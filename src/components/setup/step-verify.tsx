@@ -19,8 +19,8 @@ import { api, apiGet } from "@/lib/api";
 import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { readDraft, updateDraft, useSetupProgress } from "./progress";
-import { activeTest, TEST_SUBJECT, type VerifyTest, verifyChecks } from "./verify-checks";
+import { readDraft, updateDraft, useSetupProgress, verifiedPatch } from "./progress";
+import { activeTest, checksComplete, TEST_SUBJECT, type VerifyTest, verifyChecks } from "./verify-checks";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
 
@@ -245,12 +245,17 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
     skipListen,
   });
   const receivedDone = !!received;
-  const complete = mcpDone && (listenDone || skipListen) && sent && receivedDone && (delivered || skipListen);
+  const complete = checksComplete({ mcpDone, listenDone, skipListen, sent, received: receivedDone, delivered });
 
   useEffect(() => {
     setComplete(complete ? agent.id : null);
     return () => setComplete(null);
   }, [complete, agent.id]);
+  // "Setup complete" means done: step 8 is marked done now; "Finish setup" just leaves the page.
+  useEffect(() => {
+    const patch = verifiedPatch(complete, readDraft());
+    if (patch) updateDraft(patch);
+  }, [complete]);
 
   // Announce each tick once, politely; move focus to the success heading when everything is green.
   const [announcement, setAnnouncement] = useState("");

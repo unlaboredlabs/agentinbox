@@ -17,6 +17,16 @@ export interface AuditInput {
   detail?: Record<string, unknown> | null;
 }
 
+/**
+ * SQL condition for an MCP tool call in audit_log: an agent actor and an action without a "." (tool
+ * names are like "send_message"; "pairing.key_delivered" and console actions have a dot). The same
+ * rule as isMcpToolAction in shared/types.ts (used by the console). `t` is the table alias, if any.
+ */
+export function mcpToolCallSql(t?: string): string {
+  const c = t ? `${t}.` : "";
+  return `${c}actor_type = 'agent' AND instr(${c}action, '.') = 0`;
+}
+
 export interface AuditQuery {
   agentId?: string;
   accountId?: string;

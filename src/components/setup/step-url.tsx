@@ -13,7 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { NPX } from "@/lib/cli";
 import { useApiMutation } from "@/lib/mutations";
-import { addressLabel, analyzeUrl, consolePort, isLoopbackOrigin, publicUrlError, type Tone, type UrlAnalysis, urlVerdict } from "@/lib/public-url";
+import { addressLabel, analyzeUrl, consolePort, isLoopbackOrigin, localConsoleUrl, publicUrlError, type Tone, type UrlAnalysis, urlVerdict } from "@/lib/public-url";
 import { keys, queries } from "@/lib/queries";
 import { tunnelCommand } from "@/lib/tunnel";
 import { cn } from "@/lib/utils";
@@ -111,7 +111,8 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
   };
 
   const tunnel = tunnelCommand({ port, addresses, browserHost: window.location.hostname });
-  const localUrl = `http://localhost:${port}`;
+  // On a loopback origin already (e.g. the CLI's http://127.0.0.1 link): keep it, don't switch hostnames.
+  const { url: localUrl, fromBrowser: localIsOrigin } = localConsoleUrl(origin, port);
 
   return (
     <StepCard
@@ -223,9 +224,18 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
               <div className="space-y-2.5 pt-1 text-foreground" role="region" aria-label="What to do">
                 {situation === "local" && (
                   <>
-                    <p>Use localhost. Google sign-in works directly, and agents on this computer connect without extra flags.</p>
-                    <Button size="sm" variant="outline" onClick={() => setUrl(localUrl)}>
-                      Use {localUrl}
+                    <p>
+                      {localIsOrigin ? (
+                        <>
+                          Use <span className="font-mono">{localUrl}</span>, the address this console is open at.
+                        </>
+                      ) : (
+                        "Use localhost."
+                      )}{" "}
+                      Google sign-in works directly, and agents on this computer connect without extra flags.
+                    </p>
+                    <Button size="sm" variant="outline" onClick={() => setUrl(localUrl)} disabled={clean === localUrl}>
+                      {clean === localUrl ? `Using ${localUrl}` : `Use ${localUrl}`}
                     </Button>
                   </>
                 )}

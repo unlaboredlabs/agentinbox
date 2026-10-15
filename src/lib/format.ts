@@ -82,3 +82,16 @@ export function fmtAddressShort(a: Address | null | undefined) {
 }
 
 export const plural = (n: number, one: string, many = one + "s") => `${fmtNumber(n)} ${n === 1 ? one : many}`;
+
+/**
+ * "<agent> on <host>", unless the name already says where it runs: `connect` names agents
+ * "Claude Code on anvil" (its host without .local/.lan/.home), so "on anvil" isn't added twice. A name
+ * that is just the host is kept as is too. .local/.lan/.home are ignored on both sides.
+ */
+export function agentOnHost(name: string, host: string | null | undefined): string {
+  if (!host) return name;
+  const bare = (s: string) => s.trim().toLowerCase().replace(/\.(local|lan|home)$/, "");
+  const n = bare(name);
+  const short = bare(host);
+  return n === short || n.endsWith(` on ${short}`) ? name : `${name} on ${host}`;
+}

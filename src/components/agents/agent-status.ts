@@ -1,5 +1,5 @@
 import type { AgentTool } from "@shared/agent-api";
-import type { Agent, AuditEntry } from "@shared/types";
+import { type Agent, type AuditEntry, isMcpToolAction } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { TOOL_LABEL } from "@/lib/cli";
 import { queries } from "@/lib/queries";
@@ -22,8 +22,8 @@ export function useAgentOrigin(agent: Agent | undefined): { paired: boolean; too
   };
 }
 
-/** MCP tool names are snake_case; console and pairing actions are dotted (agent.create, pairing.key_delivered). */
-const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && /^[a-z_]+$/.test(e.action);
+/** An MCP tool call by this agent (the server counts them with the same rule, see isMcpToolAction). */
+const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && isMcpToolAction(e.action);
 
 /**
  * Evidence that the agent's tool talks to agentinbox over MCP.

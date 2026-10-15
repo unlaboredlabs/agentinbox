@@ -16,7 +16,7 @@ import { listenerHandled } from "@/components/agents/listener-handled";
 import { CodeBlock, TimeAgo } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
-import { fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
+import { agentOnHost, fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
 import { EVENT_TYPE_INFO } from "@/lib/labels";
 import { queries } from "@/lib/queries";
 import { prettySystemLabel } from "@/hooks/use-label-names";
@@ -165,7 +165,7 @@ function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { n
     );
   }
   if (e.labelIds?.length) rows.push([e.type === "label.removed" ? "Removed" : "Added", e.labelIds.join(", ")]);
-  if (delivered.length) rows.push(["Listeners", <Visible key="listeners" text={`Delivered to ${delivered.map((d) => (d.host ? `${d.name} on ${d.host}` : d.name)).join(", ")}`} />]);
+  if (delivered.length) rows.push(["Listeners", <Visible key="listeners" text={`Delivered to ${delivered.map((d) => agentOnHost(d.name, d.host)).join(", ")}`} />]);
   return (
     <div className="space-y-3 border-t bg-muted/20 px-4 py-3 sm:pl-15">
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">

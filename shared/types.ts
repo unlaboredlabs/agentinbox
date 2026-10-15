@@ -21,6 +21,13 @@ export type Capability = (typeof CAPABILITIES)[number];
 export const SEND_MODES = ["direct", "draft_only", "approval"] as const;
 export type SendMode = (typeof SEND_MODES)[number];
 
+/**
+ * Whether an audit action is an MCP tool call: tool names never contain a "." (send_message), while
+ * console and pairing actions do (agent.create, pairing.key_delivered). The SQL form of this rule is
+ * mcpToolCallSql in server/audit.ts; keep the two in step.
+ */
+export const isMcpToolAction = (action: string): boolean => !action.includes(".");
+
 export const EVENT_TYPES = [
   "message.received", // new message landed in the mailbox (not sent by the account; except the console's setup test email)
   "message.sent", // message sent from the account (by an agent or by a human)

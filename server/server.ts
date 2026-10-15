@@ -236,6 +236,23 @@ export function tunnelCommand(config: Pick<Config, "host" | "port">, e: BannerEn
 
 const shellQuote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
+const LOOPBACK_NAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Two loopback spellings of the same server: same scheme and port, and the same host or one of them
+ * localhost (which reaches either family). 127.0.0.1 and [::1] are different IP families, so a server
+ * bound to one isn't reachable at the other: never the same.
+ */
+export function sameLoopbackServer(a: string, b: string): boolean {
+  try {
+    const [x, y] = [new URL(a), new URL(b)];
+    const hosts = LOOPBACK_NAMES.has(x.hostname) && LOOPBACK_NAMES.has(y.hostname) && (x.hostname === y.hostname || x.hostname === "localhost" || y.hostname === "localhost");
+    return hosts && x.protocol === y.protocol && x.port === y.port && (y.pathname === "/" || y.pathname === "");
+  } catch {
+    return false;
+  }
+}
+
 /** The startup banner: what is running, and the one thing to do next. */
 export function bannerLines(ctx: AppContext, info: { mcp: boolean }, e: BannerEnv = currentBannerEnv()): string[] {
   const { config } = ctx;
@@ -278,8 +295,11 @@ export function bannerLines(ctx: AppContext, info: { mcp: boolean }, e: BannerEn
     if (exposed.length || headless) out.push("");
   } else {
     const publicUrl = ctx.settings.publicUrl();
-    out.push(`  ${pc.dim("Console")}  ${pc.cyan(urls[0]!)}`);
-    if (!config.dev && !urls.includes(publicUrl)) out.push(`           ${pc.cyan(publicUrl)}`);
+    // One loopback host: bound to 127.0.0.1 with the address saved as localhost (or the other way round),
+    // show the saved one. Its links (and the session cookie of the console opened there) are what the CLI uses.
+    const consoleUrl = !config.dev && sameLoopbackServer(urls[0]!, publicUrl) ? publicUrl : urls[0]!;
+    out.push(`  ${pc.dim("Console")}  ${pc.cyan(consoleUrl)}`);
+    if (!config.dev && consoleUrl !== publicUrl && !urls.includes(publicUrl)) out.push(`           ${pc.cyan(publicUrl)}`);
     if (info.mcp) out.push(`  Agents connect to ${pc.cyan(`${publicUrl}/mcp`)}`);
     out.push("");
   }

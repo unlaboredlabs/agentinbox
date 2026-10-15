@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { Logo } from "@/components/auth-shell";
 import { ConsoleVersion } from "@/components/console-update";
-import { useSetupProgress } from "@/components/setup/progress";
+import { showsSetupLink, useSetupProgress } from "@/components/setup/progress";
 import {
   Sidebar,
   SidebarContent,
@@ -87,7 +87,7 @@ export function AppSidebar() {
       </SidebarHeader>
       <SidebarContent>
         {/* Stays while the wizard is open, even once everything is green: it goes on navigating away. */}
-        {setup.state && (!setup.allDone || pathname.startsWith("/get-started")) && (
+        {showsSetupLink(!!setup.state, setup.allDone, pathname) && (
           <SidebarGroup>
             <SidebarGroupContent>
               <SidebarMenu>
