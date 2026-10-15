@@ -200,7 +200,7 @@ function calendarRows(c: CalendarEventSummary): [string, React.ReactNode][] {
   if (c.attendeeCount > c.attendees.length) shown.push(`and ${c.attendeeCount - c.attendees.length} more`);
   const rows: [string, React.ReactNode][] = [
     ["Title", <Visible key="title" text={c.summary || "(no title)"} />],
-    ["When", `${fmtEventWhen(c)}${c.timeZone ? ` (${c.timeZone})` : ""}${c.recurring || c.recurringEventId ? ", repeats" : ""}`],
+    ["Scheduled", `${fmtEventWhen(c)}${c.timeZone ? ` (${c.timeZone})` : ""}${c.recurring || c.recurringEventId ? ", repeats" : ""}`],
   ];
   if (c.location) rows.push(["Where", <Visible key="where" text={c.location} />]);
   rows.push(["Organizer", c.organizerSelf ? "This account" : <Visible key="org" text={fmtAddress(c.organizer)} />]);
@@ -209,7 +209,7 @@ function calendarRows(c: CalendarEventSummary): [string, React.ReactNode][] {
   if (c.conferenceUrl) rows.push(["Video call", call ? <ExternalLink key="call" href={call} className="break-all">{call}</ExternalLink> : <code key="call" className="font-mono break-all">{c.conferenceUrl}</code>]);
   rows.push(
     ["Calendar", <code key="cal" className="font-mono break-all">{c.calendarId}</code>],
-    ["Event", link ? <ExternalLink key="ev" href={link}>{c.id}</ExternalLink> : <code key="ev" className="font-mono break-all">{c.id}</code>],
+    ["Event id", link ? <ExternalLink key="ev" href={link} className="font-mono break-all">{c.id}</ExternalLink> : <code key="ev" className="font-mono break-all">{c.id}</code>],
   );
   return rows;
 }

@@ -48,6 +48,7 @@ const VERB: Record<CalendarApprovalKind, string> = {
 /** Follows the agent's name in the approval header: "wants to change an event on <calendar>". */
 export const calendarVerb = (a: Pick<CalendarApproval, "kind">) => VERB[a.kind];
 
+const CHANGE_WORD: Record<string, string> = { Title: "the title", When: "the time", Where: "the place", "Video call": "the video call", Repeats: "the repeat rule" };
 const quote = (s: string) => `“${s}”`;
 const yesNo = (b: boolean | undefined) => (b ? "Yes" : null);
 const list = (xs: string[]) => (xs.length < 2 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
@@ -108,7 +109,8 @@ export function calendarApprovalView(a: CalendarApproval, fmt: FormatOptions = {
     const timeChanged = ch.start !== undefined || ch.end !== undefined || ch.allDay !== undefined;
     for (const f of fields) {
       const changed = a.kind === "calendar.create" || (f.key === "when" ? timeChanged : ch[f.key] !== undefined);
-      if (a.kind === "calendar.create" && f.after === null) continue;
+      // Fields the event doesn't have and the change doesn't set aren't worth a line.
+      if (f.after === null && (a.kind === "calendar.create" || f.before === null)) continue;
       rows.push({ label: f.label, before: a.kind === "calendar.create" ? null : f.before, after: f.after, changed });
     }
     description = ch.description ?? null;
@@ -116,9 +118,9 @@ export function calendarApprovalView(a: CalendarApproval, fmt: FormatOptions = {
     if (a.kind === "calendar.create") {
       effects.push(`Creates ${named} on ${calendar}${rows.find((r) => r.label === "When")?.after ? `, ${rows.find((r) => r.label === "When")!.after}` : ""}.`);
     } else {
-      const what = rows.filter((r) => r.changed).map((r) => r.label.toLowerCase());
-      if (ch.description !== undefined) what.push("description");
-      if (ch.attendees !== undefined) what.push("guests");
+      const what = rows.filter((r) => r.changed).map((r) => CHANGE_WORD[r.label] ?? r.label.toLowerCase());
+      if (ch.description !== undefined) what.push("the description");
+      if (ch.attendees !== undefined) what.push("the guests");
       effects.push(`Changes ${what.length ? list(what) : "nothing visible"} of ${named} on ${calendar}.`);
     }
     if (ch.addConference) effects.push("Adds a Google Meet link.");

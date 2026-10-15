@@ -264,7 +264,7 @@ describe("calendar approvals", () => {
     expect(when).toEqual({ label: "When", before: "Tue, Oct 20, 2:00 – 3:00 PM", after: "Tue, Oct 20, 4:00 – 5:00 PM", changed: true });
     expect(v.rows.find((r) => r.label === "Where")).toEqual({ label: "Where", before: "Room 4", after: "Room 4", changed: false });
     expect(v.effects).toEqual([
-      "Changes when and guests of “Quarterly review” on Ops.",
+      "Changes the time and the guests of “Quarterly review” on Ops.",
       "Invites carol@acme.dev.",
       "Removes dana@vendor.com from the guest list.",
       "Google emails 2 people about it.",
@@ -276,7 +276,7 @@ describe("calendar approvals", () => {
   it("notifications off: says nobody is emailed and that new guests still see the event", () => {
     const a = approval("calendar.update", { before: summary(), change: { attendees: ["dana@vendor.com", ME, "new@x.com"] }, notifyAttendees: false });
     expect(calendarApprovalView(a, FMT).effects).toEqual([
-      "Changes guests of “Quarterly review” on Ops.",
+      "Changes the guests of “Quarterly review” on Ops.",
       "Invites new@x.com.",
       "New guests see the event on their calendars even without an email.",
       "Nobody is emailed: the agent turned notifications off.",
