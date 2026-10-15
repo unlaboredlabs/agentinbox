@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { generateProjectId, PROJECT_ID_RE, STEP_META, updateDraft, useSetupProgress } from "./progress";
 import type { StepProps } from "./step-url";
-import { CloudLink, Disclosure, FormValues, GoogleTabNote, Guide, GuideStep, Path, StepCard, StepFooter } from "./wizard-shell";
+import { CloudLink, Disclosure, Expect, FormValues, GoogleTabNote, Guide, GuideStep, Path, StepCard, StepFooter } from "./wizard-shell";
 
 const p = (id: string) => encodeURIComponent(id);
 
@@ -179,24 +179,20 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 <p>A free terminal in your browser, already signed in to Google Cloud. Nothing to install.</p>
                 <CloudLink href={cloudUrl.cloudShell}>Open Cloud Shell</CloudLink>
               </GuideStep>
-              <GuideStep
-                title="Paste this command and press Enter"
-                expect={
-                  <>
-                    “Authorize Cloud Shell” (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
-                    <code className="font-mono text-foreground">agentinbox: project {id || "…"} is ready</code>.
-                  </>
-                }
-              >
+              <GuideStep title="Paste this command and press Enter">
                 <p>It creates the project and turns on the Gmail and Pub/Sub APIs in it.</p>
-                {valid ? <CodeBlock code={projectCommand(id, inOrg)} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
                 <div className="flex items-start gap-2">
                   <Checkbox id="project-in-org" checked={inOrg} onCheckedChange={(v) => updateDraft({ projectInOrg: v === true })} className="mt-0.5" />
                   <Label htmlFor="project-in-org" className="flex-1 text-sm leading-snug font-normal text-foreground">
-                    I use Google Workspace and want to connect only my organization's accounts (creates the project inside your organization, so
-                    the “Internal” option works in the next step)
+                    I use Google Workspace and want only my organization's accounts to connect (creates the project inside your organization, so
+                    “Internal” is available in the next step)
                   </Label>
                 </div>
+                {valid ? <CodeBlock code={projectCommand(id, inOrg)} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
+                <Expect>
+                  “Authorize Cloud Shell” (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
+                  <code className="font-mono text-foreground">agentinbox: project {id || "…"} is ready</code>.
+                </Expect>
                 <Disclosure summary="The command printed an error?">
                   <ul className="list-disc space-y-1.5 pl-5">
                     <li>

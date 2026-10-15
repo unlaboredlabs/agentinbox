@@ -127,7 +127,7 @@ export function StepConsent({ index, onBack, onNext }: StepProps) {
           <p>Google asks four things, one page each:</p>
           <FormValues
             rows={[
-              { label: "1. App information", value: "agentinbox", copyLabel: "Copy app name", note: "App name. User support email: your own address. Then Next." },
+              { label: "1. App information", value: "agentinbox", copyLabel: "Copy app name", note: "Paste as the App name. User support email: your own address. Then Next." },
               {
                 label: "2. Audience",
                 note: (
