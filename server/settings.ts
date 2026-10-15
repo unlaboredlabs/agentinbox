@@ -46,7 +46,13 @@ export interface InternalState {
     /** When the operator hid the calendar_not_added notice. */
     dismissedAt?: string | null;
     /** Last observation of the Calendar API in the project (CalendarSetupState.api). */
-    api?: { state: "enabled" | "disabled"; at: string; error?: string | null };
+    api?: {
+      state: "enabled" | "disabled";
+      at: string;
+      error?: string | null;
+      /** ErrorInfo metadata.activationUrl from Google's SERVICE_DISABLED answer (names the right project). */
+      activationUrl?: string | null;
+    };
   };
   "admin.passwordHash": string;
   /** When SetupState.verified first had evidence; kept so pruning the audit log doesn't undo it. */

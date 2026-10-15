@@ -7,6 +7,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ApiError } from "../shared/types.ts";
 import { agentApiRoutes } from "./agentapi/index.ts";
+import { CALENDAR_PUSH_PATH } from "./calendar/push.ts";
 import { accountsApi } from "./api/accounts.ts";
 import { agentsApi } from "./api/agents.ts";
 import { approvalsApi } from "./api/approvals.ts";
@@ -45,6 +46,8 @@ const AUTH_BODY_LIMIT = 16 * 1024;
 const AUTH_PATHS = ["/api/setup/claim", "/api/setup/verify-token", "/api/auth/login", "/api/auth/password"];
 const MCP_BODY_LIMIT = 4 * 1024 * 1024;
 const AGENT_BODY_LIMIT = 64 * 1024;
+/** Calendar push notifications have no body. */
+const PUSH_BODY_LIMIT = 4 * 1024;
 
 /** Extensions served as files; any other path (even with a dot, e.g. /accounts/me@example.com) is a console route. */
 const ASSET_EXTENSIONS = new Set([
@@ -54,7 +57,7 @@ const ASSET_EXTENSIONS = new Set([
 ]);
 
 /** Paths the console's index.html fallback must never answer. */
-const SERVER_PREFIXES = ["/api", "/agent", "/mcp", "/oauth", "/skill.md", "/health"];
+const SERVER_PREFIXES = ["/api", "/agent", "/mcp", "/oauth", "/google", "/skill.md", "/health"];
 const isServerPath = (path: string) => SERVER_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
 
 const withMcp = new WeakSet<object>();
@@ -95,6 +98,7 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   app.use("/mcp", limit(MCP_BODY_LIMIT));
   app.use("/mcp/*", limit(MCP_BODY_LIMIT));
   app.use("/agent/*", limit(AGENT_BODY_LIMIT));
+  app.use(CALENDAR_PUSH_PATH, limit(PUSH_BODY_LIMIT));
   app.use("/api/*", csrfGuard());
   app.route("/", healthRoutes(ctx));
   app.route("/api", setupPublicApi(ctx));
@@ -105,6 +109,8 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
     return c.body(renderSkill(ctx.settings.publicUrl()));
   });
   app.route("/", oauthRoutes(ctx));
+  // Google-facing: verified by channel id + X-Goog-Channel-Token, outside the admin session and CSRF guard.
+  app.post(CALENDAR_PUSH_PATH, (c) => c.body(null, ctx.calendar.handlePush(c.req.raw.headers) as 204));
   const mcp = mcpRoutes(ctx);
   if (mcp.routes.length) withMcp.add(app);
   app.route("/", mcp);
