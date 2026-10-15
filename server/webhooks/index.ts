@@ -9,6 +9,7 @@ import { newId, randomToken } from "../util/ids.ts";
 import { DELIVERY_SELECT, type DeliveryRow, deliveryById, toDelivery } from "./deliveries.ts";
 import { matchesFilter, normalizeFilter, webhookInputSchema, webhookPatchSchema } from "./filter.ts";
 import { newSecret, postPinned, secretPrefix, type SendResult, sign } from "./send.ts";
+import { subjectPatternError } from "./regex.ts";
 import { type LookupFn, resolveTarget, SsrfError } from "./ssrf.ts";
 import type { WebhooksService } from "./types.ts";
 
@@ -513,6 +514,17 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
     }
   }
 
+  /** Patterns stored before RE2 validation existed may be rejected now; those subject clauses never match. */
+  function warnUnsupportedPatterns(): void {
+    for (const w of ctx.db.all<{ id: string; name: string; filter: string }>("SELECT id, name, filter FROM webhooks")) {
+      const subject = json.parse<WebhookFilter>(w.filter, {}).subject;
+      const error = subject ? subjectPatternError(subject) : null;
+      if (error) {
+        log.warn("Webhook subject filter is not valid RE2; it matches nothing until edited", { webhook: w.id, name: w.name, error });
+      }
+    }
+  }
+
   const onEvent = () => wake();
 
   return {
@@ -539,6 +551,7 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
         now(),
         ...busy,
       );
+      warnUnsupportedPatterns();
       timer = setInterval(tick, tickMs);
       timer.unref();
       ctx.bus.on("event", onEvent);

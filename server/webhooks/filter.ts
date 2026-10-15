@@ -2,14 +2,14 @@ import { z } from "zod";
 import { EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
 import type { StoredEvent } from "../events/types.ts";
 import { matchesAnyGlob } from "../util/glob.ts";
-import { regexRisk } from "./regex.ts";
+import { RE2_SYNTAX_HINT, subjectMatches, subjectPatternError } from "./regex.ts";
 
 /** Events about the account itself rather than a message: filters only narrow them by account. */
 export const ACCOUNT_EVENT_TYPES: readonly EventType[] = ["account.auth_failed", "sync.gap"];
 
 /** Bounds glob backtracking: filters run on attacker-controlled addresses during every emit. */
 const MAX_GLOB_STARS = 8;
-/** Only this much of the subject is tested against the pattern (bounds backtracking cost). */
+/** Only this much of the subject is tested against the pattern (bounds matching cost). */
 export const MAX_SUBJECT_TESTED = 256;
 
 const list = (max: number, label: string) =>
@@ -33,15 +33,8 @@ export const webhookFilterSchema = z
       .max(200, "Subject pattern must be at most 200 characters")
       .optional()
       .superRefine((s, issues) => {
-        if (s === undefined) return;
-        if (!compiles(s)) return issues.addIssue({ code: "custom", message: "Subject pattern must be a valid regular expression" });
-        const risk = regexRisk(s);
-        if (risk) {
-          issues.addIssue({
-            code: "custom",
-            message: `Subject pattern ${risk}, which can make matching hang. Simplify it, e.g. "invoice|receipt" or "^re:.*invoice"`,
-          });
-        }
+        const error = s === undefined ? null : subjectPatternError(s);
+        if (error) issues.addIssue({ code: "custom", message: `Subject pattern is not a valid regular expression (${error}). ${RE2_SYNTAX_HINT}` });
       }),
     hasAttachments: z.boolean().optional(),
   })
@@ -72,15 +65,6 @@ export const webhookInputSchema = z
 
 export const webhookPatchSchema = z.object(webhookFields).partial();
 
-function compiles(pattern: string): boolean {
-  try {
-    new RegExp(pattern, "i");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Drops empty lists and blank values so stored filters stay minimal. */
 export function normalizeFilter(f: WebhookFilter): WebhookFilter {
   const out: WebhookFilter = {};
@@ -108,15 +92,7 @@ export function matchesFilter(f: WebhookFilter, ev: StoredEvent): boolean {
   }
   if (f.from?.length && !(m.from && matchesAnyGlob(m.from.email, f.from))) return false;
   if (f.to?.length && ![...m.to, ...m.cc].some((a) => matchesAnyGlob(a.email, f.to!))) return false;
-  if (f.subject && !safeRegExp(f.subject)?.test(m.subject.slice(0, MAX_SUBJECT_TESTED))) return false;
+  if (f.subject && !subjectMatches(f.subject, m.subject.slice(0, MAX_SUBJECT_TESTED))) return false;
   if (f.hasAttachments !== undefined && m.hasAttachments !== f.hasAttachments) return false;
   return true;
-}
-
-function safeRegExp(pattern: string): RegExp | null {
-  try {
-    return new RegExp(pattern, "i");
-  } catch {
-    return null;
-  }
 }

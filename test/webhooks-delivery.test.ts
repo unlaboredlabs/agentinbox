@@ -10,7 +10,6 @@ import { HttpError } from "../server/util/errors.ts";
 import { rmSync } from "node:fs";
 import { createAppContext, startServices, stopServices } from "../server/wire.ts";
 import { matchesFilter, webhookFilterSchema } from "../server/webhooks/filter.ts";
-import { regexRisk } from "../server/webhooks/regex.ts";
 import { createWebhooksService, type WebhooksOptions } from "../server/webhooks/index.ts";
 import { testConfig, testContext } from "./helpers.ts";
 
@@ -187,45 +186,42 @@ describe("webhook filters", () => {
     expect(matchesFilter({ subject: "^x+" }, long)).toBe(true);
   });
 
-  it.each([
-    ["(a+)+", true],
-    ["^(\\w+\\s?)+$", true],
-    ["^(re:\\s*|fwd?:\\s*)*(.*\\s*)*invoice", true],
-    ["(\\w*\\s?)*$", true],
-    ["(?:x|y+){2,}", true],
-    ["((ab)+c)*", true],
-    ["(.*)*", true],
-    ["(a|a)*", true],
-    ["(?:re|fwd)+:", true],
-    ["\\w*\\w*x", true],
-    [".*\\s+x", true],
-    ["a+\\ba*", true],
-    ["a*b*c*d*e*f*g*", true],
-    ["(a|b)", false],
-    ["(?:re|fwd):\\s*invoice", false],
-    ["^re:.*invoice", false],
-    ["invoice|receipt", false],
-    ["[(+)]+", false],
-    ["\\(a+\\)+", false],
-    ["invoice #\\d+", false],
-    ["(ab){2}", false],
-    ["\\w+@\\w+", false],
-  ])("regex risk %s → %s", (pattern, risky) => expect(regexRisk(pattern) !== null).toBe(risky));
+  it("matches subjects case-insensitively with RE2", () => {
+    expect(matchesFilter({ subject: "^your INVOICE #\\d+$" }, ev())).toBe(true);
+    expect(matchesFilter({ subject: "(?:re|fwd):\\s*invoice" }, ev({ message: message("m1", { subject: "Fwd:  Invoice" }) }))).toBe(true);
+    expect(matchesFilter({ subject: "receipt" }, ev())).toBe(false);
+  });
 
-  it("rejects the known catastrophic patterns at validation, so they never run", () => {
-    for (const subject of ["^(\\w+\\s?)+$", "^(re:\\s*|fwd?:\\s*)*(.*\\s*)*invoice"]) {
-      const r = webhookFilterSchema.safeParse({ subject });
-      expect(r.success).toBe(false);
-      expect(r.error!.issues[0]!.message).toMatch(/can make matching hang/);
-    }
-    // Accepted patterns stay fast even on long adversarial subjects (only 256 chars are tested).
+  it.each([
+    // Round-2 PoCs: accepted by RE2 (they're valid) but linear to match.
+    ["^(\\w|\\d){1,99}$", "1"],
+    ["^(a|aa){1,200}$", "a"],
+    ["^\\w+\\s?\\w+\\s?\\w+\\s?\\w+\\s?\\w+\\s?\\w+$", "a"],
+    ["^\\w*[a-z]*\\w*[a-z]*\\w*[a-z]*$", "a"],
+    // Round-1 PoCs.
+    ["^(\\w+\\s?)+$", "a"],
+    ["^(re:\\s*|fwd?:\\s*)*(.*\\s*)*invoice", "x "],
+  ])("matches %s in linear time on a hostile 256-char subject", (subject, unit) => {
+    expect(webhookFilterSchema.safeParse({ subject }).success).toBe(true);
+    // Exactly fills the 256 tested characters, ending in a character that makes the match fail.
+    const text = `${unit.repeat(Math.floor(255 / unit.length))}!`;
+    expect(text.length).toBeLessThanOrEqual(256);
+    const hostile = ev({ message: message("m1", { subject: text }) });
+    matchesFilter({ subject }, hostile); // compile once (cached per pattern)
     const t0 = performance.now();
-    const hostile = ev({ message: message("m1", { subject: `${"a ".repeat(5000)}!` }) });
-    for (const subject of ["^(?:re|fwd):\\s*\\w+ invoice", "invoice|receipt", "^a.*!$"]) {
-      expect(webhookFilterSchema.safeParse({ subject }).success).toBe(true);
-      matchesFilter({ subject }, hostile);
-    }
-    expect(performance.now() - t0).toBeLessThan(200);
+    expect(matchesFilter({ subject }, hostile)).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(50);
+  });
+
+  it.each(["(?=a)b", "(?!re:)x", "(?<=x)y", "(?<!x)y", "(a)\\1", "(", "a{1001}"])("rejects %s with the RE2 syntax hint", (subject) => {
+    const r = webhookFilterSchema.safeParse({ subject });
+    expect(r.success).toBe(false);
+    expect(r.error!.issues[0]!.message).toMatch(/RE2 syntax.*lookarounds.*backreferences/);
+  });
+
+  it("treats a stored pattern RE2 rejects as non-matching", () => {
+    expect(matchesFilter({ subject: "(?=invoice)" }, ev())).toBe(false);
+    expect(matchesFilter({ subject: "(?=invoice)" }, ev({ type: "sync.gap", message: null }))).toBe(true);
   });
 
   it("message criteria never match events without a message", () => {
@@ -260,7 +256,7 @@ describe("webhook CRUD", () => {
     expect(await bad({ url: "ftp://example.com" })).toMatch(/http/);
     expect(await bad({ url: "http://10.0.0.1/" })).toMatch(/private/);
     expect(await bad({ name: " " })).toMatch(/Name/);
-    expect(await bad({ filter: { subject: "(a+)+$" } })).toMatch(/hang/);
+    expect(await bad({ filter: { subject: "(?<!re:)invoice" } })).toMatch(/lookarounds/);
     expect(await bad({ filter: { from: ["*a*a*a*a*a*a*a*a*a@x.com"] } })).toMatch(/at most 8/);
     expect(await bad({ url: "http://93.184.216.34/hook" })).toMatch(/must use https/);
 
@@ -480,6 +476,16 @@ describe("enqueue + delivery", () => {
     await new Promise((r) => setTimeout(r, 100));
     await ctx.webhooks.stop!();
     expect(deliveries(ctx)[0]).toMatchObject({ status: "pending", attempts: 0 });
+  });
+
+  it("starts with a stored subject pattern RE2 rejects and simply doesn't match it", async () => {
+    const ctx = setup();
+    const rx = await receiver();
+    const { webhook } = await ctx.webhooks.create(input(rx.url, { filter: { subject: "invoice" } }));
+    ctx.db.run(`UPDATE webhooks SET filter = '{"subject":"(?<=your )invoice"}' WHERE id = ?`, webhook.id);
+    ctx.webhooks.start!();
+    expect(ctx.events.emit(received("m1"))).toBeTruthy();
+    expect(deliveries(ctx)).toHaveLength(0);
   });
 
   it("test deliveries are left out of webhook stats", async () => {
