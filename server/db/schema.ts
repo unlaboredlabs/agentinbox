@@ -166,4 +166,40 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX audit_ts ON audit_log(ts);
   CREATE INDEX audit_actor ON audit_log(actor_id, ts);
   `,
+
+  /* 2: device-flow pairing + listener cursors */ `
+  CREATE TABLE pairings (
+    id TEXT PRIMARY KEY,
+    device_code_hash TEXT NOT NULL UNIQUE, -- sha256 of the CLI's polling secret
+    user_code TEXT NOT NULL,               -- shown in the terminal and the console, e.g. "K7QM-2XPD"
+    name TEXT NOT NULL,
+    description TEXT,
+    requested TEXT NOT NULL DEFAULT '{}',  -- JSON
+    client TEXT NOT NULL DEFAULT '{}',     -- JSON
+    ip TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    api_key_enc TEXT,                      -- set on approval, wiped once delivered to the CLI
+    last_poll_at TEXT,
+    decided_at TEXT,
+    decision_note TEXT,
+    delivered_at TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  CREATE INDEX pairings_status ON pairings(status, created_at);
+  CREATE INDEX pairings_user_code ON pairings(user_code);
+
+  -- Server-side cursor per agentinbox-listen consumer (MCP ack_events keeps using agent_cursors).
+  CREATE TABLE listener_cursors (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    consumer TEXT NOT NULL,
+    acked_seq INTEGER NOT NULL DEFAULT 0,
+    client TEXT NOT NULL DEFAULT '{}',
+    connected INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, consumer)
+  );
+  `,
 ];
