@@ -2,7 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError, getSelf } from "../server/listen/api.ts";
 import { EXIT, runListener, type RunListenerOptions } from "../server/listen/listen.ts";
+import { EventStream } from "../server/listen/stream.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { readStatus } from "../server/listen/state.ts";
 import { FAKE_KEY, FakeAgentApi, isolateXdg, makeEvent, waitFor } from "./listen-client-fake.ts";
@@ -118,5 +120,58 @@ describe("listen stream", () => {
     expect(api.streamRequests[0]).toMatchObject({ types: "message.received,label.added", includeBody: "1" });
     l.stop();
     await l.done;
+  });
+});
+
+describe("abort always wins (undici may not settle on abort under load)", () => {
+  const never = <T>() => new Promise<T>(() => {});
+  /** A response whose body reads never settle, even after cancel: what a stuck undici body looks like. */
+  const stuckResponse = () =>
+    ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/event-stream" }),
+      body: { getReader: () => ({ read: () => never(), cancel: async () => {} }) },
+    }) as unknown as Response;
+  const base = { url: "http://127.0.0.1:1", apiKey: FAKE_KEY, consumer: "c", lastEventId: () => 0, onMessage: () => {}, minBackoffMs: 10, maxBackoffMs: 20 };
+
+  it("stop() ends the stream while a body read is stuck, or while fetch itself never settles", async () => {
+    for (const stuck of ["body", "fetch"] as const) {
+      let fetched = false;
+      let opened = false;
+      const fetchImpl = (() => {
+        fetched = true;
+        return stuck === "body" ? Promise.resolve(stuckResponse()) : never<Response>();
+      }) as typeof fetch;
+      const s = new EventStream({ ...base, fetch: fetchImpl, onOpen: () => (opened = true), onDisconnect: () => {} });
+      const run = s.run();
+      // Wait on the stream's own state: reading the open stream, or with the fetch in flight.
+      await waitFor(() => (stuck === "body" ? opened : fetched), 2000, `stuck ${stuck}`);
+      s.stop();
+      const result = await Promise.race([run, new Promise((r) => setTimeout(() => r("still running"), 2000))]);
+      expect(result).toEqual({ kind: "stopped" });
+    }
+  });
+
+  it("the stall timer still reconnects when a stuck read never returns", async () => {
+    const reasons: string[] = [];
+    let calls = 0;
+    const s = new EventStream({ ...base, stallMs: 50, fetch: (async () => (calls++, stuckResponse())) as typeof fetch, onOpen: () => {}, onDisconnect: (r) => reasons.push(r) });
+    const run = s.run();
+    await waitFor(() => calls >= 2, 5000, "reconnect after the stall");
+    s.stop();
+    await run;
+    expect(reasons[0]).toMatch(/stream stalled/);
+  });
+
+  it("API calls time out even when fetch never settles", async () => {
+    vi.stubGlobal("fetch", () => never());
+    try {
+      const err = await Promise.race([getSelf("http://127.0.0.1:1", FAKE_KEY, 50).catch((e: unknown) => e), new Promise((r) => setTimeout(() => r("still waiting"), 2000))]);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).message).toMatch(/timed out/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

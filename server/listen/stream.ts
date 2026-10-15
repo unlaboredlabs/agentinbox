@@ -1,4 +1,5 @@
 import type { EventType } from "../../shared/types.ts";
+import { abortable } from "./abortable.ts";
 import { apiError, clientHeader, describeFetchError, userAgent } from "./api.ts";
 import { SseParser, type SseMessage } from "./sse.ts";
 import { safeText } from "./ui.ts";
@@ -56,7 +57,10 @@ export interface StreamOptions {
   stallMs?: number;
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /** Tests: the fetch implementation (default: global fetch). */
+  fetch?: typeof fetch;
 }
+
 
 class Stalled extends Error {}
 class Paused extends Error {}
@@ -93,6 +97,8 @@ export class EventStream {
   }
 
   private sleep(ms: number): Promise<void> {
+    // stop() may have come while we weren't sleeping (its wake-up went to an earlier sleep).
+    if (this.stopped) return Promise.resolve();
     return new Promise((resolve) => {
       const t = setTimeout(done, ms);
       function done() {
@@ -176,9 +182,12 @@ export class EventStream {
       const last = this.o.lastEventId();
       if (last > 0) headers["last-event-id"] = String(last);
       armStall();
-      const res = await fetch(this.streamUrl(), { headers, signal: ac.signal, redirect: "error" });
+      const pending = (this.o.fetch ?? fetch)(this.streamUrl(), { headers, signal: ac.signal, redirect: "error" });
+      // If abort wins, release whatever the fetch still produces.
+      pending.then((r) => (ac.signal.aborted ? r.body?.cancel().catch(() => {}) : undefined)).catch(() => {});
+      const res = await abortable(pending, ac.signal);
       if (!res.ok) {
-        const err = await apiError(res, "Opening the event stream");
+        const err = await abortable(apiError(res, "Opening the event stream"), ac.signal);
         if (res.status === 401 || res.status === 403) {
           const r = classifyRefusal(err.code, res.status);
           if (r.permanent) return { kind: "revoked", code: r.code, reason: r.text };
@@ -228,10 +237,22 @@ export class EventStream {
         () => {},
       );
       const decoder = new TextDecoder();
-      for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
-        armStall();
-        parser.push(decoder.decode(chunk, { stream: true }));
-        if (revoked !== null) break;
+      const reader = res.body.getReader();
+      // Cancel the body on abort (stop, stall, pause, reconnect, revoked), and never wait on a read
+      // that undici fails to settle.
+      const cancel = () => void reader.cancel().catch(() => {});
+      ac.signal.addEventListener("abort", cancel, { once: true });
+      try {
+        for (;;) {
+          const { done, value } = await abortable(reader.read(), ac.signal);
+          if (done) break;
+          armStall();
+          parser.push(decoder.decode(value, { stream: true }));
+          if (revoked !== null) break;
+        }
+      } finally {
+        ac.signal.removeEventListener("abort", cancel);
+        cancel();
       }
       if (revoked !== null) return this.afterRevoked(revoked);
       throw new Error("the server closed the stream");
