@@ -105,11 +105,18 @@ reference doesn't document a default. `sendNotifications` is deprecated.
 - **`Grant.calendarScope: string[] | null`.** A list of calendar ids, with `null` meaning every calendar in
   the account's list.
   - The primary calendar is stored as its real id (the account email). Tools accept `"primary"` as an alias
-    (`resolveCalendarId`).
+    (`resolveCalendarId`); grants reject `"primary"`, and email-shaped ids are stored lower-cased
+    (`normalizeCalendarId`).
+  - `null` covers only the calendars in the account's calendar list (`ctx.calendar.calendars`), not every id
+    `calendar.events` could reach (someone else's calendar the user can open). Any other id is denied like an
+    out-of-scope one, and approving a change re-checks the list.
+  - Omitting `calendar_id` means the primary calendar when it's in scope, else the only calendar in scope,
+    else ToolError `calendar_required`.
   - Out-of-scope calendars are denied with reason `calendar_scope`, and the message never reveals whether
     they exist.
   - free/busy follows the scope: a scoped grant may query only its own calendars. A null scope may query any
-    id or address, and Google decides what is visible.
+    id or address, and Google decides what is visible. Without `calendars` it queries the scope (the primary
+    calendar under a null scope).
 - **`Grant.calendarWriteMode: "direct" | "approval"`.** The default is `"approval"`. `calendar.write` gates
   the tools; the mode decides how a write executes. The console shows "None" as "no calendar.write".
   - We considered the lead's alternative, a three-valued mode with `"none"`, and kept two values: a write
@@ -119,13 +126,26 @@ reference doesn't document a default. `sendNotifications` is deprecated.
   grant and the default on a new one, so an older client can never widen calendar access by omission.
   Tested.
 - **Attendees and `allowTo`.** Inviting someone emails them and shares the event, so attendees count as
-  recipients (`attendeeImpact` in server/policy/calendar.ts).
-  - With `notify_attendees` true (the default, `sendUpdates: "all"`), every address Google will email must
-    pass allowTo. That is every attendee after the change plus removed ones, and on deleting an event the
-    account organizes, all attendees.
-  - With `notify_attendees` false (`sendUpdates: "none"`), only newly added attendees must pass.
-  - Rooms (`@resource.calendar.google.com`) and the account itself are exempt.
-  - RSVP is not checked: the organizer invited the account, much like replying.
+  recipients (`attendeeImpact` in server/policy/calendar.ts). What must pass allowTo (`checked`) doesn't
+  depend on notify: an event stays readable by its attendees (and editable with guestsCanModify), so a quiet
+  write can still carry text to them.
+  - `checked`: every attendee after the change, plus the organizer when it isn't the account, plus everyone
+    `emailed`. On delete, only `emailed`: a quiet delete writes nothing to anyone else.
+  - `emailed` (only with `notify_attendees` true, the default, `sendUpdates: "all"`): every attendee after the
+    change plus removed ones and another organizer; on delete, all attendees of an event the account
+    organizes, else the organizer. notify only drives `emailed` and the send caps.
+  - Rooms (`@resource.calendar.google.com`) and the account itself are exempt. An update's attendee list
+    keeps the account and existing rooms unless the list names rooms itself (then it is the full room list).
+  - RSVP: a bare answer isn't checked (the organizer invited the account, much like replying). With a
+    `comment`, the organizer and every attendee must pass allowTo: Google shows the note to all invitees.
+  - Hidden guest lists: when the grant has an allowlist, the account doesn't organize the event and Google
+    hides its guests from the account (`guestsCanSeeOtherGuests: false` or `attendeesOmitted`), updates and
+    commented RSVPs are denied (`allow_to`): there's no way to check who would see them.
+  - Updating, deleting or answering an existing event also needs `calendar.read`: the write reads the event,
+    and its results and denials describe it.
+- **`replyOnly`.** A reply-only grant can't add attendees (create or update, notify on or off): denied with
+  reason `reply_only`. Editing an event, removing attendees and RSVP stay allowed. `sendMode` doesn't apply
+  to calendar writes; `calendarWriteMode` is its calendar counterpart.
 - **`sendUpdates` defaults.** Create, update and delete use `all` when `notify_attendees` isn't false.
   - Agents creating events usually mean to invite people. The allowTo check and send caps are the brake;
     approval mode is the stronger one.
@@ -134,17 +154,22 @@ reference doesn't document a default. `sendNotifications` is deprecated.
 - **Send caps.** `maxSendsPerHour` and `maxSendsPerDay` count calendar writes that email anyone (audit
   `detail.emailed: true` on create_calendar_event, update_calendar_event, delete_calendar_event or
   respond_to_invitation) as one send each, on the same counter as mail.
+  - Creates and attendee additions count whatever notify says (`detail.invited: n`): the event lands on
+    their calendars even without an email. Writes that neither email nor add anyone (rooms only, quiet
+    edits) don't count.
   - A queued approval counts when queued, as with mail.
-  - Writes with `notify_attendees: false` don't count.
+  - A direct write that fails ambiguously (timeout, network, 5xx) counts when it would have (`detail.maybeSent`),
+    as with mail.
 - **Audit.** Every tool call is audited by the MCP layer (action = tool name). Writes put
-  `{calendarId, eventId, emailed, notified: n}` in `detail`.
+  `{calendarId, eventId, mode, emailed, notified: n, invited: n}` in `detail`.
   - Applying or rejecting an approval is audited as `approval.approve` or `approval.reject` with the kind.
   - Denials use plain words: `calendar_scope`, `calendar_not_granted` and `calendar_api_disabled` were added
-    to DENIAL_REASONS, and `allow_to`, `rate_limit` and `capability` are reused.
+    to DENIAL_REASONS, and `allow_to`, `reply_only`, `rate_limit` and `capability` are reused. A 412 from
+    Google is `calendar_conflict`.
 - **Event visibility.** `policy.canSeeEvent` is implemented and tested.
   - calendar.* events need `calendar.read` plus the event's calendar in scope.
   - Mail events need `read`, as before.
-  - Account events need `read` or `calendar.read`.
+  - `account.auth_failed` needs `read` or `calendar.read`; `sync.gap` (mail only) needs `read`.
   - Old listeners and webhooks therefore never see calendar events unless the operator grants `calendar.read`.
 
 ### Approvals
@@ -153,14 +178,37 @@ reference doesn't document a default. `sendNotifications` is deprecated.
   `calendar.update`, `calendar.delete` and `calendar.rsvp` (`CALENDAR_APPROVAL_KINDS`). For these kinds:
   - `draft_id` is `''`.
   - `payload.calendar` holds the `CalendarApprovalDetail`: the change, the event before it, who gets emailed
-    and the stored etag.
+    (`notified`), who had to pass allowTo (`checked`), the stored etag and, for RSVP, the comment.
+  - For create, `eventId` is chosen when the write is queued (base32hex, 26 characters; Google accepts client
+    ids of 5–1024 base32hex characters). Direct-mode creates choose one too, and `create_calendar_event`
+    accepts it back as `event_id`: an agent retrying after `write_uncertain` can't create a second event
+    (Google's 409 with the same content counts as applied; a different event under that id is
+    `event_id_taken`).
   - The mail fields mirror the change, so generic lists read well.
   - Status `sent` means "applied", and `sent_message_id` holds the event id.
 - **Approve.** `server/mail/approvals.ts` keeps the state machine: claim, re-check, transient failures back
-  to pending, crash recovery. For calendar kinds it calls `ctx.calendar.approvalBlockedReason` and
-  `ctx.calendar.applyApproval` (B). This dispatch is implemented.
-  - Update and delete send `If-Match` with the etag seen when queued. A 412 fails the approval ("the event
-    changed in Google Calendar since").
+  to pending, crash recovery. The "agent deleted or disabled" check is shared; for calendar kinds it then
+  calls `ctx.calendar.approvalBlockedReason` (calendar.write, calendar scope, `checked` against allowTo,
+  replyOnly against added attendees) and `ctx.calendar.applyApproval` (B).
+  - Every attempt is marked on the approval (`calendar.attemptedAt`) before anything goes to Google.
+  - Update re-reads the event first; update and delete send `If-Match` with the etag seen when queued.
+  - Did it land? After a 412, an ambiguous failure (timeout or network error: GoogleApiError status 0; a 5xx;
+    workstream A's `outcome_unknown`), a 409 on create, or an etag that moved since queuing, the event is
+    re-read (`afterFailure`):
+    - every field of the change already in place (create: the event exists; delete: it's gone, including a
+      retried delete answered 404/410; RSVP: the answer is set) → applied. In direct mode that also sets
+      `maybeSent`.
+    - known not to have landed (etag unchanged, event missing for create, still there for delete) → a
+      transient error goes back to pending (retrying is safe: same id, same If-Match); a 412 fails as "the
+      event changed in Google Calendar since, so it was not applied".
+    - can't tell (an earlier or ambiguous attempt, and the event moved on since) → fails as "may already
+      have been applied; check Google Calendar". Never "not applied".
+  - Crash recovery puts the approval back to pending with calendar wording; the next approve goes through
+    the same checks, so it is never applied twice.
+  - Transient: GoogleApiError status 0, 429 and 5xx, an account needing reconnection (including D's
+    `needs_reauth` from the calendar list).
+  - A calendar approval whose payload is malformed (no `payload.calendar`, no `eventId`, no etag for
+    update/delete, no response for RSVP, `notified` not a list) fails for good instead of returning to pending.
 - **Reject and expire.** The change is discarded; nothing reached Google before approval, so there is no
   draft to delete.
 - **Cancellation.** Removing `send` cancels pending mail approvals. Removing `calendar.write` cancels pending
@@ -306,10 +354,10 @@ reference doesn't document a default. `sendNotifications` is deprecated.
 | `ctx.google.calendar(accountId)` | `server/google/index.ts`, `types.ts` | wired to the stub |
 | CalendarService and composer | `server/calendar/types.ts`, `index.ts` | done; parts stubbed |
 | `summarizeEvent`, `isInvitation` | `server/calendar/summary.ts` | done, tested |
-| AgentCalendar (agent actions) | `server/calendar/agent.ts` | signatures only (B) |
+| AgentCalendar (agent actions) | `server/calendar/agent.ts` | done (B) |
 | Policy helpers: scope, `attendeeImpact`, allowTo | `server/policy/calendar.ts` | done, tested |
 | Grant fields, upsert semantics, visibility | `server/policy/grants.ts`, `index.ts` | done, tested |
-| Approval dispatch, kind-aware cancel | `server/mail/approvals.ts` | done, tested |
+| Approval dispatch, kind-aware cancel, applying calendar changes | `server/mail/approvals.ts`, `server/calendar/approvals.ts` | done, tested (B) |
 | Event storage | `server/events/*` | done, tested |
 | MCP registration hook, tool names | `server/mcp/calendar.ts`, `server/mcp/server.ts` (`Register`, `CALENDAR_TOOL_NAMES`) | hook stub (C) |
 | Console vocabulary: labels, icons, KIND_LABEL, DENIAL_REASONS, CALENDAR_WRITE_MODE_INFO | `src/lib/labels.ts`, `src/components/events/event-row.tsx` | done (copy may change) |

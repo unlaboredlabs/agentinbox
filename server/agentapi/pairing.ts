@@ -1,7 +1,7 @@
 import { randomInt } from "node:crypto";
 import { z } from "zod";
 import type { AgentTool, PairingPoll, PairingStart } from "../../shared/agent-api.ts";
-import { type Agent, type ApprovePairingInput, CAPABILITIES, type PairingRequest, type PairingStatus, SEND_MODES } from "../../shared/types.ts";
+import { type Agent, type ApprovePairingInput, CALENDAR_WRITE_MODES, CAPABILITIES, type PairingRequest, type PairingStatus, SEND_MODES } from "../../shared/types.ts";
 import type { AuditInput } from "../audit.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import { clientKey } from "../auth/lockout.ts";
@@ -9,7 +9,7 @@ import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { json } from "../db/index.ts";
-import { grantInputSchema } from "../policy/grants.ts";
+import { CALENDAR_GRANT_DEFAULTS, grantInputSchema } from "../policy/grants.ts";
 import { badRequest, HttpError, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 
@@ -56,6 +56,7 @@ export const pairingStartSchema = z.object({
       accounts: z.array(text(320).pipe(z.string().min(1))).max(50).optional(),
       capabilities: z.array(z.enum(CAPABILITIES)).optional(),
       sendMode: z.enum(SEND_MODES).optional(),
+      calendarWriteMode: z.enum(CALENDAR_WRITE_MODES).optional(),
       reason: text(500, "Reason").optional(),
     })
     .optional(),
@@ -387,7 +388,16 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
         ...ADMIN_ACTOR,
         action: "pairing.approved",
         outcome: "ok",
-        detail: { agentId, grants: input.grants.map((g) => ({ accountId: g.accountId, capabilities: g.capabilities, sendMode: g.sendMode })) },
+        detail: {
+          agentId,
+          grants: input.grants.map((g) => ({
+            accountId: g.accountId,
+            capabilities: g.capabilities,
+            sendMode: g.sendMode,
+            // As stored: omitted calendar fields take the new-grant defaults (approval mode, every calendar).
+            ...(g.capabilities.includes("calendar.write") ? { calendarWriteMode: g.calendarWriteMode ?? CALENDAR_GRANT_DEFAULTS.calendarWriteMode } : {}),
+          })),
+        },
       });
       publish(id);
       return ctx.policy.getAgent(agentId)!;
