@@ -216,7 +216,7 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
 
   app.post("/agent/v1/events/ack", async (c) => {
     const body = await readBody(c, z.object({ consumer: z.string().optional(), seq: z.number().int().nonnegative() }));
-    return c.json(ackListener(ctx, c.get("agent")!.agentId, parseConsumer(body.consumer), body.seq, state().options.maxConsumers ?? 20));
+    return c.json(ackListener(ctx, c.get("agent")!.agentId, parseConsumer(body.consumer, { throwaway: false }), body.seq, state().options.maxConsumers ?? 20));
   });
 
   app.all("/agent/*", (c) => c.json({ error: { code: "not_found", message: "No such agent API route" } }, 404));

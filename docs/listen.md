@@ -111,7 +111,9 @@ Flags override the profile, and `--save` writes them back. Overrides work group 
 
 `--dry-run` prints matching events without running anything. It uses a separate throwaway consumer
 (`<consumer>-dry-run`) that starts at the current position and is never advanced, so it neither moves nor creates the
-real listener's cursor.
+real listener's cursor. Consumer names ending in `-dry-run` or `-replay` are reserved for these throwaway cursors: the
+CLI won't use them for a listener, and the daemon never acknowledges them and always creates them at 0. (A consumer
+name too long for the suffix gets a short hash, so two long names never share a throwaway cursor.)
 
 **Where it starts:** the daemon creates a consumer's cursor the first time it connects. A new consumer starts with mail
 that arrives from now on, so pairing never replays the mailbox's history into your agent. `--from-start` makes a *new*
@@ -129,8 +131,9 @@ A backfill handles the stored events your grants can see from the oldest up to t
 listener handles runs twice, whether the listener is running, stopped or behind. It exits 1 if any event ended in dead
 letters, or if the daemon stays unreachable for 10 minutes. It refuses to guess: if the listener hasn't connected yet,
 start it with `--from-start` instead; if its start isn't known (a consumer created by an older daemon) or the daemon is
-older than the CLI, pass `--until <event number>`. A backfill uses its own throwaway cursor (`<consumer>-replay`, never
-advanced, so every backfill starts from the oldest event again), its own lock and its own log (`one-off.log`), so it
+older than the CLI, pass `--until <event number>` (it warns if that runs past the listener's start, since those events
+would run twice). A backfill uses its own throwaway cursor (`<consumer>-replay`, never
+advanced, so every backfill starts from the oldest event again; it refuses to run if that cursor was ever moved), its own lock and its own log (`one-off.log`), so it
 runs fine next to the listener or its service.
 
 `connect --force` keeps the consumer, so re-pairing doesn't replay anything either.

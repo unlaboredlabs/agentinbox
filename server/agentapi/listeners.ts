@@ -29,9 +29,24 @@ export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
     .map((r) => ({ consumer: r.consumer, connected: r.connected > 0, ackedSeq: r.acked_seq, lastSeenAt: r.last_seen_at, client: json.parse(r.client, {}) }));
 }
 
-export function parseConsumer(raw: unknown): string {
+/**
+ * Consumer names ending in these are the CLI's throwaway cursors (`listen --backfill` replays on
+ * `<consumer>-replay`, `listen --dry-run` peeks on `<consumer>-dry-run`). They are never acknowledged
+ * and always start at 0, so a backfill can't attach to a cursor that has moved and skip mail.
+ */
+export const THROWAWAY_SUFFIXES = ["-replay", "-dry-run"] as const;
+export const isThrowawayConsumer = (consumer: string) => THROWAWAY_SUFFIXES.some((s) => consumer.endsWith(s));
+
+/** `throwaway: false` (acks): names with a reserved suffix are refused. */
+export function parseConsumer(raw: unknown, opts: { throwaway?: boolean } = {}): string {
   const consumer = raw === undefined || raw === "" ? "default" : String(raw);
   if (!CONSUMER_RE.test(consumer)) throw badRequest("consumer must be 1-100 letters, digits, dots, underscores or dashes");
+  if (opts.throwaway === false && isThrowawayConsumer(consumer)) {
+    throw badRequest(
+      `consumer names ending in ${THROWAWAY_SUFFIXES.join(" or ")} are reserved for throwaway cursors and can't be acknowledged`,
+      "Pick a consumer name without that suffix.",
+    );
+  }
   return consumer;
 }
 
