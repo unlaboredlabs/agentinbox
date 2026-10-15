@@ -14,7 +14,8 @@
  *   await g.close();
  *
  * State helpers
- *   addAccount(email, { name?, projectAccess? })   create a mailbox (projectAccess=false → Pub/Sub admin calls get PERMISSION_DENIED)
+ *   addAccount(email, { name?, projectAccess?, workspaceDomain? })  create a mailbox (projectAccess=false → Pub/Sub admin calls get
+ *                                                  PERMISSION_DENIED; workspaceDomain → the id_token carries hd=<domain>)
  *   addLabel(email, name) → id                     create a user label ("Label_N")
  *   consentAs(email, { deny?, noRefreshToken?, scopes? })  queue the next consent (otherwise the only account, if exactly one exists)
  *   deliver(email, msg) → GmailMessage             incoming mail: builds RFC 5322, adds INBOX+UNREAD (or msg.labelIds), records
@@ -28,6 +29,9 @@
  *   failNext({ method?, path, status, reason?, message?, retryAfter?, times?, afterProcessing? })  inject errors for matching
  *                                                  requests (afterProcessing: the request takes effect, then the error is returned)
  *   accessTokenTtl                                 seconds for newly issued access tokens (default 3600)
+ *   refreshTokenTtl                                null (default): long-lived refresh tokens. A number simulates an External app in
+ *                                                  Testing: new refresh tokens expire after that many seconds (Google: 604800) and
+ *                                                  token responses carry refresh_token_expires_in (time left, on refreshes too)
  *   pullWaitMs                                     how long an empty Pub/Sub pull is held open (default 1000;
  *                                                  returnImmediately pulls answer at once)
  *   abortedPulls                                   count of waiting pulls the client cancelled (seen server-side)
@@ -96,7 +100,7 @@ export interface FakeGoogle {
   url: string;
   google: Config["google"];
   close(): Promise<void>;
-  addAccount(email: string, opts?: { name?: string; projectAccess?: boolean }): void;
+  addAccount(email: string, opts?: { name?: string; projectAccess?: boolean; workspaceDomain?: string }): void;
   addLabel(email: string, name: string): string;
   consentAs(email: string, opts?: { deny?: boolean; noRefreshToken?: boolean; scopes?: string[] }): void;
   deliver(email: string, msg: DeliverInput): GmailMessage;
@@ -116,6 +120,7 @@ export interface FakeGoogle {
   subscription(name: string): { topic: string; ackDeadlineSeconds: number; outstanding: number; queued: number } | null;
   iamPolicy(topic: string): { bindings: { role: string; members: string[] }[] } | null;
   accessTokenTtl: number;
+  refreshTokenTtl: number | null;
   pullWaitMs: number;
   /** Long-poll pulls the client cancelled while they were waiting (seen by the server). */
   abortedPulls: number;
@@ -314,6 +319,7 @@ interface Mailbox {
   watch: { topic: string; expiration: number } | null;
   projectAccess: boolean;
   nextLabel: number;
+  workspaceDomain: string | null;
 }
 
 interface Token {
@@ -839,12 +845,15 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       };
       if (!c.noRefreshToken) {
         const rt = token("1//fake-rt-");
-        refreshTokens.set(rt, { email: mb.email, scopes: c.scopes, expiresAt: Infinity, revoked: false, gen: grantOf(mb.email).gen });
+        const ttl = fake.refreshTokenTtl;
+        refreshTokens.set(rt, { email: mb.email, scopes: c.scopes, expiresAt: ttl ? Date.now() + ttl * 1000 : Infinity, revoked: false, gen: grantOf(mb.email).gen });
         out.refresh_token = rt;
+        if (ttl) out.refresh_token_expires_in = ttl;
       }
       if (c.scopes.includes("openid")) {
         const enc = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
-        out.id_token = `${enc({ alg: "none" })}.${enc({ iss: "https://accounts.google.com", email: mb.email, name: mb.name, sub: mb.email })}.`;
+        const claims = { iss: "https://accounts.google.com", email: mb.email, name: mb.name, sub: mb.email, ...(mb.workspaceDomain ? { hd: mb.workspaceDomain } : {}) };
+        out.id_token = `${enc({ alg: "none" })}.${enc(claims)}.`;
       }
       return out;
     }
@@ -853,8 +862,14 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       if (rt && rt.gen !== grantOf(rt.email).gen && grantOf(rt.email).rapt) {
         throw new HttpFail(400, { error: "invalid_grant", error_description: "reauth related error (invalid_rapt)", error_subtype: "invalid_rapt" });
       }
-      if (!valid(rt)) throw oauthFail(400, "invalid_grant", "Token has been expired or revoked.");
-      return { access_token: issueAccess(rt.email, rt.scopes), expires_in: fake.accessTokenTtl, scope: rt.scopes.join(" "), token_type: "Bearer" };
+      if (!valid(rt) || rt.expiresAt <= Date.now()) throw oauthFail(400, "invalid_grant", "Token has been expired or revoked.");
+      return {
+        access_token: issueAccess(rt.email, rt.scopes),
+        expires_in: fake.accessTokenTtl,
+        scope: rt.scopes.join(" "),
+        token_type: "Bearer",
+        ...(Number.isFinite(rt.expiresAt) ? { refresh_token_expires_in: Math.floor((rt.expiresAt - Date.now()) / 1000) } : {}),
+      };
     }
     throw oauthFail(400, "unsupported_grant_type", "Invalid grant_type.");
   });
@@ -1251,6 +1266,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     url,
     google: { oauthBase: url, authBase: url, gmailBase: url, pubsubBase: url },
     accessTokenTtl: 3600,
+    refreshTokenTtl: null,
     pullWaitMs: 1000,
     abortedPulls: 0,
     revoked: [],
@@ -1276,6 +1292,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         watch: null,
         projectAccess: opts.projectAccess ?? true,
         nextLabel: 1,
+        workspaceDomain: opts.workspaceDomain?.toLowerCase() ?? null,
       });
     },
     addLabel(email, name) {

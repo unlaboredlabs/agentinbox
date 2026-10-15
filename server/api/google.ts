@@ -3,6 +3,11 @@ import type { AppContext } from "../context.ts";
 import { asHttpError } from "../google/http.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
+const ImportInput = z.object({
+  json: z.string().min(1, "Paste the contents of the downloaded client JSON file").max(64_000, "That file is too large to be an OAuth client JSON"),
+  appType: z.enum(["internal", "external"]).optional(),
+});
+
 const ClientInput = z.object({
   clientId: z.string().trim().min(1, "Client ID is required"),
   clientSecret: z.string().optional(),
@@ -10,7 +15,7 @@ const ClientInput = z.object({
   appType: z.enum(["internal", "external"]),
 });
 
-/** GET/PUT /google/client, POST /google/pubsub/provision, POST /google/pubsub/test. */
+/** GET/PUT /google/client, POST /google/client/import, POST /google/pubsub/provision, POST /google/pubsub/test. */
 export function googleApi(ctx: AppContext) {
   const r = router();
 
@@ -26,6 +31,24 @@ export function googleApi(ctx: AppContext) {
       detail: { clientId: view.clientId, projectId: view.projectId, appType: view.appType, secretChanged: Boolean(input.clientSecret?.trim()) },
     });
     return c.json(view);
+  });
+
+  r.post("/google/client/import", async (c) => {
+    const input = await readBody(c, ImportInput);
+    const result = ctx.google.importClient(input);
+    ctx.audit.record({
+      ...ADMIN_ACTOR,
+      action: "google.client.import",
+      outcome: "ok",
+      detail: {
+        clientId: result.clientId,
+        projectId: result.projectId,
+        appType: result.appType,
+        redirectUris: result.registeredRedirectUris,
+        warnings: result.warnings.map((w) => w.code),
+      },
+    });
+    return c.json(result);
   });
 
   r.post("/google/pubsub/provision", async (c) => {

@@ -20,6 +20,9 @@ export interface AccountRow {
   watch_expires_at: string | null;
   last_sync_at: string | null;
   created_at: string;
+  refresh_expires_at: string | null;
+  /** '' = personal Gmail (detected), NULL = unknown (connected before migration 3). */
+  workspace_domain: string | null;
 }
 
 export const toAccount = (r: AccountRow): Account => ({
@@ -32,6 +35,8 @@ export const toAccount = (r: AccountRow): Account => ({
   watchExpiresAt: r.watch_expires_at,
   lastSyncAt: r.last_sync_at,
   createdAt: r.created_at,
+  refreshTokenExpiresAt: r.refresh_expires_at,
+  workspaceDomain: r.workspace_domain || null,
 });
 
 export const accountScopes = (r: AccountRow): string[] => json.parse<string[]>(r.scopes, []);

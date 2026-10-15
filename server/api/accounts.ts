@@ -19,7 +19,7 @@ const google = async <T>(fn: () => Promise<T>): Promise<T> => {
   }
 };
 
-/** /accounts: list, connect (direct + paste), resync, pause/resume, remove, labels. */
+/** /accounts: list, connect (direct + paste), resync, pause/resume, remove, labels, test email. */
 export function accountsApi(ctx: AppContext) {
   const r = router();
   const audited = (action: string, a: Account) =>
@@ -65,6 +65,9 @@ export function accountsApi(ctx: AppContext) {
     const id = ctx.accounts.require(c.req.param("id")).id;
     return c.json(await google(() => ctx.google.labels(id)));
   });
+
+  // Audited inside google.sendTestEmail (ok and error).
+  r.post("/accounts/:id/test-email", async (c) => c.json(await google(() => ctx.google.sendTestEmail(c.req.param("id")))));
 
   return r;
 }

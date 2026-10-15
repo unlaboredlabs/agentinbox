@@ -252,6 +252,7 @@ export async function compose(input: ComposeInput): Promise<string> {
     html: input.html,
     inReplyTo: input.inReplyTo ?? undefined,
     references: input.references?.length ? input.references : undefined,
+    headers: input.headers,
     attachments: input.attachments?.map((a) => ({ filename: a.filename, contentType: a.contentType, content: a.content })),
     disableFileAccess: true,
     disableUrlAccess: true,

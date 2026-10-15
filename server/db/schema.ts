@@ -202,4 +202,10 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (agent_id, consumer)
   );
   `,
+  /* 3: onboarding diagnostics on accounts */ `
+  -- When Google said the refresh token expires (External app in Testing: 7 days); NULL = long-lived.
+  ALTER TABLE accounts ADD COLUMN refresh_expires_at TEXT;
+  -- id_token "hd" claim: Workspace domain, '' = personal Gmail account, NULL = not known (connected before this migration).
+  ALTER TABLE accounts ADD COLUMN workspace_domain TEXT;
+  `,
 ];

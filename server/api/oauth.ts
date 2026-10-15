@@ -25,7 +25,7 @@ export const OAUTH_CHANNEL = "agentinbox-oauth";
 export const OAUTH_CALLBACK_SCRIPT = `(function () {
   try {
     var r = JSON.parse(document.getElementById("oauth-result").textContent);
-    var msg = { type: "agentinbox:oauth", ok: r.ok, email: r.email, error: r.error };
+    var msg = { type: "agentinbox:oauth", ok: r.ok, email: r.email, error: r.error, code: r.code, hint: r.hint };
     var toOpener = false;
     if (window.opener) {
       try {
@@ -56,6 +56,8 @@ interface PageInput {
   title: string;
   message: string;
   hint?: string | null;
+  /** ApiError code of the failure (e.g. "oauth_access_denied"), posted to the console with the message. */
+  code?: string | null;
   /** postMessage target origin for the opener (the console). */
   targetOrigin: string;
 }
@@ -64,7 +66,15 @@ export function callbackPage(p: PageInput): string {
   const icon = p.ok
     ? `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`
     : `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>`;
-  const result = { ok: p.ok, email: p.email ?? null, error: p.ok ? null : p.message, targetOrigin: p.targetOrigin };
+  // Everything but targetOrigin is posted to the console as an OAuthCallbackMessage (shared/types.ts).
+  const result = {
+    ok: p.ok,
+    email: p.email ?? null,
+    error: p.ok ? null : p.message,
+    code: p.ok ? null : (p.code ?? "internal"),
+    hint: p.ok ? null : (p.hint ?? null),
+    targetOrigin: p.targetOrigin,
+  };
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -134,9 +144,10 @@ export function oauthRoutes(ctx: AppContext) {
       return c.html(
         callbackPage({
           ok: false,
-          title: "Couldn't connect the account",
+          title: known && e.code === "oauth_access_denied" ? "Connection cancelled" : "Couldn't connect the account",
           message: known ? e.message : "Something went wrong while finishing the connection.",
           hint: known ? e.hint : "Check the agentinbox server log, then try connecting again from the console.",
+          code: known ? e.code : "internal",
           targetOrigin,
         }),
         known && e.status < 500 ? 400 : 500,

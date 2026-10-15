@@ -24,6 +24,17 @@ export interface TokenResponse {
   scope?: string;
   id_token?: string;
   token_type?: string;
+  /**
+   * Seconds until the refresh token expires. Google only sends it for tokens that expire, i.e. an
+   * External OAuth app in Testing (604800 = 7 days, counting from consent); on refreshes it is the time left.
+   */
+  refresh_token_expires_in?: number;
+}
+
+/** Absolute refresh-token expiry from a token response, or null when Google didn't send one (long-lived). */
+export function refreshExpiry(t: TokenResponse): string | null {
+  const s = t.refresh_token_expires_in;
+  return typeof s === "number" && Number.isFinite(s) && s > 0 ? new Date(Date.now() + s * 1000).toISOString() : null;
 }
 
 /** Refresh this long before the access token expires. */
@@ -129,6 +140,9 @@ export class TokenManager {
       access_expires_at: expiresAt,
       // Google may rotate refresh tokens.
       ...(res.refresh_token ? { refresh_token_enc: this.ctx.crypto.encrypt(res.refresh_token) } : {}),
+      // Testing-mode tokens report their remaining lifetime on every refresh. A response without it leaves
+      // the stored expiry alone: a token issued in Testing keeps expiring even after the app is published.
+      ...(refreshExpiry(res) ? { refresh_expires_at: refreshExpiry(res) } : {}),
     });
     return res.access_token;
   }

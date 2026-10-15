@@ -72,8 +72,11 @@ export function checkPassword(password: string): void {
   if (password.length > MAX_PASSWORD_LENGTH) throw badRequest(`Password must be at most ${MAX_PASSWORD_LENGTH} characters`);
 }
 
-/** Composes the setup checklist. Reads the stored state directly if a service is unavailable. */
-export function setupState(ctx: AppContext): SetupState {
+/**
+ * Composes the setup checklist. Reads the stored state directly if a service is unavailable.
+ * `warnings: false` skips the warning checks (the health endpoint only needs `complete`).
+ */
+export function setupState(ctx: AppContext, opts: { warnings?: boolean } = {}): SetupState {
   const claimed = isClaimed(ctx);
   const client = attempt(ctx, () => ctx.google.clientView()) ?? storedClientView(ctx);
   const pubsub = attempt(ctx, () => ctx.google.pubsubState()) ?? storedPubsub(ctx);
@@ -89,6 +92,7 @@ export function setupState(ctx: AppContext): SetupState {
     accountsConnected,
     agentsCreated: count("agents"),
     complete: claimed && googleClientConfigured && accountsConnected > 0,
+    warnings: opts.warnings === false ? [] : (attempt(ctx, () => ctx.google.setupWarnings()) ?? []),
   };
 }
 

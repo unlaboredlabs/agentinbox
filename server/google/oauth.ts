@@ -6,10 +6,10 @@ import { now } from "../db/index.ts";
 import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { type AccountRow, accountScopes, getRow, toAccount } from "./accounts.ts";
-import { callbackMode, clientCredentials } from "./client.ts";
+import { callbackMode, clientCredentials, markRedirectVerified } from "./client.ts";
 import { buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
 import { pubsubPrincipal } from "./pubsub.ts";
-import { postToken, type TokenResponse } from "./tokens.ts";
+import { postToken, refreshExpiry, type TokenResponse } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
 
 export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
@@ -24,18 +24,23 @@ const STATE_TTL_MS = 15 * 60_000;
 
 const b64url = (buf: Buffer) => buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
-/** Human explanations for errors Google returns on the redirect or the token endpoint. */
-export function oauthErrorHint(code: string): { message: string; hint: string } {
+/**
+ * Human explanations for errors Google returns on the redirect or the token endpoint. `redirectUri` is
+ * the exact URI this instance uses (for redirect_uri_mismatch).
+ */
+export function oauthErrorHint(code: string, redirectUri?: string): { message: string; hint: string } {
   switch (code) {
     case "access_denied":
       return {
-        message: "Access was denied on Google's consent screen.",
-        hint: "Click Allow and keep every permission checked. If your OAuth app is External and in Testing, add this Google account as a test user or publish the app.",
+        message: "You cancelled on Google's screen.",
+        hint: "Click Connect again and choose Continue/Allow (on \"Google hasn't verified this app\", click Continue), keeping every permission checked.",
       };
     case "org_internal":
       return {
-        message: "This OAuth app is Internal: only accounts in its Workspace org can connect.",
-        hint: "Sign in with an account from that Workspace org, or switch the consent screen to External (In production) to allow other accounts.",
+        message: "This OAuth app is Internal, so only accounts in its own Google Workspace organization can connect.",
+        hint:
+          "Sign in with an account from that Workspace organization. To connect personal Gmail or other organizations' accounts, " +
+          "make the app External instead: Google Cloud → Google Auth Platform → Audience → Make external, then publish it (In production).",
       };
     case "admin_policy_enforced":
       return {
@@ -45,13 +50,17 @@ export function oauthErrorHint(code: string): { message: string; hint: string } 
     case "redirect_uri_mismatch":
       return {
         message: "Google rejected the redirect URI.",
-        hint: "Add the exact redirect URI shown in the setup wizard to the OAuth client's Authorized redirect URIs.",
+        hint: redirectUri
+          ? `In Google Cloud → Clients → your client → Authorized redirect URIs, add exactly ${redirectUri} (no trailing slash), save, wait a minute, then connect again.`
+          : "Add the exact redirect URI shown in the setup wizard to the OAuth client's Authorized redirect URIs.",
       };
     case "invalid_client":
     case "unauthorized_client":
       return {
-        message: "Google rejected the OAuth client ID or secret.",
-        hint: "Re-copy the client ID and secret from Google Cloud → Credentials into the setup wizard. The client type must be Web application.",
+        message: "Google rejected the client ID or secret.",
+        hint:
+          "Re-import the client JSON (Clients → your client → Download JSON). If the downloaded file has no secret, " +
+          "click Add secret on that page and enter the ID and new secret manually. The client type must be Web application.",
       };
     case "invalid_grant":
       return {
@@ -63,8 +72,8 @@ export function oauthErrorHint(code: string): { message: string; hint: string } 
   }
 }
 
-const oauthError = (code: string, description?: string | null) => {
-  const { message, hint } = oauthErrorHint(code);
+const oauthError = (ctx: AppContext, code: string, description?: string | null, redirectUri?: string) => {
+  const { message, hint } = oauthErrorHint(code, redirectUri ?? callbackMode(ctx).redirectUri);
   return new HttpError(400, `oauth_${code}`, description && !message.includes(description) ? `${message} (${description})` : message, hint);
 };
 
@@ -140,16 +149,32 @@ function takeState(ctx: AppContext, state: string): StateRow {
   return row;
 }
 
-/** Decodes the id_token payload (received directly from Google over TLS, so no signature check). */
-function idTokenClaims(idToken: string | undefined): { email?: string; name?: string } {
+interface IdClaims {
+  email?: string;
+  name?: string;
+  /** Hosted domain: present only for Google Workspace accounts. */
+  hd?: string;
+}
+
+/**
+ * Decodes the id_token payload without verifying its signature. That is sound here: the token comes
+ * straight from Google's token endpoint over TLS in response to our own authenticated request, so
+ * there is no party in between that could forge it (OpenID Connect Core §3.1.3.7 allows this).
+ */
+function idTokenClaims(idToken: string | undefined): IdClaims | null {
   const payload = idToken?.split(".")[1];
-  if (!payload) return {};
+  if (!payload) return null;
   try {
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { email?: string; name?: string };
+    const v = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
+    return v && typeof v === "object" ? (v as IdClaims) : null;
   } catch {
-    return {};
+    return null;
   }
 }
+
+/** accounts.workspace_domain from the claims: the domain, '' for personal Gmail, null when unknown (no id_token). */
+const workspaceDomain = (claims: IdClaims | null): string | null =>
+  claims ? (typeof claims.hd === "string" ? claims.hd.toLowerCase() : "") : null;
 
 async function fetchProfile(ctx: AppContext, accessToken: string): Promise<{ emailAddress: string; historyId: string }> {
   const res = await fetch(buildUrl(ctx.config.google.gmailBase, "/gmail/v1/users/me/profile"), {
@@ -160,7 +185,9 @@ async function fetchProfile(ctx: AppContext, accessToken: string): Promise<{ ema
   if (!res.ok || !body?.emailAddress) {
     const message = body?.error?.message ?? `HTTP ${res.status}`;
     if (/has not been used|is disabled/i.test(message)) {
-      throw badRequest(
+      throw new HttpError(
+        400,
+        "gmail_api_disabled",
         "The Gmail API isn't enabled in your Google Cloud project.",
         "Enable it at https://console.cloud.google.com/apis/library/gmail.googleapis.com, wait a minute, then connect again.",
       );
@@ -191,16 +218,24 @@ async function discardTokens(ctx: AppContext, tokens: TokenResponse, email: stri
 }
 
 /** Saves fresh tokens on an existing account. needs_reauth/error become active; paused stays paused. */
-function storeTokens(ctx: AppContext, row: AccountRow, tokens: TokenResponse & { refresh_token: string }, granted: string[], name?: string): void {
+function storeTokens(
+  ctx: AppContext,
+  row: AccountRow,
+  tokens: TokenResponse & { refresh_token: string },
+  granted: string[],
+  claims: IdClaims | null,
+): void {
   ctx.db.run(
     `UPDATE accounts SET display_name = ?, status = ?, last_error = NULL, refresh_token_enc = ?, access_token_enc = ?,
-       access_expires_at = ?, scopes = ? WHERE id = ?`,
-    name ?? row.display_name,
+       access_expires_at = ?, scopes = ?, refresh_expires_at = ?, workspace_domain = ? WHERE id = ?`,
+    claims?.name ?? row.display_name,
     row.status === "paused" ? "paused" : "active",
     ctx.crypto.encrypt(tokens.refresh_token),
     ctx.crypto.encrypt(tokens.access_token),
     expiry(tokens),
     JSON.stringify(granted),
+    refreshExpiry(tokens),
+    workspaceDomain(claims) ?? row.workspace_domain,
     row.id,
   );
 }
@@ -209,7 +244,7 @@ const expiry = (t: TokenResponse) => new Date(Date.now() + (t.expires_in ?? 3600
 
 export async function completeConnect(ctx: AppContext, code: string, state: string): Promise<Account> {
   const st = takeState(ctx, state);
-  if (!code) throw badRequest("Google didn't return an authorization code.", "Start the connection again from the console.");
+  if (!code) throw new HttpError(400, "oauth_no_code", "Google didn't return an authorization code.", "Start the connection again from the console.");
   const { clientId, clientSecret } = clientCredentials(ctx);
   let tokens: TokenResponse;
   try {
@@ -222,15 +257,21 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
       code_verifier: st.code_verifier,
     });
   } catch (err) {
-    if (err instanceof GoogleApiError && err.reason) throw oauthError(err.reason, err.message !== err.reason ? err.message : null);
+    if (err instanceof GoogleApiError && err.reason) {
+      throw oauthError(ctx, err.reason, err.message !== err.reason ? err.message : null, st.redirect_uri);
+    }
     throw err;
   }
+  // Google accepted the redirect URI at consent and again here, so it is registered on the client.
+  markRedirectVerified(ctx, st.redirect_uri);
 
   const claims = idTokenClaims(tokens.id_token);
   const granted = (tokens.scope ?? "").split(/\s+/).filter(Boolean);
   if (granted.length && !granted.includes(GMAIL_SCOPE)) {
-    await discardTokens(ctx, tokens, claims.email);
-    throw badRequest(
+    await discardTokens(ctx, tokens, claims?.email);
+    throw new HttpError(
+      400,
+      "oauth_gmail_scope_missing",
       "Gmail access wasn't granted.",
       "Connect again and keep the \"Read, compose, and send emails\" permission checked on Google's consent screen.",
     );
@@ -246,23 +287,29 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     if (!target || target.email.toLowerCase() !== email.toLowerCase()) {
       // Keep the tokens if they belong to another connected account; never revoke them (that would break it).
       if (existing && tokens.refresh_token) {
-        storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims.name);
+        storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims);
         await afterConnect(ctx, existing.id, email);
       } else await discardTokens(ctx, tokens, email);
       if (!target) {
-        throw badRequest(
+        throw new HttpError(
+          400,
+          "oauth_account_removed",
           `The account you were reconnecting was removed from agentinbox meanwhile.${refreshed}`,
           "Use Connect account to add it again.",
         );
       }
-      throw badRequest(
+      throw new HttpError(
+        400,
+        "oauth_wrong_account",
         `You signed in as ${email}, but this reconnect is for ${target.email}.${refreshed}`,
         `Start the reconnect again and choose ${target.email} in Google's account picker.`,
       );
     }
   }
   if (!tokens.refresh_token) {
-    throw badRequest(
+    throw new HttpError(
+      400,
+      "oauth_no_refresh_token",
       "Google didn't return a refresh token, so agentinbox can't stay connected.",
       "Remove agentinbox's access at https://myaccount.google.com/permissions, then connect again.",
     );
@@ -270,18 +317,21 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
 
   const id = existing?.id ?? newId("acc");
   if (existing) {
-    storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims.name);
+    storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims);
   } else {
     ctx.db.run(
-      `INSERT INTO accounts (id, email, display_name, status, last_error, refresh_token_enc, access_token_enc, access_expires_at, scopes, created_at)
-       VALUES (?, ?, ?, 'active', NULL, ?, ?, ?, ?, ?)`,
+      `INSERT INTO accounts (id, email, display_name, status, last_error, refresh_token_enc, access_token_enc, access_expires_at, scopes,
+         refresh_expires_at, workspace_domain, created_at)
+       VALUES (?, ?, ?, 'active', NULL, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       email,
-      claims.name ?? null,
+      claims?.name ?? null,
       ctx.crypto.encrypt(tokens.refresh_token),
       ctx.crypto.encrypt(tokens.access_token),
       expiry(tokens),
       JSON.stringify(scopes),
+      refreshExpiry(tokens),
+      workspaceDomain(claims),
       now(),
     );
   }
@@ -290,7 +340,7 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     action: existing ? "account.reconnect" : "account.connect",
     accountId: id,
     outcome: "ok",
-    detail: { email, scopes },
+    detail: { email, scopes, refreshTokenExpiresAt: refreshExpiry(tokens), workspaceDomain: workspaceDomain(claims) || null },
   });
   ctx.log.child("google").info(existing ? "Account reconnected" : "Account connected", { email });
   return afterConnect(ctx, id, email);
@@ -315,19 +365,21 @@ export async function completeConnectFromUrl(ctx: AppContext, raw: string): Prom
     const text = raw.trim();
     url = new URL(text.startsWith("?") ? `http://localhost/oauth/callback${text}` : text);
   } catch {
-    throw badRequest("That isn't a valid URL.", "Copy the whole address from the browser's address bar after approving access.");
+    throw new HttpError(400, "oauth_url_invalid", "That isn't a valid URL.", "Copy the whole address from the browser's address bar after approving access.");
   }
   const q = url.searchParams;
   const error = q.get("error");
   if (error) {
     const state = q.get("state");
     if (state) ctx.db.run("DELETE FROM oauth_states WHERE state = ?", state);
-    throw oauthError(error, q.get("error_description"));
+    throw oauthError(ctx, error, q.get("error_description"));
   }
   const code = q.get("code");
   const state = q.get("state");
   if (!code || !state) {
-    throw badRequest(
+    throw new HttpError(
+      400,
+      "oauth_no_code",
       "That URL doesn't contain an authorization code.",
       "After approving access, copy the full address you land on (it starts with http://localhost and contains ?code=…&state=…), even if the page doesn't load.",
     );

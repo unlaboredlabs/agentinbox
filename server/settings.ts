@@ -14,7 +14,12 @@ export interface InternalState {
     /** AES-GCM ciphertext (ctx.crypto). */
     clientSecretEnc: string | null;
     projectId: string;
-    appType: GoogleAppType;
+    /** null: imported from a client JSON without choosing the app type yet. */
+    appType: GoogleAppType | null;
+    /** redirect_uris listed in the last imported client JSON (absent after manual entry). */
+    importedRedirectUris?: string[];
+    /** Redirect URI of the last successful account connection: proves it is registered on the client. */
+    verifiedRedirectUri?: string | null;
   };
   /** Pub/Sub resources and health. `mode` is not stored here: it is Settings.ingestMode. */
   pubsub: Omit<PubsubState, "mode"> & {
