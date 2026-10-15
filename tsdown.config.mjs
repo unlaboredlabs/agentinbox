@@ -2,7 +2,8 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  entry: { cli: "server/cli.ts" },
+  // content-worker runs email cleaning off the main thread (server/mail/pool.ts loads it next to cli.js).
+  entry: { cli: "server/cli.ts", "content-worker": "server/mail/content-worker.ts" },
   outDir: "dist",
   format: "esm",
   platform: "node",
