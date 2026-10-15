@@ -11,6 +11,7 @@ import {
   removeOwnInstall,
   sdQuote,
   type ServiceOps,
+  stagePackage,
   swapIn,
   systemctl,
   systemOps,
@@ -18,6 +19,7 @@ import {
 } from "../service.ts";
 import { ensurePrivateDir } from "./fsutil.ts";
 import { EXIT } from "./listen.ts";
+import { acquireFileLock } from "./lock.ts";
 import { type ListenFlags, resolveListen } from "./options.ts";
 import { DEFAULT_PROFILE, dataDir, listenAppDir, logPath, profilePath, profileStateDir, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
@@ -178,8 +180,13 @@ function startUnit(ops: ServiceOps, profile: string, file: string): void {
   }
 }
 
+/** Stages the listeners' install (no web console needed). */
+export const stageListenerApp = (staging: string): string => stagePackage(staging, { where: dirname(staging), requireWeb: false });
+
 export interface ListenServiceDeps {
   ops?: ServiceOps;
+  /** Installs the package into the given staging dir (tests). */
+  stage?: (staging: string) => string;
   /** Readiness check after (re)starting the unit (tests). */
   waitStarted?: (profile: string, since: number) => Promise<boolean>;
 }
@@ -196,7 +203,11 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   }
   await checkTransport(next.url, { insecure: config.insecure });
   preflight(ops);
-  saveProfile(profileName, next);
+  const shared = dataDir();
+  // A daemon started with --data pointing here would share (and lose) its app/ install with us.
+  if (existsSync(join(shared, "agentinbox.db"))) {
+    throw new Error(`${shared} holds an agentinbox daemon's data (agentinbox.db), so the listener can't install there. Run the daemon with another --data directory, or set XDG_DATA_HOME for the listener.`);
+  }
 
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   // Commands run in config.cwd (a private dir unless --cwd was given); the unit uses it too.
@@ -204,65 +215,80 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   mkdirSync(profileStateDir(profileName), { recursive: true, mode: 0o700 });
   if (config.cwdIsDefault) ensurePrivateDir(cwd);
 
-  // The same install path as the daemon: stage into <data>/app.new, swap into <data>/app.
-  mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
-  const staging = ops.stage(dataDir());
-  const app = listenAppDir();
-  const entry = installedEntry(app);
-  const file = unitFile(ops, profileName);
-  const previousUnit = readText(file);
-  const since = Date.now();
-  let swap: ReturnType<typeof swapIn> | null = null;
+  // The same install path as the daemon (stage into app.new, swap into app), under a lock: all
+  // profiles share this install, so two installs at once would trip over app.new / app.old.
+  mkdirSync(shared, { recursive: true, mode: 0o700 });
+  const releaseInstallLock = acquireFileLock(
+    join(shared, "install.lock"),
+    (holder) => new Error(`Another listener service install is running (pid ${holder.pid}, since ${holder.startedAt}). Try again when it has finished.`),
+  );
   try {
-    swap = swapIn(staging, app);
-    mkdirSync(ops.unitDir(), { recursive: true });
-    if (ops.platform === "linux") writeFileSync(file, systemdListenUnit(profileName, entry, cwd, ops.root));
-    else writeFileSync(file, launchdListenPlist(profileName, entry, cwd), { mode: 0o600 });
-    // Right after a bootout, launchd can still be tearing the old job down: retry briefly.
-    for (let attempt = 1; ; attempt++) {
-      try {
-        startUnit(ops, profileName, file);
-        break;
-      } catch (err) {
-        if (ops.platform !== "darwin" || attempt >= 5) throw err;
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-    if (!(await (deps.waitStarted ?? waitListenerStarted)(profileName, since))) throw new Error("the listener did not start");
-  } catch (err) {
-    const quietly = (fn: () => void) => {
-      try {
-        fn();
-      } catch {
-        // Best effort: report the original failure.
-      }
-    };
-    if (swap) quietly(() => swap!.restore());
-    // The settings this install saved go back too, so the restored listener runs as before.
-    quietly(() => saveProfile(profileName, profile));
-    quietly(() => rmSync(staging, { recursive: true, force: true }));
-    if (previousUnit !== null) {
-      quietly(() => {
-        writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 });
-        startUnit(ops, profileName, file);
-      });
-    } else {
-      quietly(() => uninstallListenService(profileName, true, { ops }));
-    }
-    const hints = listenerHints(ops, profileName).map((h) => `    ${h}`).join("\n");
-    throw new Error(
-      `Starting the listener service failed (${(err instanceof Error ? err.message : String(err)).split("\n")[0]}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
-    );
+    await installLocked();
+  } finally {
+    releaseInstallLock();
   }
-  swap.commit();
-  enableLinger(ops);
-  // The other profiles' listeners share the install: move them onto the new one.
-  for (const other of installedProfiles(ops).filter((o) => o !== profileName)) {
+
+  async function installLocked(): Promise<void> {
+    const staging = (deps.stage ?? stageListenerApp)(join(shared, "app.new"));
+    // Saved only once the new version is staged: a failed npm install changes nothing.
+    saveProfile(profileName, next);
+    const app = listenAppDir();
+    const entry = installedEntry(app);
+    const file = unitFile(ops, profileName);
+    const previousUnit = readText(file);
+    const since = Date.now();
+    let swap: ReturnType<typeof swapIn> | null = null;
     try {
-      if (ops.platform === "linux") systemctl(ops, "try-restart", unitName(other));
-      else ops.exec("launchctl", ["kickstart", "-k", `${launchdTarget(ops)}/${launchdLabel(other)}`], { quiet: true });
-    } catch {
-      // Not running: nothing to restart.
+      swap = swapIn(staging, app);
+      mkdirSync(ops.unitDir(), { recursive: true });
+      if (ops.platform === "linux") writeFileSync(file, systemdListenUnit(profileName, entry, cwd, ops.root));
+      else writeFileSync(file, launchdListenPlist(profileName, entry, cwd), { mode: 0o600 });
+      // Right after a bootout, launchd can still be tearing the old job down: retry briefly.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          startUnit(ops, profileName, file);
+          break;
+        } catch (err) {
+          if (ops.platform !== "darwin" || attempt >= 5) throw err;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+      if (!(await (deps.waitStarted ?? waitListenerStarted)(profileName, since))) throw new Error("the listener did not start");
+    } catch (err) {
+      const quietly = (fn: () => void) => {
+        try {
+          fn();
+        } catch {
+          // Best effort: report the original failure.
+        }
+      };
+      if (swap) quietly(() => swap!.restore());
+      // The settings this install saved go back too, so the restored listener runs as before.
+      quietly(() => saveProfile(profileName, profile));
+      quietly(() => rmSync(staging, { recursive: true, force: true }));
+      if (previousUnit !== null) {
+        quietly(() => {
+          writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 });
+          startUnit(ops, profileName, file);
+        });
+      } else {
+        quietly(() => uninstallListenService(profileName, true, { ops }));
+      }
+      const hints = listenerHints(ops, profileName).map((h) => `    ${h}`).join("\n");
+      throw new Error(
+        `Starting the listener service failed (${(err instanceof Error ? err.message : String(err)).split("\n")[0]}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
+      );
+    }
+    swap.commit();
+    enableLinger(ops);
+    // The other profiles' listeners share the install: move them onto the new one.
+    for (const other of installedProfiles(ops).filter((o) => o !== profileName)) {
+      try {
+        if (ops.platform === "linux") systemctl(ops, "try-restart", unitName(other));
+        else ops.exec("launchctl", ["kickstart", "-k", `${launchdTarget(ops)}/${launchdLabel(other)}`], { quiet: true });
+      } catch {
+        // Not running: nothing to restart.
+      }
     }
   }
 

@@ -229,7 +229,10 @@ agentinbox listen service uninstall [--profile <name>]                 # keeps t
   cache. It runs `agentinbox-cli@latest` there; from a source checkout, it runs the local build. Installation uses the
   daemon's own service machinery:
   - It checks first that systemd is reachable; if not, nothing is changed.
-  - It stages the new version in `app.new` and swaps it in.
+  - It stages the new version in `app.new` and swaps it in. A lock stops two profiles installing at once. It refuses
+    a directory that holds a daemon's `agentinbox.db`.
+  - Settings passed to `install` are saved only after the new version is staged, so a failed download changes
+    nothing.
   - It writes the unit where the user manager looks for it.
   - It waits for the listener to start. If the listener doesn't start, the previous install, unit and settings are
     restored.

@@ -1,5 +1,5 @@
 import { closeSync, constants, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ensurePrivateDir } from "./fsutil.ts";
 import { profileStateDir } from "./paths.ts";
 import { pidAlive } from "./state.ts";
@@ -13,7 +13,7 @@ import { NPX } from "./version.ts";
 
 export const lockPath = (profile: string) => join(profileStateDir(profile), "listen.lock");
 
-interface LockInfo {
+export interface LockInfo {
   pid: number;
   startedAt: string;
 }
@@ -39,15 +39,17 @@ function readLock(path: string): LockInfo | null {
   }
 }
 
-/** Profiles locked by this process (a second in-process listener has the same pid). */
+/** Lock files held by this process (a second in-process holder has the same pid). */
 const held = new Set<string>();
 
-/** Takes the lock or throws ProfileLockedError. Returns a release function (also run on process exit). */
-export function acquireProfileLock(profile: string): () => void {
-  const path = lockPath(profile);
-  ensurePrivateDir(profileStateDir(profile));
+/**
+ * Takes an exclusive lock file (pid + start time, created with O_EXCL) or throws `busy(holder)`. A lock
+ * whose process is gone is stale and taken over. Returns a release function (also run on process exit).
+ */
+export function acquireFileLock(path: string, busy: (holder: LockInfo) => Error): () => void {
+  ensurePrivateDir(dirname(path));
   const mine: LockInfo = { pid: process.pid, startedAt: new Date().toISOString() };
-  if (held.has(path)) throw new ProfileLockedError(readLock(path) ?? mine, profile);
+  if (held.has(path)) throw busy(readLock(path) ?? mine);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -69,9 +71,14 @@ export function acquireProfileLock(profile: string): () => void {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
     const holder = readLock(path);
-    if (holder && holder.pid !== process.pid && pidAlive(holder.pid)) throw new ProfileLockedError(holder, profile);
-    // Stale (crashed listener) or unreadable: take it over.
+    if (holder && holder.pid !== process.pid && pidAlive(holder.pid)) throw busy(holder);
+    // Stale (crashed process) or unreadable: take it over.
     rmSync(path, { force: true });
   }
-  throw new Error(`Could not take the listener lock ${path}.`);
+  throw new Error(`Could not take the lock ${path}.`);
+}
+
+/** Takes the profile's listener lock or throws ProfileLockedError. */
+export function acquireProfileLock(profile: string): () => void {
+  return acquireFileLock(lockPath(profile), (holder) => new ProfileLockedError(holder, profile));
 }
