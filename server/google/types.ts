@@ -84,6 +84,18 @@ export type GmailFormat = "full" | "metadata" | "minimal" | "raw";
 
 // ───────────── Errors (FROZEN) ─────────────
 
+/** Extra structure parsed from a Google error body (not frozen; informational). */
+export interface GoogleErrorDetails {
+  /** Canonical status, e.g. "PERMISSION_DENIED", or the OAuth `error` code, e.g. "invalid_grant". */
+  status?: string;
+  /** Every reason found: errors[].reason, ErrorInfo.reason, PreconditionFailure violation types. */
+  reasons?: string[];
+  /** ErrorInfo metadata, e.g. { service: "pubsub.googleapis.com" }. */
+  metadata?: Record<string, string>;
+  /** Parsed Retry-After header. */
+  retryAfterMs?: number;
+}
+
 /** Any non-2xx from a Google API, after retries. */
 export class GoogleApiError extends Error {
   constructor(
@@ -91,6 +103,7 @@ export class GoogleApiError extends Error {
     message: string,
     /** Google's error `reason`/`status` string when present, e.g. "notFound", "PERMISSION_DENIED". */
     readonly reason: string | null = null,
+    readonly details: GoogleErrorDetails = {},
   ) {
     super(message);
   }
