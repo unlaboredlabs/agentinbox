@@ -26,7 +26,11 @@ const STALE: Record<ConsoleStreamMessage["kind"], readonly (readonly string[])[]
 };
 const ALL_STALE = [...new Set([...Object.values(STALE).flat(), keys.eventHistory, keys.auditLog])];
 
-/** An `agent` message carries the whole Agent: put it in the list and detail caches without a refetch. */
+/**
+ * An `agent` message carries the whole Agent: put it in the list and detail caches without a refetch.
+ * A fetch already in flight may have read the agent before this change and would overwrite it, so
+ * such a query is refetched (invalidate cancels the running fetch and starts a new one).
+ */
 function applyAgent(qc: QueryClient, agent: Agent) {
   let known = false;
   qc.setQueryData<Agent[]>(keys.agents, (old) =>
@@ -37,11 +41,15 @@ function applyAgent(qc: QueryClient, agent: Agent) {
     }),
   );
   if (qc.getQueryData(keys.agent(agent.id))) qc.setQueryData<Agent>(keys.agent(agent.id), agent);
+  for (const queryKey of [keys.agents, keys.agent(agent.id)]) {
+    if (qc.isFetching({ queryKey, exact: true })) void qc.invalidateQueries({ queryKey, exact: true });
+  }
   // An agent the list hasn't seen yet (created elsewhere): fetch the list.
   if (!known && qc.getQueryData(keys.agents)) void qc.invalidateQueries({ queryKey: keys.agents, exact: true });
-  // The first sign that an agent works completes setup (SetupState.verified is computed server-side).
+  // The first sign that an agent works completes setup (SetupState.verified is computed server-side:
+  // an MCP call, or a listener that acked past where it started).
   const setup = qc.getQueryData<SetupState>(keys.setupState);
-  if (setup && !setup.verified && (agent.lastMcpAt || agent.listeners.some((l) => l.ackedSeq > 0))) {
+  if (setup && !setup.verified && (agent.lastMcpAt || agent.listeners.some((l) => l.ackedSeq > (l.startSeq ?? 0)))) {
     void qc.invalidateQueries({ queryKey: keys.setupState });
   }
 }

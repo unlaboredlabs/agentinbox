@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GmailLabel } from "../shared/types.ts";
 import { sha256 } from "../server/crypto.ts";
 import { parseGrantInput } from "../server/policy/grants.ts";
@@ -60,15 +60,22 @@ describe("agents and keys", () => {
     ctx.policy.authenticate(apiKey);
     expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBeNull();
 
-    ctx.policy.markMcpUse(agent.id);
-    const first = ctx.policy.getAgent(agent.id)!.lastMcpAt;
-    expect(Date.parse(first!)).toBeGreaterThan(Date.now() - 5_000);
-    ctx.policy.markMcpUse(agent.id);
-    expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBe(first);
-    const old = new Date(Date.now() - 120_000).toISOString();
-    ctx.db.run("UPDATE agents SET last_mcp_at = ? WHERE id = ?", old, agent.id);
-    ctx.policy.markMcpUse(agent.id);
-    expect(ctx.policy.getAgent(agent.id)!.lastMcpAt! > old).toBe(true);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      ctx.policy.markMcpUse(agent.id);
+      const first = ctx.policy.getAgent(agent.id)!.lastMcpAt;
+      expect(Date.parse(first!)).toBe(Date.now());
+      // Within the minute the UPDATE isn't even attempted (a write here would be visible).
+      ctx.db.run("UPDATE agents SET last_mcp_at = NULL WHERE id = ?", agent.id);
+      vi.setSystemTime(Date.now() + 59_000);
+      ctx.policy.markMcpUse(agent.id);
+      expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBeNull();
+      vi.setSystemTime(Date.now() + 2_000);
+      ctx.policy.markMcpUse(agent.id);
+      expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBe(new Date().toISOString());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("publishes the agent on bus agentState: coalesced, rate-limited with a trailing push, not after deletion", async () => {
@@ -98,10 +105,13 @@ describe("agents and keys", () => {
 
     // Access changes push too; a deleted agent never does.
     ctx.policy.updateAgent(agent.id, { name: "b" });
+    await tick(10);
+    expect(states).toHaveLength(3);
+    ctx.policy.updateAgent(agent.id, { name: "c" });
     ctx.policy.deleteAgent(agent.id);
     ctx.policy.publishAgent(agent.id);
     await tick(10);
-    expect(states).toHaveLength(2);
+    expect(states).toHaveLength(3);
   });
 
   it("records how an agent was added; console input can't claim it was paired", () => {

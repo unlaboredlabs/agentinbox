@@ -20,16 +20,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
   notFoundComponent: NotFound,
 });
 
+/** A code chunk failed to load (often a daemon that restarted on a new version): only a reload fetches the new ones. */
+const isChunkLoadError = (error: unknown) =>
+  error instanceof TypeError && /dynamically imported module|importing a module script failed|error loading dynamically imported/i.test(error.message);
+
 /**
- * Network failures: the request never got an answer (fetch threw, or a proxy in front said the
- * upstream is down), or a code chunk failed to load (often a daemon that restarted on a new version).
+ * Network failures: the request never got an answer (fetch threw), a proxy in front said the
+ * upstream is down (a 502-504 that isn't agentinbox's own JSON error), or a code chunk failed to load.
  */
 function isUnreachable(error: unknown): boolean {
-  if (error instanceof ApiError) return error.status === 0 || error.status === 502 || error.status === 503 || error.status === 504;
-  return (
-    error instanceof TypeError &&
-    /failed to fetch|networkerror|load failed|network request failed|dynamically imported module|importing a module script failed/i.test(error.message)
-  );
+  if (error instanceof ApiError) return error.status === 0 || (error.status >= 502 && error.status <= 504 && error.code.startsWith("http_"));
+  return isChunkLoadError(error) || (error instanceof TypeError && /failed to fetch|networkerror|load failed|network request failed/i.test(error.message));
 }
 
 function RootError({ error }: { error: unknown }) {
@@ -43,7 +44,7 @@ function RootError({ error }: { error: unknown }) {
             <UnplugIcon className="size-3.5 shrink-0" />
             {message}
           </div>
-          <Button onClick={() => router.invalidate()}>
+          <Button onClick={() => (isChunkLoadError(error) ? window.location.reload() : void router.invalidate())}>
             <RotateCwIcon /> Try again
           </Button>
         </div>

@@ -125,6 +125,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     if (reason === "deleted") {
       clearTimeout(pushes.get(agentId)?.timer);
       pushes.delete(agentId);
+      mcpWrittenAt.delete(agentId);
     } else {
       publishAgent(agentId);
     }
@@ -155,6 +156,12 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     entry.timer.unref?.();
   };
 
+  /**
+   * When this process last wrote (or found fresh) each agent's last_mcp_at: /mcp is hit on every tool
+   * call, so within the window markMcpUse skips the UPDATE (and the WAL write lock) entirely.
+   */
+  const mcpWrittenAt = new Map<string, number>();
+
   /** Writes `column` = now unless it was written within the throttle window; true if it was written. */
   const touchColumn = (column: "last_used_at" | "last_mcp_at", agentId: string): boolean => {
     const ts = Date.now();
@@ -174,6 +181,11 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     publishAgent,
 
     markMcpUse(agentId) {
+      const ts = Date.now();
+      if (ts - (mcpWrittenAt.get(agentId) ?? -Infinity) < LAST_USED_THROTTLE_MS) return;
+      // Written now, or written recently by an earlier run: either way nothing to do for a while.
+      // (A recent write from an earlier run means the next one may come up to a window late.)
+      mcpWrittenAt.set(agentId, ts);
       if (touchColumn("last_mcp_at", agentId)) publishAgent(agentId);
     },
 
