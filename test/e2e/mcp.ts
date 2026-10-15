@@ -2,6 +2,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { resilientFetch } from "./fetch.ts";
 
 export interface ToolResult {
   text: string;
@@ -25,6 +26,7 @@ export async function connectAgent(baseUrl: string, apiKey: string, name = "e2e-
   await client.connect(
     new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
       requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
+      fetch: resilientFetch,
     }),
   );
   const call = async (tool: string, args: Record<string, unknown> = {}): Promise<ToolResult> => {

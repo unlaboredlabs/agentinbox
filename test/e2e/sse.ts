@@ -1,6 +1,7 @@
 // Minimal SSE reader for the console stream (/api/events/stream), as the browser's EventSource would see it.
 
 import type { ConsoleStreamMessage } from "../../shared/types.ts";
+import { resilientFetch } from "./fetch.ts";
 import { waitFor } from "./wait.ts";
 
 export interface SseStream {
@@ -19,19 +20,18 @@ export interface SseStream {
 
 export async function openSse(url: string, headers: Record<string, string>): Promise<SseStream> {
   const ctrl = new AbortController();
-  const res = await fetch(url, { headers: { accept: "text/event-stream", ...headers }, signal: ctrl.signal });
+  const res = await resilientFetch(url, { headers: { accept: "text/event-stream", ...headers }, signal: ctrl.signal });
   const stream: SseStream = {
     messages: [],
     comments: [],
     status: res.status,
-    async next(kind, pred, timeout = 8000) {
-      type Data = Extract<ConsoleStreamMessage, { kind: typeof kind }>["data"];
-      const found = await waitFor(
-        () => stream.messages.find((m) => m.kind === kind && (!pred || pred(m.data as Data))),
-        { timeout, what: `SSE ${kind} message` },
-      );
-      return found.data as Data;
-    },
+    next: (async (kind: string, pred?: (data: unknown) => boolean, timeout = 8000) => {
+      const found = await waitFor(() => stream.messages.find((m) => m.kind === kind && (!pred || pred(m.data))), {
+        timeout,
+        what: `SSE ${kind} message`,
+      });
+      return found.data;
+    }) as SseStream["next"],
     close: () => ctrl.abort(),
   };
   if (!res.ok || !res.body) return stream;

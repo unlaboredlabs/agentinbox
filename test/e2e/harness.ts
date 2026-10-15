@@ -31,6 +31,7 @@ import type {
   Settings,
 } from "../../shared/types.ts";
 import { FAKE_CLIENT, type FakeGoogle, startFakeGoogle } from "../fake-google.ts";
+import { resilientFetch } from "./fetch.ts";
 import { type Agent, connectAgent } from "./mcp.ts";
 import { openSse, type SseStream } from "./sse.ts";
 import { waitFor } from "./wait.ts";
@@ -81,7 +82,7 @@ export class AdminClient {
     if (opts.csrf !== false) headers["x-agentinbox-csrf"] = "1";
     if (opts.cookie !== false && this.cookie) headers.cookie = this.cookie;
     if (opts.json !== undefined) headers["content-type"] = "application/json";
-    const res = await fetch(`${this.base()}${path}`, {
+    const res = await resilientFetch(`${this.base()}${path}`, {
       method: opts.method ?? (opts.json !== undefined ? "POST" : "GET"),
       headers,
       body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
@@ -295,7 +296,7 @@ export class Stack {
     const location = consent.headers.get("location");
     if (consent.status !== 302 || !location) throw new Error(`fake consent failed: HTTP ${consent.status} ${await consent.text()}`);
     if (start.callbackMode === "paste") return this.admin.post<Account>("/api/accounts/connect/complete", { url: location });
-    const cb = await fetch(location);
+    const cb = await resilientFetch(location);
     const html = await cb.text();
     if (cb.status !== 200 || !html.includes("Account connected")) throw new Error(`OAuth callback failed: HTTP ${cb.status}\n${html.slice(0, 500)}`);
     const accounts = await this.admin.get<Account[]>("/api/accounts");
