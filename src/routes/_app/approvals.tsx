@@ -21,15 +21,12 @@ interface Search {
   tab?: "access" | "history";
   /** User code from the terminal's verification link: opens Agent access and highlights that request. */
   pairing?: string;
-  /** Set when the human looked the request up by code here (not opened from a link). */
-  found?: boolean;
 }
 
 export const Route = createFileRoute("/_app/approvals")({
   validateSearch: (s: Record<string, unknown>): Search => ({
     tab: s.tab === "history" || s.tab === "access" ? s.tab : undefined,
     pairing: typeof s.pairing === "string" && s.pairing ? s.pairing.toUpperCase().slice(0, 12) : undefined,
-    found: s.found === true || s.found === "1" || s.found === 1 ? true : undefined,
   }),
   component: ApprovalsPage,
 });
@@ -55,6 +52,9 @@ function ApprovalsPage() {
   const decidedPairings = (pairings.data ?? []).filter((p) => p.status !== "pending").slice(0, 8);
   const [approving, setApproving] = useState<{ p: PairingRequest } | null>(null);
   const linked = search.pairing ? pendingPairings.find((p) => p.userCode === search.pairing) : undefined;
+  // Only the Find form on this page can mark a request as looked up by code: it lives in page state,
+  // never in the URL, so a crafted link can't borrow the reassuring "matches the code" label.
+  const [foundCode, setFoundCode] = useState<string | null>(null);
 
   return (
     <>
@@ -127,7 +127,10 @@ function ApprovalsPage() {
             <QueryError error={pairings.error} onRetry={() => void pairings.refetch()} />
           ) : (
             <>
-              {pendingPairings.length > 0 && <FindByCode pending={pendingPairings} onFound={(p) => void navigate({ search: { pairing: p.userCode, found: true }, replace: true })} />}
+              {pendingPairings.length > 0 && <FindByCode pending={pendingPairings} onFound={(p) => {
+                    setFoundCode(p.userCode);
+                    void navigate({ search: { pairing: p.userCode }, replace: true });
+                  }} />}
               {pendingPairings.length === 0 ? (
                 <Card>
                   <Empty>
@@ -156,7 +159,7 @@ function ApprovalsPage() {
                     key={p.id}
                     p={p}
                     accounts={accounts.data ?? []}
-                    highlighted={p.id === linked?.id ? (search.found ? "found" : "link") : undefined}
+                    highlighted={p.id === linked?.id ? (foundCode === p.userCode ? "found" : "link") : undefined}
                     onApprove={() => setApproving({ p })}
                   />
                 ))
