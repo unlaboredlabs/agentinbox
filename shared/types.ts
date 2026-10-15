@@ -363,6 +363,19 @@ export interface OAuthCallbackMessage {
   hint: string | null;
 }
 
+/**
+ * POST /api/accounts/connect/status {state}: what became of one sign-in (ConnectAccountResponse.state). The
+ * console asks when the callback page's message can't reach it (the console is open on another origin than
+ * the redirect URI's, or Google severed the opener). Remembered in memory for an hour; "unknown" once the
+ * state expired unused, after a restart, or for a state this server never issued.
+ */
+export type ConnectAttempt =
+  | { status: "pending" }
+  | { status: "connected"; accountId: string; email: string }
+  /** `code`/`error`/`hint` mirror the ApiError POST /api/accounts/connect/complete returns for the same failure. */
+  | { status: "failed"; code: string; error: string; hint: string | null }
+  | { status: "unknown" };
+
 export interface ConnectAccountResponse {
   authUrl: string;
   /** Echoed state; in paste mode the console POSTs the pasted URL to /api/accounts/connect/complete. */
@@ -735,6 +748,7 @@ export interface ApiError {
 //   POST   /api/accounts/connect                      → ConnectAccountResponse
 //          400 google_client_missing (no OAuth client saved yet)
 //   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
+//   POST   /api/accounts/connect/status {state}       → ConnectAttempt (the console's fallback when the callback page can't post to it)
 //          Connect failures (same codes on this endpoint and in the callback page's OAuthCallbackMessage):
 //          400 oauth_access_denied (cancelled on Google's screen) | oauth_org_internal | oauth_admin_policy_enforced
 //              | oauth_redirect_uri_mismatch | oauth_invalid_client | oauth_unauthorized_client | oauth_invalid_grant

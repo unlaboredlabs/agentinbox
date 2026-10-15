@@ -5,7 +5,7 @@ import { checkClient } from "./check.ts";
 import { clientView, callbackMode, importClient, setClient } from "./client.ts";
 import { createGmailClient } from "./gmail.ts";
 import { mimeTools } from "./mime.ts";
-import { completeConnect, completeConnectFromUrl, revokeAccount, startConnect } from "./oauth.ts";
+import { completeConnect, completeConnectFromUrl, connectAttempt, revokeAccount, startConnect } from "./oauth.ts";
 import { provisionPubsub, pubsubState, testPubsub } from "./pubsub.ts";
 import { googleRuntime } from "./runtime.ts";
 import { sendTestEmail } from "./testmail.ts";
@@ -37,6 +37,7 @@ export function createGoogleService(ctx: AppContext): GoogleService {
     startConnect: (opts) => startConnect(ctx, opts),
     completeConnect: (code, state) => completeConnect(ctx, code, state),
     completeConnectFromUrl: (url) => completeConnectFromUrl(ctx, url),
+    connectAttempt: (state) => connectAttempt(ctx, state),
 
     gmail,
     mime: mimeTools,

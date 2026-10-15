@@ -1,4 +1,4 @@
-import type { Account, ConnectAccountResponse, OAuthCallbackMessage } from "@shared/types";
+import type { Account, ConnectAccountResponse, ConnectAttempt, OAuthCallbackMessage } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { CheckCircle2Icon, ExternalLinkIcon, InfoIcon, RotateCwIcon } from "lucide-react";
@@ -67,6 +67,7 @@ export function ConnectAccountHost() {
   const qc = useQueryClient();
   const client = useQuery(queries.googleClient());
   const [phase, setPhase] = useState<Phase | null>(null);
+  const phaseRef = useRef<Phase | null>(null);
   const [checkNote, setCheckNote] = useState<string | null>(null);
   const inWizard = useRouterState({ select: (st) => st.location.pathname === "/get-started" });
   const navigate = useNavigate();
@@ -95,6 +96,7 @@ export function ConnectAccountHost() {
   const redirectOrigin = useRef<string | null>(null);
   useEffect(() => {
     finishRef.current = finish;
+    phaseRef.current = phase;
     activeRef.current = phase?.kind === "starting" || phase?.kind === "waiting";
     try {
       redirectOrigin.current = client.data ? new URL(client.data.redirectUri).origin : null;
@@ -168,13 +170,52 @@ export function ConnectAccountHost() {
     };
   }, []);
 
+  /**
+   * Asks the server what became of this dialog's sign-in (its state). The callback page's message can miss
+   * this tab: it posts only to the saved public URL's origin (the console may be open on another one, e.g.
+   * localhost vs 127.0.0.1), BroadcastChannel is same-origin, and a reconnect of an account that was
+   * already working changes nothing the account list would show.
+   */
+  const askServer = async (): Promise<ConnectAttempt["status"] | null> => {
+    const p = phaseRef.current;
+    if (p?.kind !== "waiting") return null;
+    const state = p.res.state;
+    let r: ConnectAttempt;
+    try {
+      r = await api<ConnectAttempt>("/api/accounts/connect/status", { body: { state } });
+    } catch {
+      return null;
+    }
+    // Ignore an answer for an attempt this dialog has since left (closed, retried, finished).
+    const now = phaseRef.current;
+    if (now?.kind !== "waiting" || now.res.state !== state) return null;
+    if (r.status === "connected") finishRef.current(r.email);
+    else if (r.status === "failed") setPhase({ kind: "error", error: new ApiError(400, r.code, r.error, r.hint ?? undefined) });
+    return r.status;
+  };
+  const askRef = useRef(askServer);
+  useEffect(() => {
+    askRef.current = askServer;
+  });
+
   // Fallback signal: the server announces the new or repaired account on the live stream.
   useStreamListener((m) => {
     if (m.kind !== "account" || (phase?.kind !== "waiting" && phase?.kind !== "starting")) return;
     const a = m.data;
     const reauth = req.reauthAccountId;
     if (reauth ? reauthFromBroken.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
+    // A reconnect of a working account (or of an address that's already here) looks like any other update.
+    else void askServer();
   });
+
+  // Coming back to this tab after Google's window is a good moment to look.
+  const waitingState = phase?.kind === "waiting" ? phase.res.state : null;
+  useEffect(() => {
+    if (!waitingState) return;
+    const onFocus = () => void askRef.current();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [waitingState]);
 
   // Notice when the popup goes away. Google's pages can sever window.opener, which also makes
   // `closed` read true early, so this only softens the message instead of failing the flow.
@@ -185,6 +226,7 @@ export function ConnectAccountHost() {
       if (popup.closed) {
         clearInterval(id);
         setPhase((p) => (p?.kind === "waiting" ? { ...p, closed: true } : p));
+        void askRef.current();
       }
     }, 600);
     return () => clearInterval(id);
@@ -192,20 +234,29 @@ export function ConnectAccountHost() {
 
   const checkAgain = async () => {
     setCheckNote(null);
+    // The server knows how this sign-in ended (connected or failed) whichever origin the callback page posted to.
+    const status = await askServer();
+    if (status === "connected" || status === "failed" || phaseRef.current?.kind !== "waiting") return;
     // Extra access (Pub/Sub): the retry it was asked for is the real check, and it says if the box wasn't ticked.
     if (req.scopes?.length) {
       finish(req.email ?? "Your account", false);
       return;
     }
-    const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
-    const reauth = req.reauthAccountId;
-    if (reauth && !reauthFromBroken.current) {
-      setCheckNote("This account was already connected, so there's nothing new to detect from here. If Google's window said it worked, close this dialog.");
-      return;
+    // The server forgot the attempt (it restarted): fall back to what the account list can show.
+    if (status !== "pending") {
+      const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
+      const reauth = req.reauthAccountId;
+      const found = accounts.find((a) => (reauth ? reauthFromBroken.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)));
+      if (found) {
+        finish(found.email);
+        return;
+      }
     }
-    const found = accounts.find((a) => (reauth ? a.id === reauth && a.status === "active" : !known.current.has(a.id)));
-    if (found) finish(found.email);
-    else setCheckNote("No new account yet. Finish signing in with Google, or use the paste option below if the window ended on an error page.");
+    setCheckNote(
+      req.reauthAccountId
+        ? "Google hasn't sent you back yet. Finish signing in with Google, or use the paste option below if the window ended on an error page."
+        : "No new account yet. Finish signing in with Google, or use the paste option below if the window ended on an error page.",
+    );
   };
 
   const close = () => {

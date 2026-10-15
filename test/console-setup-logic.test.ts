@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { callbackMode } from "../server/google/client.ts";
 import { checkTransport } from "../server/listen/transport.ts";
 import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
-import { analyzeUrl, localConsoleUrl, urlVerdict } from "../src/lib/public-url.ts";
+import { intervalInWords, isRealtime } from "../src/lib/delivery.ts";
+import { analyzeUrl, localConsoleUrl, loopbackTwin, urlVerdict } from "../src/lib/public-url.ts";
 import { tunnelCommand } from "../src/lib/tunnel.ts";
 import { wrapParts } from "../src/lib/wrap.ts";
 
@@ -82,6 +83,18 @@ describe("address verdicts match the server", () => {
     expect(localConsoleUrl("http://inbox.localhost:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
     expect(localConsoleUrl("http://192.168.1.20:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
     expect(localConsoleUrl("https://mail.example.com", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
+  });
+
+  it("spots the console open under another loopback name than the saved address (localhost vs 127.0.0.1)", () => {
+    expect(loopbackTwin("http://localhost:8425", "http://127.0.0.1:8425")).toBe("http://127.0.0.1:8425");
+    expect(loopbackTwin("http://127.0.0.1:8425", "http://localhost:8425/")).toBe("http://localhost:8425");
+    expect(loopbackTwin("http://[::1]:8425", "http://localhost:8425")).toBe("http://localhost:8425");
+    // Same origin, another port (a tunnel), another scheme, or not this computer: nothing to say.
+    expect(loopbackTwin("http://localhost:8425", "http://localhost:8425")).toBeNull();
+    expect(loopbackTwin("http://localhost:18425", "http://127.0.0.1:8425")).toBeNull();
+    expect(loopbackTwin("https://localhost:8425", "http://127.0.0.1:8425")).toBeNull();
+    expect(loopbackTwin("http://localhost:8425", "https://mail.example.com")).toBeNull();
+    expect(loopbackTwin("http://192.168.1.20:8425", "http://127.0.0.1:8425")).toBeNull();
   });
 
   it("rejects what isn't an http(s) URL", () => {
@@ -196,5 +209,22 @@ describe("soft wrap points", () => {
       .map((p) => ("space" in p ? p.space : p.segments.join("")))
       .join("");
     expect(rebuilt).toBe(text);
+  });
+});
+
+describe("delivery speed claims", () => {
+  it("says within seconds only while Pub/Sub is provisioned and pulling", () => {
+    expect(isRealtime({ mode: "pubsub", subscription: "projects/p/subscriptions/s" }, { lastError: null })).toBe(true);
+    expect(isRealtime({ mode: "poll", subscription: "projects/p/subscriptions/s" }, { lastError: null })).toBe(false);
+    expect(isRealtime({ mode: "pubsub", subscription: null }, { lastError: null })).toBe(false);
+    expect(isRealtime({ mode: "pubsub", subscription: "projects/p/subscriptions/s" }, { lastError: "Pub/Sub pull failed" })).toBe(false);
+    expect(isRealtime(undefined, undefined)).toBe(false);
+  });
+
+  it("puts the poll interval in words", () => {
+    expect(intervalInWords(30)).toBe("30 seconds");
+    expect(intervalInWords(60)).toBe("60 seconds");
+    expect(intervalInWords(120)).toBe("2 minutes");
+    expect(intervalInWords(90)).toBe("2 minutes");
   });
 });
