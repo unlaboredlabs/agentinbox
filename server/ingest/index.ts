@@ -1,4 +1,4 @@
-import type { Account, IngestMode, IngestStatus, Settings } from "../../shared/types.ts";
+import { type Account, GMAIL_WATCH_ERROR, type IngestMode, type IngestStatus, type Settings } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type AccountRow, allRows, getRow, updateRow } from "../google/accounts.ts";
@@ -175,7 +175,7 @@ class Ingest implements IngestService {
     const topic = readPubsub(this.ctx).topic;
     if (this.ctx.settings.get().ingestMode === "pubsub" && topic) {
       await startWatch(this.ctx, accountId, topic).catch((err: unknown) => {
-        updateRow(this.ctx, accountId, { last_error: `Gmail watch failed: ${errorMessage(err)}` }, true);
+        updateRow(this.ctx, accountId, { last_error: `${GMAIL_WATCH_ERROR}: ${errorMessage(err)}` }, true);
       });
     }
     this.kick(accountId);

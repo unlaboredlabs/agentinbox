@@ -32,7 +32,7 @@ const settingsLink = (text: string) => (
  */
 export function ArrivalSpeed({ of, neutral, it = "it", accountId }: { of?: string; neutral: React.ReactNode; it?: string; accountId?: string }) {
   const speed = useDeliverySpeed(accountId);
-  if (!speed.ready) return <>{neutral}</>;
+  if (!speed.ready || speed.mode === "inactive") return <>{neutral}</>;
   const from = of ? ` of ${of}` : "";
   if (speed.mode === "realtime") return <>within seconds{from}</>;
   return (

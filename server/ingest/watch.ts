@@ -1,3 +1,4 @@
+import { GMAIL_WATCH_ERROR } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { allRows, getRow, updateRow } from "../google/accounts.ts";
 import { errorMessage } from "../util/errors.ts";
@@ -5,7 +6,7 @@ import { errorMessage } from "../util/errors.ts";
 /** Gmail watches expire after 7 days; renew once a day. */
 export const WATCH_RENEW_AFTER_MS = 24 * 3600_000;
 const WATCH_LIFETIME_MS = 7 * 24 * 3600_000;
-const WATCH_ERROR = "Gmail watch failed";
+const WATCH_ERROR = GMAIL_WATCH_ERROR;
 
 export interface WatchResult {
   accountId: string;

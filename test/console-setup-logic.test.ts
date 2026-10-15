@@ -6,6 +6,7 @@ import { callbackMode } from "../server/google/client.ts";
 import { checkTransport } from "../server/listen/transport.ts";
 import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
 import { answerApplies, CHECK_NOTES, checkAgainStep, listMatch, streamUpdateConcerns } from "../src/components/accounts/connect-attempt.ts";
+import { GMAIL_WATCH_ERROR } from "../shared/types.ts";
 import { deliveryMode, intervalInWords } from "../src/lib/delivery.ts";
 import { analyzeUrl, localConsoleUrl, loopbackTwin, urlVerdict } from "../src/lib/public-url.ts";
 import { tunnelCommand } from "../src/lib/tunnel.ts";
@@ -228,9 +229,23 @@ describe("delivery speed claims", () => {
     // The account the claim is about: no watch, an expired one, an error, or not active.
     expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, watchExpiresAt: null }, NOW)).toBe("broken");
     expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, watchExpiresAt: "2026-10-15T09:00:00.000Z" }, NOW)).toBe("broken");
-    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, lastError: "watch failed" }, NOW)).toBe("broken");
-    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, status: "paused" }, NOW)).toBe("broken");
-    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, null, NOW)).toBe("broken");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, lastError: `${GMAIL_WATCH_ERROR}: 403 forbidden` }, NOW)).toBe("broken");
+  });
+
+  it("doesn't call real-time broken for errors that aren't the Gmail watch's", () => {
+    const ok = { lastError: null };
+    // What ingest writes for a failed sync: push still works, the next sync retries.
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, lastError: "Sync failed: Google API error: 503" }, NOW)).toBe("realtime");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, lastError: "Connected, but initial sync setup failed: boom" }, NOW)).toBe("realtime");
+    expect(GMAIL_WATCH_ERROR).toBe("Gmail watch failed");
+  });
+
+  it("makes no speed claim for an account that isn't synced (paused, needs reconnecting, removed)", () => {
+    for (const pubsub of [{ mode: "pubsub" as const, subscription: SUB }, { mode: "poll" as const, subscription: null }]) {
+      expect(deliveryMode(pubsub, { lastError: null }, { ...watching, status: "paused" }, NOW)).toBe("inactive");
+      expect(deliveryMode(pubsub, { lastError: null }, { ...watching, status: "needs_reauth", lastError: "Reconnect" }, NOW)).toBe("inactive");
+      expect(deliveryMode(pubsub, { lastError: "Pub/Sub pull failed" }, null, NOW)).toBe("inactive");
+    }
   });
 
   it("puts the poll interval in words", () => {

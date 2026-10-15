@@ -177,13 +177,19 @@ export function ConnectAccountHost() {
    * localhost vs 127.0.0.1), BroadcastChannel is same-origin, and a reconnect of an account that was
    * already working changes nothing the account list would show.
    */
-  const inflight = useRef<{ state: string; answer: Promise<AttemptStatus> } | null>(null);
+  const inflight = useRef<{ state: string; answer: Promise<AttemptStatus>; followUp?: Promise<AttemptStatus> } | null>(null);
   const askServer = (): Promise<AttemptStatus> => {
     const p = phaseRef.current;
     if (p?.kind !== "waiting") return Promise.resolve(null);
     const state = p.res.state;
     // One request at a time per attempt: focus, popup close and stream updates often arrive together.
-    if (inflight.current?.state === state) return inflight.current.answer;
+    // A trigger during a request may mean news the request predates: ask exactly once more after it
+    // (unless it already settled the attempt), so the dialog updates by itself.
+    const busy = inflight.current;
+    if (busy?.state === state) {
+      busy.followUp ??= busy.answer.then((st) => (st === "connected" || st === "failed" ? st : askRef.current()));
+      return busy.followUp;
+    }
     const answer = (async (): Promise<AttemptStatus> => {
       let r: ConnectAttempt;
       try {

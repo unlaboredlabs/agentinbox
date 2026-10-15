@@ -26,6 +26,9 @@ export type SendMode = (typeof SEND_MODES)[number];
  * console and pairing actions do (agent.create, pairing.key_delivered). The SQL form of this rule is
  * mcpToolCallSql in server/audit.ts; keep the two in step.
  */
+/** Prefix of Account.lastError when the account's Gmail watch (Pub/Sub push) couldn't be started or renewed. */
+export const GMAIL_WATCH_ERROR = "Gmail watch failed";
+
 export const isMcpToolAction = (action: string): boolean => !action.includes(".");
 
 export const EVENT_TYPES = [
