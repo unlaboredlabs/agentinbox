@@ -4,6 +4,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Account, Delivery, MailEvent, OverviewStats, Page, Webhook, WebhookInput, WebhookWithSecret } from "../shared/types.ts";
+import { HAS_AGENTS } from "./e2e/features.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { type ReceivedHook, startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver } from "./e2e/webhook-receiver.ts";
 import { stays, waitFor } from "./e2e/wait.ts";
@@ -21,8 +22,7 @@ beforeAll(async () => {
   s = await startStack();
   email = mailbox("events");
   [account] = (await s.bootstrap({ accounts: [email], pubsub: true })) as [Account];
-  const created = await s.createAgent("hooks-agent", [grant(account.id, { capabilities: ["read"] })]);
-  agentId = created.agent.id;
+  if (HAS_AGENTS) agentId = (await s.createAgent("hooks-agent", [grant(account.id, { capabilities: ["read"] })])).agent.id;
 });
 afterAll(async () => {
   await s.close();
@@ -55,7 +55,60 @@ function expectSigned(secret: string, hook: ReceivedHook) {
   expect(verifyStandardWebhook(secret, { ...hook, body: hook.body.replace(/}$/, ' }') }).ok).toBe(false);
 }
 
-describe("event delivery", () => {
+describe("events in the console", () => {
+  it("turns delivered mail into an event in the list and the live stream", async () => {
+    const stream = await s.admin.stream();
+    try {
+      const sent = s.fake.deliver(email, { from: "Ann Example <ann@client.test>", subject: "Console only", text: "hello" });
+      const ev = await s.waitForEvent((e) => e.message?.id === sent.id);
+      expect(ev).toMatchObject({
+        type: "message.received",
+        accountId: account.id,
+        accountEmail: email,
+        message: { id: sent.id, threadId: sent.threadId, from: { name: "Ann Example", email: "ann@client.test" }, subject: "Console only", hasAttachments: false },
+      });
+      expect(ev.id).toMatch(/^evt_/);
+      expect(Object.keys(ev).filter((k) => !MAIL_EVENT_KEYS.includes(k))).toEqual([]);
+      expect(await stream.next("event", (e) => e.id === ev.id)).toEqual(ev);
+    } finally {
+      stream.close();
+    }
+  });
+
+  it("records label changes as label.added / label.removed events", async () => {
+    const tag = s.fake.addLabel(email, "Tagged");
+    const msg = s.fake.deliver(email, { from: "t@else.test", subject: "Tag me", text: "x" });
+    await s.waitForEvent((e) => e.message?.id === msg.id);
+    s.fake.setLabels(email, msg.id, [tag], []);
+    expect((await s.waitForEvent((e) => e.type === "label.added" && e.message?.id === msg.id)).labelIds).toEqual([tag]);
+    s.fake.setLabels(email, msg.id, [], [tag]);
+    expect((await s.waitForEvent((e) => e.type === "label.removed" && e.message?.id === msg.id)).labelIds).toEqual([tag]);
+  });
+
+  it("lists events newest first with cursor paging and filters", async () => {
+    for (let i = 0; i < 3; i++) s.fake.deliver(email, { from: "pager@else.test", subject: `Page ${i}`, text: String(i) });
+    await s.waitForEvent((e) => e.message?.subject === "Page 2");
+    await s.waitForEvent((e) => e.message?.subject === "Page 0");
+    const first = await s.admin.get<Page<MailEvent>>(`/api/events?accountId=${account.id}&type=message.received&limit=2`);
+    expect(first.items).toHaveLength(2);
+    expect(first.items[0]!.seq).toBeGreaterThan(first.items[1]!.seq);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await s.admin.get<Page<MailEvent>>(`/api/events?accountId=${account.id}&type=message.received&limit=2&cursor=${first.nextCursor}`);
+    expect(second.items[0]!.seq).toBeLessThan(first.items[1]!.seq);
+    const bad = await s.admin.failure(s.admin.get("/api/events?type=nope"));
+    expect(bad.status).toBe(400);
+  });
+
+  it("keeps the console stream and event list behind the admin session", async () => {
+    for (const path of ["/api/events", "/api/events/stream", "/api/deliveries", "/api/webhooks"]) {
+      const res = await fetch(`${s.url}${path}`);
+      expect(res.status, path).toBe(401);
+    }
+  });
+
+});
+
+describe.runIf(HAS_AGENTS)("webhook delivery", () => {
   it("delivers a matching email to the console list, the live stream and a signed webhook with the cleaned body", async () => {
     const { webhook, secret } = await createHook("/hooks/billing", { filter: { from: ["*@stripe.test"], subject: "invoice" }, includeBody: true });
     expect(secret).toMatch(/^whsec_[A-Za-z0-9+/=]{20,}$/);
@@ -215,20 +268,6 @@ describe("event delivery", () => {
     expect(creds.status).toBe(400);
   });
 
-  it("lists events newest first with cursor paging and filters", async () => {
-    for (let i = 0; i < 3; i++) s.fake.deliver(email, { from: "pager@else.test", subject: `Page ${i}`, text: String(i) });
-    await s.waitForEvent((e) => e.message?.subject === "Page 2");
-    await s.waitForEvent((e) => e.message?.subject === "Page 0");
-    const first = await s.admin.get<Page<MailEvent>>(`/api/events?accountId=${account.id}&type=message.received&limit=2`);
-    expect(first.items).toHaveLength(2);
-    expect(first.items[0]!.seq).toBeGreaterThan(first.items[1]!.seq);
-    expect(first.nextCursor).not.toBeNull();
-    const second = await s.admin.get<Page<MailEvent>>(`/api/events?accountId=${account.id}&type=message.received&limit=2&cursor=${first.nextCursor}`);
-    expect(second.items[0]!.seq).toBeLessThan(first.items[1]!.seq);
-    const bad = await s.admin.failure(s.admin.get("/api/events?type=nope"));
-    expect(bad.status).toBe(400);
-  });
-
   it("turns label changes into label events for label-filtered webhooks and thread-scoped agents", async () => {
     const urgent = s.fake.addLabel(email, "Urgent");
     // Whole-mailbox agent, webhook filtered on the label (message-level filter, incl. the changed labels).
@@ -295,13 +334,6 @@ describe("event delivery", () => {
     expect(verifyStandardWebhook(secret, hook).ok).toBe(true);
     expect(hook.json).toMatchObject({ type: "account.auth_failed", data: { id: ev.id, accountId: acc.id, accountEmail: other, message: null } });
     expect((await deliveries(webhook.id))[0]).toMatchObject({ status: "succeeded", eventId: ev.id });
-  });
-
-  it("keeps the console stream and event list behind the admin session", async () => {
-    for (const path of ["/api/events", "/api/events/stream", "/api/deliveries", "/api/webhooks"]) {
-      const res = await fetch(`${s.url}${path}`);
-      expect(res.status, path).toBe(401);
-    }
   });
 
   it("summarizes activity on the overview", async () => {

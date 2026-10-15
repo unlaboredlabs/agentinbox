@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createWebhooksService } from "../server/webhooks/index.ts";
 import type { Account, Approval, Delivery, MailEvent, Page, SetupStatus, WebhookWithSecret } from "../shared/types.ts";
+import { HAS_AGENTS } from "./e2e/features.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver } from "./e2e/webhook-receiver.ts";
 import { sleep, waitFor } from "./e2e/wait.ts";
@@ -25,6 +26,7 @@ beforeAll(async () => {
   s = await startStack({ overrides: fastRetries });
   email = mailbox("restart");
   [account] = (await s.bootstrap({ accounts: [email], pubsub: true })) as [Account];
+  if (!HAS_AGENTS) return; // webhooks need an agent (feat/policy-mcp)
   const created = await s.createAgent("durable", [grant(account.id, { capabilities: ["read"] })]);
   apiKey = created.apiKey;
   hook = await s.admin.post<WebhookWithSecret>("/api/webhooks", {
@@ -44,7 +46,7 @@ const deliveries = async () => (await s.admin.get<Page<Delivery>>(`/api/deliveri
 const bySubject = (events: MailEvent[], subject: string) => events.filter((e) => e.message?.subject === subject);
 
 describe("restart durability", () => {
-  it("completes a delivery that was in flight at shutdown once the server restarts and the receiver is back", async () => {
+  it.runIf(HAS_AGENTS)("completes a delivery that was in flight at shutdown once the server restarts and the receiver is back", async () => {
     rx.respondWith(() => "hang"); // the receiver accepts the request but never answers
     const msg = s.fake.deliver(email, { from: "Ops <ops@vendor.test>", subject: "Survive restart", text: "durable body" });
     const ev = await s.waitForEvent((e) => e.message?.id === msg.id);
@@ -75,7 +77,12 @@ describe("restart durability", () => {
     expect((await deliveries()).filter((d) => d.eventId === ev.id)).toHaveLength(1);
   });
 
-  it("keeps sessions, agent keys and cursors across a restart", async () => {
+  it("keeps the admin session across a restart", async () => {
+    await s.restart(fastRetries);
+    expect(await s.admin.get<SetupStatus>("/api/setup/status")).toEqual({ claimed: true, authenticated: true });
+  });
+
+  it.runIf(HAS_AGENTS)("keeps agent keys and event cursors across a restart", async () => {
     const mcp = await s.agent(apiKey);
     const before = await mcp.ok("list_events", { limit: 100 });
     const lastSeq = Number(/ack_events with seq=(\d+)/.exec(before)![1]);
@@ -112,13 +119,14 @@ describe("restart durability", () => {
     await s.waitForEvent((e) => e.message?.id === trigger.id);
 
     const events = await s.events({ accountId: account.id });
-    for (const subject of ["Survive restart", "While down 1", "While down 2", "After restart", "After expiry"]) {
+    for (const subject of [...(HAS_AGENTS ? ["Survive restart"] : []), "While down 1", "While down 2", "After restart", "After expiry"]) {
       expect(bySubject(events, subject).filter((e) => e.type === "message.received"), subject).toHaveLength(1);
     }
     const gaps = events.filter((e) => e.type === "sync.gap");
     expect(gaps.map((e) => e.detail?.reason).sort()).toEqual(["history_expired", "manual"]);
 
     // And the webhook got each message once.
+    if (!HAS_AGENTS) return;
     await waitFor(async () => (await deliveries()).filter((d) => d.status === "succeeded").length >= 5, { what: "5 succeeded deliveries" });
     const subjects = rx.at("/hooks/durable").map((h) => h.json!.data.message?.subject);
     for (const subject of ["While down 1", "While down 2", "After restart", "After expiry"]) {
@@ -126,7 +134,7 @@ describe("restart durability", () => {
     }
   });
 
-  it("keeps a pending approval across a restart and sends it when approved afterwards", async () => {
+  it.runIf(HAS_AGENTS)("keeps a pending approval across a restart and sends it when approved afterwards", async () => {
     const sender = await s.createAgent("restart-sender", [grant(account.id, { capabilities: ["read", "send"], sendMode: "approval" })]);
     const msg = s.fake.deliver(email, { from: "Alice <alice@client.test>", subject: "Pending over restart", text: "?" });
     const mcp = await s.agent(sender.apiKey);

@@ -276,8 +276,21 @@ export class Stack {
     return accounts;
   }
 
+  /**
+   * Provisions Pub/Sub like the console: when the server answers 409 pubsub_scope_required, run the
+   * incremental consent for the principal account (reconnect with scopes ["pubsub"]) and retry.
+   */
   async provisionPubsub(): Promise<PubsubState> {
-    const state = await this.admin.post<PubsubState>("/api/google/pubsub/provision");
+    let state: PubsubState;
+    try {
+      state = await this.admin.post<PubsubState>("/api/google/pubsub/provision");
+    } catch (err) {
+      if (!(err instanceof ApiFailure) || err.code !== "pubsub_scope_required") throw err;
+      const accounts = await this.admin.get<Account[]>("/api/accounts");
+      const account = accounts.find((a) => err.body!.error.message.includes(a.email)) ?? accounts[0]!;
+      await this.connectAccount(account.email, { reauthAccountId: account.id, scopes: ["pubsub"] });
+      state = await this.admin.post<PubsubState>("/api/google/pubsub/provision");
+    }
     // The ingest loop restarts in pubsub mode on the settings broadcast; wait until it pulls.
     await waitFor(() => this.ctx.ingest.status().mode === "pubsub" && this.ctx.ingest.status().running, { what: "ingest in pubsub mode" });
     return state;
@@ -288,9 +301,12 @@ export class Stack {
    * /api/accounts/connect → the fake consent screen → redirect to /oauth/callback (direct mode), or
    * POST /api/accounts/connect/complete with the landed-on URL (paste mode).
    */
-  async connectAccount(email: string, opts: { name?: string; reauthAccountId?: string } = {}): Promise<Account> {
+  async connectAccount(email: string, opts: { name?: string; reauthAccountId?: string; scopes?: "pubsub"[] } = {}): Promise<Account> {
     this.fake.addAccount(email, { name: opts.name });
-    const start = await this.admin.post<ConnectAccountResponse>("/api/accounts/connect", opts.reauthAccountId ? { reauthAccountId: opts.reauthAccountId } : {});
+    const start = await this.admin.post<ConnectAccountResponse>("/api/accounts/connect", {
+      ...(opts.reauthAccountId ? { reauthAccountId: opts.reauthAccountId } : {}),
+      ...(opts.scopes ? { scopes: opts.scopes } : {}),
+    });
     this.fake.consentAs(email);
     const consent = await fetch(start.authUrl, { redirect: "manual" });
     const location = consent.headers.get("location");

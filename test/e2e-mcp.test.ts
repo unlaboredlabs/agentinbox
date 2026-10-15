@@ -4,6 +4,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Account, AgentTestResult, AgentWithKey, Approval, AuditEntry, GrantInput, Page, Settings } from "../shared/types.ts";
+import { HAS_AGENTS } from "./e2e/features.ts";
 import { gmailHeader, grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import type { Agent } from "./e2e/mcp.ts";
 import { waitFor } from "./e2e/wait.ts";
@@ -16,18 +17,6 @@ let email: string;
 let account: Account;
 let support: string;
 const agents: Agent[] = [];
-
-beforeAll(async () => {
-  s = await startStack();
-  email = mailbox("mcp");
-  [account] = (await s.bootstrap({ accounts: [{ email, name: "Support Desk" }], pubsub: true })) as [Account];
-  support = s.fake.addLabel(email, "Support");
-  s.fake.addLabel(email, "VIP");
-});
-afterAll(async () => {
-  await Promise.allSettled(agents.map((a) => a.close()));
-  await s.close();
-});
 
 /** Creates an agent through the console API and connects an MCP client with its key. */
 async function agentWith(name: string, g: Partial<GrantInput>, onAccount = account): Promise<{ id: string; mcp: Agent }> {
@@ -50,7 +39,19 @@ function deliverOrder(subject = "Order #42 is late") {
   });
 }
 
-describe("MCP agent journey", () => {
+describe.runIf(HAS_AGENTS)("MCP agent journey", () => {
+  beforeAll(async () => {
+    s = await startStack();
+    email = mailbox("mcp");
+    [account] = (await s.bootstrap({ accounts: [{ email, name: "Support Desk" }], pubsub: true })) as [Account];
+    support = s.fake.addLabel(email, "Support");
+    s.fake.addLabel(email, "VIP");
+  });
+  afterAll(async () => {
+    await Promise.allSettled(agents.map((a) => a.close()));
+    await s.close();
+  });
+
   it("rejects missing or unknown keys", async () => {
     const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } } };
     for (const auth of [undefined, "Bearer aib_not-a-real-key"]) {
@@ -407,8 +408,7 @@ describe("MCP agent journey", () => {
     expect((await audit(id, "denied")).filter((e) => e.reason === "label_scope")).toHaveLength(3);
   });
 
-  // BUG: google.labels caches labels for 60 s (server/google/index.ts:39-40) and AgentMail.resolveLabelIds (server/mail/agent.ts:585-587) never refreshes on a miss, so a label just created in Gmail is "No label named …" for up to a minute.
-  it.fails("can use a label that was created in Gmail moments ago", async () => {
+  it("can use a label that was created in Gmail moments ago", async () => {
     const msg = deliverOrder("Fresh label");
     const { mcp } = await agentWith("fresh-label", { capabilities: ["read", "organize"] });
     await mcp.ok("list_labels"); // warms the label cache, as any earlier tool call would

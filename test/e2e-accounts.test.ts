@@ -3,6 +3,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Account, Agent, GoogleClientView, HealthResponse, MailEvent, Settings } from "../shared/types.ts";
+import { HAS_AGENTS } from "./e2e/features.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { waitFor } from "./e2e/wait.ts";
 
@@ -191,7 +192,24 @@ describe("pause and resume", () => {
 });
 
 describe("account removal", () => {
-  it("deletes the account's grants, revokes the token, and the agent loses access over MCP", async () => {
+  it("revokes the token, stops ingest and 404s afterwards", async () => {
+    const email = mailbox("remove-basic");
+    const keep = mailbox("keep-basic");
+    const account = await s.connectAccount(email);
+    await s.connectAccount(keep);
+    const revokedBefore = s.fake.revoked.length;
+    await s.admin.del(`/api/accounts/${account.id}`);
+    expect((await s.admin.get<Account[]>("/api/accounts")).map((a) => a.id)).not.toContain(account.id);
+    expect(s.fake.revoked.length).toBe(revokedBefore + 1);
+
+    s.fake.deliver(email, { from: "carol@client.test", subject: "Removed box", text: "x" });
+    s.fake.deliver(keep, { from: "carol@client.test", subject: "Kept box", text: "y" });
+    await s.waitForEvent((e) => e.message?.subject === "Kept box");
+    expect((await s.events()).some((e) => e.message?.subject === "Removed box")).toBe(false);
+    expect((await s.admin.failure(s.admin.del(`/api/accounts/${account.id}`))).status).toBe(404);
+  });
+
+  it.runIf(HAS_AGENTS)("deletes the account's grants, revokes the token, and the agent loses access over MCP", async () => {
     const email = mailbox("remove");
     const keep = mailbox("keep");
     const account = await s.connectAccount(email);

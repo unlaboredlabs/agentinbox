@@ -21,6 +21,15 @@ describe("pub/sub provisioning", () => {
     const email = mailbox("pubsub");
     const [account] = await s.bootstrap({ accounts: [email] });
 
+    // Accounts connect with Gmail scopes only; Pub/Sub access is requested incrementally, on demand.
+    const needScope = await s.admin.failure(s.admin.post("/api/google/pubsub/provision"));
+    expect(needScope.status).toBe(409);
+    expect(needScope.code).toBe("pubsub_scope_required");
+    expect(needScope.body!.error.message).toContain(email);
+    const consent = await s.admin.post<{ authUrl: string }>("/api/accounts/connect", { reauthAccountId: account!.id, scopes: ["pubsub"] });
+    expect(new URL(consent.authUrl).searchParams.get("scope")).toContain("https://www.googleapis.com/auth/pubsub");
+    await s.connectAccount(email, { reauthAccountId: account!.id, scopes: ["pubsub"] });
+
     const state = await s.admin.post<PubsubState>("/api/google/pubsub/provision");
     expect(state).toMatchObject({ mode: "pubsub", topic: TOPIC, subscription: SUBSCRIPTION, lastError: null });
 
@@ -68,6 +77,7 @@ describe("pub/sub provisioning", () => {
     s.fake.orgPolicyBlocksIam(true);
     const email = mailbox("orgpolicy");
     const [account] = await s.bootstrap({ accounts: [email] });
+    await s.connectAccount(email, { reauthAccountId: account!.id, scopes: ["pubsub"] });
 
     const fail = await s.admin.failure(s.admin.post("/api/google/pubsub/provision"));
     expect(fail.status).toBe(400);
@@ -117,8 +127,8 @@ describe("pub/sub provisioning", () => {
     expect(s.fake.watch(second)).toBeNull();
   });
 
-  // BUG: after a Pub/Sub pull failure the loop sleeps an exponential backoff (2 s, 4 s, … 60 s; server/ingest/index.ts:286-293) that nothing interrupts, so once the principal account is reconnected new mail waits for the backoff (and isn't polled meanwhile).
-  it.fails("resumes real-time ingest promptly after the Pub/Sub principal account is reconnected", async () => {
+  // Regression (fixed on main): the pull loop used to stay in its exponential backoff after the principal was reconnected.
+  it("resumes real-time ingest promptly after the Pub/Sub principal account is reconnected", async () => {
     s = await startStack();
     const email = mailbox("ps-principal");
     const [account] = await s.bootstrap({ accounts: [email], pubsub: true });

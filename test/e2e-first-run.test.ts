@@ -2,7 +2,8 @@
 // the console API; /api/setup/state tracks every step.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { GoogleClientView, HealthResponse, SetupState, SetupStatus } from "../shared/types.ts";
+import type { Account, GoogleClientView, HealthResponse, SetupState, SetupStatus } from "../shared/types.ts";
+import { HAS_AGENTS } from "./e2e/features.ts";
 import { AdminClient, FAKE_CLIENT, grant, mailbox, PASSWORD, type Stack, startStack } from "./e2e/harness.ts";
 
 describe("first run", () => {
@@ -66,7 +67,7 @@ describe("first run", () => {
     expect(login.headers.get("set-cookie")).toMatch(/^aib_session=[^;]+;.*HttpOnly/i);
   });
 
-  it("progresses /api/setup/state through client config, account connection and the first agent", async () => {
+  it("progresses /api/setup/state through client config and account connection", async () => {
     const initial = await s.admin.get<SetupState>("/api/setup/state");
     expect(initial).toMatchObject({
       claimed: true,
@@ -109,19 +110,12 @@ describe("first run", () => {
     const health = (await (await fetch(`${s.url}/health`)).json()) as HealthResponse;
     expect(health.setupComplete).toBe(true);
 
-    const { apiKey, agent } = await s.createAgent("first-agent", [grant(account.id)]);
-    expect(apiKey).toMatch(/^aib_/);
-    expect(agent.keyPrefix).toBe(apiKey.slice(0, agent.keyPrefix.length));
-    expect((await s.admin.get<SetupState>("/api/setup/state")).agentsCreated).toBe(1);
-
-    // The public skill points agents at this instance's MCP endpoint, and the MCP endpoint is POST-only.
+    // The public skill points agents at this instance's MCP endpoint.
     const skill = await fetch(`${s.url}/skill.md`);
     expect(skill.headers.get("content-type")).toMatch(/text\/markdown/);
     const md = await skill.text();
     expect(md).toContain(`${s.url}/mcp`);
     expect(md).not.toContain("{{AGENTINBOX_URL}}");
-    expect(md).not.toContain(apiKey);
-    expect((await fetch(`${s.url}/mcp`, { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(405);
 
     // Signing out invalidates the session server-side.
     const other = new AdminClient(() => s.url);
@@ -131,6 +125,17 @@ describe("first run", () => {
     await other.post("/api/auth/logout");
     const res = await fetch(`${s.url}/api/setup/state`, { headers: { cookie: stale } });
     expect(res.status).toBe(401);
+  });
+
+  it.runIf(HAS_AGENTS)("creates the first agent: the key is shown once and works against /mcp", async () => {
+    const [account] = await s.admin.get<Account[]>("/api/accounts");
+    const { apiKey, agent } = await s.createAgent("first-agent", [grant(account!.id)]);
+    expect(apiKey).toMatch(/^aib_/);
+    expect(agent.keyPrefix).toBe(apiKey.slice(0, agent.keyPrefix.length));
+    expect((await s.admin.get<SetupState>("/api/setup/state")).agentsCreated).toBe(1);
+    expect(await (await fetch(`${s.url}/skill.md`)).text()).not.toContain(apiKey);
+    // The MCP endpoint is stateless POST-only.
+    expect((await fetch(`${s.url}/mcp`, { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(405);
 
     // The key is shown once: listing never returns it.
     const listed = JSON.stringify(await s.admin.get("/api/agents"));
