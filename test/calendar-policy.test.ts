@@ -216,10 +216,12 @@ describe("calendar scope", () => {
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { ...WINDOW, calendarId: ".." }))).reason).toBe("invalid_arguments");
     // Google's holiday calendar ids carry "#": a valid id (here not in the account's list).
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { ...WINDOW, calendarId: "en.usa#holiday@group.v.calendar.google.com" }))).reason).toBe("calendar_scope");
+    // "+" addresses are valid calendar ids (free/busy and shared calendars): out of scope, not malformed.
+    expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { ...WINDOW, calendarId: "alice+work@example.com" }))).reason).toBe("calendar_scope");
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { timeMin: "2026-10-20T00:00:00", timeMax: WINDOW.timeMax }))).reason).toBe("invalid_arguments");
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { timeMin: WINDOW.timeMax, timeMax: WINDOW.timeMin }))).reason).toBe("invalid_arguments");
-    // Only the holiday calendar's lookup in the account's list; no event call went out.
-    expect(s.cal.calls).toEqual(["calendarList"]);
+    // Only the two calendars' lookups in the account's list; no event call went out.
+    expect(s.cal.calls).toEqual(["calendarList", "calendarList"]);
   });
 });
 

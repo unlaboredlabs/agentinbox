@@ -69,11 +69,12 @@ const eventNotAccessible = (eventId: string) =>
 
 /**
  * Ids end up in Google URL paths: letters, digits and "_.@-" only (calendar ids also "#", as in Google's
- * holiday calendars "en.usa#holiday@group.v.calendar.google.com"), and never a bare "." or "..".
+ * holiday calendars "en.usa#holiday@group.v.calendar.google.com", and "+", as in "alice+work@example.com"),
+ * and never a bare "." or "..".
  */
 function checkId(what: "Calendar" | "Event", id: string): string {
   const s = id.trim();
-  const allowed = what === "Calendar" ? /^[A-Za-z0-9_.@#-]+$/ : /^[A-Za-z0-9_.@-]+$/;
+  const allowed = what === "Calendar" ? /^[A-Za-z0-9_.@#+-]+$/ : /^[A-Za-z0-9_.@-]+$/;
   if (s.length > 1024 || !allowed.test(s) || /^\.+$/.test(s)) throw new ToolError("invalid_arguments", `${what} "${cleanLine(s, 80)}" is not a valid id.`);
   return s;
 }
