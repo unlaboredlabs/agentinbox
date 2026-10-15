@@ -123,12 +123,16 @@ export function assertRecipientsAllowed(grant: Grant, emails: string[], hint?: s
   }
 }
 
-/** Successful send/reply/forward calls by this agent on this account since `sinceIso` (from the audit log). */
+/**
+ * Send/reply/forward calls by this agent on this account since `sinceIso` (from the audit log): successful
+ * ones, plus failures that may still have sent (detail.maybeSent).
+ */
 export function sendsSince(db: Db, agentId: string, accountId: string, sinceIso: string): number {
   const placeholders = SEND_ACTIONS.map(() => "?").join(", ");
   const row = db.get<{ n: number }>(
     `SELECT COUNT(*) AS n FROM audit_log
-     WHERE actor_type = 'agent' AND actor_id = ? AND ts >= ? AND account_id = ? AND outcome = 'ok' AND action IN (${placeholders})`,
+     WHERE actor_type = 'agent' AND actor_id = ? AND ts >= ? AND account_id = ? AND action IN (${placeholders})
+       AND (outcome = 'ok' OR (outcome = 'error' AND json_extract(detail, '$.maybeSent') = 1))`,
     agentId,
     sinceIso,
     accountId,

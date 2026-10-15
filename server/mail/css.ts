@@ -31,6 +31,9 @@ export interface DomDocument {
 
 export type Style = Map<string, string>;
 
+/** Declaration values longer than this are ignored (no legitimate hiding needs them; bounds regex work). */
+const MAX_VALUE_CHARS = 256;
+
 /** Parses declarations ("a: b; c: d") into lower-cased property → value. `!important` is dropped. */
 export function parseStyle(style: string | null | undefined): Style {
   const out: Style = new Map();
@@ -38,6 +41,7 @@ export function parseStyle(style: string | null | undefined): Style {
   for (const decl of style.split(";")) {
     const i = decl.indexOf(":");
     if (i < 0) continue;
+    if (decl.length - i > MAX_VALUE_CHARS + 16) continue;
     const prop = decl.slice(0, i).trim().toLowerCase();
     const value = decl
       .slice(i + 1)
@@ -49,7 +53,7 @@ export function parseStyle(style: string | null | undefined): Style {
   return out;
 }
 
-export const isZeroLength = (v: string | undefined) => v !== undefined && /^[-+]?0*\.?0+(?:[a-z%]+)?$/.test(v.trim());
+export const isZeroLength = (v: string | undefined) => v !== undefined && /^[+-]?(?:0+(?:\.0*)?|\.0+)(?:[a-z%]+)?$/.test(v.trim());
 
 // ───────────── Colours ─────────────
 
@@ -147,7 +151,7 @@ export function contrastRatio(a: string, b: string): number {
 }
 
 /** Images and gradients in a `background` shorthand (they paint over the colour). */
-const BG_IMAGE = /url\([^)]*\)|[a-z-]*gradient\((?:[^()]|\([^()]*\))*\)|image-set\([^)]*\)/g;
+const BG_IMAGE = /url\([^)]*\)|(?:repeating-)?(?:linear|radial|conic)-gradient\((?:[^()]|\([^()]*\))*\)|(?:-webkit-)?image-set\([^)]*\)/g;
 
 /** The background colour an element sets, from `background-color`, the `background` shorthand or `bgcolor`. */
 export function backgroundColor(style: Style, el: DomElement): string | null {
@@ -193,7 +197,7 @@ function sizePx(raw: string, parent: number): number | null {
   if (v === "larger") return parent * 1.2;
   if (v === "inherit" || v === "unset") return parent;
   if (v === "initial") return ROOT_FONT_PX;
-  const m = /^([+-]?\d*\.?\d+)([a-z%]*)$/.exec(v);
+  const m = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)$/.exec(v);
   if (!m) return null;
   const n = parseFloat(m[1]!);
   const unit = m[2]!;
@@ -234,9 +238,11 @@ export const DEFAULT_FONT_PX = ROOT_FONT_PX;
 /** Properties taken from <style> rules: only the ones that can hide content. */
 const SHEET_PROPS = new Set(["display", "visibility", "opacity", "font-size", "font", "overflow", "height", "max-height", "width", "max-width"]);
 const COLOR_PROPS = /^(?:color|background(?:-color|-image)?)$/;
-const MAX_CSS_CHARS = 200_000;
-const MAX_RULES = 1_000;
-const MAX_SELECTORS = 3_000;
+const MAX_CSS_CHARS = 64_000;
+const MAX_RULES = 300;
+const MAX_SELECTORS = 300;
+const MAX_SELECTOR_CHARS = 200;
+const MAX_COMBINATORS = 3;
 const MAX_MATCH_OPS = 2_000_000;
 
 interface Rule {
@@ -246,11 +252,26 @@ interface Rule {
   conditional: boolean;
 }
 
+/** Removes comments in one pass (a lazy regex rescans the rest of the input for every unclosed "/*"). */
+function stripCssComments(css: string): string {
+  let out = "";
+  let i = 0;
+  while (i < css.length) {
+    const start = css.indexOf("/*", i);
+    if (start < 0) return out + css.slice(i);
+    out += css.slice(i, start) + " ";
+    const end = css.indexOf("*/", start + 2);
+    if (end < 0) return out;
+    i = end + 2;
+  }
+  return out;
+}
+
 /** Splits CSS into rules; rules inside conditional groups are marked. Linear in the CSS size. */
 function parseRules(css: string): { rules: Rule[]; truncated: boolean } {
   const rules: Rule[] = [];
   let truncated = false;
-  const text = css.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/<!--|-->/g, " ");
+  const text = stripCssComments(css).replace(/<!--|-->/g, " ");
   const block = (from: number): number => {
     // Index just past the "}" matching the "{" at `from`.
     let depth = 0;
@@ -308,7 +329,7 @@ function parseCompound(sel: string): Compound | null {
  * pseudo parts dropped (`td > a.btn:hover` → `a.btn`). "any" when that leaves nothing specific.
  */
 function subjectOf(sel: string): Compound | "any" {
-  const last = sel.trim().split(/\s*[\s>+~]\s*/).at(-1) ?? "";
+  const last = sel.trim().split(/[\s>+~]+/).at(-1) ?? "";
   const bare = last.replace(/\[[^\]]*\]/g, "").replace(/::?[\w-]+(?:\([^)]*\))?/g, "");
   const c = parseCompound(bare);
   return !c || (!c.tag && !c.id && !c.classes.length) ? "any" : c;
@@ -376,6 +397,11 @@ export function stylesheetEffects(doc: DomDocument): SheetEffects {
       if (++selectors > MAX_SELECTORS) {
         out.allColourUncertain = true;
         break;
+      }
+      // Long or deeply combined selectors are skipped outright (bounded work, and never hiding rules).
+      if (sel.length > MAX_SELECTOR_CHARS || (sel.match(/[\s>+~]+/g)?.length ?? 0) > MAX_COMBINATORS) {
+        if (colour) out.allColourUncertain = true;
+        continue;
       }
       const exact = parseCompound(sel);
       const subject = exact ?? subjectOf(sel);

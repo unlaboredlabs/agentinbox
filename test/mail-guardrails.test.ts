@@ -53,15 +53,29 @@ describe("send caps under concurrency", () => {
     expect((await s.call("send_message", { to: "y@client.com", subject: "s", body: "b" })).isError).toBe(true);
   });
 
-  it("releases the slot when the send fails", async () => {
+  it("releases the slot when the send definitely failed", async () => {
     const s = await setup({ sendMode: "direct", maxSendsPerHour: 1 });
     const send = s.gmail.send.bind(s.gmail);
     s.gmail.send = async () => {
-      throw new GoogleApiError(500, "backend error");
+      throw new GoogleApiError(400, "Invalid To header");
     };
-    expect((await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" })).text).toMatch(/Gmail error \(500\)/);
+    expect((await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" })).text).toMatch(/Gmail rejected the request/);
     s.gmail.send = send;
     expect((await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" })).isError).toBe(false);
+  });
+
+  it.each([
+    ["a Gmail 5xx", new GoogleApiError(503, "backend error")],
+    ["a network failure", new TypeError("fetch failed")],
+  ])("counts a send that may have gone through (%s) against the cap", async (_name, err) => {
+    const s = await setup({ sendMode: "direct", maxSendsPerHour: 1 });
+    s.gmail.send = async () => {
+      throw err;
+    };
+    const r = await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" });
+    expect(r.text).toMatch(/may or may not have been sent\. Check .*in:sent/);
+    expect(s.audits("send_message")[0]).toMatchObject({ outcome: "error", reason: "send_uncertain", detail: expect.objectContaining({ maybeSent: true }) });
+    expect((await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" })).text).toMatch(/Send limit reached/);
   });
 });
 

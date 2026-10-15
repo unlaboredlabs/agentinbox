@@ -5,7 +5,8 @@ import { type Capability, EVENT_TYPES, type GmailLabel } from "../../shared/type
 import type { AppContext } from "../context.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import { AgentMail, MAX_ATTACHMENT_BYTES, ToolError, type ToolTrace } from "../mail/agent.ts";
-import { formatSize, htmlToMarkdown, labelNames, stripInvisible, truncateText, wrapUntrusted } from "../mail/content.ts";
+import { cleanLine, formatSize, labelNames, MAX_HTML_CHARS, stripInvisible, truncateText, wrapUntrusted } from "../mail/content.ts";
+import { contentPool } from "../mail/pool.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
 import { errorMessage, HttpError, PolicyDenied } from "../util/errors.ts";
 import {
@@ -257,19 +258,21 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
       },
       async (args, mail) => {
         const r = await mail.getAttachment(args.account, args.message_id, args.attachment_id);
-        const head = `Attachment ${r.filename} (${r.mimeType}, ${formatSize(r.data.length)}) from message ${args.message_id}`;
+        const head = `Attachment ${cleanLine(r.filename, 200)} (${cleanLine(r.mimeType, 100)}, ${formatSize(r.data.length)}) from message ${cleanLine(args.message_id, 100)}`;
         const kind = textAttachment(r.mimeType, r.filename);
         if (kind) {
-          const raw = r.data.toString("utf8");
-          const cleaned = kind === "html" ? htmlToMarkdown(raw).markdown : stripInvisible(raw).text;
+          // Bounded input: text beyond MAX_HTML_CHARS is never read (the agent sees a truncation note).
+          const clipped = r.data.length > MAX_HTML_CHARS;
+          const raw = r.data.subarray(0, MAX_HTML_CHARS).toString("utf8");
+          const cleaned = kind === "html" ? (await contentPool(ctx).html(raw)).markdown : stripInvisible(raw).text;
           const t = truncateText(cleaned, r.maxChars);
-          const note = t.truncated ? `\n[Truncated at ${r.maxChars} of ${cleaned.length} characters.]` : "";
+          const note = t.truncated || clipped ? `\n[Truncated: showing ${t.text.length} characters of a ${formatSize(r.data.length)} file.]` : "";
           return `${head}\n${wrapUntrusted(r.from, t.text)}${note}`;
         }
         if (r.data.length > MAX_ATTACHMENT_BYTES) {
           throw new ToolError(
             "too_large",
-            `${r.filename} is ${formatSize(r.data.length)}; attachments over ${formatSize(MAX_ATTACHMENT_BYTES)} can't be returned. Forward it with include_attachments instead if a human needs it.`,
+            `${cleanLine(r.filename, 200)} is ${formatSize(r.data.length)}; attachments over ${formatSize(MAX_ATTACHMENT_BYTES)} can't be returned. Forward it with include_attachments instead if a human needs it.`,
           );
         }
         const data = r.data.toString("base64");
@@ -283,7 +286,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
           { type: "text", text: `${head}. Content is base64-encoded below.` },
           {
             type: "resource",
-            resource: { uri: `attachment://${encodeURIComponent(args.message_id)}/${encodeURIComponent(r.filename)}`, mimeType: r.mimeType, blob: data },
+            resource: { uri: `attachment://${encodeURIComponent(args.message_id)}/${encodeURIComponent(r.filename)}`, mimeType: cleanLine(r.mimeType, 100), blob: data },
           },
         ];
       },
@@ -437,7 +440,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
       "reply",
       {
         title: "Reply",
-        description: `Reply to a message inside its thread (threading headers and "Re:" subject are handled). reply_all also includes the original To and Cc. ${modes}`,
+        description: `Reply to a message inside its thread (threading headers and "Re:" subject are handled). reply_all also includes the original To and Cc. ${modes} Reply-only access limits you to replies, not who receives them: whoever wrote into the thread can be answered (the recipient allowlist is what restricts recipients).`,
         input: {
           account,
           message_id: messageId,

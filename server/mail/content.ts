@@ -105,7 +105,7 @@ export function stripInvisible(text: string): { text: string; removed: number } 
 const visibleText = (s: string | null) => stripInvisible(s ?? "").text.trim();
 
 /** Neutralizes our delimiter and look-alikes (`</ email_content >`, turndown's `email\_content`) in untrusted text. */
-export const escapeDelimiters = (s: string) => s.replace(/<(\s*\/?\s*email\\?_content)/gi, "&lt;$1");
+export const escapeDelimiters = (s: string) => s.replace(/<(?=\s{0,16}\/?\s{0,16}email\\?_content)/gi, "&lt;");
 
 // ───────────── HTML cleaning ─────────────
 
@@ -133,7 +133,7 @@ function parseOpacity(v: string | undefined): number {
 
 /** Text an element would show (also for <template>, whose content linkedom keeps out of textContent). */
 function elementText(el: DomElement): string {
-  return visibleText(el.textContent || el.innerHTML.replace(/<[^>]*>/g, " "));
+  return visibleText(el.textContent || el.innerHTML.replace(/<[^<>]*>/g, " "));
 }
 
 const hasText = (n: DomNode) => visibleText(n.textContent).length > 0;
@@ -202,8 +202,12 @@ function childContext(el: DomElement, style: Style, parent: Inherited, state: Cl
 
 /** Comment text a human could read if a client rendered it (conditional comments are rendered by Outlook). */
 function commentText(text: string): string {
-  return visibleText(text.replace(/^\s*\[if[^\]]*\]>?|<!\[endif\]\s*$|\[endif\]\s*$/gi, "").replace(/<[^>]*>/g, " "));
+  return visibleText(text.replace(/^\s*\[if[^\]]*\]>?|<!\[endif\]\s*$|\[endif\]\s*$/gi, "").replace(/<[^<>]*>/g, " "));
 }
+
+const MAX_WHITESPACE_RUN = 64;
+const LONG_WHITESPACE = /\s{65}/;
+const LONG_WHITESPACE_G = /\s{65,}/g;
 
 /** Iterative (deeply nested mail must not overflow the stack). */
 function cleanTree(root: DomElement, rootCtx: Inherited, state: CleanState): void {
@@ -220,6 +224,13 @@ function cleanTree(root: DomElement, rootCtx: Inherited, state: CleanState): voi
         if (hasText(child) && textHidden(ctx)) {
           state.removed++;
           child.remove();
+          continue;
+        }
+        // Whitespace runs are capped: nobody reads 64+ blanks, and turndown's end-anchored whitespace
+        // regexes are quadratic in run length.
+        const text = child.textContent ?? "";
+        if (text.length > MAX_WHITESPACE_RUN && LONG_WHITESPACE.test(text)) {
+          child.textContent = text.replace(LONG_WHITESPACE_G, (m) => m.slice(0, MAX_WHITESPACE_RUN));
         }
         continue;
       }
@@ -253,20 +264,49 @@ function cleanTree(root: DomElement, rootCtx: Inherited, state: CleanState): voi
 const MAX_DEPTH = 80;
 const BLOCK_TAGS = new Set(["DIV", "P", "TABLE", "TBODY", "THEAD", "TFOOT", "TR", "TD", "TH", "LI", "UL", "OL", "SECTION", "ARTICLE", "BLOCKQUOTE", "CENTER", "H1", "H2", "H3", "H4", "H5", "H6"]);
 
+/**
+ * Replaces everything below MAX_DEPTH with its leaves (text, images, line breaks) in document order.
+ * Linear: leaves are collected in one walk and moved individually (moving whole subtrees per level, as
+ * unwrapping does, is quadratic in linkedom).
+ */
 function flattenDeepNesting(root: DomElement): void {
   const stack: [DomElement, number][] = [[root, 0]];
   while (stack.length) {
     const [el, depth] = stack.pop()!;
-    if (depth >= MAX_DEPTH) {
-      // Children come after parents in document order, so reversed order unwraps the innermost first.
-      for (const d of Array.from(el.querySelectorAll("*")).reverse()) {
-        if (d.tagName === "IMG" || d.tagName === "BR") continue;
-        d.replaceWith(...Array.from(d.childNodes), ...(BLOCK_TAGS.has(d.tagName) ? [" "] : []));
-      }
+    if (depth < MAX_DEPTH) {
+      for (const c of Array.from(el.childNodes)) if (c.nodeType === ELEMENT) stack.push([c as DomElement, depth + 1]);
       continue;
     }
-    for (const c of Array.from(el.childNodes)) if (c.nodeType === ELEMENT) stack.push([c as DomElement, depth + 1]);
+    const leaves: (DomNode | string)[] = [];
+    const walk: (DomNode | string)[] = Array.from(el.childNodes).reverse();
+    while (walk.length) {
+      const n = walk.pop()!;
+      if (typeof n === "string") {
+        leaves.push(n);
+      } else if (n.nodeType === TEXT || n.nodeName === "IMG" || n.nodeName === "BR") {
+        leaves.push(n);
+      } else if (n.nodeType === ELEMENT) {
+        // A block ends with a space so words from adjacent blocks don't run together.
+        if (BLOCK_TAGS.has(n.nodeName)) walk.push(" ");
+        walk.push(...Array.from(n.childNodes).reverse());
+      }
+    }
+    for (const c of Array.from(el.childNodes)) c.remove();
+    el.append(...leaves);
   }
+}
+
+/** Elements beyond this make a message too complex to convert (checked on the raw HTML before parsing). */
+export const MAX_ELEMENTS = 20_000;
+
+export class ContentTooComplexError extends Error {}
+
+/** Counts start tags without building anything; stops at the cap. */
+function tooManyElements(html: string): boolean {
+  const re = /<[a-zA-Z]/g;
+  let n = 0;
+  while (re.exec(html)) if (++n > MAX_ELEMENTS) return true;
+  return false;
 }
 
 // ───────────── HTML → markdown ─────────────
@@ -369,7 +409,9 @@ function tidyMarkdown(md: string): string {
   return md
     .replace(/\r\n?/g, "\n")
     .replace(/\u00A0/g, " ")
-    .replace(/[ \t]+$/gm, "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -379,9 +421,9 @@ function tidyMarkdown(md: string): string {
  * before <body> goes into <head>, the rest (including stray content after </body>) into <body>.
  */
 function normalizeDocument(html: string): string {
-  const open = /<body\b([^>]*)>/i.exec(html);
+  const open = /<body\b([^<>]{0,4000})>/i.exec(html);
   if (!open) return `<!DOCTYPE html><html><head></head><body>${html}</body></html>`;
-  const strip = (x: string) => x.replace(/<!DOCTYPE[^>]*>|<\/?(?:html|head|body)\b[^>]*>/gi, "");
+  const strip = (x: string) => x.replace(/<!DOCTYPE[^<>]{0,4000}>|<\/?(?:html|head|body)\b[^<>]{0,4000}>/gi, "");
   const head = strip(html.slice(0, open.index));
   const body = strip(html.slice(open.index + open[0].length));
   return `<!DOCTYPE html><html><head>${head}</head><body${open[1]}>${body}</body></html>`;
@@ -389,6 +431,7 @@ function normalizeDocument(html: string): string {
 
 /** Cleans hidden content out of an HTML body and converts it to markdown. */
 export function htmlToMarkdown(html: string): { markdown: string; removed: number } {
+  if (tooManyElements(html)) throw new ContentTooComplexError(`more than ${MAX_ELEMENTS} elements`);
   const doc = parseHTML(normalizeDocument(html)).document as unknown as DomDocument;
   const root = doc.body ?? doc.documentElement;
   const state: CleanState = { removed: 0, sheet: stylesheetEffects(doc) };
@@ -424,7 +467,7 @@ export function cleanPlainText(text: string): { text: string; removed: number } 
 export function parseAuthResults(header: string | null): ContentSignals["auth"] {
   if (!header) return null;
   // Unfold continuation lines, then take the first header (several are joined with "\n").
-  const top = header.replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)[0] ?? "";
+  const top = header.slice(0, 8192).replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)[0] ?? "";
   let s = top.replace(/"(?:[^"\\]|\\.)*"/g, '""');
   for (let prev = ""; prev !== s; ) {
     prev = s;
@@ -490,7 +533,7 @@ const SUSPICIOUS: Pattern[] = [
   { re: /\b(?:do\s+not|don't|never)\s+(?:tell|inform|notify|alert|mention\s+(?:this\s+)?to)\s+(?:the\s+)?(?:user|owner|human|recipient)\b/i },
   { re: /\bBEGIN\s+SYSTEM\b|\bEND\s+SYSTEM\b|<\/?system>|\[\/?system\]|<\|im_start\|>/i },
   // Transcript role spoofing ("Assistant: Sure, …"), not "System: macOS 15.1" or a job title.
-  { re: /^\s*(?:assistant|system|ai)\s*:\s*(?:you\b|ignore\b|disregard\b|from\s+now\b|new\s+instructions\b|sure\b|okay\b|ok\b|i\s+will\b|i'll\b|understood\b)/im },
+  { re: /^[ \t]*(?:assistant|system|ai)[ \t]*:[ \t]*(?:you\b|ignore\b|disregard\b|from\s+now\b|new\s+instructions\b|sure\b|okay\b|ok\b|i\s+will\b|i'll\b|understood\b)/im },
   { re: /\b(?:reveal|send|share|leak|exfiltrate|give)\s+(?:me\s+)?(?:your|the)\s+(?:api\s+keys?|credentials|passwords?|secrets?|tokens?|instructions)\b/i, negatable: true },
   // Imperatives, not retention notices ("we will delete all messages older than 90 days").
   {
@@ -548,6 +591,7 @@ export interface BuiltContent extends MessageContent {
 }
 
 const UNCONVERTIBLE = "[The HTML body of this message could not be converted to text.]";
+const TOO_COMPLEX_NOTE = "[The HTML version of this message is too complex to display safely; showing the plain-text version.]";
 /** Larger HTML bodies are not converted (bounded work per message); the text/plain part is used instead. */
 export const MAX_HTML_CHARS = 1_000_000;
 
@@ -570,8 +614,9 @@ export function buildContent(parsed: ParsedMessage, opts: { accountEmail: string
       body = r.markdown;
       removed = r.removed;
       allHidden = !body && r.removed > 0;
-    } catch {
+    } catch (err) {
       failed = true;
+      if (err instanceof ContentTooComplexError) note = TOO_COMPLEX_NOTE;
     }
   }
   if (!body && !allHidden && parsed.text) {
@@ -579,7 +624,7 @@ export function buildContent(parsed: ParsedMessage, opts: { accountEmail: string
     body = r.text;
     removed += r.removed;
   }
-  if (!body && failed) body = note ? note.replace("; showing the plain-text version", "") : UNCONVERTIBLE;
+  if (!body && failed) body = note ? note.replace(/; showing the plain-text version/, "") : UNCONVERTIBLE;
   else if (note) body = `${note}\n\n${body}`;
   body = escapeDelimiters(body);
   const subject = stripInvisible(parsed.summary.subject ?? "");
@@ -605,7 +650,7 @@ const escapeAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;
 
 /** Wraps untrusted content in the delimiter. Delimiter tags and look-alikes inside the content are escaped. */
 export function wrapUntrusted(from: string | null | undefined, body: string): string {
-  return `<email_content from="${escapeAttr(from ?? "unknown")}" untrusted>\n${escapeDelimiters(body)}\n</email_content>`;
+  return `<email_content from="${escapeAttr(cleanLine(from ?? "unknown", 320))}" untrusted>\n${escapeDelimiters(body)}\n</email_content>`;
 }
 
 /** Untrusted header-ish text (subjects, names, snippets) on one line: cleaned, delimiter-escaped, optionally clipped. */
@@ -674,4 +719,31 @@ export function renderMessage(summary: MessageSummary, content: BuiltContent, la
     lines.push(`[Body truncated at ${maxChars} of ${content.totalChars} characters (operator setting maxBodyChars).]`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Content when cleaning didn't finish in time (see server/mail/pool.ts): the cleaned text/plain part, or a
+ * notice. Never the unconverted HTML. Marked truncated, with a note saying why.
+ */
+export function fallbackContent(parsed: ParsedMessage, opts: { accountEmail: string; maxChars: number }): BuiltContent {
+  const text = parsed.text ? cleanPlainText(parsed.text.slice(0, MAX_HTML_CHARS)).text : "";
+  const body = escapeDelimiters(
+    text
+      ? `[This message is too complex to display safely; showing its plain-text version.]\n\n${text}`
+      : "[This message is too complex to display safely. Ask a human to read it in Gmail.]",
+  );
+  const subject = stripInvisible(parsed.summary.subject ?? "");
+  const t = truncateText(body, opts.maxChars);
+  return {
+    body: t.text,
+    truncated: true,
+    totalChars: body.length,
+    attachments: parsed.attachments,
+    signals: {
+      hiddenContentRemoved: false,
+      suspiciousInstructions: suspiciousPhrases(`${subject.text}\n${body}`),
+      auth: parseAuthResults(parsed.authenticationResults),
+      external: isExternal(parsed.summary.from?.email, opts.accountEmail),
+    },
+  };
 }

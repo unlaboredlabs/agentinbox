@@ -5,7 +5,7 @@
 import type { Account, Address, Approval, Capability, GmailLabel, Grant, MessageSummary } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { GmailClient, GmailMessage, GmailPart, GmailThread, ParsedMessage } from "../google/types.ts";
-import { GoogleApiError } from "../google/types.ts";
+import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import {
   assertRecipientsAllowed,
   CAPABILITY_HELP,
@@ -20,7 +20,8 @@ import type { AgentPrincipal } from "../policy/types.ts";
 import { PolicyDenied } from "../util/errors.ts";
 import { matchesGlob } from "../util/glob.ts";
 import { Approvals, type ApprovalPayload, draftFingerprint } from "./approvals.ts";
-import { type BuiltContent, buildContent, formatAddresses } from "./content.ts";
+import { type BuiltContent, formatAddresses } from "./content.ts";
+import { contentPool } from "./pool.ts";
 
 /** Input problems the agent can fix (wrong arguments, ambiguous account, …). */
 export class ToolError extends Error {
@@ -386,9 +387,9 @@ export class AgentMail {
     };
   }
 
-  private render(a: Access, msg: GmailMessage): RenderedMessage {
+  private async render(a: Access, msg: GmailMessage): Promise<RenderedMessage> {
     const parsed = this.ctx.google.mime.parse(msg);
-    const content = buildContent(parsed, { accountEmail: a.account.email, maxChars: this.maxChars() });
+    const content = await contentPool(this.ctx).content(parsed, { accountEmail: a.account.email, maxChars: this.maxChars() });
     // Show stable part ids to agents; get_attachment maps them back to Gmail's current attachment id.
     const parts = attachmentParts(msg);
     content.attachments = content.attachments.map((x) => ({ ...x, id: parts.find((p) => p.attachmentId === x.id)?.partId ?? x.id }));
@@ -400,7 +401,7 @@ export class AgentMail {
     this.trace.target = threadId;
     const thread = await this.fetchById("Thread", threadId, () => a.gmail.getThread(threadId, "full"));
     this.assertThreadLabels(a, threadLabels(thread), "Thread", threadId);
-    const messages = (thread.messages ?? []).map((m) => this.render(a, m));
+    const messages = await Promise.all((thread.messages ?? []).map((m) => this.render(a, m)));
     this.trace.detail = { messages: messages.length };
     return { account: a.account, threadId, messages, labels: await this.labelsSafe(a), maxChars: this.maxChars() };
   }
@@ -409,7 +410,7 @@ export class AgentMail {
     const a = this.resolve(account, "read");
     this.trace.target = messageId;
     const msg = await this.loadMessage(a, messageId, "full");
-    return { account: a.account, message: this.render(a, msg), labels: await this.labelsSafe(a), maxChars: this.maxChars() };
+    return { account: a.account, message: await this.render(a, msg), labels: await this.labelsSafe(a), maxChars: this.maxChars() };
   }
 
   /**
@@ -570,7 +571,7 @@ export class AgentMail {
     assertRecipientsAllowed(a.grant, to.map((x) => x.email));
     const src = await this.loadMessage(a, args.messageId, "full");
     const p = this.ctx.google.mime.parse(src);
-    const original = buildContent(p, { accountEmail: a.account.email, maxChars: 0 });
+    const original = await contentPool(this.ctx).content(p, { accountEmail: a.account.email, maxChars: 0 });
     const quoted = [
       "---------- Forwarded message ---------",
       `From: ${formatAddresses(p.summary.from ? [p.summary.from] : [])}`,
@@ -651,7 +652,7 @@ export class AgentMail {
     });
 
     if (a.grant.sendMode === "direct") {
-      const sent = await a.gmail.send(raw, m.threadId);
+      const sent = await this.uncertain(() => a.gmail.send(raw, m.threadId), "sent");
       this.trace.target = sent.id;
       try {
         this.ctx.ingest.kick(a.account.id);
@@ -661,7 +662,7 @@ export class AgentMail {
       return { status: "sent", messageId: sent.id, threadId: sent.threadId };
     }
 
-    const draft = await a.gmail.createDraft(raw, m.threadId);
+    const draft = await this.uncertain(() => a.gmail.createDraft(raw, m.threadId), "saved as a draft");
     if (a.grant.sendMode === "draft_only") {
       this.trace.target = draft.id;
       return { status: "draft_created", draftId: draft.id, message: DRAFT_ONLY_MESSAGE };
@@ -693,6 +694,25 @@ export class AgentMail {
       expiresAt: approval.expiresAt,
       message: "Queued for human approval; nothing has been sent yet. Check later with get_send_status.",
     };
+  }
+
+  /**
+   * Runs the Gmail write that sends (or saves) mail. A failure that may have happened after Gmail accepted
+   * it (5xx, network error, timeout) is recorded as "maybeSent", which counts toward the send caps, and the
+   * agent is told to check before retrying.
+   */
+  private async uncertain<T>(fn: () => Promise<T>, what: string): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      const ambiguous = err instanceof GoogleApiError ? err.status >= 500 : !(err instanceof AccountNeedsReauthError);
+      if (!ambiguous) throw err;
+      this.trace.detail.maybeSent = true;
+      throw new ToolError(
+        "send_uncertain",
+        `The connection to Gmail failed, so the message may or may not have been ${what}. Check (search_threads with in:sent or in:drafts) before retrying.`,
+      );
+    }
   }
 
   /** Read-only: an overdue pending request is reported as expired (the expiry timer records it). */

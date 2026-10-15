@@ -2,7 +2,7 @@ import type { MessageContent } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { errorMessage, notFound } from "../util/errors.ts";
 import { Approvals } from "./approvals.ts";
-import { buildContent } from "./content.ts";
+import { closeContentPool, contentPool } from "./pool.ts";
 import type { MailService } from "./types.ts";
 
 const EXPIRY_INTERVAL_MS = 60_000;
@@ -19,7 +19,7 @@ export function createMailService(ctx: AppContext): MailService {
       const account = ctx.accounts.get(accountId);
       if (!account) throw notFound("Account");
       const msg = await ctx.google.gmail(accountId).getMessage(messageId, "full");
-      const { totalChars: _total, ...content } = buildContent(ctx.google.mime.parse(msg), {
+      const { totalChars: _total, ...content } = await contentPool(ctx).content(ctx.google.mime.parse(msg), {
         accountEmail: account.email,
         maxChars: ctx.settings.get().maxBodyChars,
       });
@@ -39,9 +39,10 @@ export function createMailService(ctx: AppContext): MailService {
       timer.unref();
     },
 
-    stop() {
+    async stop() {
       if (timer) clearInterval(timer);
       timer = undefined;
+      await closeContentPool(ctx);
     },
   };
 }
