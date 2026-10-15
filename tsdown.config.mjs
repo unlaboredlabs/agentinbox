@@ -1,3 +1,4 @@
+// Plain JS so tsdown can load it on Node 22 without a TypeScript loader.
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
