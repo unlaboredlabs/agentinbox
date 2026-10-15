@@ -183,6 +183,7 @@ export class FakeAgentApi {
         grants: [{ accountId: "acc_1", accountEmail: "me@example.com", capabilities: ["read", "draft"], labelScope: null, sendMode: "draft_only" }],
         mcpUrl: `${this.url}/mcp`,
         skillUrl: `${this.url}/skill.md`,
+        headSeq: this.events.at(-1)?.data.seq ?? 0,
       };
       return this.json(res, 200, self);
     }

@@ -4,12 +4,14 @@ import pc from "picocolors";
 import {
   assertSupported,
   enableLinger,
-  installPackage,
+  installedCli,
   isRoot,
   launchAgentPath,
   launchdTarget,
   run,
   sdQuote,
+  stagePackage,
+  swapDir,
   systemctl,
   systemdUnitPath,
   xmlEscape,
@@ -20,7 +22,7 @@ import { type ListenFlags, resolveListen } from "./options.ts";
 import { DEFAULT_PROFILE, listenAppDir, logPath, profilePath, profileStateDir, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
 import { checkTransport } from "./transport.ts";
-import { NPM_PACKAGE, NPX } from "./version.ts";
+import { NPX } from "./version.ts";
 
 /**
  * `agentinbox listen service install|uninstall|status`: one systemd user unit / launchd agent per
@@ -150,7 +152,8 @@ export async function installListenService(flags: ListenFlags): Promise<void> {
 
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   // Install first (into a new dir, swapped in on success); the current unit keeps running until then.
-  const entry = installPackage(listenAppDir(), { where: listenAppDir(), requireWeb: false, pkg: NPM_PACKAGE });
+  swapDir(stagePackage(`${listenAppDir()}.new`, { where: listenAppDir(), requireWeb: false }), listenAppDir());
+  const entry = installedCli(listenAppDir());
   // Commands run in config.cwd (a private dir unless --cwd was given); the unit uses it too.
   const cwd = config.cwd;
   mkdirSync(profileStateDir(profileName), { recursive: true, mode: 0o700 });
