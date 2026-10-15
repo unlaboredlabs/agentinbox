@@ -367,7 +367,10 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
       }
       const t = clock();
       const agentId = db.tx(() => {
-        const { agent, apiKey } = ctx.policy.createAgent({ name: input.name ?? r.name, description: r.description, grants: input.grants });
+        const { agent, apiKey } = ctx.policy.createAgent(
+          { name: input.name ?? r.name, description: r.description, grants: input.grants },
+          { origin: "paired" },
+        );
         const changes = db.run(
           `UPDATE pairings SET status = 'approved', agent_id = ?, api_key_enc = ?, decided_at = ?, expires_at = ?
            WHERE id = ? AND status = 'pending'`,

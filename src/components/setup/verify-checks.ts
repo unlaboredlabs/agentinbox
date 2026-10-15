@@ -53,7 +53,8 @@ export function verifyChecks({ test, events, listeners, calls, skipListen }: Ver
   );
   const received = ofTest.find((e) => e.type === "message.received") ?? ofTest[0];
   const atSend = new Set(test.listenersAtSend ?? []);
-  const delivered = !!received && listeners.some((l) => atSend.has(l.consumer) && l.ackedSeq >= received.seq);
+  // Past where the listener's cursor started (older mail predates it; null = unknown) and acked (as listenerHandled in agent-status).
+  const delivered = !!received && listeners.some((l) => atSend.has(l.consumer) && received.seq > (l.startSeq ?? 0) && l.ackedSeq >= received.seq);
   return {
     sent: true,
     received,

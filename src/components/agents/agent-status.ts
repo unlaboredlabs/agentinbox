@@ -1,24 +1,32 @@
 import type { AgentTool } from "@shared/agent-api";
-import type { Agent, AuditEntry } from "@shared/types";
+import type { Agent, AuditEntry, ListenerInfo } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { TOOL_LABEL } from "@/lib/cli";
 import { queries } from "@/lib/queries";
 
 /**
- * How the agent was added: paired from its terminal (`connect`, the key lives in a profile on that
- * machine) or created here with a copied key. Pairings are kept for a while after approval; an agent
- * with a listener was certainly paired (listen uses the profile's key).
+ * How the agent was added (Agent.origin): paired from its terminal (`connect`, the key lives in a
+ * profile on that machine) or created here with a copied key. The tool it named comes from its
+ * pairing request, which is pruned after the retention period (then `tool` is null).
+ * `known` is false only while a paired agent's tool is still loading.
  */
 export function useAgentOrigin(agent: Agent | undefined): { paired: boolean; tool: AgentTool | null; known: boolean } {
-  const pairings = useQuery({ ...queries.pairings("approved"), enabled: !!agent });
-  const p = agent ? pairings.data?.find((x) => x.agentId === agent.id) : undefined;
+  const paired = agent?.origin === "paired";
+  const pairings = useQuery({ ...queries.pairings("approved"), enabled: paired });
+  const p = agent && paired ? pairings.data?.find((x) => x.agentId === agent.id) : undefined;
   const t = p?.client.tool;
   return {
-    paired: !!p || !!agent?.listeners.length,
+    paired,
     tool: t && t in TOOL_LABEL ? (t as AgentTool) : null,
-    known: !pairings.isPending,
+    known: !!agent && (!paired || !pairings.isPending),
   };
 }
+
+/**
+ * True when this listener received and acknowledged event `seq`: past where its cursor started
+ * (older mail predates it; null = unknown, counted) and at or below what it acked.
+ */
+export const listenerHandled = (l: ListenerInfo, seq: number) => seq > (l.startSeq ?? 0) && seq <= l.ackedSeq;
 
 /** MCP tool names are snake_case; console and pairing actions are dotted (agent.create, pairing.key_delivered). */
 const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && /^[a-z_]+$/.test(e.action);

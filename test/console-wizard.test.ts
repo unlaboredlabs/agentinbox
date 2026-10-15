@@ -41,7 +41,14 @@ function event(seq: number, type: MailEvent["type"], over: { id?: string; subjec
   };
 }
 
-const listener = (consumer: string, ackedSeq: number, connected = true): ListenerInfo => ({ consumer, connected, ackedSeq, lastSeenAt: null, client: {} });
+const listener = (consumer: string, ackedSeq: number, connected = true, startSeq: number | null = null): ListenerInfo => ({
+  consumer,
+  connected,
+  startSeq,
+  ackedSeq,
+  lastSeenAt: null,
+  client: {},
+});
 const call = (action: string, outcome: AuditEntry["outcome"], ts: string): AuditEntry => ({
   id: 1,
   ts,
@@ -93,6 +100,12 @@ describe("verifyChecks", () => {
     expect(r.resendForListener).toBe(true);
     const other = verifyChecks({ ...base, test: test0, events, listeners: [listener("laptop-default", 9)] });
     expect(other.delivered).toBe(false);
+  });
+
+  it("does not count a listener whose cursor started at or after the event", () => {
+    const events = [event(7, "message.received")];
+    expect(verifyChecks({ ...base, test: test0, events, listeners: [listener("host-default", 9, true, 7)] }).delivered).toBe(false);
+    expect(verifyChecks({ ...base, test: test0, events, listeners: [listener("host-default", 9, true, 6)] }).delivered).toBe(true);
   });
 
   it("counts a recorded listener that is disconnected now but acked past the event", () => {

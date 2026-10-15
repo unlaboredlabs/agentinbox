@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { EventType, MailEvent } from "@shared/types";
+import type { EventType, Grant, MailEvent } from "@shared/types";
 import {
   AlertTriangleIcon,
   BellRingIcon,
@@ -12,6 +12,7 @@ import {
   TagIcon,
 } from "lucide-react";
 import { useState } from "react";
+import { listenerHandled } from "@/components/agents/agent-status";
 import { CodeBlock, TimeAgo } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
@@ -56,16 +57,29 @@ function headline(e: MailEvent) {
   return EVENT_TYPE_INFO[e.type]?.description ?? e.type;
 }
 
+/** Account-level events reach any agent that can read the account, whatever its label scope (server/policy). */
+const SCOPE_FREE: EventType[] = ["account.auth_failed", "sync.gap"];
+
+/** Whether this grant lets its agent see the event (mirrors policy.canSeeEvent). */
+function grantSees(g: Grant, e: MailEvent): boolean {
+  if (g.accountId !== e.accountId || !g.capabilities.includes("read")) return false;
+  if (g.labelScope === null || SCOPE_FREE.includes(e.type)) return true;
+  // threadLabelIds comes with console events; the message's own labels are a (narrower) stand-in.
+  const labels = e.threadLabelIds ?? e.message?.labelIds ?? [];
+  return labels.some((id) => g.labelScope!.includes(id));
+}
+
 /**
- * `agentinbox listen` instances whose cursor passed this event: their agent can read the account and
- * the listener acknowledged it (ran its command, or skipped it by its own filter).
+ * `agentinbox listen` instances that got this event: their agent may see it (account and label
+ * scope), it came after the listener started, and the listener acknowledged it (ran its command, or
+ * skipped it by its own filter).
  */
 function useListenerDelivery(e: MailEvent) {
   const agents = useQuery(queries.agents());
   const out: { name: string; host: string | null }[] = [];
   for (const a of agents.data ?? []) {
-    if (!a.grants.some((g) => g.accountId === e.accountId && g.capabilities.includes("read"))) continue;
-    for (const l of a.listeners) if (l.ackedSeq >= e.seq) out.push({ name: a.name, host: l.client.hostname ?? null });
+    if (!a.grants.some((g) => grantSees(g, e))) continue;
+    for (const l of a.listeners) if (listenerHandled(l, e.seq)) out.push({ name: a.name, host: l.client.hostname ?? null });
   }
   return out;
 }

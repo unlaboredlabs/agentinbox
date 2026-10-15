@@ -59,7 +59,7 @@ export interface EventsService extends Lifecycle {
    */
   emit(e: NewEvent): MailEvent | null;
   get(id: string): StoredEvent | null;
-  /** Console listing, newest first. */
+  /** Console listing, newest first (with threadLabelIds: never hand these items to agents or webhooks). */
   list(q: { accountId?: string; type?: EventType; cursor?: string | null; limit?: number }): Page<MailEvent>;
 
   // Agent feed (MCP list_events / wait_for_events / ack_events). Only events the agent may see

@@ -1,5 +1,5 @@
 import { streamSSE } from "hono/streaming";
-import { type ConsoleStreamMessage, EVENT_TYPES, type EventType } from "../../shared/types.ts";
+import { type ConsoleStreamMessage, EVENT_TYPES, type EventType, type MailEvent } from "../../shared/types.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { badRequest } from "../util/errors.ts";
@@ -20,6 +20,15 @@ const CHANNELS = {
   pairing: "pairing",
   agentState: "agent",
 } as const satisfies Partial<Record<keyof BusEvents, ConsoleStreamMessage["kind"]>>;
+
+function withScopeLabels(ctx: AppContext, ev: MailEvent): MailEvent {
+  try {
+    const stored = ctx.events.get(ev.id);
+    return stored ? { ...ev, threadLabelIds: stored.threadLabelIds } : ev;
+  } catch {
+    return ev;
+  }
+}
 
 /** Paths are relative to /api. */
 export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPendingWrites?: number } = {}) {
@@ -54,7 +63,11 @@ export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPend
         const send = (msg: ConsoleStreamMessage) => enqueue(() => stream.writeSSE({ data: JSON.stringify(msg) }));
         enqueue(() => stream.write(": connected\n\n"));
         const listeners = Object.entries(CHANNELS).map(([channel, kind]) => {
-          const listener = (data: unknown) => send({ kind, data } as ConsoleStreamMessage);
+          const listener = (data: unknown) => {
+            // The bus carries the public event; the console also gets the thread labels (as GET /events does).
+            if (kind === "event") data = withScopeLabels(ctx, data as MailEvent);
+            send({ kind, data } as ConsoleStreamMessage);
+          };
           ctx.bus.on(channel as keyof typeof CHANNELS, listener);
           return () => ctx.bus.off(channel as keyof typeof CHANNELS, listener);
         });

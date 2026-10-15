@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Agent, AgentWithKey, CreateAgentInput, Grant, GrantInput } from "../../shared/types.ts";
+import type { Agent, AgentOrigin, AgentWithKey, CreateAgentInput, Grant, GrantInput } from "../../shared/types.ts";
 import { listenersOf } from "../agentapi/listeners.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { BusEvents } from "../bus.ts";
@@ -27,6 +27,7 @@ interface AgentRow {
   key_prefix: string;
   key_hash: string;
   disabled: number;
+  origin: string;
   last_used_at: string | null;
   last_mcp_at: string | null;
   created_at: string;
@@ -60,6 +61,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     description: r.description,
     keyPrefix: r.key_prefix,
     disabled: bool(r.disabled),
+    origin: r.origin === "paired" ? "paired" : "key",
     lastUsedAt: r.last_used_at,
     lastMcpAt: r.last_mcp_at,
     createdAt: r.created_at,
@@ -194,7 +196,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       return r ? toAgent(r) : null;
     },
 
-    createAgent(input: CreateAgentInput): AgentWithKey {
+    createAgent(input: CreateAgentInput, opts: { origin?: AgentOrigin } = {}): AgentWithKey {
       const fields = parseAgentFields(input);
       if (!fields.name) throw badRequest("Name is required");
       const grants = (input.grants ?? []).map(parseGrantInput);
@@ -207,12 +209,13 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       const id = newId("agt");
       db.tx(() => {
         db.run(
-          "INSERT INTO agents (id, name, description, key_prefix, key_hash, disabled, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+          "INSERT INTO agents (id, name, description, key_prefix, key_hash, disabled, origin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
           id,
           fields.name!,
           fields.description || null,
           apiKey.slice(0, 8),
           sha256(apiKey),
+          opts.origin ?? "key",
           now(),
         );
         for (const g of grants) writeGrant(id, g);

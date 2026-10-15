@@ -22,11 +22,18 @@ export function accessProblem(db: Db, agentId: string, keyHash: string): RevokeR
 /** `ListenerInfo[]` for an agent, from listener_cursors. */
 export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
   return db
-    .all<{ consumer: string; acked_seq: number; client: string; connected: number; last_seen_at: string | null }>(
-      "SELECT consumer, acked_seq, client, connected, last_seen_at FROM listener_cursors WHERE agent_id = ? ORDER BY consumer",
+    .all<{ consumer: string; acked_seq: number; start_seq: number | null; client: string; connected: number; last_seen_at: string | null }>(
+      "SELECT consumer, acked_seq, start_seq, client, connected, last_seen_at FROM listener_cursors WHERE agent_id = ? ORDER BY consumer",
       agentId,
     )
-    .map((r) => ({ consumer: r.consumer, connected: r.connected > 0, ackedSeq: r.acked_seq, lastSeenAt: r.last_seen_at, client: json.parse(r.client, {}) }));
+    .map((r) => ({
+      consumer: r.consumer,
+      connected: r.connected > 0,
+      startSeq: r.start_seq,
+      ackedSeq: r.acked_seq,
+      lastSeenAt: r.last_seen_at,
+      client: json.parse(r.client, {}),
+    }));
 }
 
 /**

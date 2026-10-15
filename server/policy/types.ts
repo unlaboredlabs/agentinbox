@@ -1,7 +1,7 @@
 // Policy domain contract. Owned by the policy + MCP + mail work area.
 // Members marked FROZEN are used by other domains: do not rename or change them. Adding members is fine.
 
-import type { Agent, AgentWithKey, CreateAgentInput, EventType, Grant, GrantInput } from "../../shared/types.ts";
+import type { Agent, AgentOrigin, AgentWithKey, CreateAgentInput, EventType, Grant, GrantInput } from "../../shared/types.ts";
 import type { Lifecycle } from "../context.ts";
 
 /** An authenticated agent (from its `aib_…` bearer key). */
@@ -25,7 +25,8 @@ export interface PolicyService extends Lifecycle {
 
   listAgents(): Agent[];
   getAgent(id: string): Agent | null;
-  createAgent(input: CreateAgentInput): AgentWithKey;
+  /** `origin` defaults to "key" (console); pairing approval passes "paired". Not settable through the API. */
+  createAgent(input: CreateAgentInput, opts?: { origin?: AgentOrigin }): AgentWithKey;
   updateAgent(id: string, patch: { name?: string; description?: string | null; disabled?: boolean }): Agent;
   rotateKey(id: string): AgentWithKey;
   deleteAgent(id: string): void;

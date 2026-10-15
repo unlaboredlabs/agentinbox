@@ -356,6 +356,9 @@ export interface ConnectAccountResponse {
 
 // ───────────────────────────── Agents & grants ─────────────────────────────
 
+/** How an agent was added: approved from `agentinbox connect` (its key lives in a profile on that machine), or created here with a copied key. */
+export type AgentOrigin = "paired" | "key";
+
 export interface Agent {
   id: string; // agt_…
   name: string;
@@ -363,6 +366,7 @@ export interface Agent {
   /** First chars of the key, for identification (e.g. "aib_7Hk2"). The full key is shown once at creation/rotation. */
   keyPrefix: string;
   disabled: boolean;
+  origin: AgentOrigin;
   /** Last request with this agent's key (MCP or the listener API), written at most once a minute. */
   lastUsedAt: string | null;
   /** Last request to /mcp only (a tool's startup `tools/list` counts), written at most once a minute. */
@@ -376,6 +380,12 @@ export interface Agent {
 export interface ListenerInfo {
   consumer: string;
   connected: boolean;
+  /**
+   * Where the cursor started when the consumer was created (the head, or 0 for start=beginning):
+   * events at or below it predate the listener and weren't delivered to it. Null = unknown (created
+   * before this was recorded, or by an ack).
+   */
+  startSeq: number | null;
   ackedSeq: number;
   lastSeenAt: string | null;
   client: { hostname?: string; platform?: string; version?: string };
@@ -482,6 +492,11 @@ export interface MailEvent {
   /** Free-form detail for account/sync events. */
   detail?: Record<string, unknown>;
   createdAt: string;
+  /**
+   * Console only (GET /api/events and the console stream): the thread's labels when the event was
+   * recorded, which agents' label scopes are matched against. Never sent to agents or webhooks.
+   */
+  threadLabelIds?: string[];
 }
 
 // ───────────────────────────── Webhooks ─────────────────────────────

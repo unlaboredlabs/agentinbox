@@ -217,8 +217,15 @@ export const MIGRATIONS: string[] = [
   -- before this migration, or by an ack (unknown).
   ALTER TABLE listener_cursors ADD COLUMN start_seq INTEGER;
   `,
-  /* 5: MCP use apart from listen */ `
+  /* 5: MCP use apart from listen; how each agent was added */ `
   -- Last authenticated request to /mcp; throttled like last_used_at (first write immediate).
   ALTER TABLE agents ADD COLUMN last_mcp_at TEXT;
+  -- 'paired' (approved from \`agentinbox connect\`: the key lives in a profile on that machine) or
+  -- 'key' (created in the console, key copied by hand).
+  ALTER TABLE agents ADD COLUMN origin TEXT NOT NULL DEFAULT 'key';
+  -- Backfill: a kept approved pairing, or a listener (\`listen\` runs on a pairing's profile), means paired.
+  UPDATE agents SET origin = 'paired'
+    WHERE id IN (SELECT agent_id FROM pairings WHERE status = 'approved' AND agent_id IS NOT NULL)
+       OR id IN (SELECT agent_id FROM listener_cursors);
   `,
 ];
