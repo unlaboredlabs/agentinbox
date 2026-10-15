@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -5,7 +6,7 @@ import type { AppEnv } from "../server/api/util.ts";
 import type { Account, ConnectAccountResponse } from "../shared/types.ts";
 import { accountsApi } from "../server/api/accounts.ts";
 import { googleApi } from "../server/api/google.ts";
-import { oauthRoutes } from "../server/api/oauth.ts";
+import { callbackPage, OAUTH_CALLBACK_SCRIPT, OAUTH_CALLBACK_SCRIPT_HASH, oauthRoutes } from "../server/api/oauth.ts";
 import type { AppContext } from "../server/context.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../server/google/types.ts";
 import { HttpError } from "../server/util/errors.ts";
@@ -126,7 +127,7 @@ describe("connect", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("Connected alice@example.com. You can close this tab.");
-    expect(html).toContain('"type":"agentinbox:oauth"');
+    expect(html).toContain('<script type="application/json" id="oauth-result">{"ok":true,"email":"alice@example.com"');
     expect(html).toContain("prefers-color-scheme: dark");
 
     const [acct] = ctx.accounts.list();
@@ -253,6 +254,19 @@ describe("connect", () => {
     const before = tokenCalls();
     await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toBeInstanceOf(HttpError);
     expect(tokenCalls()).toBe(before + 1);
+  });
+
+  it("uses one static, hashable script on every callback page", async () => {
+    const scripts = (html: string) => [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    const okHtml = callbackPage({ ok: true, email: "a@b.test", title: "t", message: "m", targetOrigin: "https://x.test" });
+    const errHtml = callbackPage({ ok: false, title: "t", message: "</script><script>alert(1)</script>", hint: "h", targetOrigin: "*" });
+    expect(scripts(okHtml)).toEqual([OAUTH_CALLBACK_SCRIPT]);
+    expect(scripts(errHtml)).toEqual([OAUTH_CALLBACK_SCRIPT]);
+    expect(OAUTH_CALLBACK_SCRIPT_HASH).toBe(`sha256-${createHash("sha256").update(OAUTH_CALLBACK_SCRIPT).digest("base64")}`);
+    // Dynamic data is JSON in a data block with "<" escaped, so it can't close the element.
+    const data = /<script type="application\/json" id="oauth-result">([^<]*)<\/script>/.exec(errHtml)![1]!;
+    expect(JSON.parse(data)).toEqual({ ok: false, email: null, error: "</script><script>alert(1)</script>", targetOrigin: "*" });
+    expect(errHtml).not.toContain("<script>alert(1)");
   });
 
   it("renders an escaped error page on callback failure", async () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AppContext } from "../context.ts";
 import { HttpError } from "../util/errors.ts";
 import { asHttpError } from "../google/http.ts";
@@ -6,8 +7,25 @@ import { router } from "./util.ts";
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
-/** JSON safe to inline in a <script> element. */
+/** JSON safe to embed in a <script type="application/json"> data block. */
 const scriptJson = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
+
+/**
+ * The callback page's only executable script. It is static (all dynamic data lives in the JSON block
+ * #oauth-result), so the CSP can allow exactly this hash instead of inline scripts in general.
+ */
+export const OAUTH_CALLBACK_SCRIPT = `(function () {
+  try {
+    var r = JSON.parse(document.getElementById("oauth-result").textContent);
+    if (window.opener) {
+      window.opener.postMessage({ type: "agentinbox:oauth", ok: r.ok, email: r.email, error: r.error }, r.targetOrigin);
+      if (r.ok) setTimeout(function () { window.close(); }, 600);
+    }
+  } catch (e) {}
+})();`;
+
+/** CSP source for OAUTH_CALLBACK_SCRIPT, e.g. script-src 'sha256-…'. */
+export const OAUTH_CALLBACK_SCRIPT_HASH = `sha256-${createHash("sha256").update(OAUTH_CALLBACK_SCRIPT).digest("base64")}`;
 
 interface PageInput {
   ok: boolean;
@@ -23,7 +41,7 @@ export function callbackPage(p: PageInput): string {
   const icon = p.ok
     ? `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`
     : `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>`;
-  const payload = { type: "agentinbox:oauth", ok: p.ok, email: p.email ?? null, error: p.ok ? null : p.message };
+  const result = { ok: p.ok, email: p.email ?? null, error: p.ok ? null : p.message, targetOrigin: p.targetOrigin };
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -61,12 +79,8 @@ export function callbackPage(p: PageInput): string {
   <a class="button" href="${escapeHtml(p.ok && p.email ? `/accounts?connected=${encodeURIComponent(p.email)}` : "/accounts")}">Go to accounts</a>
   <div class="brand">agentinbox</div>
 </main>
-<script>
-  (function () {
-    var msg = ${scriptJson(payload)};
-    try { if (window.opener) { window.opener.postMessage(msg, ${scriptJson(p.targetOrigin)}); ${p.ok ? "setTimeout(function () { window.close(); }, 600);" : ""} } } catch (e) {}
-  })();
-</script>
+<script type="application/json" id="oauth-result">${scriptJson(result)}</script>
+<script>${OAUTH_CALLBACK_SCRIPT}</script>
 </body>
 </html>`;
 }
