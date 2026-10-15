@@ -1,85 +1,361 @@
-import { useState } from "react";
-import { projectIdError } from "@/components/google/client-form";
+import { AlertTriangleIcon, RefreshCwIcon, TerminalIcon, MousePointerClickIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CodeBlock } from "@/components/common";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { PROJECT_ID_RE, updateDraft, useSetupProgress } from "./progress";
+import { Label } from "@/components/ui/label";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { generateProjectId, PROJECT_ID_RE, STEP_META, updateDraft, useSetupProgress } from "./progress";
 import type { StepProps } from "./step-url";
-import { CloudLink, Guide, GuideStep, StepCard, StepFooter } from "./wizard-shell";
+import { CloudLink, Disclosure, FormValues, GoogleTabNote, Guide, GuideStep, Path, StepCard, StepFooter } from "./wizard-shell";
+
+const p = (id: string) => encodeURIComponent(id);
 
 export const cloudUrl = {
+  cloudShell: "https://shell.cloud.google.com/?show=terminal",
   createProject: "https://console.cloud.google.com/projectcreate",
-  gmailApi: (p: string) => `https://console.cloud.google.com/apis/library/gmail.googleapis.com?project=${encodeURIComponent(p)}`,
-  pubsubApi: (p: string) => `https://console.cloud.google.com/apis/library/pubsub.googleapis.com?project=${encodeURIComponent(p)}`,
-  authOverview: (p: string) => `https://console.cloud.google.com/auth/overview?project=${encodeURIComponent(p)}`,
-  authAudience: (p: string) => `https://console.cloud.google.com/auth/audience?project=${encodeURIComponent(p)}`,
-  authScopes: (p: string) => `https://console.cloud.google.com/auth/scopes?project=${encodeURIComponent(p)}`,
-  createClient: (p: string) => `https://console.cloud.google.com/auth/clients/create?project=${encodeURIComponent(p)}`,
+  enableApis: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com,pubsub.googleapis.com&project=${p(id)}`,
+  dashboard: (id: string) => `https://console.cloud.google.com/home/dashboard?project=${p(id)}`,
+  authOverview: (id: string) => `https://console.cloud.google.com/auth/overview?project=${p(id)}`,
+  authAudience: (id: string) => `https://console.cloud.google.com/auth/audience?project=${p(id)}`,
+  authScopes: (id: string) => `https://console.cloud.google.com/auth/scopes?project=${p(id)}`,
+  clients: (id: string) => `https://console.cloud.google.com/auth/clients?project=${p(id)}`,
+  createClient: (id: string) => `https://console.cloud.google.com/auth/clients/create?project=${p(id)}`,
+  iam: (id: string) => `https://console.cloud.google.com/iam-admin/iam?project=${p(id)}`,
+  orgPolicies: (id: string) => `https://console.cloud.google.com/iam-admin/orgpolicies?project=${p(id)}`,
+  billing: (id: string) => `https://console.cloud.google.com/billing/linkedaccount?project=${p(id)}`,
 };
 
-export function StepProject({ index, onBack, onNext }: StepProps) {
+/** Specific, fixable message for a project ID, or null when it's valid. */
+export function projectIdProblem(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return "Enter the project ID.";
+  if (/^\d+$/.test(v)) return "That's the project number. Use the project ID: lowercase letters, digits and hyphens, like agentinbox-123456.";
+  if (/[A-Z ]/.test(v)) return "That looks like the project name. Use the project ID: lowercase, no spaces, like agentinbox-123456.";
+  if (v.length < 6 || v.length > 30) return "Project IDs are 6 to 30 characters long.";
+  if (!/^[a-z]/.test(v)) return "Project IDs start with a lowercase letter.";
+  if (/-$/.test(v)) return "Project IDs can't end with a hyphen.";
+  if (!PROJECT_ID_RE.test(v)) return "Use only lowercase letters, digits and hyphens.";
+  return null;
+}
+
+/** The Cloud Shell command: create the project, then enable the Gmail and Pub/Sub APIs in it. */
+export function projectCommand(id: string, inOrg: boolean) {
+  const org = inOrg ? ` --organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"` : "";
+  return (
+    `gcloud projects create ${id} --name=agentinbox${org} && ` +
+    `gcloud services enable gmail.googleapis.com pubsub.googleapis.com --project=${id} && ` +
+    `echo "agentinbox: project ${id} is ready"`
+  );
+}
+
+export function StepProject(props: StepProps) {
+  const { state } = useSetupProgress();
+  // Once the OAuth client is saved, the server owns the project ID: just show it.
+  if (state?.gcpProjectId) return <ProjectSaved {...props} projectId={state.gcpProjectId} />;
+  return <ProjectSetup {...props} />;
+}
+
+function ProjectSaved({ index, onBack, onNext, projectId }: StepProps & { projectId: string }) {
+  return (
+    <StepCard
+      index={index}
+      title={STEP_META.project.title}
+      description="agentinbox signs in to Gmail through your own Google Cloud project."
+      footer={<StepFooter onBack={onBack} onNext={onNext} />}
+    >
+      <p className="text-sm">
+        agentinbox uses the project <code className="font-mono font-medium">{projectId}</code> (saved with the OAuth client in step 4).
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <CloudLink href={cloudUrl.dashboard(projectId)}>Open the project</CloudLink>
+        <CloudLink href={cloudUrl.enableApis(projectId)}>Check the APIs are enabled</CloudLink>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        To move to another project, create an OAuth client there and import it in step 4; the project ID comes with it.
+      </p>
+    </StepCard>
+  );
+}
+
+function ProjectSetup({ index, onBack, onNext }: StepProps) {
   const { state, draft } = useSetupProgress();
-  const [projectId, setProjectId] = useState(state?.gcpProjectId ?? draft.projectId ?? "");
+  const mode = draft.projectMode ?? "new";
+  const method = draft.projectMethod ?? "shell";
+  const inOrg = !!draft.projectInOrg;
+
+  // A project ID ready to go, generated once and kept (the command must stay the same after a reload).
+  useEffect(() => {
+    if (!draft.newProjectId) updateDraft({ newProjectId: generateProjectId() });
+  }, [draft.newProjectId]);
+  const newId = draft.newProjectId ?? "";
+  const [existingId, setExistingId] = useState(draft.existingProjectId ?? (mode === "existing" ? (state?.gcpProjectId ?? draft.projectId ?? "") : ""));
   const [touched, setTouched] = useState(false);
-  const clean = projectId.trim();
-  const error = projectIdError(clean);
-  const valid = PROJECT_ID_RE.test(clean);
+
+  const id = mode === "new" ? newId.trim() : existingId.trim();
+  const problem = projectIdProblem(id);
+  const valid = !problem;
 
   const next = () => {
     setTouched(true);
     if (!valid) return;
-    updateDraft({ projectId: clean, projectConfirmed: true });
+    updateDraft({ projectId: id, projectConfirmed: true, projectMode: mode });
     onNext();
   };
 
   return (
     <StepCard
       index={index}
-      title="Create a Google Cloud project"
-      description="agentinbox uses your own Google Cloud project and OAuth app, so your mail never passes through anyone else's. It's free and takes a couple of minutes."
-      footer={<StepFooter onBack={onBack} onNext={next} nextDisabled={touched && !valid} />}
+      title={STEP_META.project.title}
+      description="agentinbox signs in to Gmail through your own Google Cloud project, so your mail never passes through anyone else's. Free; no billing account needed."
+      footer={
+        <StepFooter
+          onBack={onBack}
+          onNext={next}
+          nextDisabled={touched && !valid}
+          nextLabel={mode === "new" ? "I've created it" : "Continue"}
+          hint={touched && problem ? "Fix the project ID first" : undefined}
+        />
+      }
     >
-      <Guide>
-        <GuideStep title="Create a project (or pick an existing one)">
-          <p>Any name works, e.g. “agentinbox”. With Google Workspace, create it inside your organization.</p>
-          <CloudLink href={cloudUrl.createProject}>Create project</CloudLink>
-        </GuideStep>
-        <GuideStep title="Paste the project ID" done={valid}>
-          <p>
-            Find it on the project's dashboard or in the project picker at the top of Google Cloud. It's the lowercase ID (like{" "}
-            <code className="font-mono text-foreground">agentinbox-471203</code>), not the display name or the project number.
-          </p>
-          <Field data-invalid={touched && !!error} className="max-w-sm">
-            <FieldLabel htmlFor="gcp-project" className="sr-only">
-              Project ID
-            </FieldLabel>
-            <Input
-              id="gcp-project"
-              className="font-mono"
-              placeholder="agentinbox-471203"
-              spellCheck={false}
-              autoComplete="off"
-              value={projectId}
-              onChange={(e) => setProjectId(e.target.value.toLowerCase())}
-              onBlur={() => clean && setTouched(true)}
-              onKeyDown={(e) => e.key === "Enter" && next()}
-              aria-invalid={touched && !!error}
-            />
-            {touched && error ? <FieldError>{error}</FieldError> : <FieldDescription>The links below open in this project.</FieldDescription>}
+      <GoogleTabNote />
+
+      {mode === "new" ? (
+        <>
+          <Field data-invalid={!!problem} className="max-w-md">
+            <FieldLabel htmlFor="new-project-id">Project ID</FieldLabel>
+            <div className="flex gap-2">
+              <Input
+                id="new-project-id"
+                className="font-mono"
+                spellCheck={false}
+                autoComplete="off"
+                value={newId}
+                onChange={(e) => updateDraft({ newProjectId: e.target.value.trim() })}
+                aria-invalid={!!problem}
+                aria-describedby="new-project-id-hint"
+              />
+              <Button type="button" variant="outline" onClick={() => updateDraft({ newProjectId: generateProjectId() })}>
+                <RefreshCwIcon /> New ID
+              </Button>
+            </div>
+            <div id="new-project-id-hint">
+              {problem ? (
+                <FieldError>{problem}</FieldError>
+              ) : (
+                <FieldDescription>
+                  Project IDs are unique across Google and permanent. If Google says this one is taken, click New ID and run the command again.
+                  The project name (agentinbox) is just a label.
+                </FieldDescription>
+              )}
+            </div>
           </Field>
-        </GuideStep>
-        <GuideStep title="Enable the Gmail API">
-          <p>Open the API page and click Enable.</p>
-          <CloudLink href={valid ? cloudUrl.gmailApi(clean) : "#"} disabled={!valid}>
-            Enable Gmail API
-          </CloudLink>
-        </GuideStep>
-        <GuideStep title="Enable the Cloud Pub/Sub API (recommended)">
-          <p>Only needed for real-time delivery (step 6), but enabling it now saves a trip back.</p>
-          <CloudLink href={valid ? cloudUrl.pubsubApi(clean) : "#"} disabled={!valid}>
-            Enable Pub/Sub API
-          </CloudLink>
-        </GuideStep>
-      </Guide>
+
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            className="flex-wrap"
+            value={method}
+            onValueChange={(v) => v && updateDraft({ projectMethod: v as "shell" | "console" })}
+            aria-label="How to create the project"
+          >
+            <ToggleGroupItem value="shell">
+              <TerminalIcon /> One command (recommended)
+            </ToggleGroupItem>
+            <ToggleGroupItem value="console">
+              <MousePointerClickIcon /> Click through the console
+            </ToggleGroupItem>
+          </ToggleGroup>
+
+          {method === "shell" ? (
+            <Guide>
+              <GuideStep
+                title="Open Cloud Shell"
+                expect="a terminal at the bottom of the page. The first time, Google may ask you to pick your country and accept the terms."
+              >
+                <p>A free terminal in your browser, already signed in to Google Cloud. Nothing to install.</p>
+                <CloudLink href={cloudUrl.cloudShell}>Open Cloud Shell</CloudLink>
+              </GuideStep>
+              <GuideStep
+                title="Paste this command and press Enter"
+                expect={
+                  <>
+                    “Authorize Cloud Shell” (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
+                    <code className="font-mono text-foreground">agentinbox: project {id || "…"} is ready</code>.
+                  </>
+                }
+              >
+                <p>It creates the project and turns on the Gmail and Pub/Sub APIs in it.</p>
+                {valid ? <CodeBlock code={projectCommand(id, inOrg)} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
+                <div className="flex items-start gap-2">
+                  <Checkbox id="project-in-org" checked={inOrg} onCheckedChange={(v) => updateDraft({ projectInOrg: v === true })} className="mt-0.5" />
+                  <Label htmlFor="project-in-org" className="flex-1 text-sm leading-snug font-normal text-foreground">
+                    I use Google Workspace and want to connect only my organization's accounts (creates the project inside your organization, so
+                    the “Internal” option works in the next step)
+                  </Label>
+                </div>
+                <Disclosure summary="The command printed an error?">
+                  <ul className="list-disc space-y-1.5 pl-5">
+                    <li>
+                      <strong className="text-foreground">“already in use” or “already exists”</strong>: someone has this ID. Click{" "}
+                      <strong className="text-foreground">New ID</strong> above, copy the command again and run it.
+                    </li>
+                    <li>
+                      <strong className="text-foreground">Terms of Service</strong> or <strong className="text-foreground">country</strong>: open{" "}
+                      <a className="underline" href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer">
+                        console.cloud.google.com
+                      </a>{" "}
+                      once, accept, then run the command again.
+                    </li>
+                    <li>
+                      <strong className="text-foreground">quota</strong> (too many projects): delete projects you no longer use, or use the console
+                      path.
+                    </li>
+                    <li>
+                      <strong className="text-foreground">--organization</strong> errors: untick the Workspace box above, or ask your Workspace
+                      admin for the “Project Creator” role.
+                    </li>
+                    <li>
+                      The project was created but enabling failed: run only the second part again, or use the{" "}
+                      <a className="underline" href={cloudUrl.enableApis(id)} target="_blank" rel="noopener noreferrer">
+                        enable link
+                      </a>
+                      .
+                    </li>
+                  </ul>
+                </Disclosure>
+              </GuideStep>
+            </Guide>
+          ) : (
+            <Guide>
+              <GuideStep
+                title="Create the project"
+                expect={
+                  <>
+                    a notification “Create Project: agentinbox”, then <strong className="text-foreground">Select project</strong>.
+                  </>
+                }
+              >
+                <p>Open the form and fill it in like this:</p>
+                <FormValues
+                  rows={[
+                    { label: "Project name", value: "agentinbox" },
+                    {
+                      label: "Project ID",
+                      value: id,
+                      note: "Click Edit under the name to change the suggested ID, and paste this one.",
+                    },
+                    {
+                      label: "Location / Organization",
+                      note: "Personal @gmail.com: “No organization” is fine. Google Workspace: keep your organization (needed for Internal).",
+                    },
+                  ]}
+                />
+                <p>
+                  Click <strong className="text-foreground">Create</strong>. Ignore “Start free trial” or billing banners: billing isn't needed.
+                </p>
+                <CloudLink href={cloudUrl.createProject}>Open Create a project</CloudLink>
+              </GuideStep>
+              <GuideStep title="Turn on the Gmail and Pub/Sub APIs" expect="a confirmation that the APIs are enabled.">
+                <p>
+                  The link opens in your new project. Confirm the project, then click <strong className="text-foreground">Next</strong> and{" "}
+                  <strong className="text-foreground">Enable</strong>.
+                </p>
+                <CloudLink href={valid ? cloudUrl.enableApis(id) : "#"} disabled={!valid} disabledReason="Fix the project ID above first">
+                  Enable the APIs
+                </CloudLink>
+              </GuideStep>
+            </Guide>
+          )}
+
+          <Disclosure summary="Use an existing project instead (advanced)">
+            <p>
+              A dedicated project is safer: agentinbox shares a project's sign-in screen, limits and settings with every other app in it. Only
+              reuse a project if you can't create one.
+            </p>
+            <Button variant="outline" size="sm" onClick={() => updateDraft({ projectMode: "existing" })}>
+              Use an existing project
+            </Button>
+          </Disclosure>
+        </>
+      ) : (
+        <>
+          <ReuseRisks />
+          <Guide>
+            <GuideStep title="Enter the existing project's ID" done={valid}>
+              <p>
+                Find it in Google Cloud's project picker (the <strong className="text-foreground">ID</strong> column) or on the project's Dashboard
+                under <Path items={["Project info", "Project ID"]} />. Not the name, not the number.
+              </p>
+              <Field data-invalid={touched && !!problem} className="max-w-sm">
+                <FieldLabel htmlFor="gcp-project">Project ID</FieldLabel>
+                <Input
+                  id="gcp-project"
+                  className="font-mono"
+                  placeholder="my-project-123456"
+                  spellCheck={false}
+                  autoComplete="off"
+                  value={existingId}
+                  onChange={(e) => {
+                    setExistingId(e.target.value);
+                    updateDraft({ existingProjectId: e.target.value.trim() });
+                  }}
+                  onBlur={() => existingId.trim() && setTouched(true)}
+                  onKeyDown={(e) => e.key === "Enter" && next()}
+                  aria-invalid={touched && !!problem}
+                  aria-describedby="gcp-project-hint"
+                />
+                <div id="gcp-project-hint">
+                  {(touched || existingId.trim()) && problem ? (
+                    <FieldError>{problem}</FieldError>
+                  ) : (
+                    <FieldDescription>The links in the next steps open in this project.</FieldDescription>
+                  )}
+                </div>
+              </Field>
+            </GuideStep>
+            <GuideStep title="Turn on the Gmail and Pub/Sub APIs" expect="a confirmation that the APIs are enabled (or that they already were).">
+              <p>
+                Confirm the project, then click <strong className="text-foreground">Next</strong> and{" "}
+                <strong className="text-foreground">Enable</strong>.
+              </p>
+              <CloudLink href={valid ? cloudUrl.enableApis(id) : "#"} disabled={!valid} disabledReason="Enter the project ID first">
+                Enable the APIs
+              </CloudLink>
+            </GuideStep>
+          </Guide>
+          <Button variant="link" className="h-auto px-0" onClick={() => updateDraft({ projectMode: "new" })}>
+            Create a new project instead (recommended)
+          </Button>
+        </>
+      )}
     </StepCard>
+  );
+}
+
+function ReuseRisks() {
+  return (
+    <Alert variant="warning">
+      <AlertTriangleIcon />
+      <AlertTitle>Reusing a project: what agentinbox shares with the other apps in it</AlertTitle>
+      <AlertDescription>
+        <ul className="list-disc space-y-1 pl-4">
+          <li>One sign-in screen: its name, logo and support email, audience (Internal/External) and publishing status.</li>
+          <li>Switching it back to Testing makes every app's sign-ins expire after 7 days.</li>
+          <li>Unverified apps are capped at 100 users per project, shared by all its apps.</li>
+          <li>Users see one entry for the project under their Google account's third-party access: removing it cuts off both apps.</li>
+          <li>API quotas, and deleting or locking the project, affect both.</li>
+        </ul>
+        <p className="pt-1 font-medium text-foreground">If you reuse it:</p>
+        <ul className="list-disc space-y-1 pl-4">
+          <li>Don't rename or rebrand the existing sign-in screen; leave it as it is.</li>
+          <li>Create a separate OAuth client for agentinbox, and don't touch the other app's client.</li>
+          <li>Prefer polling over Pub/Sub for new mail (step 6).</li>
+        </ul>
+      </AlertDescription>
+    </Alert>
   );
 }

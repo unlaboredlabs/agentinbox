@@ -10,11 +10,29 @@ import { queries } from "@/lib/queries";
  */
 export interface SetupDraft {
   urlConfirmed?: boolean;
+  /** "new" (default): a dedicated project created for agentinbox; "existing": reuse one (advanced). */
+  projectMode?: "new" | "existing";
+  /** Pre-generated ID for the new project (agentinbox-123456), editable. Kept so the command stays the same. */
+  newProjectId?: string;
+  /** The ID typed for an existing project. */
+  existingProjectId?: string;
+  /** How the new project gets created: one Cloud Shell command, or clicks in the console. */
+  projectMethod?: "shell" | "console";
+  /** Create the new project inside the user's Google Workspace organization (needed for Internal). */
+  projectInOrg?: boolean;
+  /** The project the later steps use, set when step 2 is confirmed. */
   projectId?: string;
   projectConfirmed?: boolean;
   appType?: GoogleAppType;
   productionConfirmed?: boolean;
+  /**
+   * The redirect URI the OAuth client was saved with (import or manual entry). When the public URL
+   * changes later, the current one differs and step 4 / Settings ask to add the new URI.
+   */
+  clientRedirectUri?: string;
   pubsubSkipped?: boolean;
+  /** Set by the "Check that it works" step once the first event reached the agent. */
+  verified?: boolean;
 }
 
 // Per instance: the same browser may set up several agentinbox daemons.
@@ -46,6 +64,7 @@ export function updateDraft(patch: Partial<SetupDraft>) {
 export function clearServerOwnedDraft() {
   const d = read();
   if (d.projectId === undefined && d.appType === undefined && d.productionConfirmed === undefined && d.projectConfirmed === undefined) return;
+  // projectMode stays: later steps (and Settings) still adapt their advice for a shared project.
   const { projectId: _p, appType: _a, productionConfirmed: _c, projectConfirmed: _pc, ...rest } = d;
   cache = rest;
   try {
@@ -63,21 +82,28 @@ export function useSetupDraft(): SetupDraft {
   );
 }
 
-export const STEP_IDS = ["url", "project", "consent", "client", "accounts", "pubsub", "agent"] as const;
+export const STEP_IDS = ["url", "project", "consent", "client", "accounts", "pubsub", "agent", "verify"] as const;
 export type StepId = (typeof STEP_IDS)[number];
 export type StepStatus = "done" | "skipped" | "todo";
 
 export const STEP_META: Record<StepId, { title: string; short: string; optional?: boolean }> = {
-  url: { title: "Confirm the public URL", short: "Public URL" },
+  url: { title: "Choose the address of agentinbox", short: "Address" },
   project: { title: "Create a Google Cloud project", short: "Google Cloud project" },
-  consent: { title: "Configure the OAuth consent screen", short: "Consent screen" },
+  consent: { title: "Set up the Google sign-in screen", short: "Sign-in screen" },
   client: { title: "Create the OAuth client", short: "OAuth client" },
   accounts: { title: "Connect Gmail accounts", short: "Gmail accounts" },
-  pubsub: { title: "Turn on real-time delivery", short: "Real-time delivery", optional: true },
-  agent: { title: "Create your first agent", short: "First agent" },
+  pubsub: { title: "Get new mail within seconds", short: "Instant delivery", optional: true },
+  agent: { title: "Connect your first agent", short: "First agent" },
+  verify: { title: "Check that it works", short: "Check it works" },
 };
 
 export const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+
+/** A fresh project ID suggestion: "agentinbox-" + 6 random digits (Google IDs are global, so make a clash unlikely). */
+export function generateProjectId(): string {
+  const n = crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000;
+  return `agentinbox-${String(n).padStart(6, "0")}`;
+}
 
 export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): Record<StepId, StepStatus> {
   const s = state;
@@ -93,6 +119,7 @@ export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): 
     accounts: accountsDone ? "done" : "todo",
     pubsub: pubsubReady ? "done" : draft.pubsubSkipped ? "skipped" : "todo",
     agent: (s?.agentsCreated ?? 0) > 0 ? "done" : "todo",
+    verify: draft.verified ? "done" : "todo",
   };
 }
 

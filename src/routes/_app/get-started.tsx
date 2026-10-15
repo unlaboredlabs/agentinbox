@@ -9,12 +9,20 @@ import { StepConsent } from "@/components/setup/step-consent";
 import { StepProject } from "@/components/setup/step-project";
 import { StepPubsub } from "@/components/setup/step-pubsub";
 import { type StepProps, StepUrl } from "@/components/setup/step-url";
+import { StepVerify } from "@/components/setup/step-verify";
 import { WizardNav } from "@/components/setup/wizard-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 
+interface Search {
+  step?: StepId;
+  /** The step the user jumped back from: Continue returns there instead of walking forward one by one. */
+  from?: StepId;
+}
+
 export const Route = createFileRoute("/_app/get-started")({
-  validateSearch: (s: Record<string, unknown>): { step?: StepId } => ({
+  validateSearch: (s: Record<string, unknown>): Search => ({
     step: STEP_IDS.find((id) => id === s.step),
+    from: STEP_IDS.find((id) => id === s.from),
   }),
   component: GetStarted,
 });
@@ -27,11 +35,12 @@ const STEPS: Record<StepId, (p: StepProps) => React.ReactNode> = {
   accounts: StepAccounts,
   pubsub: StepPubsub,
   agent: StepAgent,
+  verify: StepVerify,
 };
 
 /** Resumable setup wizard: opens at the first unfinished step; any step can be revisited. */
 function GetStarted() {
-  const { step } = Route.useSearch();
+  const { step, from } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const progress = useSetupProgress();
 
@@ -48,35 +57,40 @@ function GetStarted() {
   }
   if (progress.query.isError) return <QueryError error={progress.query.error} onRetry={() => void progress.query.refetch()} />;
 
-  const current = step ?? progress.firstTodo ?? "agent";
+  const current = step ?? progress.firstTodo ?? "verify";
   const index = STEP_IDS.indexOf(current);
-  const go = (id: StepId) => {
-    void navigate({ search: { step: id } });
+  const go = (id: StepId, returnTo?: StepId) => {
+    // Toasts belong to the step that raised them; don't let them cover the next one's buttons.
+    toast.dismiss();
+    void navigate({ search: { step: id, ...(returnTo ? { from: returnTo } : {}) } });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
+  // Jumping back to an earlier step remembers where you were, so Continue brings you back there.
+  const select = (id: StepId) => {
+    const back = STEP_IDS.indexOf(id) < index ? (from && STEP_IDS.indexOf(from) > index ? from : current) : undefined;
+    go(id, back);
+  };
+  const returnTo = from && STEP_IDS.indexOf(from) > index ? from : undefined;
   const onNext = () => {
-    const nextId = STEP_IDS[index + 1];
+    const nextId = returnTo ?? STEP_IDS[index + 1];
     if (nextId) go(nextId);
     else {
       toast.success("Setup complete", { description: "Your agents can use Gmail now. The overview shows what they're up to." });
       void navigate({ to: "/" });
     }
   };
-  const onBack = index > 0 ? () => go(STEP_IDS[index - 1]!) : undefined;
+  const onBack = index > 0 ? () => go(STEP_IDS[index - 1]!, returnTo) : undefined;
   const Step = STEPS[current];
 
   return (
     <>
-      <PageHeader
-        title="Get started"
-        description="About 10 minutes, mostly in Google Cloud. Your progress is saved, so you can leave and pick up where you left off."
-      />
+      <PageHeader title="Get started" description="About 10 minutes, mostly in Google Cloud (opens in new tabs). Progress is saved." />
       <div className="grid items-start gap-6 lg:grid-cols-[14rem_1fr]">
         <div className="lg:sticky lg:top-20">
-          <WizardNav current={current} statuses={progress.statuses} onSelect={go} />
+          <WizardNav current={current} statuses={progress.statuses} onSelect={select} />
         </div>
         <div className="min-w-0">
-          <Step key={current} index={index} onBack={onBack} onNext={onNext} />
+          <Step key={current} index={index} onBack={onBack} onNext={onNext} returnTo={returnTo} />
         </div>
       </div>
     </>
