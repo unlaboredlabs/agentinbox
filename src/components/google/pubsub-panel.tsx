@@ -12,6 +12,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, ApiError, toastError } from "@/lib/api";
+import { shellQuote } from "@/lib/cli";
+import { PROJECT_ID_WITH_DOMAIN_RE } from "@/lib/gcp-project";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -45,7 +47,9 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
   const active = p?.mode === "pubsub" && !!p.subscription;
   const accounts = (accountList.data ?? []).filter((a) => a.status === "active");
   // The account the next provisioning uses: the one picked here, else one being switched to, else the current one.
-  const principalId = chosen ?? p?.pendingPrincipalAccountId ?? p?.principalAccountId ?? accounts[0]?.id;
+  // Only active accounts can be picked: fall back to the first one when the server's choice isn't among them.
+  const isActive = (id: string | null | undefined) => !!id && accounts.some((a) => a.id === id);
+  const principalId = [chosen, p?.pendingPrincipalAccountId, p?.principalAccountId].find(isActive) ?? accounts[0]?.id;
   const switching_ = active && !!p?.principalAccountId && principalId !== p.principalAccountId;
   const principal = accountList.data?.find((a) => a.id === principalId);
   const projectId = state.data?.gcpProjectId ?? "";
@@ -105,8 +109,9 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
       scopes: ["pubsub"],
       reauthAccountId: who?.id,
       email: who?.email,
-      onDone: () => {
-        setGrantedFor(who?.email ?? "");
+      // Only a reported success counts as "granted": then a scope error again means the box wasn't ticked.
+      onDone: (confirmed) => {
+        if (confirmed) setGrantedFor(who?.email ?? "");
         void provision(who?.id);
       },
     });
@@ -219,11 +224,11 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
             <div className="flex flex-wrap items-center gap-3">
               {projectId && <ExternalLink href={cloudUrl.iam(projectId)}>Open IAM in Google Cloud</ExternalLink>}
             </div>
-            {principal && projectId && (
+            {principal && PROJECT_ID_WITH_DOMAIN_RE.test(projectId) && (
               <>
                 <p>Or run this in Cloud Shell as the project owner:</p>
                 <CodeBlock
-                  code={`gcloud projects add-iam-policy-binding ${projectId} --member=user:${principal.email} --role=roles/pubsub.admin`}
+                  code={`gcloud projects add-iam-policy-binding ${shellQuote(projectId)} --member=${shellQuote(`user:${principal.email}`)} --role=roles/pubsub.admin`}
                   wrap
                   copyLabel="Copy gcloud command"
                 />
@@ -238,13 +243,26 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         {code === "pubsub_org_policy" && (
           <Panel icon={<XCircleIcon className="mt-0.5 size-4 shrink-0 text-critical" />} title="Your organization's policy blocks Gmail notifications">
             <p>
-              A Google Workspace rule (Domain Restricted Sharing) stops Gmail's notification service from publishing into your project. Polling
-              works without it. To use real-time anyway, an admin with the Organization Policy Administrator role edits the policy{" "}
-              <span className="font-mono text-xs">iam.allowedPolicyMemberDomains</span> for this project (Manage policy → Override parent's policy →
-              add a rule that allows all values, or allows this principal), then you try again:
+              A Google Workspace rule (Domain Restricted Sharing, <span className="font-mono text-xs">iam.allowedPolicyMemberDomains</span>) stops
+              Gmail's notification service from publishing into your project. Polling works without it.
+            </p>
+            <p>
+              To use real-time anyway, someone with the Organization Policy Administrator role opens the policy for this project, temporarily
+              allows all values (Manage policy → Override parent's policy → Allow all), you click Try again here, and then they restore the
+              policy. The permission agentinbox granted stays in place.
+            </p>
+            <CopyField value="roles/orgpolicy.policyAdmin" label="Copy Organization Policy Administrator role" />
+            <p className="text-xs">
+              This policy lists customer IDs, not accounts, so it can't allow just Gmail's service account. Organizations using the newer{" "}
+              <span className="font-mono">iam.managed.allowedPolicyMembers</span> policy can allow that one principal instead:
             </p>
             <CopyField value={GMAIL_PUSH} label="Copy Gmail push principal" />
-            {projectId && <ExternalLink href={cloudUrl.orgPolicies(projectId)}>Open Organization policies</ExternalLink>}
+            <div className="flex flex-wrap items-center gap-3">
+              {projectId && <ExternalLink href={cloudUrl.orgPolicies(projectId)}>Open Organization policies</ExternalLink>}
+              <Button size="sm" onClick={() => void provision()} disabled={provisioning}>
+                <RefreshCwIcon /> Try again
+              </Button>
+            </div>
             <p className="text-xs">Creating the project outside your organization also avoids it, but then the app can't be Internal.</p>
           </Panel>
         )}
@@ -285,7 +303,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
             {provisioning ? <Spinner /> : <RadioTowerIcon />} {active ? (switching_ ? `Switch to ${principal?.email ?? "this account"}` : "Set up again") : "Set up real-time automatically"}
           </Button>
         )}
-        {provisionError !== undefined && code !== "pubsub_scope_required" && code !== "pubsub_permission_denied" && (
+        {provisionError !== undefined && code !== "pubsub_scope_required" && code !== "pubsub_permission_denied" && code !== "pubsub_org_policy" && (
           <Button variant="outline" onClick={() => void provision()} disabled={provisioning}>
             <RefreshCwIcon /> Try again
           </Button>

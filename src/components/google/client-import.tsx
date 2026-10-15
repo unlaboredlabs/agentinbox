@@ -58,6 +58,8 @@ export function ClientImport({
       onImported?.(r);
     } catch (err) {
       setError(err);
+      // Don't leave the secret on screen; the error says what to fix, and pasting again is one step.
+      setText("");
     } finally {
       setPending(false);
       // Announce and show the outcome where the user is looking.
@@ -130,9 +132,9 @@ export function ClientImport({
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
             const pasted = e.clipboardData.getData("text");
+            // Submit straight away without putting the file (and its secret) on screen.
             if (pasted.trim().startsWith("{")) {
               e.preventDefault();
-              setText(pasted);
               void submit(pasted);
             }
           }}

@@ -22,7 +22,11 @@ interface ConnectRequest {
   /** Extra Google access to request incrementally, e.g. ["pubsub"] for provisioning. */
   scopes?: string[];
   /** Called once the account is connected (e.g. to retry what needed the extra access). */
-  onDone?: () => void;
+  /**
+   * `confirmed`: Google's callback (or the pasted address) reported success. False when the user only
+   * clicked "I'm done, check again", so the caller re-checks without assuming anything was granted.
+   */
+  onDone?: (confirmed: boolean) => void;
 }
 
 type Phase =
@@ -73,10 +77,10 @@ export function ConnectAccountHost() {
   const reqRef = useRef<ConnectRequest>({});
   /** Reconnecting an account that was in needs_reauth: only then does "active again" prove the new sign-in landed. */
   const reauthFromBroken = useRef(false);
-  const finish = (email: string) => {
+  const finish = (email: string, confirmed = true) => {
     const done = reqRef.current.onDone;
     reqRef.current = { ...reqRef.current, onDone: undefined };
-    if (done) setTimeout(done, 0);
+    if (done) setTimeout(() => done(confirmed), 0);
     setPhase((p) => {
       if (p?.kind === "waiting") p.popup?.close();
       return { kind: "done", email };
@@ -190,7 +194,7 @@ export function ConnectAccountHost() {
     setCheckNote(null);
     // Extra access (Pub/Sub): the retry it was asked for is the real check, and it says if the box wasn't ticked.
     if (req.scopes?.length) {
-      finish(req.email ?? "Your account");
+      finish(req.email ?? "Your account", false);
       return;
     }
     const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
