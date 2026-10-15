@@ -58,6 +58,16 @@ describe("agentinbox CLI (subprocess)", () => {
     expect(recipe.output().trim()).toContain(`--mcp-config '${join(xdg.XDG_CONFIG_HOME!, "agentinbox", "mcp", "default.claude.json")}'`);
   }, 30_000);
 
+  it("--print-recipe validates the profile name before putting it into a command", async () => {
+    const bad = cli(["listen", "--print-recipe", "hermes", "--profile", "x$(touch /tmp/aib-recipe-pwn)"], xdg);
+    expect(await bad.exit).toBe(1);
+    expect(bad.output()).toContain("Invalid profile name");
+    expect(bad.output()).not.toContain("hermes chat");
+    const ok = cli(["listen", "--print-recipe", "hermes", "--profile", "work"], xdg);
+    expect(await ok.exit).toBe(0);
+    expect(ok.output()).toContain("-t mcp-agentinbox-work --query-file -");
+  }, 30_000);
+
   it("listen exits 78 when access is revoked, so services don't restart-loop", async () => {
     saveProfile("default", { url: api.url, apiKey: FAKE_KEY, agentId: "agt_1", agentName: "t", consumer: "c", exec: "cat > /dev/null" });
     const run = cli(["listen"], xdg);
