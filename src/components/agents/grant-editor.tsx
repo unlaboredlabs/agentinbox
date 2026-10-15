@@ -232,7 +232,12 @@ export function GrantFieldsForm({
           <FieldLabel>Changes to events</FieldLabel>
           <CalendarWriteControl value={calendarWriteChoice(value)} onChange={(choice) => set(withCalendarWriteChoice(value, choice))} />
           {calendarWrite && !calendarRead && (
-            <FieldDescription className="text-warning">Without reading calendars, the agent can't look up the events it would change or answer.</FieldDescription>
+            <FieldDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-warning">
+              <span>Without Calendar: read, writes only let the agent create events. Changing, deleting or answering existing ones needs read too.</span>
+              <Button type="button" variant="outline" size="xs" onClick={() => toggleCap("calendar.read", true)}>
+                Turn on read
+              </Button>
+            </FieldDescription>
           )}
         </Field>
         <Field data-disabled={!calendar}>
@@ -274,7 +279,7 @@ export function GrantFieldsForm({
             <FieldLabel htmlFor={id("reply")}>Replies only</FieldLabel>
             <FieldDescription>
               Only allow replying inside threads the agent can already see; no new conversations.
-              {calendarWrite && " Calendar changes can't invite new guests either."}
+              {calendarWrite && " It can't add guests to calendar events either."}
             </FieldDescription>
           </div>
         </Field>

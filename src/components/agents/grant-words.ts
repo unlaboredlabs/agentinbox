@@ -28,7 +28,8 @@ export function mailInWords(g: { capabilities: Capability[]; sendMode: SendMode 
 
 /**
  * The calendar part alone, null without a calendar capability: "Can read every calendar; can't change
- * events", "Can read 2 calendars; writes need your approval", "Can read and change 1 calendar".
+ * events", "Can read 2 calendars; writes need your approval", "Can read and change 1 calendar". Write
+ * without read only creates events.
  */
 export function calendarInWords(g: { capabilities: Capability[] } & Partial<Pick<Grant, "calendarScope" | "calendarWriteMode">>): string | null {
   const read = g.capabilities.includes("calendar.read");
@@ -38,6 +39,7 @@ export function calendarInWords(g: { capabilities: Capability[] } & Partial<Pick
   const which = n === undefined ? "every calendar" : `${n} calendar${n === 1 ? "" : "s"}`;
   const approval = (g.calendarWriteMode ?? "approval") === "approval";
   if (!write) return `Can read ${which}; can't change events`;
-  if (!read) return approval ? `Can write to ${which} once you approve; can't read events` : `Can write to ${which}; can't read events`;
+  // Changing, deleting or answering an existing event needs calendar.read too (server/calendar/agent.ts).
+  if (!read) return `Can create events on ${which}${approval ? " once you approve" : ""}; can't read or change existing ones`;
   return approval ? `Can read ${which}; writes need your approval` : `Can read and change ${which}`;
 }

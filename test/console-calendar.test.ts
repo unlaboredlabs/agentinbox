@@ -191,8 +191,12 @@ describe("grants in words", () => {
       "Can read 2 calendars; writes need your approval",
     );
     expect(calendarInWords({ capabilities: ["calendar.read", "calendar.write"], calendarScope: ["a"], calendarWriteMode: "direct" })).toBe("Can read and change 1 calendar");
+    // Write without read only creates: changing, deleting and answering need read too.
     expect(calendarInWords({ capabilities: ["calendar.write"], calendarScope: null, calendarWriteMode: "approval" })).toBe(
-      "Can write to every calendar once you approve; can't read events",
+      "Can create events on every calendar once you approve; can't read or change existing ones",
+    );
+    expect(calendarInWords({ capabilities: ["calendar.write"], calendarScope: ["a", "b"], calendarWriteMode: "direct" })).toBe(
+      "Can create events on 2 calendars; can't read or change existing ones",
     );
   });
 
