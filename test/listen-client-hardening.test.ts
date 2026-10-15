@@ -4,7 +4,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { swapDir } from "../server/service.ts";
+import { type ServiceOps, swapIn } from "../server/service.ts";
+import { installListenService } from "../server/listen/service.ts";
+import { listenAppDir } from "../server/listen/paths.ts";
 import { replayDead } from "../server/listen/admin.ts";
 import { openConnectLog, runConnect } from "../server/listen/connect.ts";
 import { commandInput, eventEnv } from "../server/listen/event.ts";
@@ -149,20 +151,68 @@ describe("one listener per profile", () => {
 });
 
 describe("service reinstall", () => {
-  it("swaps the new install in only after it succeeded", () => {
+  it("swapIn moves a staged install in, restores or commits", () => {
     const root = mkdtempSync(join(tmpdir(), "aib-swap-"));
     const app = join(root, "app");
     mkdirSync(app);
     writeFileSync(join(app, "v"), "1");
     mkdirSync(`${app}.new`);
     writeFileSync(join(`${app}.new`, "v"), "2");
-    swapDir(`${app}.new`, app);
+    const swap = swapIn(`${app}.new`, app);
     expect(readFileSync(join(app, "v"), "utf8")).toBe("2");
-    expect(existsSync(`${app}.new`)).toBe(false);
-    expect(existsSync(`${app}.old`)).toBe(false);
-    // A missing new dir (failed install) leaves the current one in place.
-    expect(() => swapDir(`${app}.new`, app)).toThrow();
-    expect(readFileSync(join(app, "v"), "utf8")).toBe("2");
+    swap.restore();
+    expect(readFileSync(join(app, "v"), "utf8")).toBe("1");
+    // A failed move (nothing staged) leaves the current install in place.
+    expect(() => swapIn(`${app}.new`, app)).toThrow();
+    expect(readFileSync(join(app, "v"), "utf8")).toBe("1");
+  });
+
+  function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean): ServiceOps & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      capture: () => "",
+      calls,
+      platform: "linux",
+      root: false,
+      uid: 1000,
+      user: "me",
+      exec(cmd, args) {
+        calls.push(`${cmd} ${args.join(" ")}`);
+        if (failOn?.(cmd, args)) throw new Error(`Command failed: ${cmd} ${args.join(" ")}`);
+      },
+      stage(dataDir) {
+        const staging = join(dataDir, "app.new");
+        mkdirSync(join(staging, "node_modules/agentinbox-cli/dist"), { recursive: true });
+        writeFileSync(join(staging, "node_modules/agentinbox-cli/dist/cli.js"), `// ${calls.length}\n`);
+        return staging;
+      },
+      unitDir: () => join(dir, "units"),
+      waitReady: async () => true,
+    };
+  }
+
+  it("installs through the daemon's machinery and rolls back to the previous install when the listener doesn't start", async () => {
+    saveProfile("default", baseProfile());
+    const ops = fakeOps(env.root);
+    await installListenService({}, { ops, waitStarted: async () => true });
+    const unit = join(env.root, "units", "agentinbox-listen-default.service");
+    const first = readFileSync(unit, "utf8");
+    expect(first).toContain(`${listenAppDir()}/node_modules/agentinbox-cli/dist/cli.js" listen --profile default`);
+    expect(first).not.toContain("network-online"); // user unit
+    expect(ops.calls).toEqual(expect.arrayContaining(["systemctl --user daemon-reload", "systemctl --user restart agentinbox-listen-default", "loginctl enable-linger me"]));
+    const firstEntry = readFileSync(join(listenAppDir(), "node_modules/agentinbox-cli/dist/cli.js"), "utf8");
+
+    // Re-install with a new --exec, but the new listener never comes up: everything goes back.
+    await expect(installListenService({ exec: "false" }, { ops, waitStarted: async () => false })).rejects.toThrow(/Rolled back to the previous install/);
+    expect(readFileSync(unit, "utf8")).toBe(first);
+    expect(readFileSync(join(listenAppDir(), "node_modules/agentinbox-cli/dist/cli.js"), "utf8")).toBe(firstEntry);
+    expect(existsSync(`${listenAppDir()}.old`)).toBe(false);
+    expect(loadProfile().exec).toBe("cat > /dev/null");
+
+    // systemd unreachable: nothing is touched.
+    const broken = fakeOps(env.root, (cmd, args) => cmd === "systemctl" && args.includes("daemon-reload"));
+    await expect(installListenService({}, { ops: broken, waitStarted: async () => true })).rejects.toThrow(/Can't talk to systemd/);
+    expect(readFileSync(unit, "utf8")).toBe(first);
   });
 });
 

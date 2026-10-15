@@ -6,7 +6,7 @@ import { join } from "node:path";
  * macOS alike, so one set of paths works everywhere:
  *   config  $XDG_CONFIG_HOME/agentinbox  (~/.config/agentinbox)       profiles/<name>.json (0600)
  *   state   $XDG_STATE_HOME/agentinbox   (~/.local/state/agentinbox)  listen/<name>/{listen.log,dead.jsonl,status.json}
- *   data    $XDG_DATA_HOME/agentinbox    (~/.local/share/agentinbox)  listen-app/ (stable install the services run)
+ *   data    $XDG_DATA_HOME/agentinbox    (~/.local/share/agentinbox)  app/ (stable install the services run)
  */
 
 const xdg = (envVar: string, fallback: string) => {
@@ -27,7 +27,8 @@ export const deadPath = (name: string) => join(profileStateDir(name), "dead.json
 export const statusPath = (name: string) => join(profileStateDir(name), "status.json");
 /** Default working directory for --exec commands: private (0700), so no planted CLAUDE.md, .mcp.json or hooks apply. */
 export const workDir = (name: string) => join(profileStateDir(name), "work");
-export const listenAppDir = () => join(dataDir(), "listen-app");
+/** The listeners' stable install (shared by all profiles), staged and swapped like the daemon's `<data>/app`. */
+export const listenAppDir = () => join(dataDir(), "app");
 
 export const DEFAULT_PROFILE = "default";
 const PROFILE_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;

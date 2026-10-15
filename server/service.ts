@@ -50,7 +50,7 @@ function plainEnv(spec: ServiceSpec): Record<string, string> {
 }
 
 /** systemd word quoting for ExecStart/Environment: double quotes, escaped backslashes, quotes and specifiers. */
-const sdQuote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
+export const sdQuote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
 
 /**
  * The systemd unit. Everything from service.env (including AGENTINBOX_MASTER_KEY) is loaded with
@@ -80,8 +80,11 @@ WantedBy=${spec.system ? "multi-user.target" : "default.target"}
 }
 
 /** The launchd plist. Written with mode 0600, since it may carry AGENTINBOX_MASTER_KEY. */
+/** Escapes text for a plist <string>. */
+export const xmlEscape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 export function renderLaunchdPlist(spec: ServiceSpec): string {
-  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const esc = xmlEscape;
   const vars = Object.entries({ ...plainEnv(spec), ...spec.extraEnv })
     .map(([k, v]) => `    <key>${esc(k)}</key><string>${esc(v)}</string>`)
     .join("\n");
@@ -169,17 +172,16 @@ function writeServiceEnv(dataDir: string, env: Record<string, string>): void {
 }
 
 /**
- * Installs the package into `<data>/app.new`, so a failed npm install leaves the current service
- * untouched. From an installed package that is the latest release; from a source checkout, the
- * local build. Returns the staging directory.
+ * Installs the package into `staging` (a fresh private npm prefix), so a failed npm install leaves the
+ * current install untouched. From an installed package that is the latest release; from a source
+ * checkout, the local build. Returns `staging`. The one install path for the daemon and the listeners.
  */
-function stageApp(dataDir: string): string {
-  const staging = join(dataDir, "app.new");
+export function stagePackage(staging: string, opts: { where: string; requireWeb: boolean }): string {
   const fromSource = basename(dirname(ROOT)) !== "node_modules";
   let spec = `${PACKAGE}@latest`;
   let tmp: string | undefined;
   if (fromSource) {
-    if (!existsSync(join(ROOT, "dist/cli.js")) || !existsSync(join(ROOT, "dist/web/index.html"))) {
+    if (!existsSync(join(ROOT, "dist/cli.js")) || (opts.requireWeb && !existsSync(join(ROOT, "dist/web/index.html")))) {
       throw new Error("Run `pnpm build` before installing the service from a source checkout.");
     }
     tmp = mkdtempSync(join(tmpdir(), "agentinbox-pack-"));
@@ -187,13 +189,13 @@ function stageApp(dataDir: string): string {
     spec = join(tmp, out.trim().split("\n").pop()!);
   }
 
-  console.log(fromSource ? "  Installing this build into the data directory…" : "  Installing the latest release into the data directory…");
+  console.log(fromSource ? `  Installing this build into ${opts.where}…` : `  Installing the latest release into ${opts.where}…`);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   writeFileSync(join(staging, "package.json"), '{ "private": true }\n');
   try {
     execFileSync(npm, ["install", spec, "--omit=dev", "--prefer-online", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: staging, stdio: "inherit" });
-    if (!existsSync(join(staging, "node_modules", PACKAGE, "dist/cli.js"))) throw new Error("the installed package has no dist/cli.js");
+    if (!existsSync(installedEntry(staging))) throw new Error("the installed package has no dist/cli.js");
   } catch (err) {
     rmSync(staging, { recursive: true, force: true });
     throw new Error(`Installing agentinbox failed, so the existing service was left as it was. ${err instanceof Error ? err.message : ""}`.trim());
@@ -201,6 +203,45 @@ function stageApp(dataDir: string): string {
     if (tmp) rmSync(tmp, { recursive: true, force: true });
   }
   return staging;
+}
+
+/** The CLI entry inside an install made by stagePackage. */
+export const installedEntry = (app: string) => join(app, "node_modules", PACKAGE, "dist/cli.js");
+
+/** Installs into `<dir>/app.new` (see stagePackage). Returns the staging directory. */
+export const stageApp = (dir: string): string => stagePackage(join(dir, "app.new"), { where: "the data directory", requireWeb: true });
+
+/**
+ * Moves a staged install into place as `app` (the current one becomes `app.old`). `restore()` puts
+ * the previous install back; `commit()` deletes it. If the move itself fails, nothing changes.
+ */
+export function swapIn(staging: string, app: string): { restore(): void; commit(): void } {
+  const old = `${app}.old`;
+  rmSync(old, { recursive: true, force: true });
+  if (existsSync(app)) renameSync(app, old);
+  try {
+    renameSync(staging, app);
+  } catch (err) {
+    if (existsSync(old)) renameSync(old, app);
+    throw err;
+  }
+  return {
+    restore() {
+      rmSync(app, { recursive: true, force: true });
+      if (existsSync(old)) renameSync(old, app);
+    },
+    commit() {
+      rmSync(old, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Deletes `<dir>/app`, `app.new` and `app.old`, but only where they really are our own installs. */
+export function removeOwnInstall(dir: string): void {
+  for (const name of ["app", "app.new", "app.old"]) {
+    const path = join(dir, name);
+    if (existsSync(join(path, "node_modules", PACKAGE))) rmSync(path, { recursive: true, force: true });
+  }
 }
 
 // ───────────── System integration (injectable for tests) ─────────────
@@ -259,10 +300,10 @@ export function userManagerConfigHome(ops: Pick<ServiceOps, "capture">): string 
 }
 
 const unitFile = (ops: ServiceOps) => join(ops.unitDir(), ops.platform === "darwin" ? `${LAUNCHD_LABEL}.plist` : `${SERVICE_NAME}.service`);
-const systemctl = (ops: ServiceOps, ...args: string[]) => ops.exec("systemctl", ops.root ? args : ["--user", ...args]);
-const launchdTarget = (ops: ServiceOps) => `gui/${ops.uid}`;
+export const systemctl = (ops: ServiceOps, ...args: string[]) => ops.exec("systemctl", ops.root ? args : ["--user", ...args]);
+export const launchdTarget = (ops: ServiceOps) => `gui/${ops.uid}`;
 
-function assertSupported(ops: ServiceOps): void {
+export function assertSupported(ops: ServiceOps): void {
   if (ops.platform !== "linux" && ops.platform !== "darwin") {
     throw new Error(
       `Service install supports Linux (systemd) and macOS (launchd). Elsewhere, install the command (\`npm i -g ${PACKAGE}\`) and run \`agentinbox start\` under your own supervisor.`,
@@ -270,7 +311,7 @@ function assertSupported(ops: ServiceOps): void {
   }
 }
 
-const readText = (file: string) => {
+export const readText = (file: string) => {
   try {
     return readFileSync(file, "utf8");
   } catch {
@@ -298,7 +339,7 @@ export function serviceHints(ops: ServiceOps, env: NodeJS.ProcessEnv = process.e
 const firstLine = (err: unknown) => (err instanceof Error ? err.message : String(err)).split("\n")[0];
 
 /** Fails before anything is touched when systemd can't be reached (e.g. no user bus over su). */
-function preflight(ops: ServiceOps): void {
+export function preflight(ops: ServiceOps): void {
   if (ops.platform !== "linux") return;
   try {
     systemctl(ops, "daemon-reload");
@@ -325,17 +366,13 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
   const previousUnit = readText(file);
   const previousEnv = readText(serviceEnvPath(config.dataDir));
   const app = join(config.dataDir, "app");
-  const old = join(config.dataDir, "app.old");
-  const entry = join(app, "node_modules", PACKAGE, "dist/cli.js");
+  const entry = installedEntry(app);
   const spec: ServiceSpec = { execPath: process.execPath, entry, dataDir: config.dataDir, port: config.port, host: config.host, extraEnv, system: ops.root };
-  let swapped = false;
+  let swap: ReturnType<typeof swapIn> | null = null;
 
   try {
     uninstallService(config, ops, { quiet: true, keepApp: true });
-    rmSync(old, { recursive: true, force: true });
-    if (existsSync(app)) renameSync(app, old);
-    renameSync(staging, app);
-    swapped = true;
+    swap = swapIn(staging, app);
     writeServiceEnv(config.dataDir, extraEnv);
     mkdirSync(ops.unitDir(), { recursive: true });
     if (ops.platform === "linux") {
@@ -355,7 +392,7 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
       `Starting the service failed (${firstLine(err)}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
     );
   }
-  rmSync(old, { recursive: true, force: true });
+  swap!.commit();
 
   function rollback(): void {
     const quietly = (fn: () => void) => {
@@ -369,12 +406,7 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
     quietly(() => rmSync(file, { force: true }));
     if (ops.platform === "linux") quietly(() => systemctl(ops, "daemon-reload"));
     quietly(() => rmSync(staging, { recursive: true, force: true }));
-    if (swapped) {
-      quietly(() => {
-        rmSync(app, { recursive: true, force: true });
-        if (existsSync(old)) renameSync(old, app);
-      });
-    }
+    if (swap) quietly(() => swap!.restore());
     quietly(() => (previousEnv === null ? rmSync(serviceEnvPath(config.dataDir), { force: true }) : writeFileSync(serviceEnvPath(config.dataDir), previousEnv, { mode: 0o600 })));
     if (previousUnit !== null) {
       quietly(() => {
@@ -389,14 +421,7 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
     }
   }
 
-  if (ops.platform === "linux" && !ops.root) {
-    // Keep user services running after logout and start them at boot.
-    try {
-      ops.exec("loginctl", ["enable-linger", ops.user], { quiet: true });
-    } catch {
-      console.warn(`  Could not enable lingering. Run \`sudo loginctl enable-linger ${ops.user}\` so the service starts at boot.`);
-    }
-  }
+  enableLinger(ops);
 
   const kept = Object.keys(extraEnv).filter((k) => !(k in process.env));
   console.log(`\n  Installed ${SERVICE_NAME} as a ${ops.platform === "linux" ? "systemd" : "launchd"} service.`);
@@ -405,6 +430,16 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
   );
   if (kept.length) console.log(`  Kept ${kept.join(", ")} from the previous install.`);
   printLinks(config);
+}
+
+/** Keeps user services running after logout and starts them at boot (systemd user units only). */
+export function enableLinger(ops: ServiceOps): void {
+  if (ops.platform !== "linux" || ops.root) return;
+  try {
+    ops.exec("loginctl", ["enable-linger", ops.user], { quiet: true });
+  } catch {
+    console.warn(`  Could not enable lingering. Run \`sudo loginctl enable-linger ${ops.user}\` so the service starts at boot.`);
+  }
 }
 
 /** AGENTINBOX_DATA from an installed unit or plist. */
@@ -451,13 +486,8 @@ export function uninstallService(
     }
     if (!opts.quiet) console.log(`Removed the ${SERVICE_NAME} service. Your data in ${dataDir} was kept.`);
   }
-  if (!opts.keepApp) {
-    // The service's own install; the data (database, keys) stays.
-    for (const dir of ["app", "app.new", "app.old"]) {
-      const path = join(dataDir, dir);
-      if (existsSync(join(path, "node_modules", PACKAGE))) rmSync(path, { recursive: true, force: true });
-    }
-  }
+  // The service's own install; the data (database, keys) stays.
+  if (!opts.keepApp) removeOwnInstall(dataDir);
 }
 
 export function serviceStatus(ops: ServiceOps = systemOps()): void {

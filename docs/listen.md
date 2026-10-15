@@ -225,11 +225,17 @@ agentinbox listen service uninstall [--profile <name>]                 # keeps t
 - **macOS**: a launchd agent labelled `com.unlaboredlabs.agentinbox.listen.<profile>`. It uses
   `KeepAlive { SuccessfulExit = false }`. Output goes to the rotated `listen.log`; only crashes reach
   `service-stderr.log` in the state directory.
-- The service runs from a **stable install** at `~/.local/share/agentinbox/listen-app`, not the npx cache. It runs
-  `agentinbox-cli@latest` there; from a source checkout, it runs the local build. The new version is installed next to
-  the current one and swapped in only after it succeeded, so a failed update (offline, registry down) leaves the
-  running listener alone. Re-running `install` updates it, restarts this profile's listener, and restarts the other
-  profiles' listeners onto the new install.
+- The service runs from a **stable install** at `~/.local/share/agentinbox/app` (shared by all profiles), not the npx
+  cache. It runs `agentinbox-cli@latest` there; from a source checkout, it runs the local build. Installation uses the
+  daemon's own service machinery:
+  - It checks first that systemd is reachable; if not, nothing is changed.
+  - It stages the new version in `app.new` and swaps it in.
+  - It writes the unit where the user manager looks for it.
+  - It waits for the listener to start. If the listener doesn't start, the previous install, unit and settings are
+    restored.
+
+  Re-running `install` updates the install, restarts this profile's listener, and restarts the other profiles'
+  listeners onto it. `uninstall` removes the shared install once no listener service is left.
 - The unit only says `listen --profile <name>`. The key stays in the 0600 profile file. The unit's `PATH` is your
   shell's `PATH` with npx and version-manager shims removed, so `claude`, `codex` and `hermes` resolve as they do in
   your terminal.
@@ -289,7 +295,7 @@ agentinbox listen service uninstall [--profile <name>]                 # keeps t
 | Default command working directory | `…/listen/<name>/work` (0700) |
 | Claude Code MCP config for the recipe (no key) | `$XDG_CONFIG_HOME/agentinbox/mcp/<name>.claude.json` |
 | Header helper for Claude Code | `$XDG_CONFIG_HOME/agentinbox/bin/mcp-header.mjs` |
-| Service install | `$XDG_DATA_HOME/agentinbox/listen-app` (default `~/.local/share/…`) |
+| Service install | `$XDG_DATA_HOME/agentinbox/app` (default `~/.local/share/…`) |
 
 The same paths are used on macOS.
 
