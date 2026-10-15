@@ -20,7 +20,7 @@ export function AccountsAttention({ accounts }: { accounts: Account[] }) {
         <ul className="divide-y">
           {broken.map((a) => (
             <li key={a.id} className="flex flex-wrap items-center gap-3 py-2">
-              <div className="min-w-0 flex-1">
+              <div className="min-w-56 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-sm font-medium">{a.email}</span>
                   <AccountStatusBadge status={a.status} />
@@ -53,7 +53,7 @@ export function ApprovalsCallout({ approvals }: { approvals: Approval[] }) {
         <span className="flex size-9 items-center justify-center rounded-lg bg-warning/20">
           <StampIcon className="size-4" />
         </span>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-48 flex-1">
           <div className="font-medium">
             {approvals.length === 1 ? "1 message is waiting for your approval" : `${approvals.length} messages are waiting for your approval`}
           </div>
@@ -82,7 +82,7 @@ export function PairingCallout({ pairings }: { pairings: PairingRequest[] }) {
         <span className="flex size-9 items-center justify-center rounded-lg bg-warning/20">
           <KeyRoundIcon className="size-4" />
         </span>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-48 flex-1">
           <div className="font-medium">
             {waiting.length === 1 ? "An agent is asking for access" : `${waiting.length} agents are asking for access`}
           </div>

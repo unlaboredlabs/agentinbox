@@ -19,6 +19,7 @@ const PROVISION_STEPS = ["Creating the Pub/Sub topic", "Letting Gmail publish to
 export function PubsubPanel({ compact }: { compact?: boolean }) {
   const qc = useQueryClient();
   const state = useQuery(queries.setupState());
+  const accountList = useQuery(queries.accounts());
   const settings = useQuery(queries.settings());
   const [provisioning, setProvisioning] = useState(false);
   const [provisionError, setProvisionError] = useState<unknown>();
@@ -79,6 +80,18 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
     provisionError instanceof ApiError &&
     (provisionError.code === "pubsub_scope_required" || /access to (cloud )?pub\/?sub|pub\/?sub (access|scope|permission)/i.test(`${provisionError.message} ${provisionError.hint ?? ""}`));
 
+  // The account agentinbox provisions with: named in the server's error, else the first connected one.
+  const principal = (() => {
+    const list = accountList.data ?? [];
+    const text = provisionError instanceof ApiError ? `${provisionError.message} ${provisionError.hint ?? ""}` : "";
+    const named = text.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g)?.map((e) => e.toLowerCase()) ?? [];
+    return (
+      list.find((a) => named.includes(a.email.toLowerCase())) ??
+      [...list].filter((a) => a.status !== "paused").sort((x, y) => x.createdAt.localeCompare(y.createdAt))[0]
+    );
+  })();
+  const projectId = state.data?.gcpProjectId;
+
   if (state.isPending) return <Skeleton className="h-32 rounded-xl" />;
   const p = state.data?.pubsub;
   const accounts = state.data?.accountsConnected ?? 0;
@@ -127,13 +140,18 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
             <div className="space-y-1">
               <div className="font-medium">One more permission: Pub/Sub</div>
               <p className="text-muted-foreground">
-                Connecting Gmail only asks for mail access. To create the topic and subscription, agentinbox needs Pub/Sub access too, granted once
-                by an account that can manage the Google Cloud project.
+                Connecting Gmail only asks for mail access. To create the topic and subscription, agentinbox also needs Pub/Sub access from{" "}
+                {principal ? <span className="font-medium text-foreground">{principal.email}</span> : "the account it provisions with"}, which must be
+                an Owner or Pub/Sub Admin of {projectId ? <span className="font-mono text-foreground">{projectId}</span> : "the Google Cloud project"}.
+              </p>
+              <p className="text-muted-foreground">
+                Not the project owner? Ask the owner to grant this account the Pub/Sub Admin role in Google Cloud (IAM), or connect the owner's
+                Gmail account first so agentinbox provisions with it.
               </p>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => connectAccount({ scopes: ["pubsub"], onDone: () => void provision() })}>
+            <Button size="sm" onClick={() => connectAccount({ scopes: ["pubsub"], reauthAccountId: principal?.id, email: principal?.email, onDone: () => void provision() })}>
               <KeyRoundIcon /> Grant Pub/Sub access
             </Button>
             <Button size="sm" variant="outline" onClick={provision} disabled={provisioning}>

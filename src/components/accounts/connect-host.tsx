@@ -75,6 +75,7 @@ export function ConnectAccountHost() {
   const known = useRef<Set<string>>(new Set());
 
   const reqRef = useRef<ConnectRequest>({});
+  const reauthWasActive = useRef(false);
   const finish = (email: string) => {
     const done = reqRef.current.onDone;
     reqRef.current = { ...reqRef.current, onDone: undefined };
@@ -116,6 +117,8 @@ export function ConnectAccountHost() {
     }
     const accounts = qc.getQueryData<Account[]>(keys.accounts) ?? (await qc.fetchQuery(queries.accounts()).catch(() => []));
     known.current = new Set(accounts.map((a) => a.id));
+    // Reconnecting an account that is still active: its routine updates on the stream prove nothing.
+    reauthWasActive.current = !!r.reauthAccountId && accounts.some((a) => a.id === r.reauthAccountId && a.status === "active");
     try {
       const res = await api<ConnectAccountResponse>("/api/accounts/connect", {
         body: { ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}), ...(r.scopes?.length ? { scopes: r.scopes } : {}) },
@@ -163,7 +166,7 @@ export function ConnectAccountHost() {
     if (m.kind !== "account" || (phase?.kind !== "waiting" && phase?.kind !== "starting")) return;
     const a = m.data;
     const reauth = req.reauthAccountId;
-    if (reauth ? a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
+    if (reauth ? !reauthWasActive.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
   });
 
   // Notice when the popup goes away. Google's pages can sever window.opener, which also makes
@@ -201,13 +204,13 @@ export function ConnectAccountHost() {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {req.scopes?.includes("pubsub") ? "Grant Pub/Sub access" : reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}
+            {req.scopes?.includes("pubsub") ? `Grant Pub/Sub access${req.email ? ` for ${req.email}` : ""}` : reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}
           </DialogTitle>
           <DialogDescription>
             {phase?.kind === "waiting" && phase.res.callbackMode === "paste"
               ? "Sign in with Google in a new tab, then paste back the address you land on."
               : req.scopes?.includes("pubsub")
-                ? "Sign in with the Google account that owns the Cloud project and allow Pub/Sub access. agentinbox uses it only to create and read its own topic and subscription."
+                ? `Sign in as ${req.email ?? "the account agentinbox provisions Pub/Sub with"} (another account won't work) and allow Pub/Sub access. It must be an Owner or Pub/Sub Admin of ${client.data?.projectId ?? "the Google Cloud project"}. agentinbox only uses it for its own topic and subscription.`
                 : "Sign in with Google and allow agentinbox to manage the mailbox."}
           </DialogDescription>
         </DialogHeader>
