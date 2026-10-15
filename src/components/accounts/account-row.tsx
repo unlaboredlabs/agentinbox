@@ -1,8 +1,9 @@
 import type { Account } from "@shared/types";
-import { AlertTriangleIcon, BotIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { AlertTriangleIcon, BotIcon, CalendarPlusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { TimeAgo } from "@/components/common";
+import { SCOPES } from "@/lib/gcp-project";
 import { queries } from "@/lib/queries";
 import { useNow } from "@/hooks/use-now";
 import { confirm } from "@/components/confirm";
@@ -14,7 +15,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { AccountAvatar, AccountStatusBadge } from "./account-status";
+import { type AccountCalendarView, accountCalendarView } from "@/components/google/calendar-flow";
+import { addCalendarTo, openCalendarSetup } from "@/components/google/calendar-setup";
+import { AccountAvatar, AccountStatusBadge, CalendarBadge } from "./account-status";
 import { connectAccount } from "./connect-host";
 import { useAccountActions } from "./use-account-actions";
 
@@ -27,6 +30,8 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
   const agents = useQuery(queries.agents());
   const users = (agents.data ?? []).filter((ag) => ag.grants.some((g) => g.accountId === a.id));
   const healthy = a.status === "active";
+  const calendar = useCalendarView(a);
+  const addCalendar = () => addCalendarTo(a);
 
   const askRemove = () =>
     confirm({
@@ -50,6 +55,7 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="truncate font-medium">{a.email}</span>
             <AccountStatusBadge status={a.status} />
+            {calendar && <CalendarBadge view={calendar} />}
           </div>
           <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
             {a.displayName && <span className="truncate">{a.displayName}</span>}
@@ -85,6 +91,12 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
               )}
             </div>
           )}
+          {calendar?.tone === "bad" && (
+            <p className="mt-2 flex max-w-3xl items-start gap-1.5 rounded-md bg-critical/[0.06] px-2.5 py-1.5 text-xs text-foreground/90">
+              <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-critical" />
+              <span className="break-words">{calendar.description}</span>
+            </p>
+          )}
           {a.lastError && (
             <p className="mt-2 flex max-w-3xl items-start gap-1.5 rounded-md bg-critical/[0.06] px-2.5 py-1.5 text-xs text-foreground/90">
               <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-critical" />
@@ -97,6 +109,16 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
         {a.status === "needs_reauth" && (
           <Button size="sm" onClick={reconnect}>
             <UnplugIcon /> Reconnect
+          </Button>
+        )}
+        {calendar?.fix === "consent" && calendar.tone === "warn" && a.status !== "needs_reauth" && (
+          <Button size="sm" variant="outline" onClick={addCalendar}>
+            <CalendarPlusIcon /> Add Calendar
+          </Button>
+        )}
+        {calendar?.fix === "enable_api" && (
+          <Button size="sm" variant="outline" onClick={() => openCalendarSetup("api")}>
+            Turn on Calendar API
           </Button>
         )}
         {a.status === "paused" && (
@@ -114,6 +136,11 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
             <DropdownMenuItem onSelect={reconnect}>
               <UnplugIcon /> Reconnect
             </DropdownMenuItem>
+            {calendar?.fix === "consent" && (
+              <DropdownMenuItem onSelect={addCalendar}>
+                <CalendarPlusIcon /> Add Google Calendar
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem disabled={a.status === "paused"} onSelect={() => resync.mutate(a)}>
               <RefreshCwIcon /> Resync now
             </DropdownMenuItem>
@@ -135,4 +162,18 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
       </div>
     </div>
   );
+}
+
+/**
+ * The account's Calendar state: from the install's Calendar setup (which knows whether Calendar is
+ * wanted), else from the account alone. null while neither is known.
+ */
+function useCalendarView(a: Account): AccountCalendarView | null {
+  const setup = useQuery(queries.calendarSetup());
+  const entry = setup.data?.accounts.find((c) => c.accountId === a.id);
+  const enabled = setup.data?.enabled ?? false;
+  if (entry) return accountCalendarView({ ...entry, error: a.calendar?.error }, enabled);
+  if (!setup.isSuccess && !a.calendar) return null;
+  const c = a.calendar ?? { status: "not_granted" as const, missingScopes: [...SCOPES.calendar], error: null };
+  return accountCalendarView({ ...c, syncedCalendars: 0, push: false }, enabled);
 }

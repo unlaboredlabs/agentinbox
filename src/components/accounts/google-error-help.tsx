@@ -6,7 +6,7 @@ import { queries } from "@/lib/queries";
 
 /**
  * What to do about the errors Google shows on its own pages (they never reach agentinbox), plus the
- * unverified-app notice. Used in the connect dialog and on the wizard's Gmail step.
+ * unverified-app notice. Used in the connect dialog and on the wizard's accounts step.
  */
 export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
   const client = useQuery(queries.googleClient());
@@ -22,8 +22,9 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
           </Item>
         )}
         <Item title="A list of permissions with checkboxes">
-          Tick the Gmail box (or <strong className="text-foreground">Select all</strong>), then <strong className="text-foreground">Continue</strong>.
-          Without it agentinbox can't read mail.
+          Click <strong className="text-foreground">Select all</strong> (or tick each box), then <strong className="text-foreground">Continue</strong>.
+          Gmail is required: without it agentinbox can't read mail. Calendar's boxes are optional: unticked, mail still works and you can add
+          Calendar later.
         </Item>
         <Item title="“Error 400: redirect_uri_mismatch”">
           <p>The OAuth client doesn't list this exact redirect URI. Add it, save, wait a few minutes, then open sign-in again:</p>
@@ -56,7 +57,8 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
           A Google Workspace admin must trust the app: admin.google.com →{" "}
           <Path items={["Security", "Access and data control", "API controls", "Manage Third-Party App Access", "Configure new app"]} />, search for
           the client ID{v?.clientId ? <span className="font-mono break-all"> {v.clientId}</span> : ""}, and set it to{" "}
-          <strong className="text-foreground">Trusted</strong>.
+          <strong className="text-foreground">Trusted</strong>. If the admin blocks only Google Calendar, turn off “Also add Google Calendar” and
+          connect mail now.
         </Item>
         <Item title="“Error 401: invalid_client” or “deleted_client”">
           The client ID is wrong, or the client was deleted (Google deletes clients unused for 6 months). Create a new client and import it in step 4.

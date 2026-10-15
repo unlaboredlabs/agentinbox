@@ -48,7 +48,7 @@ export const STEP_META: Record<StepId, { title: string; short: string; optional?
   project: { title: "Create a Google Cloud project", short: "Google Cloud project" },
   consent: { title: "Set up the Google sign-in screen", short: "Sign-in screen" },
   client: { title: "Create the OAuth client", short: "OAuth client" },
-  accounts: { title: "Connect Gmail accounts", short: "Gmail accounts" },
+  accounts: { title: "Connect Google accounts", short: "Google accounts" },
   pubsub: { title: "Set up real-time delivery", short: "Real-time delivery", optional: true },
   agent: { title: "Connect your first agent", short: "First agent" },
   verify: { title: "Check that it works", short: "Check it works" },

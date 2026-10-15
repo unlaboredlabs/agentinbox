@@ -13,6 +13,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { CalendarSetupSummary } from "@/components/google/calendar-setup";
 import { RedirectNotice } from "@/components/google/redirect-notice";
 import { UrlVerdict } from "@/components/setup/step-url";
 import { api, toastError } from "@/lib/api";
@@ -23,6 +24,7 @@ interface FormValues {
   publicUrl: string;
   ingestMode: IngestMode;
   pollIntervalSeconds: string;
+  calendarPollSeconds: string;
   maxBodyChars: string;
   retentionDays: string;
   approvalTtlHours: string;
@@ -34,6 +36,7 @@ const toForm = (s: Settings): FormValues => ({
   publicUrl: s.publicUrl,
   ingestMode: s.ingestMode,
   pollIntervalSeconds: String(s.pollIntervalSeconds),
+  calendarPollSeconds: String(s.calendarPollSeconds),
   maxBodyChars: String(s.maxBodyChars),
   retentionDays: String(s.retentionDays),
   approvalTtlHours: String(s.approvalTtlHours),
@@ -41,11 +44,11 @@ const toForm = (s: Settings): FormValues => ({
   pairingEnabled: s.pairingEnabled,
 });
 
-// calendarPollSeconds: not on the form yet (calendar workstream E); PATCH leaves it unchanged.
-const fromForm = (v: FormValues): Omit<Settings, "calendarPollSeconds"> => ({
+const fromForm = (v: FormValues): Settings => ({
   publicUrl: v.publicUrl.trim().replace(/\/+$/, ""),
   ingestMode: v.ingestMode,
   pollIntervalSeconds: Number(v.pollIntervalSeconds),
+  calendarPollSeconds: Number(v.calendarPollSeconds),
   maxBodyChars: Number(v.maxBodyChars),
   retentionDays: Number(v.retentionDays),
   approvalTtlHours: Number(v.approvalTtlHours),
@@ -181,6 +184,28 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             <form.Field name="pollIntervalSeconds" validators={{ onChange: ({ value }) => intError("Poll interval", 5, 3600)(value) }}>
               {(field) => (
                 <NumberField field={field} label="Poll interval" unit="seconds" description="How often polling checks each account. Real-time mode also polls at this interval while Pub/Sub isn't set up or is failing; otherwise it re-checks every 5 minutes." />
+              )}
+            </form.Field>
+          </FieldGroup>
+        </CardContent>
+      </Card>
+
+      <Card id="calendar" className="scroll-mt-20">
+        <CardHeader>
+          <CardTitle>Google Calendar</CardTitle>
+          <CardDescription>Lets agents read calendars, find free time, schedule events and answer invitations, per their access.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <FieldGroup>
+            <CalendarSetupSummary />
+            <form.Field name="calendarPollSeconds" validators={{ onChange: ({ value }) => intError("Calendar poll interval", 15, 3600)(value) }}>
+              {(field) => (
+                <NumberField
+                  field={field}
+                  label="Calendar poll interval"
+                  unit="seconds"
+                  description="How often synced calendars are checked for changes and new invitations. Calendars with a verified Google push channel are re-checked every 15 minutes instead."
+                />
               )}
             </form.Field>
           </FieldGroup>

@@ -2,9 +2,11 @@
 // callback mode, agent transport rule), project IDs and the Cloud Shell command, the SSH tunnel
 // command, and where long commands may wrap.
 import { describe, expect, it } from "vitest";
+import { CALENDAR_API_SERVICE, enableCalendarApiUrl } from "../server/google/calendar.ts";
 import { callbackMode } from "../server/google/client.ts";
+import { CALENDAR_SCOPES, GMAIL_SCOPE, PUBSUB_SCOPE } from "../server/google/scopes.ts";
 import { checkTransport } from "../server/listen/transport.ts";
-import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
+import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem, SCOPES } from "../src/lib/gcp-project.ts";
 import { answerApplies, CHECK_NOTES, checkAgainStep, listMatch, streamUpdateConcerns } from "../src/components/accounts/connect-attempt.ts";
 import { GMAIL_WATCH_ERROR } from "../shared/types.ts";
 import { deliveryMode, intervalInWords } from "../src/lib/delivery.ts";
@@ -134,7 +136,7 @@ describe("project IDs", () => {
   it("builds the Cloud Shell command only for a valid ID", () => {
     expect(projectCommand("agentinbox-123456", false)).toBe(
       "gcloud projects create agentinbox-123456 --name=agentinbox && " +
-        "gcloud services enable gmail.googleapis.com --project=agentinbox-123456 && " +
+        "gcloud services enable gmail.googleapis.com calendar-json.googleapis.com --project=agentinbox-123456 && " +
         'echo "agentinbox: project agentinbox-123456 is ready"',
     );
     expect(projectCommand("agentinbox-123456", true)).toContain(
@@ -143,12 +145,28 @@ describe("project IDs", () => {
     for (const bad of ["", "x; rm -rf ~", "agentinbox-1 && curl evil", "$(id)", "My Project"]) expect(projectCommand(bad, false)).toBeNull();
   });
 
-  it("enables only Gmail in step 2 (Pub/Sub may need billing); step 6 links to enabling Pub/Sub", () => {
+  it("enables Gmail and Calendar but not Pub/Sub in step 2 (Pub/Sub may need billing); step 6 links to enabling Pub/Sub", () => {
     // Google may require billing to enable Pub/Sub: that would fail the required Gmail path.
     expect(projectCommand("agentinbox-123456", false)).not.toContain("pubsub");
     expect(projectCommand("agentinbox-123456", true)).not.toContain("pubsub");
     expect(cloudUrl.enableGmail("agentinbox-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=agentinbox-123456");
     expect(cloudUrl.enablePubsub("agentinbox-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=agentinbox-123456");
+  });
+
+  it("enables the Calendar API under its service name, matching the server's link and command", () => {
+    expect(projectCommand("agentinbox-123456", false)).toContain(`${CALENDAR_API_SERVICE} --project=agentinbox-123456`);
+    expect(cloudUrl.enableCalendar("agentinbox-123456")).toBe(enableCalendarApiUrl("agentinbox-123456"));
+    expect(cloudUrl.enableCalendar("agentinbox-123456")).toBe(
+      "https://console.cloud.google.com/flows/enableapi?apiid=calendar-json.googleapis.com&project=agentinbox-123456",
+    );
+  });
+});
+
+describe("scopes listed in the wizard", () => {
+  it("are the ones the server asks Google for", () => {
+    expect(SCOPES.gmail).toBe(GMAIL_SCOPE);
+    expect(SCOPES.pubsub).toBe(PUBSUB_SCOPE);
+    expect([...SCOPES.calendar]).toEqual([...CALENDAR_SCOPES]);
   });
 });
 
