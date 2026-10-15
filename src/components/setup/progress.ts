@@ -1,6 +1,7 @@
 import type { GoogleAppType, SetupState } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useSyncExternalStore } from "react";
+import { PROJECT_ID_RE } from "@/lib/gcp-project";
 import { queries } from "@/lib/queries";
 
 /**
@@ -100,13 +101,7 @@ export const STEP_META: Record<StepId, { title: string; short: string; optional?
   verify: { title: "Check that it works", short: "Check it works" },
 };
 
-export const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
-
-/** A fresh project ID suggestion: "agentinbox-" + 6 random digits (Google IDs are global, so make a clash unlikely). */
-export function generateProjectId(): string {
-  const n = crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000;
-  return `agentinbox-${String(n).padStart(6, "0")}`;
-}
+export { generateProjectId, PROJECT_ID_RE } from "@/lib/gcp-project";
 
 export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): Record<StepId, StepStatus> {
   const s = state;

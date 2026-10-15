@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangleIcon, CheckCircle2Icon, InfoIcon, LaptopIcon, NetworkIcon, ServerIcon, ShieldIcon, XCircleIcon } from "lucide-react";
 import { useState } from "react";
 import { ChoiceCards } from "@/components/choice-cards";
-import { CodeBlock, ErrorAlert } from "@/components/common";
+import { CodeBlock, ErrorAlert, Wrapped } from "@/components/common";
 import { RedirectNotice, rememberRedirectBeforeChange, useRedirectProblem } from "@/components/google/redirect-notice";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -13,10 +13,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { NPX } from "@/lib/cli";
 import { useApiMutation } from "@/lib/mutations";
-import { addressLabel, analyzeUrl, consolePort, isLoopbackOrigin, publicUrlError, type UrlAnalysis } from "@/lib/public-url";
+import { addressLabel, analyzeUrl, consolePort, isLoopbackOrigin, publicUrlError, type Tone, type UrlAnalysis, urlVerdict } from "@/lib/public-url";
 import { keys, queries } from "@/lib/queries";
+import { tunnelCommand } from "@/lib/tunnel";
 import { cn } from "@/lib/utils";
-import { STEP_META, type StepId, updateDraft, useSetupDraft } from "./progress";
+import { STEP_META, type StepId, updateDraft, useSetupProgress } from "./progress";
 import { Disclosure, StepCard, StepFooter } from "./wizard-shell";
 
 export interface StepProps {
@@ -27,31 +28,8 @@ export interface StepProps {
   returnTo?: StepId;
 }
 
-type Tone = "good" | "warn" | "bad" | "info";
-
 const TONE_ICON = { good: CheckCircle2Icon, warn: AlertTriangleIcon, bad: XCircleIcon, info: InfoIcon };
 const TONE_COLOR = { good: "text-success", warn: "text-warning", bad: "text-critical", info: "text-chart-1" };
-
-/** What this address means for Google sign-in and for agents, in the same terms the CLI uses. */
-export function urlVerdict(a: UrlAnalysis, browserRemote: boolean): { google: [Tone, string]; agents: [Tone, string] } {
-  const google: [Tone, string] =
-    a.host === "loopback" && browserRemote
-      ? ["bad", "Won't work from this browser: Google would send you back to localhost on the computer you're browsing from, not to the server."]
-      : a.google === "direct"
-        ? ["good", "Works directly: Google sends you straight back here."]
-        : a.google === "paste"
-          ? ["warn", "One extra step: Google only returns to https or localhost addresses, so after signing in you copy the address you land on and paste it here."]
-          : ["bad", "Won't work: Google refuses https addresses on a raw IP or a private name (like .lan or .local). Use a real domain, a *.ts.net name or localhost through an SSH tunnel."];
-  const agents: [Tone, string] =
-    a.transport === "loopback"
-      ? ["info", "Only agents on the same machine as agentinbox can reach it."]
-      : a.transport === "tailscale"
-        ? ["good", "Agents on your tailnet can connect (Tailscale encrypts the traffic)."]
-        : a.transport === "https"
-          ? ["good", "Agents anywhere that can reach this address can connect."]
-          : ["warn", "Agents on other machines refuse plain http unless you add --insecure, because their key would cross the network unencrypted. Prefer an SSH tunnel, Tailscale or https."];
-  return { google, agents };
-}
 
 export function UrlVerdict({ analysis, browserRemote, className }: { analysis: UrlAnalysis; browserRemote: boolean; className?: string }) {
   const v = urlVerdict(analysis, browserRemote);
@@ -60,7 +38,7 @@ export function UrlVerdict({ analysis, browserRemote, className }: { analysis: U
     ["Agents", v.agents],
   ];
   return (
-    <dl className={cn("divide-y rounded-lg border text-sm", className)} aria-live="polite">
+    <dl className={cn("divide-y rounded-lg border text-sm", className)}>
       {rows.map(([label, [tone, text]]) => {
         const Icon = TONE_ICON[tone];
         return (
@@ -87,11 +65,12 @@ type Situation = "local" | "remote" | "tailscale" | "public";
 
 function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & { settings: Settings; addresses: string[] }) {
   const qc = useQueryClient();
-  const draft = useSetupDraft();
+  const { draft, statuses } = useSetupProgress();
   const origin = window.location.origin;
   const browserRemote = !isLoopbackOrigin(origin);
-  // First visit: the address in the browser's bar is the best guess (it's how this browser reaches the server).
-  const firstVisit = !draft.urlConfirmed;
+  // First visit (nothing confirmed, no client, no account): the address in the browser's bar is the best
+  // guess. Once the step is done, a new browser shows the saved address and never changes it silently.
+  const firstVisit = statuses.url !== "done";
   const [url, setUrl] = useState(firstVisit && analyzeUrl(origin) ? origin : settings.publicUrl);
   const [changedRedirect, setChangedRedirect] = useState(false);
   const error = publicUrlError(url);
@@ -131,7 +110,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
     }
   };
 
-  const sshHost = browserRemote ? window.location.hostname : "your-server";
+  const tunnel = tunnelCommand({ port, addresses, browserHost: window.location.hostname });
   const localUrl = `http://localhost:${port}`;
 
   return (
@@ -189,7 +168,10 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
                   {firstVisit && clean === origin && settings.publicUrl !== origin
                     ? "Filled in from your browser's address bar. "
                     : ""}
-                  Agents will connect to <span className="font-mono break-all">{clean}/mcp</span>
+                  Agents will connect to{" "}
+                  <span className="font-mono">
+                    <Wrapped text={`${clean}/mcp`} />
+                  </span>
                 </FieldDescription>
               )}
             </div>
@@ -259,7 +241,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
                       Easiest: an SSH tunnel. Run this on the computer with your browser (replace <code className="font-mono">you</code> with your SSH
                       user) and keep it open:
                     </p>
-                    <CodeBlock code={`ssh -N -L ${port}:localhost:${port} you@${sshHost}`} wrap copyLabel="Copy SSH tunnel command" />
+                    <CodeBlock code={tunnel} wrap copyLabel="Copy SSH tunnel command" />
                     <p>
                       Then open <span className="font-mono">{localUrl}</span> in your browser, sign in to this console again, and use{" "}
                       <span className="font-mono">{localUrl}</span> as the address. Agents on the server connect directly; agents on your computer

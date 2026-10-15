@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useNow } from "@/hooks/use-now";
 import { describeError } from "@/lib/api";
+import { wrapParts } from "@/lib/wrap";
 import { fmtAgo, fmtExact } from "@/lib/format";
 import type { Tone } from "@/lib/labels";
 import { cn } from "@/lib/utils";
@@ -119,21 +120,17 @@ export function CopyButton({
   );
 }
 
-// Soft wrap points inside a long token: after URL separators, never after a hyphen
-// (so `--set-as-default` or `agentinbox-123456` stay whole) and never between "//".
-const SOFT_BREAK = /(?<=[/?&,])(?=[^/])/;
-
 /**
- * Text that wraps at spaces and after / ? & , only. Each piece in between is unbreakable, so long
- * commands and URLs never split mid-flag or mid-word; a piece wider than the box scrolls instead.
+ * Text that wraps at spaces and after / ? & , only (see wrapParts). Each piece in between is
+ * unbreakable, so long commands and URLs never split mid-flag or mid-word; a piece wider than the box scrolls.
  */
 export function Wrapped({ text }: { text: string }) {
-  return text.split(/(\s+)/).map((tok, i) =>
-    !tok || /^\s+$/.test(tok) ? (
-      tok
+  return wrapParts(text).map((part, i) =>
+    "space" in part ? (
+      part.space
     ) : (
       <span key={i}>
-        {tok.split(SOFT_BREAK).map((seg, j) => (
+        {part.segments.map((seg, j) => (
           <Fragment key={j}>
             {j > 0 && <wbr />}
             <span className="whitespace-nowrap">{seg}</span>

@@ -8,7 +8,8 @@ import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { generateProjectId, PROJECT_ID_RE, STEP_META, updateDraft, useSetupProgress } from "./progress";
+import { generateProjectId, projectCommand, projectIdProblem } from "@/lib/gcp-project";
+import { STEP_META, updateDraft, useSetupProgress } from "./progress";
 import type { StepProps } from "./step-url";
 import { CloudLink, Disclosure, Expect, FormValues, GoogleTabNote, Guide, GuideStep, Path, StepCard, StepFooter } from "./wizard-shell";
 
@@ -29,28 +30,7 @@ export const cloudUrl = {
   billing: (id: string) => `https://console.cloud.google.com/billing/linkedaccount?project=${p(id)}`,
 };
 
-/** Specific, fixable message for a project ID, or null when it's valid. */
-export function projectIdProblem(raw: string): string | null {
-  const v = raw.trim();
-  if (!v) return "Enter the project ID.";
-  if (/^\d+$/.test(v)) return "That's the project number. Use the project ID: lowercase letters, digits and hyphens, like agentinbox-123456.";
-  if (/[A-Z ]/.test(v)) return "That looks like the project name. Use the project ID: lowercase, no spaces, like agentinbox-123456.";
-  if (v.length < 6 || v.length > 30) return "Project IDs are 6 to 30 characters long.";
-  if (!/^[a-z]/.test(v)) return "Project IDs start with a lowercase letter.";
-  if (/-$/.test(v)) return "Project IDs can't end with a hyphen.";
-  if (!PROJECT_ID_RE.test(v)) return "Use only lowercase letters, digits and hyphens.";
-  return null;
-}
-
-/** The Cloud Shell command: create the project, then enable the Gmail and Pub/Sub APIs in it. */
-export function projectCommand(id: string, inOrg: boolean) {
-  const org = inOrg ? ` --organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"` : "";
-  return (
-    `gcloud projects create ${id} --name=agentinbox${org} && ` +
-    `gcloud services enable gmail.googleapis.com pubsub.googleapis.com --project=${id} && ` +
-    `echo "agentinbox: project ${id} is ready"`
-  );
-}
+export { projectCommand, projectIdProblem } from "@/lib/gcp-project";
 
 export function StepProject(props: StepProps) {
   const { state } = useSetupProgress();
@@ -98,6 +78,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
   const id = mode === "new" ? newId.trim() : existingId.trim();
   const problem = projectIdProblem(id);
   const valid = !problem;
+  const command = projectCommand(id, inOrg);
 
   const next = () => {
     setTouched(true);
@@ -188,7 +169,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                     “Internal” is available in the next step)
                   </Label>
                 </div>
-                {valid ? <CodeBlock code={projectCommand(id, inOrg)} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
+                {command ? <CodeBlock code={command} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
                 <Expect>
                   “Authorize Cloud Shell” (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
                   <code className="font-mono text-foreground">agentinbox: project {id || "…"} is ready</code>.

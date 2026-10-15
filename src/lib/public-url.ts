@@ -1,7 +1,7 @@
 // What a public URL means for the two things that depend on it: Google sign-in (the OAuth redirect)
 // and agents (the transport rule in src/lib/cli.ts, the same one the CLI enforces).
 
-import { type Transport, transportOf } from "./cli";
+import { type Transport, transportOf } from "./cli.ts";
 
 export type HostKind = "loopback" | "tailscale" | "ip" | "private-name" | "public-name";
 
@@ -13,11 +13,20 @@ function ipv4(host: string) {
 // Names Google won't accept in a redirect URI: they don't end in a public top-level domain.
 const PRIVATE_SUFFIXES = [".lan", ".local", ".home", ".internal", ".home.arpa", ".localdomain", ".corp", ".intranet", ".private", ".test", ".example", ".invalid", ".localhost"];
 
+// Exactly the server's callback rule (server/google/client.ts LOOPBACK): only these get a direct
+// http redirect; other loopback names (foo.localhost, 127.0.0.2) use paste mode there.
+const GOOGLE_LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);
+
+const bareHost = (url: URL) => url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+
+/** This machine, decided from the hostname alone (https://localhost is loopback too). */
+const isLoopbackName = (host: string) => host === "localhost" || host.endsWith(".localhost") || host === "::1" || ipv4(host)?.[0] === 127;
+
 export function hostKind(url: URL): HostKind {
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const t = transportOf(url.href);
-  if (t === "loopback") return "loopback";
-  if (t === "tailscale" && !host.endsWith(".ts.net")) return "tailscale";
+  const host = bareHost(url);
+  if (isLoopbackName(host)) return "loopback";
+  const v4 = ipv4(host);
+  if ((v4 && v4[0] === 100 && v4[1]! >= 64 && v4[1]! <= 127) || /^fd7a:115c:a1e0:/.test(host)) return "tailscale";
   if (ipv4(host) || host.includes(":")) return "ip";
   if (!host.includes(".") || PRIVATE_SUFFIXES.some((s) => host.endsWith(s))) return "private-name";
   return "public-name";
@@ -45,9 +54,41 @@ export function analyzeUrl(raw: string): UrlAnalysis | null {
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   const transport = transportOf(url.href);
   const host = hostKind(url);
+  const exactLoopback = GOOGLE_LOOPBACK.has(bareHost(url));
+  // http: the server redirects directly only to the exact loopback names; https: always direct, but
+  // Google refuses raw IPs and private names (other than those loopback names) as redirect URIs.
   const google =
-    host === "loopback" ? "direct" : url.protocol === "http:" ? "paste" : host === "ip" || host === "private-name" ? "rejected" : "direct";
+    url.protocol === "http:"
+      ? exactLoopback
+        ? "direct"
+        : "paste"
+      : exactLoopback || host === "public-name"
+        ? "direct"
+        : "rejected";
   return { url, transport, host, google };
+}
+
+export type Tone = "good" | "warn" | "bad" | "info";
+
+/** What this address means for Google sign-in and for agents, in the same terms the CLI uses. */
+export function urlVerdict(a: UrlAnalysis, browserRemote: boolean): { google: [Tone, string]; agents: [Tone, string] } {
+  const google: [Tone, string] =
+    a.host === "loopback" && browserRemote
+      ? ["bad", "Won't work from this browser: Google would send you back to localhost on the computer you're browsing from, not to the server."]
+      : a.google === "direct"
+        ? ["good", "Works directly: Google sends you straight back here."]
+        : a.google === "paste"
+          ? ["warn", "One extra step: Google only returns to https or localhost addresses, so after signing in you copy the address you land on and paste it here."]
+          : ["bad", "Won't work: Google refuses https addresses on a raw IP or a private name (like .lan or .local). Use a real domain, a *.ts.net name or localhost through an SSH tunnel."];
+  const agents: [Tone, string] =
+    a.transport === "loopback"
+      ? ["info", "Only agents on the same machine as agentinbox can reach it."]
+      : a.transport === "tailscale"
+        ? ["good", "Agents on your tailnet can connect (Tailscale encrypts the traffic)."]
+        : a.transport === "https"
+          ? ["good", "Agents anywhere that can reach this address can connect."]
+          : ["warn", "Agents on other machines refuse plain http unless you add --insecure, because their key would cross the network unencrypted. Prefer an SSH tunnel, Tailscale or https."];
+  return { google, agents };
 }
 
 /** Short label for an address chip ("This machine", "Your network", …). */
@@ -75,7 +116,9 @@ export const isLoopbackOrigin = (origin: string) => analyzeUrl(origin)?.host ===
 /** The port this console is served on (for tunnel and Tailscale commands). */
 export function consolePort(addresses: string[], publicUrl: string): string {
   // The server's own addresses first: the browser may reach it through a tunnel or proxy on another port.
-  for (const u of [...addresses, window.location.origin, publicUrl]) {
+  // (globalThis: this module is also unit-tested under Node, which has no window.)
+  const origin = (globalThis as { location?: { origin: string } }).location?.origin ?? "";
+  for (const u of [...addresses, origin, publicUrl]) {
     try {
       const p = new URL(u).port;
       if (p) return p;
