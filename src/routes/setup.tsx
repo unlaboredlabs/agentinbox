@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, redirect, useNavigate } from "@tanstack/react-router";
 import { CheckCircle2Icon, InfoIcon, TerminalIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AuthShell } from "@/components/auth-shell";
 import { ErrorAlert } from "@/components/common";
 import { MIN_PASSWORD, PasswordInput, StrengthMeter } from "@/components/password-input";
@@ -26,6 +26,8 @@ export const Route = createFileRoute("/setup")({
   component: ClaimPage,
 });
 
+const verifyRequest = (token: string) => api("/api/setup/verify-token", { body: { token } });
+
 type TokenCheck = { status: "idle" } | { status: "checking" } | { status: "ok" } | { status: "error"; error: unknown };
 
 /** First run: prove you own the server (setup token from the CLI), then choose the admin password. */
@@ -43,22 +45,30 @@ function ClaimPage() {
   const tokenRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
 
-  const verify = useCallback(async (value: string): Promise<boolean> => {
+  const verify = async (value: string): Promise<boolean> => {
     setCheck({ status: "checking" });
     try {
-      await api("/api/setup/verify-token", { body: { token: value } });
+      await verifyRequest(value);
       setCheck({ status: "ok" });
       return true;
     } catch (err) {
       setCheck({ status: "error", error: err });
       return false;
     }
-  }, []);
+  };
 
-  // A setup link: check its token before asking for a password.
+  // A setup link: check its token before asking for a password (the initial state is "checking").
   useEffect(() => {
-    if (linkToken) void verify(linkToken);
-  }, [linkToken, verify]);
+    if (!linkToken) return;
+    let live = true;
+    verifyRequest(linkToken).then(
+      () => live && setCheck({ status: "ok" }),
+      (err: unknown) => live && setCheck({ status: "error", error: err }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [linkToken]);
 
   const verified = check.status === "ok";
   const tokenError = check.status === "error" ? check.error : undefined;
