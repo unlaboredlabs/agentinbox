@@ -28,7 +28,7 @@
 // the API key generated; it is handed to the polling CLI exactly once and written to a 0600 file.
 // Codes are short-lived and single-use; requests, approvals, denials, expiry and key delivery are audited.
 
-import type { Capability, EventType, SendMode, WebhookFilter } from "./types.ts";
+import type { CalendarWriteMode, Capability, EventType, SendMode, WebhookFilter } from "./types.ts";
 
 export type AgentTool = "claude-code" | "codex" | "cursor" | "hermes" | "other";
 
@@ -41,6 +41,8 @@ export interface PairingStartInput {
     accounts?: string[]; // account emails
     capabilities?: Capability[];
     sendMode?: SendMode;
+    /** How calendar writes should run if calendar.write is granted; the human decides (default "approval"). */
+    calendarWriteMode?: CalendarWriteMode;
     reason?: string;
   };
   client?: { hostname?: string; platform?: string; tool?: AgentTool; version?: string };
