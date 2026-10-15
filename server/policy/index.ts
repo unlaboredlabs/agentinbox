@@ -57,6 +57,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     lastUsedAt: r.last_used_at,
     createdAt: r.created_at,
     grants: grantsOf(r.id),
+    listeners: [], // PLACEHOLDER: filled from listener_cursors by the listen work area
   });
 
   const row = (id: string) => db.get<AgentRow>("SELECT * FROM agents WHERE id = ?", id);
