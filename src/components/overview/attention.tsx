@@ -88,7 +88,7 @@ export function PairingCallout({ pairings }: { pairings: PairingRequest[] }) {
           </div>
           <p className="truncate text-sm text-muted-foreground">
             {first.name}
-            {first.client.hostname && ` · ${first.client.hostname}`}
+            {first.ip && ` · from ${first.ip}`}
             {waiting.length > 1 && " and more"}
           </p>
         </div>

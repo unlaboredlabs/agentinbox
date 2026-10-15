@@ -54,7 +54,7 @@ function Overview() {
             hint={s && (s.denied24h ? <span className="text-warning">{s.denied24h} blocked by guardrails</span> : "none blocked")}
           />
           <StatCard
-            label="Webhook deliveries"
+            label="Deliveries"
             icon={WebhookIcon}
             loading={loading}
             value={fmtNumber(s?.deliveries24h.succeeded)}

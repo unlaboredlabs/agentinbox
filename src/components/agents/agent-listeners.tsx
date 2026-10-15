@@ -79,7 +79,7 @@ export function AgentListeners({ agent }: { agent: Agent }) {
           <div className="text-sm font-medium">{listeners.length ? "Add or update a listener" : "Start a listener"}</div>
           <ToolTabs value={tool} onChange={setTool} />
           <InsecureTransportAlert publicUrl={publicUrl} />
-          <CodeBlock code={c.listen} />
+          <CodeBlock code={c.listen} wrap />
           <p className="text-xs text-muted-foreground">{RECIPES[tool].note}</p>
           <p className="text-xs text-muted-foreground">
             Run it on the machine where this agent was connected with <code className="font-mono text-foreground">npx agentinbox-cli connect</code>

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { BellRingIcon, MessageSquareTextIcon, ShieldAlertIcon, ShieldCheckIcon, SparklesIcon, TerminalIcon } from "lucide-react";
 import { useState } from "react";
-import { CodeBlock, CopyField } from "@/components/common";
+import { CodeBlock, CopyButton } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { connectCommands, RECIPES, TOOL_LABEL, TOOLS, transportOf } from "@/lib/cli";
@@ -100,7 +100,10 @@ export function ConnectAgentGuide({ className }: { className?: string }) {
           <SparklesIcon className="size-4 text-chart-1" /> Quickest: let the agent set itself up
         </div>
         <p className="mb-2 text-sm text-muted-foreground">Tell your agent:</p>
-        <CopyField value={c.selfSetup} />
+        <div className="flex items-start gap-2 rounded-md border bg-background py-1.5 pr-1.5 pl-3">
+          <p className="min-w-0 flex-1 py-1 text-sm [overflow-wrap:anywhere]">“{c.selfSetup}”</p>
+          <CopyButton value={c.selfSetup} withText variant="outline" />
+        </div>
         <p className="mt-2 text-xs text-muted-foreground">It reads the skill, runs the commands below and asks you to approve it here.</p>
       </div>
 
@@ -110,7 +113,7 @@ export function ConnectAgentGuide({ className }: { className?: string }) {
         <InsecureTransportAlert publicUrl={publicUrl} />
         <ol>
           <Step n={1} icon={TerminalIcon} title={`On the machine where ${label} runs`}>
-            <CodeBlock code={c.connect} />
+            <CodeBlock code={c.connect} wrap />
             <p className="text-xs text-muted-foreground">
               It prints a code like <span className="font-mono">K7QM-2XPD</span> and waits.
               {tool !== "other" && ` --setup-mcp adds agentinbox to ${label} without ever showing the key.`} The agent is named “
@@ -128,7 +131,7 @@ export function ConnectAgentGuide({ className }: { className?: string }) {
             </p>
           </Step>
           <Step n={3} icon={BellRingIcon} title={<>Wake it on new mail <span className="font-normal text-muted-foreground">(optional)</span></>}>
-            <CodeBlock code={c.listen} />
+            <CodeBlock code={c.listen} wrap />
             <p className="text-xs text-muted-foreground">
               Runs in the background (systemd or launchd) and starts {label} for each new email. {RECIPES[tool].note}
             </p>

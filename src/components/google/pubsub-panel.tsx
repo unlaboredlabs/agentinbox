@@ -1,6 +1,6 @@
 import type { PubsubState, PubsubTestResult, Settings } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2Icon, RadioTowerIcon, RefreshCwIcon, SendIcon, TimerIcon, XCircleIcon, ZapIcon } from "lucide-react";
+import { CheckCircle2Icon, KeyRoundIcon, RadioTowerIcon, RefreshCwIcon, SendIcon, TimerIcon, XCircleIcon, ZapIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ErrorAlert, TimeAgo, ToneBadge } from "@/components/common";
@@ -8,7 +8,8 @@ import { updateDraft } from "@/components/setup/progress";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { api, toastError } from "@/lib/api";
+import { connectAccount } from "@/components/accounts/connect-host";
+import { api, ApiError, describeError, toastError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +75,10 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
     }
   };
 
+  const needsScope =
+    provisionError instanceof ApiError &&
+    (provisionError.code === "pubsub_scope_required" || /pub\/?sub (access|scope)/i.test(`${provisionError.message} ${provisionError.hint ?? ""}`));
+
   if (state.isPending) return <Skeleton className="h-32 rounded-xl" />;
   const p = state.data?.pubsub;
   const accounts = state.data?.accountsConnected ?? 0;
@@ -115,7 +120,34 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
 
       {provisioning && <ProvisionProgress />}
 
-      {provisionError !== undefined && (
+      {needsScope && (
+        <div className="space-y-3 rounded-lg border border-warning/40 bg-warning/[0.06] p-3 text-sm">
+          <div className="flex items-start gap-2">
+            <KeyRoundIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+            <div className="space-y-1">
+              <div className="font-medium">One more permission: Pub/Sub</div>
+              <p className="text-muted-foreground">
+                Connecting Gmail only asks for mail access. To create the topic and subscription, agentinbox needs Pub/Sub access too, granted once
+                by an account that can manage the Google Cloud project.
+                {describeError(provisionError).hint && <span className="mt-1 block text-foreground/80">{describeError(provisionError).hint}</span>}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => connectAccount({ scopes: ["pubsub"], onDone: () => void provision() })}>
+              <KeyRoundIcon /> Grant Pub/Sub access
+            </Button>
+            <Button size="sm" variant="outline" onClick={provision} disabled={provisioning}>
+              <RefreshCwIcon /> Try again
+            </Button>
+            <Button size="sm" variant="ghost" onClick={usePolling} disabled={switching}>
+              Use polling instead
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {provisionError !== undefined && !needsScope && (
         <ErrorAlert error={provisionError} title="Couldn't set up Pub/Sub">
           <p className="pt-1 text-foreground/80">
             Polling works fine for most setups; it's just slower to notice new mail. You can retry Pub/Sub any time from Settings.

@@ -415,13 +415,15 @@ async function mcp(apiKey: string) {
 }
 const lastAuditId = () => ctx.db.get<{ id: number }>("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")!.id;
 const auditPlan: { from: number; to: number; minutesAgo: number }[] = [];
-async function at(minutesAgo: number, fn: () => Promise<unknown>) {
-  const from = lastAuditId();
-  await fn();
-  auditPlan.push({ from, to: lastAuditId(), minutesAgo });
-}
+// Every action is planned at a time on the last day's timeline, then run in chronological order so
+// audit ids and timestamps agree (the audit log is ordered by id).
+const plan: { minutesAgo: number; fn: () => Promise<unknown> }[] = [];
+const at = (minutesAgo: number, fn: () => Promise<unknown>) => void plan.push({ minutesAgo, fn });
 
 const sup = await mcp(support.apiKey);
+const cc = await mcp(claudeKey);
+const bill = await mcp(billing.apiKey);
+
 for (const [mins, key] of [
   [1300, "trial-ending"],
   [1080, "sso-question"],
@@ -431,30 +433,28 @@ for (const [mins, key] of [
   [220, "refund"],
   [150, "login-issue"],
 ] as const) {
-  await at(mins, () => sup.call("search_threads", { query: "in:inbox newer_than:1d" }));
-  await at(mins - 1, () => sup.call("get_thread", { thread_id: msgIds[key]!.threadId }));
-  await at(mins - 2, () => sup.call("create_draft", { to: ["customer@example.com"], subject: "Re: ticket", body: "Thanks for reaching out — looking into this now.", thread_id: msgIds[key]!.threadId }));
+  at(mins, () => sup.call("search_threads", { query: "in:inbox newer_than:1d" }));
+  at(mins - 1, () => sup.call("get_thread", { thread_id: msgIds[key]!.threadId }));
+  at(mins - 2, () =>
+    sup.call("create_draft", { to: ["customer@example.com"], subject: "Re: ticket", body: "Thanks for reaching out, looking into this now.", thread_id: msgIds[key]!.threadId }),
+  );
 }
-await at(95, () => sup.call("get_message", { message_id: msgIds["northwind-invoice"]!.id })); // label_scope denial
-await at(94, () => sup.call("get_message", { message_id: msgIds["payroll-phish"]!.id })); // label_scope denial
-await at(20, () => sup.call("modify_labels", { thread_id: msgIds.refund!.threadId, add: ["STARRED"] }));
-await sup.close();
+at(95, () => sup.call("get_message", { message_id: msgIds["northwind-invoice"]!.id })); // label_scope denial
+at(94, () => sup.call("get_message", { message_id: msgIds["payroll-phish"]!.id })); // label_scope denial
+at(20, () => sup.call("modify_labels", { thread_id: msgIds.refund!.threadId, add: ["STARRED"] }));
 
-const cc = await mcp(claudeKey);
 for (const mins of [1260, 900, 610, 380, 175, 60, 12]) {
-  await at(mins, () => cc.call("list_events", {}));
-  await at(mins - 1, () => cc.call("search_threads", { account: OPS, query: "is:unread" }));
+  at(mins, () => cc.call("list_events", {}));
+  at(mins - 1, () => cc.call("search_threads", { account: OPS, query: "is:unread" }));
 }
-await at(170, () => cc.call("get_thread", { account: OPS, thread_id: msgIds["datadog-alert"]!.threadId }));
-await at(8, () => cc.call("send_message", { account: OPS, to: ["jules@acme.dev"], subject: "Heads up", body: "Latency alert fired." })); // no send capability
-await cc.close();
+at(170, () => cc.call("get_thread", { account: OPS, thread_id: msgIds["datadog-alert"]!.threadId }));
+at(8, () => cc.call("send_message", { account: OPS, to: ["jules@acme.dev"], subject: "Heads up", body: "Latency alert fired." })); // no send capability
 
-const bill = await mcp(billing.apiKey);
-await at(600, () => bill.call("search_threads", { query: "label:Billing newer_than:2d" }));
-await at(420, () => bill.call("get_thread", { thread_id: msgIds["aws-bill"]!.threadId }));
-await at(290, () => bill.call("get_thread", { thread_id: msgIds["stripe-paid"]!.threadId }));
-await at(52, () => bill.call("get_thread", { thread_id: msgIds["northwind-invoice"]!.threadId }));
-await at(50, () =>
+at(600, () => bill.call("search_threads", { query: "label:Billing newer_than:2d" }));
+at(420, () => bill.call("get_thread", { thread_id: msgIds["aws-bill"]!.threadId }));
+at(290, () => bill.call("get_thread", { thread_id: msgIds["stripe-paid"]!.threadId }));
+at(52, () => bill.call("get_thread", { thread_id: msgIds["northwind-invoice"]!.threadId }));
+at(50, () =>
   bill.call("send_message", {
     to: ["ap@acme.dev"],
     subject: "AR summary: week 42",
@@ -462,15 +462,8 @@ await at(50, () =>
     reason: "Weekly AR summary for the AP team",
   }),
 );
-await at(44, () =>
-  bill.call("send_message", {
-    to: ["dana@northwind.io"],
-    subject: "Payment scheduled",
-    body: "Hi Dana, payment is scheduled for tomorrow.",
-    reason: "Confirm payment date",
-  }),
-);
-await at(40, () =>
+at(44, () => bill.call("send_message", { to: ["dana@northwind.io"], subject: "Payment scheduled", body: "Hi Dana, payment is scheduled for tomorrow.", reason: "Confirm payment date" }));
+at(40, () =>
   bill.call("send_message", {
     to: ["dana.whitfield@gmail.com"],
     subject: "Invoice INV-2291",
@@ -478,7 +471,7 @@ await at(40, () =>
     reason: "Vendor asked to send remittance to a personal address",
   }),
 ); // allow_to denial
-await at(31, () =>
+at(31, () =>
   bill.call("reply", {
     message_id: msgIds["northwind-invoice"]!.id,
     body:
@@ -489,24 +482,31 @@ await at(31, () =>
     reason: "Acknowledge Northwind invoice INV-2291 and explain the partial payment",
   }),
 );
-await at(5, () => bill.call("send_message", { to: ["ap@acme.dev"], subject: "One more thing", body: "…", reason: "Follow-up" })); // rate_limit denial
-await bill.close();
+const pendingTo = async (addr: string) =>
+  (await api<Approval[]>("GET", "/api/approvals?status=pending")).find((a) => a.kind === "send" && a.to.some((t) => t.email === addr));
+at(7, async () => {
+  const a = await pendingTo("ap@acme.dev");
+  if (a) await api("POST", `/api/approvals/${a.id}/approve`, { note: "Looks right." });
+});
+at(6, async () => {
+  const a = await pendingTo("dana@northwind.io");
+  if (a) await api("POST", `/api/approvals/${a.id}/reject`, { note: "Don't confirm dates by email; finance sends remittance from the bank portal." });
+});
+at(5, () => bill.call("send_message", { to: ["ap@acme.dev"], subject: "One more thing", body: "…", reason: "Follow-up" })); // rate_limit denial
+// The old digest agent gets turned off (its webhook keeps failing), and the n8n hook gets a test send.
+at(15, () => api("PATCH", `/api/agents/${digest.agent.id}`, { disabled: true }));
+at(3, () => api("POST", `/api/webhooks/${n8n.webhook.id}/test`).catch(() => {}));
 
-const approvals = await api<Approval[]>("GET", "/api/approvals?status=pending");
-const byTo = (addr: string) => approvals.find((a) => a.to.some((t) => t.email === addr) && a.kind === "send");
-const ar = byTo("ap@acme.dev");
-const pay = byTo("dana@northwind.io");
-if (ar) await at(7, () => api("POST", `/api/approvals/${ar.id}/approve`, { note: "Looks right." }));
-if (pay) await at(6, () => api("POST", `/api/approvals/${pay.id}/reject`, { note: "Don't confirm dates by email; finance sends remittance from the bank portal." }));
+for (const step of plan.sort((a, b) => b.minutesAgo - a.minutesAgo)) {
+  const from = lastAuditId();
+  await step.fn();
+  auditPlan.push({ from, to: lastAuditId(), minutesAgo: step.minutesAgo });
+}
+await Promise.all([sup.close(), cc.close(), bill.close()]);
 log("agent activity recorded");
 
-// Turn the old digest agent off (its webhook keeps failing).
-await api("PATCH", `/api/agents/${digest.agent.id}`, { disabled: true });
-
-// Test sends, so each webhook has a test delivery too.
-await api("POST", `/api/webhooks/${n8n.webhook.id}/test`).catch(() => {});
-
-// Let the worker attempt the deliveries once.
+// Let ingest pick up what the agents did (sends, labels), then let the worker attempt the deliveries once.
+await sleep(5000);
 await waitFor("first delivery attempts", () => ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE attempts = 0")!.n === 0, 20_000);
 
 // ───────────── Backdate, so timelines look like a day of real traffic ─────────────
@@ -545,7 +545,8 @@ ctx.db.tx(() => {
   ctx.db.run("UPDATE agents SET created_at = ?", iso(2 * 24 * HOUR + 3 * HOUR));
   ctx.db.run("UPDATE agents SET created_at = ? WHERE id = ?", iso(26 * HOUR), claudeAgentId);
   ctx.db.run("UPDATE webhooks SET created_at = ?", iso(2 * 24 * HOUR));
-  ctx.db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", iso(9 * 24 * HOUR), digest.agent.id);
+  ctx.db.run("UPDATE agents SET last_used_at = ?, created_at = ? WHERE id = ?", iso(9 * 24 * HOUR), iso(40 * 24 * HOUR), digest.agent.id);
+  ctx.db.run("UPDATE webhooks SET created_at = ? WHERE id = ?", iso(40 * 24 * HOUR), zap.webhook.id);
   for (const a of ctx.db.all<{ id: string; status: string; subject: string }>("SELECT id, status, COALESCE(json_extract(payload, '$.subject'), '') AS subject FROM approvals")) {
     const created = a.status === "pending" ? iso(31 * 60_000) : a.subject.startsWith("AR") ? iso(50 * 60_000) : iso(44 * 60_000);
     const decided = a.status === "pending" ? null : a.subject.startsWith("AR") ? iso(7 * 60_000) : iso(6 * 60_000);

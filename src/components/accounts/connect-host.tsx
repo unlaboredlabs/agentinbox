@@ -19,6 +19,10 @@ interface ConnectRequest {
   /** Reconnect an existing account (needs_reauth) instead of adding a new one. */
   reauthAccountId?: string;
   email?: string;
+  /** Extra Google access to request incrementally, e.g. ["pubsub"] for provisioning. */
+  scopes?: string[];
+  /** Called once the account is connected (e.g. to retry what needed the extra access). */
+  onDone?: () => void;
 }
 
 type Phase =
@@ -70,7 +74,11 @@ export function ConnectAccountHost() {
   const [req, setReq] = useState<ConnectRequest>({});
   const known = useRef<Set<string>>(new Set());
 
+  const reqRef = useRef<ConnectRequest>({});
   const finish = (email: string) => {
+    const done = reqRef.current.onDone;
+    reqRef.current = { ...reqRef.current, onDone: undefined };
+    if (done) setTimeout(done, 0);
     setPhase((p) => {
       if (p?.kind === "waiting") p.popup?.close();
       return { kind: "done", email };
@@ -95,6 +103,7 @@ export function ConnectAccountHost() {
 
   const start = async (r: ConnectRequest) => {
     setReq(r);
+    reqRef.current = r;
     const cached = client.data;
     // Paste mode uses a plain link (the user needs a full address bar); otherwise open the pop-up now.
     const popup = cached?.callbackMode === "paste" ? null : openPopup();
@@ -109,7 +118,7 @@ export function ConnectAccountHost() {
     known.current = new Set(accounts.map((a) => a.id));
     try {
       const res = await api<ConnectAccountResponse>("/api/accounts/connect", {
-        body: r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {},
+        body: { ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}), ...(r.scopes?.length ? { scopes: r.scopes } : {}) },
       });
       if (popup && res.callbackMode === "direct") popup.location.href = res.authUrl;
       else popup?.close();
@@ -191,11 +200,15 @@ export function ConnectAccountHost() {
     <Dialog open={!!phase} onOpenChange={(o) => !o && close()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}</DialogTitle>
+          <DialogTitle>
+            {req.scopes?.includes("pubsub") ? "Grant Pub/Sub access" : reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}
+          </DialogTitle>
           <DialogDescription>
             {phase?.kind === "waiting" && phase.res.callbackMode === "paste"
               ? "Sign in with Google in a new tab, then paste back the address you land on."
-              : "Sign in with Google and allow agentinbox to manage the mailbox."}
+              : req.scopes?.includes("pubsub")
+                ? "Sign in with the Google account that owns the Cloud project and allow Pub/Sub access. agentinbox uses it only to create and read its own topic and subscription."
+                : "Sign in with Google and allow agentinbox to manage the mailbox."}
           </DialogDescription>
         </DialogHeader>
 
