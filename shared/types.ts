@@ -595,7 +595,8 @@ export interface ApiError {
 //   POST   /api/setup/claim {token,password}          → 204 + session cookie (only while unclaimed)
 //   POST   /api/auth/login {password}                 → 204 + session cookie (5 failures/IP → 15 min lockout)
 //   POST   /api/auth/logout                           → 204
-//   GET    /oauth/callback?code&state                 → HTML (redirects to console /accounts?connected=…)
+//   GET    /oauth/callback?code&state                 → HTML result page; posts an OAuthCallbackMessage (ok/email or error/code/hint)
+//                                                       to its opener and on BroadcastChannel "agentinbox-oauth"
 //
 // Authenticated (admin session):
 //   GET    /api/setup/state                           → SetupState
