@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { KeyRoundIcon } from "lucide-react";
 import { CodeBlock, ExternalLink } from "@/components/common";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { NPX } from "@/lib/cli";
+import { NPX, shellQuote } from "@/lib/cli";
 import { queries } from "@/lib/queries";
 
 export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
@@ -10,8 +10,8 @@ export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
 export function snippets(publicUrl: string, key: string) {
   const mcp = `${publicUrl}/mcp`;
   return {
-    claude: `claude mcp add --transport http agentinbox ${mcp} \\\n  --header "Authorization: Bearer ${key}"`,
-    codexToml: `[mcp_servers.agentinbox]\nurl = "${mcp}"\nbearer_token_env_var = "AGENTINBOX_API_KEY"`,
+    claude: `claude mcp add --transport http agentinbox ${shellQuote(mcp)} \\\n  --header "Authorization: Bearer ${key}"`,
+    codexToml: `[mcp_servers.agentinbox]\nurl = ${JSON.stringify(mcp)}\nbearer_token_env_var = "AGENTINBOX_API_KEY"`,
     codexEnv: `export AGENTINBOX_API_KEY="${key}"`,
     cursor: JSON.stringify({ mcpServers: { agentinbox: { url: mcp, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
     generic: JSON.stringify(
@@ -19,8 +19,8 @@ export function snippets(publicUrl: string, key: string) {
       null,
       2,
     ),
-    hermes: `mcp_servers:\n  agentinbox:\n    url: "${mcp}"\n    headers:\n      Authorization: "Bearer ${key}"`,
-    skill: `${NPX} skill install --url ${publicUrl}`,
+    hermes: `mcp_servers:\n  agentinbox:\n    url: ${JSON.stringify(mcp)}\n    headers:\n      Authorization: "Bearer ${key}"`,
+    skill: `${NPX} skill install --url ${shellQuote(publicUrl)}`,
     mcpUrl: mcp,
     skillUrl: `${publicUrl}/skill.md`,
   };

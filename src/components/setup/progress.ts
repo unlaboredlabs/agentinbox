@@ -1,6 +1,6 @@
 import type { GoogleAppType, SetupState } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { queries } from "@/lib/queries";
 
 /**
@@ -17,7 +17,8 @@ export interface SetupDraft {
   pubsubSkipped?: boolean;
 }
 
-const KEY = "agentinbox.setup";
+// Per instance: the same browser may set up several agentinbox daemons.
+const KEY = `agentinbox.setup:${typeof window === "undefined" ? "" : window.location.host}`;
 const listeners = new Set<() => void>();
 let cache: SetupDraft | null = null;
 
@@ -37,6 +38,20 @@ export function updateDraft(patch: Partial<SetupDraft>) {
     localStorage.setItem(KEY, JSON.stringify(cache));
   } catch {
     /* private mode: keep in memory */
+  }
+  for (const l of listeners) l();
+}
+
+/** Removes answers the server now owns (once the OAuth client is saved, it stores project id and app type). */
+export function clearServerOwnedDraft() {
+  const d = read();
+  if (d.projectId === undefined && d.appType === undefined && d.productionConfirmed === undefined && d.projectConfirmed === undefined) return;
+  const { projectId: _p, appType: _a, productionConfirmed: _c, projectConfirmed: _pc, ...rest } = d;
+  cache = rest;
+  try {
+    localStorage.setItem(KEY, JSON.stringify(cache));
+  } catch {
+    /* ignore */
   }
   for (const l of listeners) l();
 }
@@ -85,6 +100,10 @@ export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): 
 export function useSetupProgress() {
   const query = useQuery(queries.setupState());
   const draft = useSetupDraft();
+  const configured = !!query.data?.googleClientConfigured;
+  useEffect(() => {
+    if (configured) clearServerOwnedDraft();
+  }, [configured]);
   const statuses = stepStatuses(query.data, draft);
   const finished = STEP_IDS.filter((id) => statuses[id] !== "todo").length;
   const firstTodo = STEP_IDS.find((id) => statuses[id] === "todo");

@@ -78,17 +78,13 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
 
   const needsScope =
     provisionError instanceof ApiError &&
-    (provisionError.code === "pubsub_scope_required" || /access to (cloud )?pub\/?sub|pub\/?sub (access|scope|permission)/i.test(`${provisionError.message} ${provisionError.hint ?? ""}`));
+    (provisionError.code === "pubsub_scope_required" || /access to (cloud )?pub\/?sub|manage pub\/?sub|pub\/?sub (access|scope|permission)/i.test(`${provisionError.message} ${provisionError.hint ?? ""}`));
 
-  // The account agentinbox provisions with: named in the server's error, else the first connected one.
+  // The account agentinbox provisions with, when the server's error names it; otherwise the server picks.
   const principal = (() => {
-    const list = accountList.data ?? [];
     const text = provisionError instanceof ApiError ? `${provisionError.message} ${provisionError.hint ?? ""}` : "";
-    const named = text.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g)?.map((e) => e.toLowerCase()) ?? [];
-    return (
-      list.find((a) => named.includes(a.email.toLowerCase())) ??
-      [...list].filter((a) => a.status !== "paused").sort((x, y) => x.createdAt.localeCompare(y.createdAt))[0]
-    );
+    const named = text.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g)?.map((e) => e.toLowerCase().replace(/\.$/, "")) ?? [];
+    return (accountList.data ?? []).find((a) => named.includes(a.email.toLowerCase()));
   })();
   const projectId = state.data?.gcpProjectId;
 

@@ -18,7 +18,7 @@ export const cloudUrl = {
 
 export function StepProject({ index, onBack, onNext }: StepProps) {
   const { state, draft } = useSetupProgress();
-  const [projectId, setProjectId] = useState(draft.projectId ?? state?.gcpProjectId ?? "");
+  const [projectId, setProjectId] = useState(state?.gcpProjectId ?? draft.projectId ?? "");
   const [touched, setTouched] = useState(false);
   const clean = projectId.trim();
   const error = projectIdError(clean);

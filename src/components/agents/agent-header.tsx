@@ -150,8 +150,14 @@ export function AgentHeader({ agent }: { agent: Agent }) {
         <EditDialog agent={agent} onOpenChange={setEditing} onSave={(p) => patch.mutateAsync(p).then(() => setEditing(false))} pending={patch.isPending} />
       )}
 
-      <Dialog open={!!rotated} onOpenChange={(o) => !o && setRotated(undefined)}>
-        <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl" onInteractOutside={(e) => e.preventDefault()}>
+      {/* One-time key: only the explicit button closes it (no Escape, outside click or X). */}
+      <Dialog open={!!rotated}>
+        <DialogContent
+          className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl"
+          showCloseButton={false}
+          onInteractOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>New API key for {agent.name}</DialogTitle>
             <DialogDescription>The previous key has stopped working. Update your agent's configuration with this one.</DialogDescription>

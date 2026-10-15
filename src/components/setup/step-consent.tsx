@@ -19,9 +19,9 @@ export const SCOPES = {
 
 export function StepConsent({ index, onBack, onNext }: StepProps) {
   const { state, draft } = useSetupProgress();
-  const project = draft.projectId ?? state?.gcpProjectId ?? "";
-  const [appType, setAppType] = useState<GoogleAppType | undefined>(draft.appType ?? state?.googleAppType ?? undefined);
-  const [production, setProduction] = useState(!!draft.productionConfirmed || state?.googleAppType === "external");
+  const project = state?.gcpProjectId ?? draft.projectId ?? "";
+  const [appType, setAppType] = useState<GoogleAppType | undefined>(state?.googleAppType ?? draft.appType ?? undefined);
+  const [production, setProduction] = useState(state?.googleAppType === "external" || !!draft.productionConfirmed);
   const blocked = !appType || (appType === "external" && !production);
 
   const next = () => {

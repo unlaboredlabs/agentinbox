@@ -24,3 +24,9 @@ export function useRevealedKey(agentId: string): string | undefined {
     () => keysByAgent.get(agentId),
   );
 }
+
+/** Drops every remembered key (sign-out, expired session). */
+export function forgetAllKeys() {
+  keysByAgent.clear();
+  listeners.forEach((l) => l());
+}

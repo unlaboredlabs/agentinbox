@@ -87,3 +87,11 @@ function normalize(g: GrantFields): GrantFields {
     allowTo: [...g.allowTo].sort(),
   };
 }
+
+/** Why a grant can't be saved as it is, or null. */
+export function grantProblem(g: GrantFields): string | null {
+  if (!g.capabilities.length) return "Choose at least one capability.";
+  if (g.labelScope && g.labelScope.length === 0) return "Pick at least one label, or allow the whole mailbox.";
+  if (g.maxSendsPerHour === 0 || g.maxSendsPerDay === 0) return "Send limits must be at least 1 (leave empty for no limit).";
+  return null;
+}

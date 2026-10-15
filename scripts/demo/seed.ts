@@ -7,6 +7,7 @@
 //   --public-url <url>   publicUrl to store (default: https://inbox.acme.dev; use the local URL to click through OAuth)
 //   --fresh --stage pubsub              claimed, client set, ops@acme.dev connected: the wizard's Pub/Sub step
 //   --pubsub-fail org-policy|scope|api  make Pub/Sub provisioning fail the way real projects do
+//   --hidden-chars                      add a pending send whose subject/body hide bidi and zero-width characters
 //
 // Serves the console from dist/web (run `pnpm build` or `pnpm exec vite build` first), or point
 // Vite at it: AGENTINBOX_DEV_SERVER=http://127.0.0.1:8531 pnpm exec vite --host 127.0.0.1
@@ -36,6 +37,7 @@ const { values: args } = parseArgs({
     "public-url": { type: "string" },
     stage: { type: "string" },
     "pubsub-fail": { type: "string" },
+    "hidden-chars": { type: "boolean", default: false },
   },
 });
 
@@ -210,7 +212,7 @@ const billing = await api<AgentWithKey>("POST", "/api/agents", {
       labelScope: [labelIds.Billing!, labelIds.Vendors!],
       sendMode: "approval",
       allowTo: ["*@acme.dev", "*@northwind.io", "ap@stripe.com"],
-      maxSendsPerHour: 3,
+      maxSendsPerHour: args["hidden-chars"] ? 4 : 3,
       maxSendsPerDay: 20,
     }),
   ],
@@ -516,6 +518,15 @@ at(6, async () => {
   const a = await pendingTo("dana@northwind.io");
   if (a) await api("POST", `/api/approvals/${a.id}/reject`, { note: "Don't confirm dates by email; finance sends remittance from the bank portal." });
 });
+if (args["hidden-chars"]) {
+  at(33, () =>
+    bill.call("reply", {
+      message_id: msgIds["northwind-invoice"]!.id,
+      body: "Hi Dana,\n\nPlease use the updated bank details: IBAN \u202EGB29 NWBK\u202C 6016 1331 9268 19.\u200B\n\nThanks",
+      reason: "Confirm new bank details\u2066 as requested\u2069",
+    }),
+  );
+}
 at(5, () => bill.call("send_message", { to: ["ap@acme.dev"], subject: "One more thing", body: "…", reason: "Follow-up" })); // rate_limit denial
 // The old digest agent gets turned off (its webhook keeps failing), and the n8n hook gets a test send.
 at(15, () => api("PATCH", `/api/agents/${digest.agent.id}`, { disabled: true }));

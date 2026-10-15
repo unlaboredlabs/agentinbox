@@ -9,8 +9,9 @@ import { keys } from "@/lib/queries";
 export const Route = createFileRoute("/_app/accounts")({
   // The OAuth callback lands here when it can't hand back to the pop-up's opener.
   validateSearch: (s: Record<string, unknown>): { connected?: string; error?: string } => ({
-    connected: typeof s.connected === "string" ? s.connected : undefined,
-    error: typeof s.error === "string" ? s.error : undefined,
+    // Only an address-shaped value is echoed back; error text from the URL is never shown (anyone can craft the link).
+    connected: typeof s.connected === "string" && /^[^\s@<>]{1,64}@[^\s@<>]{1,190}$/.test(s.connected) ? s.connected : undefined,
+    error: s.error ? "1" : undefined,
   }),
   component: AccountsPage,
 });
@@ -23,7 +24,7 @@ function AccountsPage() {
   useEffect(() => {
     if (!connected && !error) return;
     if (connected) toast.success(`${connected} is connected`, { description: "Mail starts syncing now." });
-    if (error) toast.error("Couldn't connect the account", { description: error, duration: 10_000 });
+    if (error) toast.error("Couldn't connect the account", { description: "Google sign-in didn't complete. Try connecting the account again.", duration: 10_000 });
     void qc.invalidateQueries({ queryKey: keys.accounts });
     void navigate({ search: {}, replace: true });
   }, [connected, error, navigate, qc]);

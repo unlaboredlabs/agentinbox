@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import { AccountAvatar, AccountStatusBadge } from "@/components/accounts/account-status";
 import { GrantFieldsForm } from "@/components/agents/grant-editor";
 import { ErrorAlert, SectionLabel, TimeAgo, ToneBadge } from "@/components/common";
+import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
@@ -34,7 +35,7 @@ import { useNow } from "@/hooks/use-now";
 import { api, ApiError, toastError } from "@/lib/api";
 import { TOOL_LABEL } from "@/lib/cli";
 import { fmtDuration } from "@/lib/format";
-import { GRANT_PRESETS, type GrantFields, presetGrant } from "@/lib/grants";
+import { GRANT_PRESETS, type GrantFields, grantProblem, presetGrant } from "@/lib/grants";
 import { type Choice, ChoiceCards } from "@/components/choice-cards";
 import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { keys, queries } from "@/lib/queries";
@@ -82,7 +83,11 @@ function ClientFacts({ p }: { p: PairingRequest }) {
     { icon: TerminalIcon, label: "Tool", value: [tool, p.client.version && `CLI ${p.client.version}`].filter(Boolean).join(" · ") || null },
   ];
   const rows = [
-    ...facts.map((f) => ({ ...f, node: f.value ? <span className="font-mono text-[13px] break-all">{f.value}</span> : null })),
+    ...facts.map((f) => ({ ...f, node: f.value ? (
+        <span className="font-mono text-[13px] break-all">
+          <Visible text={f.value} />
+        </span>
+      ) : null })),
     {
       icon: GlobeIcon,
       label: "From",
@@ -146,7 +151,9 @@ function AskedFor({ p, accounts }: { p: PairingRequest; accounts: Account[] }) {
       {r.reason && (
         <div className="flex gap-2 border-t pt-2 text-sm">
           <MessageSquareQuoteIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-          <p className="whitespace-pre-wrap break-words">{r.reason}</p>
+          <p className="whitespace-pre-wrap break-words">
+            <Visible text={r.reason} />
+          </p>
         </div>
       )}
     </div>
@@ -194,13 +201,19 @@ export function PairingCard({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-base font-semibold break-words">{p.name}</span>
+              <span className="text-base font-semibold break-words">
+                <Visible text={p.name} />
+              </span>
               <Badge variant="outline" className="font-normal text-muted-foreground">
                 self-reported by the agent
               </Badge>
-              {highlighted && <Badge className="bg-chart-1 font-normal text-white">Opened from your terminal</Badge>}
+              {highlighted && <Badge className="bg-chart-1 font-normal text-white">Opened from a link</Badge>}
             </div>
-            {p.description && <p className="text-sm break-words whitespace-pre-wrap text-muted-foreground">{p.description}</p>}
+            {p.description && (
+              <p className="text-sm break-words whitespace-pre-wrap text-muted-foreground">
+                <Visible text={p.description} />
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <ClockIcon className="size-3.5" />
@@ -260,7 +273,8 @@ export function PairingCard({
 }
 
 /** Find a pending request by the code shown in the agent's terminal. */
-export function FindByCode({ pending, onFound }: { pending: PairingRequest[]; onFound: (p: PairingRequest, code: string) => void }) {
+/** Find a pending request by its code. Only highlights it: the code is typed again in the approve dialog. */
+export function FindByCode({ pending, onFound }: { pending: PairingRequest[]; onFound: (p: PairingRequest) => void }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const submit = (e: React.FormEvent) => {
@@ -271,7 +285,7 @@ export function FindByCode({ pending, onFound }: { pending: PairingRequest[]; on
     if (!match) return setError("No waiting request has this code. Codes last 10 minutes; if it expired, run connect again.");
     setError(null);
     setCode("");
-    onFound(match, c);
+    onFound(match);
   };
   return (
     <form onSubmit={submit} className="space-y-1.5">
@@ -326,13 +340,10 @@ const PAIRING_CHOICES: Choice<string>[] = [
  */
 export function PairingApproveDialog({
   p,
-  initialCode,
   accounts,
   onOpenChange,
 }: {
   p: PairingRequest | null;
-  /** Only when the human already typed it in the "find by code" box. */
-  initialCode?: string;
   accounts: Account[];
   onOpenChange: (open: boolean) => void;
 }) {
@@ -348,7 +359,7 @@ export function PairingApproveDialog({
         {approved ? (
           <ApprovedState agent={approved.agent} onClose={close} />
         ) : p ? (
-          <ApproveForm key={p.id} p={p} initialCode={initialCode} accounts={accounts} onApproved={(agent) => setApproved({ agent, request: p })} onCancel={close} />
+          <ApproveForm key={p.id} p={p} accounts={accounts} onApproved={(agent) => setApproved({ agent, request: p })} onCancel={close} />
         ) : null}
       </DialogContent>
     </Dialog>
@@ -382,19 +393,18 @@ function ApprovedState({ agent, onClose }: { agent: Agent; onClose: () => void }
 
 function ApproveForm({
   p,
-  initialCode,
   accounts,
   onApproved,
   onCancel,
 }: {
   p: PairingRequest;
-  initialCode?: string;
   accounts: Account[];
   onApproved: (a: Agent) => void;
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
-  const [code, setCode] = useState(initialCode ?? "");
+  // Never pre-filled: the human types what the agent's terminal shows.
+  const [code, setCode] = useState("");
   const [codeError, setCodeError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -407,10 +417,17 @@ function ApproveForm({
     Object.fromEntries(usable.map((a) => [a.id, { on: usable.filter((x) => x.status === "active").length === 1 && a.status === "active", preset: "read", fields: { ...PAIRING_DEFAULT } }])),
   );
   const [error, setError] = useState<unknown>(null);
+  /** The request was decided or expired meanwhile: nothing left to approve. */
+  const [gone, setGone] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [typing, setTyping] = useState<Record<string, boolean>>({});
   const more = asksForMore(p);
   const selected = usable.filter((a) => choices[a.id]?.on);
-  const scopeEmpty = selected.some((a) => choices[a.id]!.fields.labelScope?.length === 0);
+  const problem = !selected.length
+    ? "Choose at least one account."
+    : selected.some((a) => typing[a.id] && choices[a.id]!.preset === "custom")
+      ? "Add or clear the recipient you're typing first."
+      : (selected.map((a) => grantProblem(choices[a.id]!.fields)).find(Boolean) ?? null);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -419,7 +436,7 @@ function ApproveForm({
     if (typed !== p.userCode) {
       return setCodeError("That's not this request's code. If your terminal shows a different code, this request isn't from your agent: deny it.");
     }
-    if (!selected.length) return setError(new Error("Choose at least one account for the agent."));
+    if (problem) return setError(new Error(problem));
     setBusy(true);
     setError(null);
     try {
@@ -434,8 +451,14 @@ function ApproveForm({
       void qc.invalidateQueries({ queryKey: keys.agents });
       onApproved(agent);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) setCodeError(err.message);
-      else setError(err);
+      if (err instanceof ApiError && err.code === "user_code_mismatch") setCodeError(err.message);
+      else {
+        setError(err);
+        if (err instanceof ApiError && (err.status === 409 || err.status === 404)) {
+          setGone(true);
+          void qc.invalidateQueries({ queryKey: keys.pairings });
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -446,8 +469,11 @@ function ApproveForm({
       <DialogHeader>
         <DialogTitle>Approve agent access</DialogTitle>
         <DialogDescription>
-          <span className="font-medium text-foreground">{p.name}</span> from <span className="font-mono">{p.ip ?? "an unknown address"}</span> wants
-          access. Nothing is granted until you confirm the code.
+          <span className="font-medium text-foreground">
+            <Visible text={p.name} />
+          </span>{" "}
+          <span className="rounded border px-1 text-xs">self-reported</span> from <span className="font-mono">{p.ip ?? "an unknown address"}</span>{" "}
+          wants access. Nothing is granted until you confirm the code. <ExpiresIn at={p.expiresAt} />.
         </DialogDescription>
       </DialogHeader>
 
@@ -471,7 +497,9 @@ function ApproveForm({
         {codeError ? (
           <FieldError>{codeError}</FieldError>
         ) : (
-          <FieldDescription>Type the code your agent's terminal shows. If you didn't start this request yourself, deny it.</FieldDescription>
+          <FieldDescription>
+            Type the code from your agent's terminal. If you didn't just run <code className="font-mono">connect</code> yourself, deny this request.
+          </FieldDescription>
         )}
       </Field>
 
@@ -528,6 +556,7 @@ function ApproveForm({
                           accountId={a.id}
                           value={c.fields}
                           onChange={(patch) => set({ fields: { ...c.fields, ...patch } })}
+                          onPendingChange={(v) => setTyping((t) => ({ ...t, [a.id]: v }))}
                         />
                       </div>
                     )}
@@ -545,8 +574,8 @@ function ApproveForm({
         <Button type="button" variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
-        {!selected.length && <span className="mr-auto self-center text-xs text-muted-foreground">Choose at least one account.</span>}
-        <Button type="submit" disabled={busy || !selected.length || scopeEmpty}>
+        {problem && !gone && <span className="mr-auto self-center text-xs text-muted-foreground">{problem}</span>}
+        <Button type="submit" disabled={busy || gone || !!problem}>
           {busy ? <Spinner /> : <CheckIcon />} Approve and send key to terminal
         </Button>
       </DialogFooter>

@@ -75,7 +75,8 @@ export function ConnectAccountHost() {
   const known = useRef<Set<string>>(new Set());
 
   const reqRef = useRef<ConnectRequest>({});
-  const reauthWasActive = useRef(false);
+  /** Reconnecting an account that was in needs_reauth: only then does "active again" prove the new sign-in landed. */
+  const reauthFromBroken = useRef(false);
   const finish = (email: string) => {
     const done = reqRef.current.onDone;
     reqRef.current = { ...reqRef.current, onDone: undefined };
@@ -117,8 +118,9 @@ export function ConnectAccountHost() {
     }
     const accounts = qc.getQueryData<Account[]>(keys.accounts) ?? (await qc.fetchQuery(queries.accounts()).catch(() => []));
     known.current = new Set(accounts.map((a) => a.id));
-    // Reconnecting an account that is still active: its routine updates on the stream prove nothing.
-    reauthWasActive.current = !!r.reauthAccountId && accounts.some((a) => a.id === r.reauthAccountId && a.status === "active");
+    // For active, paused or erroring accounts a status change proves nothing (resume, a recovered sync…):
+    // those reconnects finish only on the callback page's own result.
+    reauthFromBroken.current = !!r.reauthAccountId && accounts.some((a) => a.id === r.reauthAccountId && a.status === "needs_reauth");
     try {
       const res = await api<ConnectAccountResponse>("/api/accounts/connect", {
         body: { ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}), ...(r.scopes?.length ? { scopes: r.scopes } : {}) },
@@ -166,7 +168,7 @@ export function ConnectAccountHost() {
     if (m.kind !== "account" || (phase?.kind !== "waiting" && phase?.kind !== "starting")) return;
     const a = m.data;
     const reauth = req.reauthAccountId;
-    if (reauth ? !reauthWasActive.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
+    if (reauth ? reauthFromBroken.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
   });
 
   // Notice when the popup goes away. Google's pages can sever window.opener, which also makes
@@ -186,6 +188,12 @@ export function ConnectAccountHost() {
   const checkAgain = async () => {
     const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
     const reauth = req.reauthAccountId;
+    if (reauth && !reauthFromBroken.current) {
+      toast.info("Can't confirm this one from here", {
+        description: "This account was already connected, so there's nothing new to detect. If Google said it worked, close this dialog.",
+      });
+      return;
+    }
     const found = accounts.find((a) => (reauth ? a.id === reauth && a.status === "active" : !known.current.has(a.id)));
     if (found) finish(found.email);
     else toast.info("No new account yet", { description: "Finish signing in with Google, or start again." });

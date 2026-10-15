@@ -22,7 +22,7 @@ const STALE: Record<ConsoleStreamMessage["kind"], readonly (readonly string[])[]
   account: [keys.accounts, keys.setupState, keys.overview],
   pairing: [keys.pairings, keys.agents],
 };
-const ALL_STALE = [...new Set(Object.values(STALE).flat())];
+const ALL_STALE = [...new Set([...Object.values(STALE).flat(), keys.eventHistory, keys.auditLog])];
 
 function isMessage(v: unknown): v is ConsoleStreamMessage {
   return !!v && typeof v === "object" && typeof (v as { kind?: unknown }).kind === "string" && "data" in v;

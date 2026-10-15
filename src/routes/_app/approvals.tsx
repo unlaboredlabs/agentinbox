@@ -50,7 +50,7 @@ function ApprovalsPage() {
   const count = pending.data?.length ?? 0;
   const pendingPairings = (pairings.data ?? []).filter((p) => p.status === "pending");
   const decidedPairings = (pairings.data ?? []).filter((p) => p.status !== "pending").slice(0, 8);
-  const [approving, setApproving] = useState<{ p: PairingRequest; code?: string } | null>(null);
+  const [approving, setApproving] = useState<{ p: PairingRequest } | null>(null);
   const linked = search.pairing ? pendingPairings.find((p) => p.userCode === search.pairing) : undefined;
 
   return (
@@ -124,7 +124,7 @@ function ApprovalsPage() {
             <QueryError error={pairings.error} onRetry={() => void pairings.refetch()} />
           ) : (
             <>
-              {pendingPairings.length > 0 && <FindByCode pending={pendingPairings} onFound={(p, code) => setApproving({ p, code })} />}
+              {pendingPairings.length > 0 && <FindByCode pending={pendingPairings} onFound={(p) => void navigate({ search: { pairing: p.userCode }, replace: true })} />}
               {pendingPairings.length === 0 ? (
                 <Card>
                   <Empty>
@@ -188,7 +188,6 @@ function ApprovalsPage() {
 
       <PairingApproveDialog
         p={approving?.p ?? null}
-        initialCode={approving?.code}
         accounts={accounts.data ?? []}
         onOpenChange={(o) => !o && setApproving(null)}
       />

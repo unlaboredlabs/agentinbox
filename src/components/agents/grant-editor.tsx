@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
-import { DEFAULT_GRANT, type GrantFields, sameGrant, toGrantFields, validateAddressGlob } from "@/lib/grants";
+import { DEFAULT_GRANT, type GrantFields, grantProblem, sameGrant, toGrantFields, validateAddressGlob } from "@/lib/grants";
 import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
@@ -73,7 +73,8 @@ export function GrantEditor({
 
   const dirty = !!draft && (!saved || !sameGrant(draft, saved));
   const set = (patch: Partial<GrantFields>) => setDraft((d) => ({ ...(d ?? DEFAULT_GRANT), ...patch }));
-  const scopeEmpty = draft?.labelScope?.length === 0;
+  const [typing, setTyping] = useState(false);
+  const problem = draft ? (typing ? "Add or clear the recipient you're typing first." : grantProblem(draft)) : null;
 
   const askRemove = () =>
     confirm({
@@ -121,7 +122,7 @@ export function GrantEditor({
       {draft && open && (
         <div className="border-t p-4">
           <FieldGroup>
-            <GrantFieldsForm idPrefix={account.id} accountId={account.id} value={draft} onChange={set} />
+            <GrantFieldsForm idPrefix={account.id} accountId={account.id} value={draft} onChange={set} onPendingChange={setTyping} />
 
             <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-4">
               {saved ? (
@@ -143,7 +144,8 @@ export function GrantEditor({
                     {saved ? "Discard changes" : "Cancel"}
                   </Button>
                 )}
-                <Button disabled={!dirty || save.isPending || scopeEmpty} onClick={() => save.mutate(draft)}>
+                {problem && dirty && <span className="self-center text-xs text-warning">{problem}</span>}
+                <Button disabled={!dirty || save.isPending || !!problem} onClick={() => save.mutate(draft)}>
                   {save.isPending && <Spinner />}
                   {saved ? "Save permissions" : "Grant access"}
                 </Button>
@@ -162,11 +164,14 @@ export function GrantFieldsForm({
   accountId,
   value,
   onChange,
+  onPendingChange,
 }: {
   idPrefix: string;
   accountId: string;
   value: GrantFields;
   onChange: (patch: Partial<GrantFields>) => void;
+  /** Recipient text typed but not added yet. */
+  onPendingChange?: (pending: boolean) => void;
 }) {
   const set = onChange;
   const id = (s: string) => `${idPrefix}-${s}`;
@@ -216,6 +221,7 @@ export function GrantFieldsForm({
             onChange={(allowTo) => set({ allowTo })}
             placeholder="Anyone. Add addresses or *@company.com"
             validate={validateAddressGlob}
+            onPendingChange={onPendingChange}
             aria-describedby={id("allow-hint")}
           />
           <FieldDescription id={id("allow-hint")}>
@@ -252,7 +258,9 @@ function CapInput({ id, label, value, onChange }: { id: string; label: string; v
           const digits = e.target.value.replace(/\D/g, "");
           onChange(digits ? Math.min(100_000, Number(digits)) : null);
         }}
+        aria-invalid={value === 0}
       />
+      {value === 0 && <p className="text-xs text-destructive">Use at least 1, or leave empty for no limit.</p>}
     </Field>
   );
 }

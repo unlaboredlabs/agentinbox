@@ -85,6 +85,8 @@ export function transportOf(publicUrl: string): Transport {
   if (v4 && v4[0] === 127) return "loopback";
   if (v4 && v4[0] === 100 && v4[1]! >= 64 && v4[1]! <= 127) return "tailscale";
   if (host.endsWith(".ts.net")) return "tailscale";
+  // Tailscale's IPv6 range fd7a:115c:a1e0::/48 (URL hosts are normalized to lowercase, compressed form).
+  if (/^fd7a:115c:a1e0:/.test(host)) return "tailscale";
   return "insecure";
 }
 
@@ -103,10 +105,10 @@ export function connectCommands(publicUrl: string, tool: AgentTool): ConnectComm
   const flag = insecure ? " --insecure" : "";
   const toolFlags = tool === "other" ? "" : ` --tool ${tool} --setup-mcp`;
   return {
-    connect: `${NPX} connect ${publicUrl}${toolFlags}${flag}`,
+    connect: `${NPX} connect ${shellQuote(publicUrl)}${toolFlags}${flag}`,
     listen: `${NPX} listen service install --exec ${shellQuote(RECIPES[tool].exec)}${flag}`,
     selfSetup: `Read ${publicUrl}/skill.md and set yourself up with agentinbox.`,
-    skillInstall: `${NPX} skill install --url ${publicUrl}`,
+    skillInstall: `${NPX} skill install --url ${shellQuote(publicUrl)}`,
     insecure,
   };
 }

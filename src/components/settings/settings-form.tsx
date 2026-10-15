@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { IngestMode, Settings, SystemInfo } from "@shared/types";
 import { useForm } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
@@ -102,6 +103,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
   });
 
   const initial = JSON.stringify(toForm(settings));
+  const [allowTyping, setAllowTyping] = useState(false);
 
   return (
     <form
@@ -194,7 +196,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             </form.Field>
             <form.Field name="pollIntervalSeconds" validators={{ onChange: ({ value }) => intError("Poll interval", 5, 3600)(value) }}>
               {(field) => (
-                <NumberField field={field} label="Poll interval" unit="seconds" description="Used in polling mode, and as a safety net in real-time mode." />
+                <NumberField field={field} label="Poll interval" unit="seconds" description="How often polling mode checks each account. Real-time mode doesn't use it (it re-checks on its own every 5 minutes)." />
               )}
             </form.Field>
           </FieldGroup>
@@ -271,7 +273,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             {(field) => (
               <Field>
                 <FieldLabel htmlFor="allowlist">Allowed private hosts</FieldLabel>
-                <ChipsInput id="allowlist" value={field.state.value} onChange={field.handleChange} placeholder="e.g. 10.0.0.0/8, n8n.internal" validate={allowlistError} />
+                <ChipsInput id="allowlist" value={field.state.value} onChange={field.handleChange} placeholder="e.g. 10.0.0.0/8, n8n.internal" validate={allowlistError} onPendingChange={setAllowTyping} />
                 <FieldDescription className="flex items-start gap-1.5">
                   <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
                   <span>
@@ -289,12 +291,12 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         {([changed, canSubmit, submitting]) =>
           changed ? (
             <div className="sticky bottom-4 z-10 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-background/95 p-3 shadow-lg backdrop-blur">
-              <span className="text-sm">You have unsaved changes.</span>
+              <span className="text-sm">{allowTyping ? "Add or clear the host you're typing in the allowlist first." : "You have unsaved changes."}</span>
               <div className="flex gap-2">
                 <Button type="button" variant="ghost" onClick={() => form.reset()}>
                   Discard
                 </Button>
-                <Button type="submit" disabled={!canSubmit || submitting}>
+                <Button type="submit" disabled={!canSubmit || submitting || allowTyping}>
                   {submitting && <Spinner />} Save settings
                 </Button>
               </div>
