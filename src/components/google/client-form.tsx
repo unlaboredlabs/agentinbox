@@ -12,6 +12,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
+import { rememberClientRedirect } from "./redirect-notice";
+
+/** Last characters of the saved secret, when the server reports them (newer servers). */
+export const secretHintOf = (v: GoogleClientView | undefined) => (v as (GoogleClientView & { secretHint?: string | null }) | undefined)?.secretHint ?? null;
 
 export const CLIENT_ID_RE = /^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/;
 
@@ -62,6 +66,7 @@ export function ClientForm({
     errorTitle: false,
     onSuccess: (v) => {
       setSecret("");
+      rememberClientRedirect(v);
       onSaved?.(v);
     },
   });
@@ -119,10 +124,14 @@ export function ClientForm({
             <FieldError>{errors.secret}</FieldError>
           ) : hasSecret ? (
             <FieldDescription className="flex items-center gap-1.5">
-              <CheckCircle2Icon className="size-3.5 text-success" /> A secret is saved (encrypted). It's never shown again.
+              <CheckCircle2Icon className="size-3.5 text-success" /> A secret is saved (encrypted)
+              {secretHintOf(view) ? `, ending in …${secretHintOf(view)}` : ""}. Paste a new one only to replace it.
             </FieldDescription>
           ) : (
-            <FieldDescription>Stored encrypted on this server and never sent back to the browser.</FieldDescription>
+            <FieldDescription>
+              Google shows a secret only once. Lost it? In Google Cloud open <strong>Google Auth Platform → Clients</strong> → your client →{" "}
+              <strong>Add secret</strong>, and paste the new one here. Stored encrypted.
+            </FieldDescription>
           )}
         </Field>
         {!fixedProjectId && (
