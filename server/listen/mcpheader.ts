@@ -34,7 +34,7 @@ process.stdout.write(JSON.stringify({ Authorization: "Bearer " + profile.apiKey 
 }
 
 /** Node installs whose path names one version, so upgrading or removing that version breaks anything that recorded it. */
-const VERSIONED_NODE = /\/fnm\/node-versions\/|\/\.?nvm\/versions\/node\/|\/\.volta\/tools\/image\/node\/|\/\.asdf\/installs\/nodejs\/|\/mise\/installs\/node\/|\/n\/versions\/node\/|\/Cellar\/node(@\d+)?\//;
+const VERSIONED_NODE = /\/\.?fnm\/node-versions\/|\/\.?nvm\/versions\/node\/|\/\.volta\/tools\/image\/node\/|\/\.asdf\/installs\/nodejs\/|\/mise\/installs\/node\/|\/n\/versions\/node\/|\/Cellar\/node(@\d+)?\//;
 
 export interface NodeChoice {
   /** The node binary recorded in the header helper command. */
@@ -54,17 +54,20 @@ function worksAsNode(path: string): boolean {
 /**
  * The node to record for Claude Code's header helper. A version manager's node (fnm, nvm, Volta, asdf,
  * mise, n, a Homebrew Cellar keg) disappears on upgrade, so prefer a path that stays put: the same
- * Homebrew prefix's bin/node, fnm's default alias, or a system node, but only when it exists and runs.
+ * Homebrew keg's opt/ link (then the prefix's bin/node), fnm's default alias, or a system node, but only
+ * when it exists and runs.
  * Version-manager shims that pick a version per directory (asdf, mise, Volta) aren't used: Claude Code
  * runs the helper in whatever project it's in. Otherwise the current node is kept (and reported).
  */
 export function helperNode(execPath = process.execPath, works: (path: string) => boolean = worksAsNode): NodeChoice {
   if (!VERSIONED_NODE.test(execPath)) return { path: execPath, versioned: false };
   const candidates: string[] = [];
-  const cellar = /^(.*)\/Cellar\/node(@\d+)?\//.exec(execPath);
-  if (cellar) candidates.push(join(cellar[1]!, "bin", "node"));
-  const fnm = /^(.*)\/node-versions\//.exec(execPath);
-  if (fnm && /\/fnm\/node-versions\//.test(execPath)) candidates.push(join(fnm[1]!, "aliases", "default", "bin", "node"));
+  // Homebrew: <prefix>/opt/node@22 (or opt/node) follows the same formula across upgrades; bin/node may be another one.
+  const cellar = /^(.*)\/Cellar\/(node(?:@\d+)?)\//.exec(execPath);
+  if (cellar) candidates.push(join(cellar[1]!, "opt", cellar[2]!, "bin", "node"), join(cellar[1]!, "bin", "node"));
+  // fnm: ~/.local/share/fnm (or the older ~/.fnm)/node-versions/… → <fnm dir>/aliases/default.
+  const fnm = /^(.*\/\.?fnm)\/node-versions\//.exec(execPath);
+  if (fnm) candidates.push(join(fnm[1]!, "aliases", "default", "bin", "node"));
   candidates.push("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node");
   const stable = candidates.find((c) => c !== execPath && !VERSIONED_NODE.test(c) && works(c));
   return stable ? { path: stable, versioned: false } : { path: execPath, versioned: true };
@@ -83,7 +86,7 @@ export function helperNodeNote(profile: string, rerun: string): string {
   const v = path === process.execPath ? ` (v${process.versions.node})` : "";
   return versioned
     ? `Node.js: Claude Code runs the header helper with ${path}${v}. That path belongs to one Node version: if you upgrade or remove it, run \`${rerun}\` again.`
-    : `Node.js: Claude Code runs the header helper with ${path}${v}; if you remove or replace it, run \`${rerun}\` again.`;
+    : `Node.js: Claude Code runs the header helper with ${path}${v}; if you remove it, run \`${rerun}\` again.`;
 }
 
 /** Writes (or refreshes) the helper script, 0700. Returns the shell command for headersHelper. */

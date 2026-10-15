@@ -67,6 +67,10 @@ describe("agentinbox CLI (subprocess)", () => {
     const both = cli(["listen", "service", "install", "--recipe", "claude-code", "--exec", "cat"], xdg);
     expect(await both.exit).toBe(1);
     expect(both.output()).toContain("--recipe and --exec can't be combined");
+    // Without a target, the service install points at --recipe first.
+    const none = cli(["listen", "service", "install"], xdg);
+    expect(await none.exit).toBe(1);
+    expect(none.output()).toContain("Nothing for the service to run. Pass --recipe <tool> (claude-code, codex, cursor, hermes)");
     expect(api.live.size).toBe(0);
   }, 30_000);
 

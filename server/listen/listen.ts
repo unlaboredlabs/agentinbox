@@ -13,7 +13,7 @@ import { createListenLogger, type ListenLogger } from "./logfile.ts";
 import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { describeGrants, grantsKey } from "./grants.ts";
-import { shellQuote } from "./recipes.ts";
+import { recipeToolFor, shellQuote } from "./recipes.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
 import { acquireBackfillLock, acquireProfileLock } from "./lock.ts";
 import { appendDead, knownConsumers, rememberConsumer, StatusWriter } from "./state.ts";
@@ -597,7 +597,9 @@ export function backfillCommand(profileName: string, profile: Profile, c: Effect
   const savedExec = profile.exec ?? null;
   const savedForward = profile.forward?.url ?? null;
   if (c.exec !== savedExec || (c.forward?.url ?? null) !== savedForward) {
-    if (c.exec) parts.push(`--exec ${shellQuote(c.exec)}`);
+    const tool = recipeToolFor(c.exec, profileName);
+    if (tool) parts.push(`--recipe ${tool}`);
+    else if (c.exec) parts.push(`--exec ${shellQuote(c.exec)}`);
     if (c.forward) parts.push(`--forward ${shellQuote(c.forward.url)}`);
   }
   return parts.join(" ");

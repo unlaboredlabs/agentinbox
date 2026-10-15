@@ -115,6 +115,11 @@ export function parseRecipeTool(value: string): Exclude<AgentTool, "other"> {
   throw new Error(`Unknown --recipe "${value}". Built-in recipes: ${RECIPE_TOOLS.join(", ")}.${hint}`);
 }
 
+/** The built-in recipe whose command is exactly `exec` for this profile, if any (to print `--recipe <tool>` back). */
+export function recipeToolFor(exec: string | null, profile: string = DEFAULT_PROFILE): Exclude<AgentTool, "other"> | null {
+  return (exec && RECIPE_TOOLS.find((t) => recipe(t, profile).exec === exec)) || null;
+}
+
 /** Single-quotes a string for POSIX shells (for printing copy-pasteable commands). */
 export const shellQuote = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'"'"'`)}'`);
 

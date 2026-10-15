@@ -160,7 +160,7 @@ export async function replayDead(flags: ListenFlags & { id?: string }, opts: { r
   const available: Target[] = [];
   if (config.exec) available.push("exec");
   if (config.forward) available.push("forward");
-  if (!available.length) throw new Error(`Nothing to replay to: pass --exec '<command>' and/or --forward <url> (or save them in the profile with \`${NPX} listen --save …\`).`);
+  if (!available.length) throw new Error(`Nothing to replay to: pass --recipe <tool> (claude-code, codex, cursor, hermes), --exec '<command>' and/or --forward <url> (or save them in the profile with \`${NPX} listen --save …\`).`);
   if (config.exec && process.platform === "win32") throw new Error("--exec isn't supported on Windows; replay with --forward instead.");
 
   const timeoutMs = config.timeoutSeconds * 1000;
