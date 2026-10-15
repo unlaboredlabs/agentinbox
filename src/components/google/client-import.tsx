@@ -21,7 +21,10 @@ export function ClientImport({
   expectedProjectId,
   onImported,
   onNeedsManual,
+  quiet,
 }: {
+  /** The surrounding page already says what's saved: skip the "Imported and saved" line. */
+  quiet?: boolean;
   /** The audience chosen earlier; omitted keeps what the server has. */
   appType?: GoogleAppType;
   /** The project the earlier steps used: a different one in the file gets pointed out. */
@@ -142,7 +145,7 @@ export function ClientImport({
       </div>
 
       <div ref={resultRef} tabIndex={-1} className="space-y-2 outline-none" role="status">
-        {result && (
+        {result && !quiet && (
           <p className="flex items-start gap-1.5 text-sm text-foreground">
             <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
             <span>

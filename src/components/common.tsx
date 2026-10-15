@@ -119,12 +119,12 @@ export function CopyButton({
   );
 }
 
-// Soft wrap points inside a long token: after URL and flag separators, never after a hyphen
+// Soft wrap points inside a long token: after URL separators, never after a hyphen
 // (so `--set-as-default` or `agentinbox-123456` stay whole) and never between "//".
-const SOFT_BREAK = /(?<=[/?&,=])(?=[^/])/;
+const SOFT_BREAK = /(?<=[/?&,])(?=[^/])/;
 
 /**
- * Text that wraps at spaces and after / ? & = , only. Each piece in between is unbreakable, so long
+ * Text that wraps at spaces and after / ? & , only. Each piece in between is unbreakable, so long
  * commands and URLs never split mid-flag or mid-word; a piece wider than the box scrolls instead.
  */
 export function Wrapped({ text }: { text: string }) {

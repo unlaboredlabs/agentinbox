@@ -117,6 +117,7 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
                 expectedProjectId={project || undefined}
                 onNeedsManual={() => setManual(true)}
                 onImported={(r) => setCheck(r.check)}
+                quiet
               />
               {configured && <ClientCheckResult check={check} view={v} onChecked={setCheck} />}
               {!check && <SetupWarnings filter={(w) => w.code === "client_invalid" || w.code === "client_secret_invalid"} />}

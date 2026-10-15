@@ -44,7 +44,9 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
   const p = state.data?.pubsub;
   const active = p?.mode === "pubsub" && !!p.subscription;
   const accounts = (accountList.data ?? []).filter((a) => a.status === "active");
-  const principalId = chosen ?? p?.principalAccountId ?? accounts[0]?.id;
+  // The account the next provisioning uses: the one picked here, else one being switched to, else the current one.
+  const principalId = chosen ?? p?.pendingPrincipalAccountId ?? p?.principalAccountId ?? accounts[0]?.id;
+  const switching_ = active && !!p?.principalAccountId && principalId !== p.principalAccountId;
   const principal = accountList.data?.find((a) => a.id === principalId);
   const projectId = state.data?.gcpProjectId ?? "";
 
@@ -166,6 +168,13 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
 
       {p?.lastError && provisionError === undefined && !pollingMode && <ErrorAlert error={new Error(p.lastError)} title="Pub/Sub reported a problem" />}
 
+      {active && p?.pendingPrincipalEmail && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Switching to {p.pendingPrincipalEmail}… Real-time delivery keeps working with {p.principalEmail ?? "the current account"} until the switch
+          succeeds.
+        </p>
+      )}
+
       {provisioning && <ProvisionProgress />}
 
       <div ref={problemRef} tabIndex={-1} className="space-y-3 outline-none" role={provisionError !== undefined ? "alert" : undefined}>
@@ -241,7 +250,10 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         )}
 
         {provisionError !== undefined && code !== "pubsub_scope_required" && code !== "pubsub_permission_denied" && code !== "pubsub_org_policy" && (
-          <ErrorAlert error={provisionError} title="Couldn't turn on real-time delivery">
+          <ErrorAlert
+            error={provisionError}
+            title={switching_ ? `Couldn't switch to ${principal?.email ?? "that account"}; real-time keeps working as before` : "Couldn't turn on real-time delivery"}
+          >
             {code === "pubsub_billing" && projectId && (
               <p className="pt-1">
                 <ExternalLink href={cloudUrl.billing(projectId)}>Link a billing account</ExternalLink>
@@ -267,10 +279,10 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 empty:hidden">
         {provisionError === undefined && (
           <Button onClick={() => void provision()} disabled={provisioning || accounts.length === 0} variant={active ? "outline" : "default"}>
-            {provisioning ? <Spinner /> : <RadioTowerIcon />} {active ? "Set up again" : "Set up real-time automatically"}
+            {provisioning ? <Spinner /> : <RadioTowerIcon />} {active ? (switching_ ? `Switch to ${principal?.email ?? "this account"}` : "Set up again") : "Set up real-time automatically"}
           </Button>
         )}
         {provisionError !== undefined && code !== "pubsub_scope_required" && code !== "pubsub_permission_denied" && (
@@ -295,7 +307,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
               </Button>
             )
           ))}
-        {provisionError === undefined && !active && accounts.length > 1 && accountPicker}
+        {provisionError === undefined && accounts.length > 1 && accountPicker}
       </div>
       {accounts.length === 0 && <p className="text-xs text-muted-foreground">Connect a Gmail account first: setting this up uses its Google access.</p>}
     </div>

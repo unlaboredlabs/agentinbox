@@ -238,9 +238,9 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
               columns={2}
               choices={[
                 { value: "local", icon: LaptopIcon, title: "All on this computer", description: "Your browser, agentinbox and your agents run on one machine." },
-                { value: "remote", icon: ServerIcon, title: "agentinbox runs on another machine", description: "A server, VM or Raspberry Pi you reach over SSH." },
+                { value: "remote", icon: ServerIcon, title: "On a server or VM", description: "agentinbox runs on another machine you reach over SSH (a server, VM, Raspberry Pi)." },
                 { value: "tailscale", icon: NetworkIcon, title: "I use Tailscale", description: "The machines are on the same tailnet." },
-                { value: "public", icon: ShieldIcon, title: "A public server with a domain", description: "Reachable from the internet, e.g. mail.example.com." },
+                { value: "public", icon: ShieldIcon, title: "Public, with a domain", description: "A server reachable from the internet, e.g. mail.example.com." },
               ]}
             />
             {situation && (
