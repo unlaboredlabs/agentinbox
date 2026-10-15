@@ -16,12 +16,20 @@ export function describeGrant(g: Grant): string {
   else parts.push(caps.join(", ") || "no capabilities");
   if (caps.includes("send")) {
     if (g.sendMode === "approval") parts.push("sends need your approval in the console");
-    else if (g.sendMode === "direct") parts.push("sends go out directly");
+    else if (g.sendMode === "direct") parts.push(g.allowTo?.length ? "sends go out directly to allowed recipients" : "sends go out directly");
     else parts.push("sends become Gmail drafts for you to send");
+    // Restrictions the daemon enforces on top of the send mode.
+    if (g.allowTo?.length) {
+      const shown = g.allowTo.slice(0, 3).map((a) => safeText(a, 80));
+      parts.push(`only to ${shown.join(", ")}${g.allowTo.length > 3 ? ` and ${g.allowTo.length - 3} more` : ""}`);
+    }
+    if (g.replyOnly) parts.push("replies in existing threads only");
+    const limits = [g.maxSendsPerHour ? `${g.maxSendsPerHour}/hour` : null, g.maxSendsPerDay ? `${g.maxSendsPerDay}/day` : null].filter(Boolean);
+    if (limits.length) parts.push(`at most ${limits.join(", ")}`);
   } else if (!readOnly && caps.length) {
     parts.push("can't send");
   }
-  if (g.labelScope?.length) parts.push(`only labels ${g.labelScope.map((l) => safeText(l, 60)).join(", ")}`);
+  if (g.labelScope?.length) parts.push(`only label${g.labelScope.length > 1 ? "s" : ""} ${g.labelScope.map((l) => safeText(l, 60)).join(", ")}`);
   return `${safeText(g.accountEmail || g.accountId, 120)}: ${parts.join("; ")}`;
 }
 
@@ -35,6 +43,15 @@ export function describeGrants(grants: Grant[]): string[] {
 export const grantsKey = (grants: Grant[]) =>
   JSON.stringify(
     grants
-      .map((g) => [g.accountId, [...g.capabilities].sort(), g.sendMode, g.labelScope ? [...g.labelScope].sort() : null])
+      .map((g) => [
+        g.accountId,
+        [...g.capabilities].sort(),
+        g.sendMode,
+        g.labelScope ? [...g.labelScope].sort() : null,
+        g.allowTo ? [...g.allowTo].sort() : null,
+        g.replyOnly ?? null,
+        g.maxSendsPerHour ?? null,
+        g.maxSendsPerDay ?? null,
+      ])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   );

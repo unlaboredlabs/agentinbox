@@ -98,7 +98,8 @@ line (`--header "Authorization: Bearer $(…)"`): other local users can read it 
 agentinbox listen [--profile <name>] [--exec "<cmd>"] [--forward http://localhost:<port>/<path>]
                   [--types a,b] [--from <glob>]… [--to <glob>]… [--label <id>]… [--subject <regex>]
                   [--include-body] [--concurrency 2] [--timeout 300] [--max-attempts 5]
-                  [--consumer <name>] [--cwd <dir>] [--insecure] [--save] [--dry-run] [--from-start] [--backfill]
+                  [--consumer <name>] [--cwd <dir>] [--insecure] [--save] [--dry-run] [--from-start]
+                  [--backfill [--until <seq>]]
 agentinbox listen --print-recipe claude-code|codex|cursor|hermes|other [--profile <name>]
 ```
 
@@ -115,17 +116,22 @@ real listener's cursor.
 **Where it starts:** the daemon creates a consumer's cursor the first time it connects. A new consumer starts with mail
 that arrives from now on, so pairing never replays the mailbox's history into your agent. `--from-start` makes a *new*
 consumer start at the oldest stored event instead. Once a consumer exists, `--from-start` has no effect, and the
-listener warns you. To run the mail that's already stored through your command once, use `--backfill`:
+listener warns you. To run the **mail from before this listener started** through your command once, use
+`--backfill`:
 
 ```sh
 npx agentinbox-cli listen --backfill            # the profile's saved --exec/--forward; or pass them here
 npx agentinbox-cli listen --backfill --dry-run  # just list what it would run
 ```
 
-A backfill handles every stored event your grants can see, oldest first, up to the newest one when it starts, then
-exits (exit 1 if any event ended in dead letters). It uses its own throwaway cursor (`<consumer>-replay`, never
+The daemon records where each consumer's cursor started when it was created (`GET /agent/v1/me` → `consumers[].startSeq`).
+A backfill handles the stored events your grants can see from the oldest up to that point, then exits, so nothing the
+listener handles runs twice, whether the listener is running, stopped or behind. It exits 1 if any event ended in dead
+letters, or if the daemon stays unreachable for 10 minutes. It refuses to guess: if the listener hasn't connected yet,
+start it with `--from-start` instead; if its start isn't known (a consumer created by an older daemon) or the daemon is
+older than the CLI, pass `--until <event number>`. A backfill uses its own throwaway cursor (`<consumer>-replay`, never
 advanced, so every backfill starts from the oldest event again), its own lock and its own log (`one-off.log`), so it
-runs fine while the listener or its service is running; mail that arrives meanwhile is left to the listener.
+runs fine next to the listener or its service.
 
 `connect --force` keeps the consumer, so re-pairing doesn't replay anything either.
 

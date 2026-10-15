@@ -80,7 +80,24 @@ export type PairingPoll =
 export interface AgentSelf {
   id: string;
   name: string;
-  grants: { accountId: string; accountEmail: string; capabilities: Capability[]; labelScope: string[] | null; sendMode: SendMode }[];
+  grants: {
+    accountId: string;
+    accountEmail: string;
+    capabilities: Capability[];
+    labelScope: string[] | null;
+    sendMode: SendMode;
+    /** Send restrictions (absent from older daemons). */
+    allowTo?: string[];
+    replyOnly?: boolean;
+    maxSendsPerHour?: number | null;
+    maxSendsPerDay?: number | null;
+  }[];
+  /**
+   * This agent's listener consumers (absent from older daemons). `startSeq`: where the cursor started
+   * when the consumer was created (mail at or below it predates that listener; what `listen --backfill`
+   * replays); null when unknown (created before the daemon recorded it).
+   */
+  consumers?: { consumer: string; startSeq: number | null; ackedSeq: number; connected: boolean }[];
   mcpUrl: string;
   skillUrl: string;
   /** Newest event seq this agent can see: where a new consumer starts ("from now on"). */

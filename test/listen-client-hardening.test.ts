@@ -71,7 +71,7 @@ describe("starting point", () => {
     l = start({ flags: { consumer: "fresh" } });
     await waitFor(() => api.streamRequests.length === 3, 5000, "third stream");
     expect(api.streamRequests[2]!.start).toBeNull();
-    expect(output).toContain("Listening for new events from now on. To also run the mail that's already stored once (in another terminal, while this keeps running): npx agentinbox-cli listen --backfill");
+    expect(output).toContain("Listening for new events from now on. To also run the mail from before this listener started, once (in another terminal, while this keeps running): npx agentinbox-cli listen --backfill");
     l.stop();
     await l.done;
   });

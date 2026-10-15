@@ -130,7 +130,8 @@ Example:
   )
     .option("--dry-run", "print matching events without running anything (uses a throwaway <consumer>-dry-run cursor)")
     .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists: use --backfill)")
-    .option("--backfill", "run the mail that's already stored through --exec/--forward once, oldest first, then exit; safe while the listener runs (own cursor)")
+    .option("--backfill", "run the mail from before this listener started through --exec/--forward once, oldest first, then exit; safe while the listener runs (own cursor)")
+    .option("--until <seq>", "with --backfill: replay up to this event number instead of where the listener started", int("--until"))
     .option("--print-recipe <tool>", `print the ready-made --exec command for ${TOOLS.join(", ")} (with this machine's paths) and exit`)
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags & { printRecipe?: string }) => {

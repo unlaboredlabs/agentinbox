@@ -80,6 +80,13 @@ export class FakeAgentApi {
   blockedCode: string | null = null;
   /** What GET /me reports as the agent's grants (the console's choice at approval). */
   grants: AgentSelf["grants"] = [{ accountId: "acc_1", accountEmail: "me@example.com", capabilities: ["read", "draft"], labelScope: null, sendMode: "draft_only" }];
+  /** Consumers as GET /me reports them (created on first stream connection, like the daemon). */
+  consumers = new Map<string, { startSeq: number | null; acked: number }>();
+  private readonly ownCursor = new Set<string>();
+  /** false: GET /me omits `consumers` (a daemon older than the CLI). */
+  reportConsumers = true;
+  /** Event seqs the stream never delivers (filtered or invisible to this agent). */
+  hidden = new Set<number>();
   /** headSeq reported by GET /me; default: the newest event. */
   headSeq: number | null = null;
   /** Base the approve link is built on (the daemon's publicUrl setting); default: this server's own URL. */
@@ -129,6 +136,7 @@ export class FakeAgentApi {
   /** Adds an event and pushes it to live streams. */
   publish(e: WebhookPayload): void {
     this.events.push(e);
+    if (this.hidden.has(e.data.seq)) return;
     for (const res of this.live) this.write(res, e);
   }
 
@@ -190,6 +198,9 @@ export class FakeAgentApi {
         mcpUrl: `${this.url}/mcp`,
         skillUrl: `${this.url}/skill.md`,
         headSeq: this.headSeq ?? this.events.at(-1)?.data.seq ?? 0,
+        ...(this.reportConsumers
+          ? { consumers: [...this.consumers].map(([consumer, c]) => ({ consumer, startSeq: c.startSeq, ackedSeq: c.acked, connected: false })) }
+          : {}),
       };
       return this.json(res, 200, self);
     }
@@ -199,6 +210,9 @@ export class FakeAgentApi {
       const seq = Number(b.seq);
       this.acks.push(seq);
       this.acked = Math.max(this.acked, seq);
+      const c = this.consumers.get(String(b.consumer));
+      if (c) c.acked = Math.max(c.acked, seq);
+      else this.consumers.set(String(b.consumer), { startSeq: null, acked: seq });
       return this.json(res, 200, { ackedSeq: this.acked });
     }
     if (req.method === "GET" && url.pathname === "/agent/v1/events/stream") {
@@ -219,8 +233,17 @@ export class FakeAgentApi {
       if (!this.authed(req)) return this.json(res, 401, { error: { code: "unauthorized", message: this.revoked ?? "invalid API key" } });
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       res.write(": connected\n\n");
-      const from = Math.max(Number(url.searchParams.get("after") ?? 0), Number(req.headers["last-event-id"] ?? 0), this.acked);
-      for (const e of this.events) if (e.data.seq > from) this.write(res, e);
+      // Cursors: a consumer that started at the beginning keeps its own; everyone else shares `acked`
+      // (what most tests set directly).
+      const name = url.searchParams.get("consumer") ?? "default";
+      if (!this.consumers.has(name)) {
+        const beginning = url.searchParams.get("start") === "beginning";
+        this.consumers.set(name, { startSeq: beginning ? 0 : (this.events.at(-1)?.data.seq ?? 0), acked: 0 });
+        if (beginning) this.ownCursor.add(name);
+      }
+      const cursor = this.ownCursor.has(name) ? this.consumers.get(name)!.acked : this.acked;
+      const from = Math.max(Number(url.searchParams.get("after") ?? 0), Number(req.headers["last-event-id"] ?? 0), cursor);
+      for (const e of this.events) if (e.data.seq > from && !this.hidden.has(e.data.seq)) this.write(res, e);
       this.live.add(res);
       const ping = setInterval(() => {
         if (this.sendPings) res.write(": ping\n\n");

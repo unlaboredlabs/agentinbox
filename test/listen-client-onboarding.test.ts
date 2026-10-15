@@ -9,7 +9,7 @@ import { printStatus } from "../server/listen/admin.ts";
 import { approveLinks, CONNECT_EXIT, runConnect } from "../server/listen/connect.ts";
 import { describeGrant, describeGrants } from "../server/listen/grants.ts";
 import { EXIT, runListener, type RunListenerOptions } from "../server/listen/listen.ts";
-import { acquireProfileLock, backfillLockPath, lockPath } from "../server/listen/lock.ts";
+import { backfillLockPath, lockPath } from "../server/listen/lock.ts";
 import { helperScriptPath } from "../server/listen/mcpheader.ts";
 import { setupMcp } from "../server/listen/mcpsetup.ts";
 import { readStatus } from "../server/listen/state.ts";
@@ -60,7 +60,10 @@ describe("grants in plain words", () => {
     expect(describeGrant(g(["read", "draft", "send", "organize"], "approval"))).toBe("ops@acme.dev: read, draft, send, organize; sends need your approval in the console");
     expect(describeGrant(g(["read", "draft", "send"], "direct"))).toBe("ops@acme.dev: read, draft, send; sends go out directly");
     expect(describeGrant(g(["read", "draft"], "draft_only"))).toBe("ops@acme.dev: read, draft; can't send");
-    expect(describeGrant(g(["read"], "draft_only", ["INBOX"]))).toContain("only labels INBOX");
+    expect(describeGrant(g(["read"], "draft_only", ["INBOX"]))).toContain("only label INBOX");
+    expect(describeGrant({ ...g(["read", "send"], "direct"), allowTo: ["*@acme.dev"], replyOnly: true, maxSendsPerHour: 5, maxSendsPerDay: null })).toBe(
+      "ops@acme.dev: read, send; sends go out directly to allowed recipients; only to *@acme.dev; replies in existing threads only; at most 5/hour",
+    );
     expect(describeGrants([])[0]).toMatch(/no mailbox access yet/);
   });
 });
@@ -205,38 +208,88 @@ describe("listen", () => {
     expect(plain()).toMatch(/Access\s+me@example.com: read, draft; can't send/);
   });
 
-  it("--backfill runs stored events once next to a running listener, then exits", async () => {
+  const lines = (file: string) => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []);
+
+  it("--backfill replays only the mail from before the listener started, next to the running listener", async () => {
     saveProfile("default", baseProfile());
     for (const s of [1, 2, 3]) api.events.push(makeEvent(s));
-    // The profile's listener (e.g. its service) holds the profile lock.
-    const releaseListener = acquireProfileLock("default");
-    const runs = join(env.root, "runs.txt");
-    const bf = start({ flags: { backfill: true, exec: `cat >> /dev/null; echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` }, backfillIdleMs: 300 });
-    const code = await bf.done;
-    expect(code).toBe(EXIT.ok);
-    expect(readFileSync(runs, "utf8").trim().split("\n")).toEqual(["1", "2", "3"]);
+    const listenerRuns = join(env.root, "listener.txt");
+    const runs = join(env.root, "backfill.txt");
+    // The listener starts at the head (#3) and handles what arrives after it.
+    api.acked = 3; // the fake's shared cursor: where a new consumer starts
+    const listener = start({ flags: { exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${listenerRuns}` } });
+    await waitFor(() => api.live.size === 1, 5000, "listener stream");
+    expect(api.consumers.get("c")?.startSeq).toBe(3);
+    api.publish(makeEvent(4));
+    api.publish(makeEvent(5));
+    await waitFor(() => lines(listenerRuns).length === 2, 5000, "listener handled #4, #5");
+
+    const began = Date.now();
+    const bf = start({ flags: { backfill: true, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` } });
+    expect(await bf.done).toBe(EXIT.ok);
+    // It stopped at the end seq (#4 arrived past it), not on the 60 s safety net.
+    expect(Date.now() - began).toBeLessThan(10_000);
+    expect(lines(runs)).toEqual(["1", "2", "3"]);
+    expect(lines(listenerRuns)).toEqual(["4", "5"]);
     expect(api.streamRequests.at(-1)).toMatchObject({ consumer: "c-replay", start: "beginning" });
-    expect(api.acks).toEqual([]); // never moves a cursor
+    expect(api.acks.every((a) => a >= 4)).toBe(true); // only the listener acknowledged anything
+    expect(plain()).toContain("mail from before the listener started (events up to #3)");
     expect(plain()).toContain("Backfill done: 3 events handled");
-    // The listener's lock and status.json are untouched; the backfill's own lock is gone.
+    // The listener's lock and status are untouched; the backfill's own lock is gone.
     expect(existsSync(lockPath("default"))).toBe(true);
     expect(existsSync(backfillLockPath("default"))).toBe(false);
-    expect(readStatus("default")).toBeNull();
-    releaseListener();
+    expect(readStatus("default")?.consumer).toBe("c");
+    listener.stop();
+    await listener.done;
   });
 
-  it("--backfill stops at the head and leaves newer mail alone; nothing stored is a no-op", async () => {
+  it("--backfill refuses when it can't know where the listener started; --until overrides", async () => {
     saveProfile("default", baseProfile());
-    expect(await start({ flags: { backfill: true } }).done).toBe(EXIT.ok);
-    expect(plain()).toContain("No stored events to backfill yet");
-
-    // #3 arrived after the backfill read the head (#2): it's the listener's job.
     for (const s of [1, 2, 3]) api.events.push(makeEvent(s));
-    api.headSeq = 2;
-    const runs = join(env.root, "runs2.txt");
-    const bf = start({ flags: { backfill: true, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` }, backfillIdleMs: 60_000 });
-    expect(await bf.done).toBe(EXIT.ok);
-    expect(readFileSync(runs, "utf8").trim().split("\n")).toEqual(["1", "2"]);
+    await expect(start({ flags: { backfill: true } }).done).rejects.toThrow(/hasn't connected yet[\s\S]*--from-start/);
+    api.consumers.set("c", { startSeq: null, acked: 3 });
+    await expect(start({ flags: { backfill: true } }).done).rejects.toThrow(/doesn't know where consumer "c" started[\s\S]*--until/);
+    api.reportConsumers = false;
+    await expect(start({ flags: { backfill: true } }).done).rejects.toThrow(/older than this CLI/);
+    const runs = join(env.root, "until.txt");
+    expect(await start({ flags: { backfill: true, until: 2, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` } }).done).toBe(EXIT.ok);
+    expect(lines(runs)).toEqual(["1", "2"]);
+  });
+
+  it("--backfill: nothing to do when the listener started at the oldest event", async () => {
+    saveProfile("default", baseProfile());
+    api.events.push(makeEvent(1));
+    api.consumers.set("c", { startSeq: 0, acked: 1 });
+    expect(await start({ flags: { backfill: true } }).done).toBe(EXIT.ok);
+    expect(plain()).toContain("Nothing to backfill");
+  });
+
+  it("--backfill --dry-run previews the backfill range on the replay cursor and runs nothing", async () => {
+    saveProfile("default", baseProfile());
+    for (const s of [1, 2, 3, 4]) api.events.push(makeEvent(s));
+    api.consumers.set("c", { startSeq: 2, acked: 4 });
+    const runs = join(env.root, "dry.txt");
+    expect(await start({ flags: { backfill: true, dryRun: true, exec: `echo x >> ${runs}` } }).done).toBe(EXIT.ok);
+    expect(api.streamRequests.at(-1)).toMatchObject({ consumer: "c-replay", start: "beginning", after: null });
+    expect(plain()).toContain("#1 message.received");
+    expect(plain()).toContain("#2 message.received");
+    expect(plain()).not.toContain("#3 message.received");
+    expect(existsSync(runs)).toBe(false);
+  });
+
+  it("--backfill: the safety net ends it when the rest isn't visible; gives up when the daemon stays unreachable", async () => {
+    saveProfile("default", baseProfile());
+    for (const s of [1, 2, 3]) api.events.push(makeEvent(s));
+    api.consumers.set("c", { startSeq: 3, acked: 3 });
+    api.hidden.add(3); // e.g. filtered out: the stream never sends it
+    const runs = join(env.root, "safety.txt");
+    expect(await start({ flags: { backfill: true, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` }, backfillIdleMs: 300 }).done).toBe(EXIT.ok);
+    expect(lines(runs)).toEqual(["1", "2"]);
+    expect(plain()).toContain("aren't visible to this listener");
+
+    api.blockedCode = "agent_disabled";
+    expect(await start({ flags: { backfill: true }, backfillUnreachableMs: 300 }).done).toBe(EXIT.error);
+    expect(plain()).toContain("Gave up: the daemon was unreachable");
   });
 
   it("the backfill hint names a command that works, with targets that weren't saved", async () => {

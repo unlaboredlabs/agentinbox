@@ -41,8 +41,13 @@ export interface RunListenerOptions {
   revokedExitDelayMs?: number;
   /** How often the agent's access (GET /me) is re-read, so the log shows grant changes. Default 5 min. */
   grantsRefreshMs?: number;
-  /** --backfill: quiet time (nothing received, nothing running) after which the stored events are done. Default 5 s. */
+  /**
+   * --backfill safety net: quiet time (nothing received, nothing running) after which the rest up to the
+   * end is taken to be invisible to this listener (types filter, label scope, retention). Default 60 s.
+   */
   backfillIdleMs?: number;
+  /** --backfill gives up when the daemon stays unreachable this long. Default 10 min. */
+  backfillUnreachableMs?: number;
 }
 
 /** Acknowledges the finished prefix, coalescing and retrying in the background. */
@@ -149,7 +154,8 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     // own throwaway consumers that are never advanced, so they create nothing for the real listener.
     const fromStart = !!opts.flags.fromStart || backfill;
     const known = knownConsumers(profileName).includes(config.consumer);
-    const streamConsumer = dryRun ? `${config.consumer.slice(0, 92)}-dry-run` : backfill ? `${config.consumer.slice(0, 93)}-replay` : config.consumer;
+    // A backfill (even a dry one) replays on its own cursor from the oldest event; a dry run peeks from the head.
+    const streamConsumer = backfill ? `${config.consumer.slice(0, 93)}-replay` : dryRun ? `${config.consumer.slice(0, 92)}-dry-run` : config.consumer;
     let streamAfter = 0;
     if (dryRun && !fromStart) {
       streamAfter = await getSelf(profile.url, profile.apiKey, 8000).then(
@@ -157,16 +163,9 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         () => 0,
       );
     }
-    // --backfill stops at the newest event that exists now; newer mail is the listener's job.
-    let backfillHead = 0;
-    if (backfill) {
-      backfillHead = await getSelf(profile.url, profile.apiKey, 8000).then(
-        (s) => s.headSeq ?? 0,
-        (err: unknown) => {
-          throw new Error(`Couldn't ask the daemon how far stored mail goes: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
-        },
-      );
-    }
+    // --backfill = the mail from before this listener started: it ends where the listener's consumer
+    // started on the daemon, so nothing the listener handles (or will handle) runs twice.
+    const backfillHead = backfill ? await backfillEnd(profileName, profile, config.consumer, opts.flags.until) : 0;
     const backfillHint = backfillCommand(profileName, profile, config);
 
     if (config.cwdIsDefault) ensurePrivateDir(config.cwd);
@@ -174,22 +173,24 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     if (!existsSync(claudeMcpConfigPath(profileName))) writeClaudeMcpConfig(profileName, `${profile.url}/mcp`);
     if (!quietConsole) printBanner(log, profileName, profile, config, dryRun, backfill);
     if (backfill && backfillHead === 0) {
-      log.info("No stored events to backfill yet: nothing to do.");
+      log.info(`Nothing to backfill: the listener (consumer "${config.consumer}") started with the oldest stored mail, so it handles all of it.`);
       return EXIT.ok;
     }
     if (backfill) {
-      log.info(`Backfill: handling stored events up to #${backfillHead}, oldest first, then exiting${dryRun ? " (dry run: nothing executed)" : ""}. Mail that arrives meanwhile is left to the listener.`);
+      log.info(
+        `Backfill: handling the mail from before the listener started (events up to #${backfillHead}), oldest first, then exiting${dryRun ? " (dry run: nothing executed)" : ""}. Everything newer is the listener's.`,
+      );
     } else if (dryRun) {
       log.info(fromStart ? "Dry run from the oldest stored event." : "Dry run: showing new events from now on.");
     } else if (fromStart && known) {
       log.warn(
         `This listener (consumer "${config.consumer}") already has a position on the daemon, so --from-start does nothing.\n` +
-          `--from-start only applies to a new consumer. To run the mail that's already stored through it once (fine while this listener runs): ${backfillHint}`,
+          `--from-start only applies to a new consumer. To run the mail from before this listener started through it once (fine while it runs): ${backfillHint}`,
       );
     } else if (fromStart) {
       log.info("Processing every stored event this agent can see, from the oldest (--from-start).");
     } else if (!known) {
-      log.info(`Listening for new events from now on. To also run the mail that's already stored once (in another terminal, while this keeps running): ${backfillHint}`);
+      log.info(`Listening for new events from now on. To also run the mail from before this listener started, once (in another terminal, while this keeps running): ${backfillHint}`);
     }
 
     const status = new StatusWriter(profileName, {
@@ -373,6 +374,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         if (blocked || downSince) void checkGrants();
         blocked = null;
         connectedNow = true;
+        lastActivity = Date.now();
         log.info(`${pc.green("●")} Connected${after}. ${backfill ? "Receiving stored events…" : "Waiting for events…"}`);
         if (!dryRun && !backfill) rememberConsumer(profileName, config.consumer);
         downSince = null;
@@ -439,19 +441,30 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       process.on("SIGTERM", onSignal);
     }
 
-    // --backfill ends once everything up to the head arrived (or the stream went quiet) and finished.
+    // --backfill ends once it has reached its end seq (an event at or past it arrived) and everything
+    // finished. Safety net: a long quiet spell means the rest isn't visible to this listener. It gives
+    // up if the daemon stays unreachable.
     let handled = 0;
     let failed = 0;
     let backfillTimer: NodeJS.Timeout | null = null;
     if (backfill) {
-      const idleMs = opts.backfillIdleMs ?? 5000;
+      const idleMs = opts.backfillIdleMs ?? 60_000;
+      const unreachableMs = opts.backfillUnreachableMs ?? 10 * 60_000;
       backfillTimer = setInterval(() => {
-        if (dispatcher.inFlight > 0) {
-          lastActivity = Date.now();
+        const now = Date.now();
+        if (!connectedNow) {
+          if (downSince !== null && now - downSince >= unreachableMs) stop("backfill unreachable");
           return;
         }
-        const received = pastHead || dispatcher.lastSeq >= backfillHead || (connectedNow && Date.now() - lastActivity >= idleMs);
-        if (received) stop("backfill complete");
+        if (dispatcher.inFlight > 0) {
+          lastActivity = now;
+          return;
+        }
+        if (pastHead || dispatcher.lastSeq >= backfillHead) stop("backfill complete");
+        else if (now - lastActivity >= idleMs) {
+          log.info(`No more stored events arrived for ${formatDuration(idleMs)}; the rest up to #${backfillHead} aren't visible to this listener (event types, label scope, or removed by retention).`);
+          stop("backfill complete");
+        }
       }, 100);
     }
 
@@ -474,6 +487,12 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     }
     status.update({ connected: false, stoppedAt: new Date().toISOString(), exitReason: stopReason ?? "stopped" });
     status.flush();
+    if (backfill && stopReason === "backfill unreachable") {
+      log.error(
+        `Gave up: the daemon was unreachable for ${formatDuration(opts.backfillUnreachableMs ?? 10 * 60_000)}. ${handled} event${handled === 1 ? "" : "s"} handled so far; run the backfill again later (it starts over from the oldest event, so handlers should dedupe on the event id).`,
+      );
+      return EXIT.error;
+    }
     if (backfill && stopReason === "backfill complete") {
       const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
       log.info(
@@ -505,6 +524,45 @@ async function revokedExit(log: ListenLogger, status: StatusWriter, profileName:
 }
 
 /**
+ * Where `--backfill` ends: the seq the listener's consumer started at on the daemon (recorded when the
+ * consumer was created), or --until. Refuses when that can't be known, rather than replaying mail the
+ * listener already handled.
+ */
+async function backfillEnd(profileName: string, profile: Profile, consumer: string, until: number | undefined): Promise<number> {
+  if (until !== undefined) {
+    if (!Number.isSafeInteger(until) || until < 0) throw new Error("--until must be an event number (0 or more).");
+    return until;
+  }
+  const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
+  let self;
+  try {
+    self = await getSelf(profile.url, profile.apiKey, 8000);
+  } catch (err) {
+    throw new Error(`Couldn't ask the daemon where the listener started: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+  }
+  if (!self.consumers) {
+    throw new Error(
+      "This agentinbox daemon doesn't report where listeners started (it's older than this CLI), so a backfill could re-run mail the listener already handled.\n" +
+        `  Update agentinbox, or pass --until <event number>: the newest event to replay (events after it are the listener's).`,
+    );
+  }
+  const mine = self.consumers.find((c) => c.consumer === consumer);
+  if (!mine) {
+    throw new Error(
+      `The listener (consumer "${consumer}") hasn't connected yet, so no mail predates it.\n` +
+        `  Start it with --from-start instead: a new listener then begins with the oldest stored mail. E.g. ${NPX} listen${p} --from-start`,
+    );
+  }
+  if (mine.startSeq === null) {
+    throw new Error(
+      `The daemon doesn't know where consumer "${consumer}" started (it was created by an older agentinbox).\n` +
+        `  Pass --until <event number>: the newest event to replay. The listener's first handled events are in ${NPX} listen status${p} and its log.`,
+    );
+  }
+  return mine.startSeq;
+}
+
+/**
  * The one-off backfill command for this listener: `listen --backfill`, plus the targets when they came
  * from flags rather than the profile (the backfill must run the same thing).
  */
@@ -527,7 +585,7 @@ function printBanner(log: ListenLogger, name: string, profile: Profile, c: Effec
     `  daemon    ${profile.url}  ${pc.gray(`(consumer ${c.consumer} on ${hostname()})`)}`,
   ];
   if (dryRun) lines.push(`  mode      ${pc.yellow("dry run")}: matching events are printed; nothing runs and the cursor is not advanced`);
-  if (backfill) lines.push(`  mode      ${pc.yellow("backfill")}: stored events up to now, then exit (own cursor; the listener is not affected)`);
+  if (backfill) lines.push(`  mode      ${pc.yellow("backfill")}: mail from before the listener started, then exit (own cursor; the listener is not affected)`);
   if (c.exec) lines.push(`  exec      ${safeText(c.exec, 300)}`, `  cwd       ${c.cwd}${c.cwdIsDefault ? pc.gray(" (private; --cwd to change)") : ""}`);
   if (c.forward) lines.push(`  forward   ${c.forward.url} ${pc.gray(`(signed, see \`${NPX} listen secret\`)`)}`);
   lines.push(`  events    ${describeFilter(c)}${c.includeBody ? " · with bodies" : ""}`);

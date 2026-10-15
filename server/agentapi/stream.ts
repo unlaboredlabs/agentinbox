@@ -122,10 +122,11 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
   const isNew = !db.get("SELECT 1 FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, consumer);
   const t = new Date().toISOString();
   db.run(
-    `INSERT INTO listener_cursors (agent_id, consumer, acked_seq, client, connected, last_seen_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)
+    `INSERT INTO listener_cursors (agent_id, consumer, acked_seq, start_seq, client, connected, last_seen_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
      ON CONFLICT(agent_id, consumer) DO UPDATE SET client = excluded.client, connected = connected + 1, last_seen_at = excluded.last_seen_at`,
     agentId,
     consumer,
+    isNew && start !== "beginning" ? newest : 0,
     isNew && start !== "beginning" ? newest : 0,
     json.str(clientInfo(c)),
     t,

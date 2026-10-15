@@ -65,8 +65,9 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    ```
 
    To check it works end to end, ask the user to send a test email from the console's "Check that it works" step;
-   `listen status` then shows it under recent events. Mail that was already stored before the listener started is not
-   replayed; `npx -y agentinbox-cli listen --backfill` runs it through the same command once (ask the user first).
+   `listen status` then shows it under recent events. Mail from before the listener started is not replayed;
+   `npx -y agentinbox-cli listen --backfill` runs exactly that mail through the same command once, then exits (ask the
+   user first).
 
    `--print-recipe` prints the ready-made command for your tool with this machine's paths. The trigger is an email
    anyone can send, so each recipe limits what the woken agent can do as far as that CLI allows:

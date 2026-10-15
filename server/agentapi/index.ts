@@ -185,7 +185,17 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
         capabilities: g.capabilities,
         labelScope: g.labelScope,
         sendMode: g.sendMode,
+        allowTo: g.allowTo,
+        replyOnly: g.replyOnly,
+        maxSendsPerHour: g.maxSendsPerHour,
+        maxSendsPerDay: g.maxSendsPerDay,
       })),
+      consumers: ctx.db
+        .all<{ consumer: string; start_seq: number | null; acked_seq: number; connected: number }>(
+          "SELECT consumer, start_seq, acked_seq, connected FROM listener_cursors WHERE agent_id = ? ORDER BY consumer",
+          agent.id,
+        )
+        .map((r) => ({ consumer: r.consumer, startSeq: r.start_seq, ackedSeq: r.acked_seq, connected: r.connected > 0 })),
       mcpUrl: `${base}/mcp`,
       skillUrl: `${base}/skill.md`,
       headSeq: newestVisibleSeq(ctx, agent.id),

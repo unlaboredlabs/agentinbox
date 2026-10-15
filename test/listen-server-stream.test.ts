@@ -235,7 +235,20 @@ describe("agent API auth", () => {
     expect(self).toEqual({
       id: s.agent.id,
       name: "Hermes",
-      grants: [{ accountId: "acc_a", accountEmail: "me@acme.com", capabilities: ["read", "draft"], labelScope: null, sendMode: "draft_only" }],
+      grants: [
+        {
+          accountId: "acc_a",
+          accountEmail: "me@acme.com",
+          capabilities: ["read", "draft"],
+          labelScope: null,
+          sendMode: "draft_only",
+          allowTo: [],
+          replyOnly: false,
+          maxSendsPerHour: null,
+          maxSendsPerDay: null,
+        },
+      ],
+      consumers: [],
       mcpUrl: `${base}/mcp`,
       skillUrl: `${base}/skill.md`,
       headSeq: 0,
@@ -438,6 +451,25 @@ describe("consumer start and reversible refusals", () => {
     await fresh.until(() => fresh.mail().length >= 4);
     expect(seqs(fresh)).toEqual([old[1], old[2], live, next]);
     expect((await fetch(`${s.url}/agent/v1/events/stream?start=later`, { headers: { authorization: `Bearer ${s.apiKey}` } })).status).toBe(400);
+  });
+
+  it("/me reports where each consumer started (null when created by an ack), plus grant restrictions", async () => {
+    const s = await setup();
+    const old = ["m1", "m2"].map((id) => emitMessage(s.ctx, "acc_a", id));
+    const now = await s.open("?consumer=listener&start=now");
+    const all = await s.open("?consumer=history&start=beginning");
+    await all.until(() => all.mail().length >= 2);
+    now.cancel();
+    all.cancel();
+    emitMessage(s.ctx, "acc_a", "m3");
+    expect((await s.ack("acked-only", 0)).status).toBe(200);
+    // Reconnecting never moves the recorded start.
+    const again = await s.open("?consumer=listener&start=beginning");
+    again.cancel();
+    const me = (await (await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${s.apiKey}` } })).json()) as AgentSelf;
+    const by = Object.fromEntries(me.consumers!.map((c) => [c.consumer, c.startSeq]));
+    expect(by).toEqual({ listener: old[1], history: 0, "acked-only": null });
+    expect(me.grants[0]).toMatchObject({ allowTo: expect.any(Array), replyOnly: expect.any(Boolean) });
   });
 
   it("accepts consumer names up to 100 characters", async () => {
