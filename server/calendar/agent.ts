@@ -16,7 +16,7 @@ import type {
 } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { type CalendarClient, type CalendarEventRaw, classifyCalendarError } from "../google/calendar.ts";
-import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
+import { GoogleApiError } from "../google/types.ts";
 import { Approvals, type ApprovalPayload } from "../mail/approvals.ts";
 import { AgentMail, MAX_RECIPIENTS, ToolError, type ToolTrace } from "../mail/agent.ts";
 import { cleanLine } from "../mail/content.ts";
@@ -32,7 +32,7 @@ import {
 import { reserveSend } from "../policy/enforce.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
 import { HttpError, PolicyDenied } from "../util/errors.ts";
-import { addedAttendees, applyChange, type CalendarWriteKind } from "./approvals.ts";
+import { addedAttendees, afterFailure, applyChange, CalendarApplyError, type CalendarWriteKind, isAmbiguous } from "./approvals.ts";
 import { cleanEventDescription } from "./content.ts";
 import { selfAttendee, summarizeEvent } from "./summary.ts";
 
@@ -67,12 +67,19 @@ const CAP_HINT = "Try again later, or ask your user to make this change in Googl
 const eventNotAccessible = (eventId: string) =>
   `Event ${eventId} was not found or is not accessible to you. Use list_calendar_events to find events you can access.`;
 
-/** Ids end up in Google URL paths: no whitespace or control characters, and never a bare "." or "..". */
-function checkId(what: string, id: string): string {
+/**
+ * Ids end up in Google URL paths: letters, digits and "_.@-" only (calendar ids also "#", as in Google's
+ * holiday calendars "en.usa#holiday@group.v.calendar.google.com"), and never a bare "." or "..".
+ */
+function checkId(what: "Calendar" | "Event", id: string): string {
   const s = id.trim();
-  if (!s || s.length > 1024 || /^\.+$/.test(s) || /[\s\p{Cc}/\\?]/u.test(s)) throw new ToolError("invalid_arguments", `${what} "${cleanLine(s, 80)}" is not a valid id.`);
+  const allowed = what === "Calendar" ? /^[A-Za-z0-9_.@#-]+$/ : /^[A-Za-z0-9_.@-]+$/;
+  if (s.length > 1024 || !allowed.test(s) || /^\.+$/.test(s)) throw new ToolError("invalid_arguments", `${what} "${cleanLine(s, 80)}" is not a valid id.`);
   return s;
 }
+
+/** Google's rules for event ids a client chooses: base32hex (a-v, 0-9), 5 to 1024 characters. */
+const CLIENT_EVENT_ID = /^[a-v0-9]{5,1024}$/;
 
 function checkTimeZone(tz: string): string {
   try {
@@ -115,6 +122,7 @@ export function validateEventInput(input: CalendarEventInput, kind: "create" | "
     out.location = input.location.trim();
   }
   if (input.timeZone !== undefined) out.timeZone = checkTimeZone(input.timeZone.trim());
+  if (out.timeZone && input.start === undefined) throw bad("time_zone applies to start and end: pass them with it.");
   if ((input.start === undefined) !== (input.end === undefined)) throw bad("Pass start and end together.");
   if (input.start !== undefined && input.end !== undefined) {
     const start = input.start.trim();
@@ -187,9 +195,34 @@ export class AgentCalendar {
    * trace.accountId. ToolError calendar_not_granted / needs_reauth when the account can't serve calendar calls.
    */
   resolve(account: string | undefined, cap: CalendarCapability): CalendarAccess {
-    const { grant, account: acc } = new AgentMail(this.ctx, this.principal, this.trace).resolve(account, cap);
+    let found;
+    try {
+      found = new AgentMail(this.ctx, this.principal, this.trace).resolve(account, cap);
+    } catch (err) {
+      const email = this.trace.accountId ? this.ctx.accounts.get(this.trace.accountId)?.email : null;
+      if (err instanceof ToolError && err.code === "needs_reauth" && email) {
+        throw new ToolError("needs_reauth", `The Google account ${email} needs to be reconnected. Ask the operator to reconnect it in the agentinbox console.`);
+      }
+      throw err;
+    }
+    const { grant, account: acc } = found;
     if (!acc.calendar || acc.calendar.status === "not_granted") throw notGranted(acc.email);
     return { grant, account: acc, calendar: this.ctx.google.calendar(acc.id) };
+  }
+
+  /**
+   * Writes to an existing event read it first and their answers and denials describe it, so they need
+   * calendar.read as well as calendar.write.
+   */
+  private resolveExisting(account: string | undefined): CalendarAccess {
+    const a = this.resolve(account, "calendar.write");
+    if (!a.grant.capabilities.includes("calendar.read")) {
+      throw new PolicyDenied(
+        "capability",
+        `Your access to ${a.account.email} lets you create events but not read them, and changing an existing event needs both. Ask the operator to add calendar.read.`,
+      );
+    }
+    return a;
   }
 
   /** Like resolve, accepting any of several capabilities. */
@@ -212,7 +245,8 @@ export class AgentCalendar {
     if (!p) {
       p = this.ctx.calendar.calendars(a.account.id).catch((err: unknown) => {
         // 409 calendar_not_granted / calendar_api_disabled / needs_reauth: the agent can't fix these.
-        throw err instanceof HttpError ? new ToolError(err.code, `${err.message}${err.hint ? ` ${err.hint}` : ""}`) : err;
+        // The hint is for the operator (console paths, gcloud commands), not the agent.
+        throw err instanceof HttpError ? new ToolError(err.code, err.message) : err;
       });
       this.lists.set(a.account.id, p);
     }
@@ -357,11 +391,24 @@ export class AgentCalendar {
 
   // ───────────── Write ─────────────
 
-  async createEvent(account: string | undefined, calendarId: string | undefined, input: CalendarEventInput, opts: WriteArgs): Promise<CalendarWriteOutcome> {
+  /**
+   * `opts.eventId`: the id from an earlier attempt (write_uncertain names it). Retrying with it can't create a
+   * second event: if Google has it with the same content, the earlier attempt counts as applied.
+   */
+  async createEvent(
+    account: string | undefined,
+    calendarId: string | undefined,
+    input: CalendarEventInput,
+    opts: WriteArgs & { eventId?: string },
+  ): Promise<CalendarWriteOutcome> {
     const a = this.resolve(account, "calendar.write");
     const change = validateEventInput(input, "create");
+    const eventId = opts.eventId?.trim();
+    if (eventId !== undefined && !CLIENT_EVENT_ID.test(eventId)) {
+      throw new ToolError("invalid_arguments", "event_id must be the id from an earlier create_calendar_event attempt (5-1024 characters a-v and 0-9).");
+    }
     const cal = await this.calendarFor(a, calendarId);
-    return this.write(a, "create", cal, newCalendarEventId(), null, { change }, opts);
+    return this.write(a, "create", cal, eventId || newCalendarEventId(), null, { change }, opts);
   }
 
   /** `change` holds only the fields to change; attendees, when given, is the full new list. */
@@ -372,7 +419,7 @@ export class AgentCalendar {
     change: CalendarEventInput,
     opts: WriteArgs,
   ): Promise<CalendarWriteOutcome> {
-    const a = this.resolve(account, "calendar.write");
+    const a = this.resolveExisting(account);
     const id = checkId("Event", eventId);
     const valid = validateEventInput(change, "update");
     const cal = await this.calendarFor(a, calendarId);
@@ -381,7 +428,7 @@ export class AgentCalendar {
   }
 
   async deleteEvent(account: string | undefined, calendarId: string | undefined, eventId: string, opts: WriteArgs): Promise<CalendarWriteOutcome> {
-    const a = this.resolve(account, "calendar.write");
+    const a = this.resolveExisting(account);
     const id = checkId("Event", eventId);
     const cal = await this.calendarFor(a, calendarId);
     const raw = await this.existing(a, cal, id);
@@ -390,8 +437,8 @@ export class AgentCalendar {
 
   /**
    * RSVP on an event the account is invited to (not its own). A bare answer isn't checked against allowTo
-   * (the organizer invited the account); with a comment the organizer must pass it, since the comment is
-   * free text sent to them.
+   * (the organizer invited the account); with a comment the organizer and every attendee must pass it, since
+   * Google shows the comment to all of them.
    */
   async respond(
     account: string | undefined,
@@ -400,7 +447,7 @@ export class AgentCalendar {
     response: Exclude<CalendarResponseStatus, "needsAction">,
     opts: WriteArgs & { comment?: string },
   ): Promise<CalendarWriteOutcome> {
-    const a = this.resolve(account, "calendar.write");
+    const a = this.resolveExisting(account);
     const id = checkId("Event", eventId);
     if (!["accepted", "declined", "tentative"].includes(response)) throw new ToolError("invalid_arguments", "response must be accepted, declined or tentative.");
     const comment = opts.comment?.trim() || null;
@@ -422,8 +469,9 @@ export class AgentCalendar {
 
   /**
    * The shared write path: who the change involves (attendeeImpact), replyOnly against new attendees,
-   * allowTo over everyone involved, a send-cap slot when Google will email anyone, then the grant's write
-   * mode. Audit detail: {calendarId, eventId, mode, emailed, notified}.
+   * allowTo over everyone involved, a send-cap slot when Google will email anyone or the event lands on new
+   * attendees' calendars, then the grant's write mode. Audit detail: {calendarId, eventId, mode, emailed,
+   * notified, invited}.
    */
   private async write(
     a: CalendarAccess,
@@ -447,6 +495,9 @@ export class AgentCalendar {
       comment: !!w.comment,
     });
     const before = raw ? summarizeEvent(raw, calendarId) : null;
+    const added = addedAttendees(w.change, others, a.account.email);
+    // Even without an email, a create or an added attendee puts the event on their calendar: it counts too.
+    const counts = impact.emailed.length > 0 || added.length > 0;
     this.trace.target = eventId;
     this.trace.detail = {
       calendarId,
@@ -454,11 +505,21 @@ export class AgentCalendar {
       mode: a.grant.calendarWriteMode,
       emailed: impact.emailed.length > 0,
       notified: impact.emailed.length,
+      invited: added.length,
     };
-    assertNoNewAttendees(a.grant, addedAttendees(w.change, others, a.account.email));
+    // Who would see the change can't be checked when Google hides the guest list from the account.
+    const hidden = raw && !raw.organizer?.self && (raw.guestsCanSeeOtherGuests === false || raw.attendeesOmitted);
+    if (hidden && a.grant.allowTo.length && (kind === "update" || (kind === "rsvp" && w.comment))) {
+      throw new PolicyDenied(
+        "allow_to",
+        `The organizer hides this event's guest list, so agentinbox can't check who would see your ${kind === "rsvp" ? "comment" : "change"} against this account's allowlist. ` +
+          (kind === "rsvp" ? "Answer without a comment, or ask your user." : "Ask your user to change it in Google Calendar."),
+      );
+    }
+    assertNoNewAttendees(a.grant, added);
     assertAttendeesAllowed(a.grant, impact.checked);
     // Synchronous check-and-reserve, shared with mail sends: no await between the cap check and taking the slot.
-    if (impact.emailed.length) this.trace.release = reserveSend(this.ctx.db, a.grant, Date.now(), CAP_HINT);
+    if (counts) this.trace.release = reserveSend(this.ctx.db, a.grant, Date.now(), CAP_HINT);
 
     const detail: CalendarApprovalDetail & { eventId: string } = {
       calendarId,
@@ -475,11 +536,11 @@ export class AgentCalendar {
     };
 
     if (a.grant.calendarWriteMode === "direct") {
-      const after = await this.apply(a, kind, detail, raw, impact.emailed.length > 0);
+      const after = await this.apply(a, kind, detail, raw, counts);
       try {
         this.ctx.calendar.kick(a.account.id, calendarId);
       } catch {
-        // kick never throws once sync is implemented; tolerate placeholders.
+        // kick never throws; tolerate placeholders.
       }
       if (kind === "delete" || !after) return { status: "deleted", calendarId, eventId, notified: impact.emailed };
       return { status: "applied", event: summarizeEvent(after, calendarId), notified: impact.emailed };
@@ -514,30 +575,50 @@ export class AgentCalendar {
   }
 
   /**
-   * A direct write. A failure that may have happened after Google accepted it (5xx, network error) is
-   * recorded as maybeSent when it would have emailed anyone, so it counts toward the send caps, and the agent
-   * is told to check before retrying (a create retried by the agent is a new event).
+   * A direct write. A failed attempt is judged by afterFailure (the event re-read): already in place counts
+   * as applied. A failure that may have happened after Google accepted it is recorded as maybeSent when the
+   * write counts toward the send caps, and the agent is told how to check or retry safely.
    */
   private async apply(
     a: CalendarAccess,
     kind: CalendarWriteKind,
     d: CalendarApprovalDetail & { eventId: string },
     raw: CalendarEventRaw | null,
-    emails: boolean,
+    counts: boolean,
   ): Promise<CalendarEventRaw | null> {
     try {
       return await applyChange(a.calendar, kind, d, raw);
     } catch (err) {
-      const known = translate(a, err, eventNotAccessible(d.eventId));
-      if (known !== err) throw known;
-      const ambiguous = err instanceof GoogleApiError ? err.status >= 500 : !(err instanceof AccountNeedsReauthError);
-      if (!ambiguous) throw err;
-      if (emails) this.trace.detail.maybeSent = true;
-      throw new ToolError(
-        "write_uncertain",
-        `The connection to Google Calendar failed, so the change may or may not have been applied. Check with get_calendar_event (event_id ${d.eventId}) before retrying.`,
-      );
+      const r = await afterFailure(a.calendar, kind, d, err, false);
+      if ("applied" in r) {
+        if (counts && isAmbiguous(err)) this.trace.detail.maybeSent = true;
+        return r.applied;
+      }
+      const e = r.error;
+      if (e instanceof CalendarApplyError) {
+        if (e.code === "write_uncertain") {
+          if (counts) this.trace.detail.maybeSent = true;
+          throw new ToolError("write_uncertain", `The change may already have been applied, but the event changed since, so agentinbox can't tell. ${this.checkAdvice(a, kind, d.eventId)}`);
+        }
+        if (e.code === "event_id_taken") throw new ToolError("event_id_taken", `event_id ${d.eventId} already belongs to a different event. Leave event_id out to create a new event.`);
+        if (e.code === "calendar_conflict") throw translate(a, new GoogleApiError(412, "Precondition Failed"));
+        throw new ToolError("not_found", eventNotAccessible(d.eventId));
+      }
+      const known = translate(a, e, eventNotAccessible(d.eventId));
+      if (known !== e) throw known;
+      if (!isAmbiguous(e)) throw e;
+      if (counts) this.trace.detail.maybeSent = true;
+      throw new ToolError("write_uncertain", `The connection to Google Calendar failed, so the change may or may not have been applied. ${this.checkAdvice(a, kind, d.eventId)}`);
     }
+  }
+
+  /** How to find out whether an uncertain write landed, with the tools this grant has. */
+  private checkAdvice(a: CalendarAccess, kind: CalendarWriteKind, eventId: string): string {
+    const canRead = a.grant.capabilities.includes("calendar.read");
+    const check = `check with get_calendar_event (event_id ${eventId})`;
+    if (kind !== "create") return `${check[0]!.toUpperCase()}${check.slice(1)} before retrying.`;
+    const retry = `To retry, call create_calendar_event again with the same details and event_id ${eventId}: it can't create a second event.`;
+    return canRead ? `${retry} Or ${check} first.` : retry;
   }
 }
 

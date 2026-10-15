@@ -129,15 +129,16 @@ export function assertRecipientsAllowed(grant: Grant, emails: string[], hint?: s
 
 /**
  * Sends by this agent on this account since `sinceIso` (from the audit log): send/reply/forward calls, and
- * calendar writes that emailed someone (detail.emailed, docs/calendar.md "Send caps"). Successful ones, plus
- * failures that may still have gone out (detail.maybeSent).
+ * calendar writes that emailed someone or put the event on new attendees' calendars (detail.emailed,
+ * detail.invited; docs/calendar.md "Send caps"). Successful ones, plus failures that may still have gone
+ * out (detail.maybeSent).
  */
 export function sendsSince(db: Db, agentId: string, accountId: string, sinceIso: string): number {
   const list = (xs: readonly string[]) => xs.map(() => "?").join(", ");
   const row = db.get<{ n: number }>(
     `SELECT COUNT(*) AS n FROM audit_log
      WHERE actor_type = 'agent' AND actor_id = ? AND ts >= ? AND account_id = ?
-       AND (action IN (${list(SEND_ACTIONS)}) OR (action IN (${list(CALENDAR_WRITE_ACTIONS)}) AND json_extract(detail, '$.emailed') = 1))
+       AND (action IN (${list(SEND_ACTIONS)}) OR (action IN (${list(CALENDAR_WRITE_ACTIONS)}) AND (json_extract(detail, '$.emailed') = 1 OR json_extract(detail, '$.invited') > 0)))
        AND (outcome = 'ok' OR (outcome = 'error' AND json_extract(detail, '$.maybeSent') = 1))`,
     agentId,
     sinceIso,

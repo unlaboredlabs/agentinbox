@@ -941,6 +941,11 @@ export interface CalendarApprovalDetail {
    * existed: then recomputed from the change.
    */
   checked?: string[];
+  /**
+   * When agentinbox last started sending this change to Google (set before each attempt). Once set, a later
+   * attempt can't assume the earlier one didn't land: it checks the event first.
+   */
+  attemptedAt?: string | null;
 }
 
 /**

@@ -80,6 +80,8 @@ export interface GrantRow {
   created_at: string;
 }
 
+const stringList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
 export const toGrant = (r: GrantRow): Grant => ({
   id: r.id,
   agentId: r.agent_id,
@@ -91,7 +93,8 @@ export const toGrant = (r: GrantRow): Grant => ({
   replyOnly: bool(r.reply_only),
   maxSendsPerHour: r.max_sends_per_hour,
   maxSendsPerDay: r.max_sends_per_day,
-  calendarScope: r.calendar_scope === null ? null : json.parse<string[] | null>(r.calendar_scope, null),
+  // Unreadable JSON narrows to no calendar at all, never to every calendar.
+  calendarScope: r.calendar_scope === null ? null : stringList(json.parse<unknown>(r.calendar_scope, [])),
   calendarWriteMode: r.calendar_write_mode === "direct" ? "direct" : "approval",
   createdAt: r.created_at,
 });

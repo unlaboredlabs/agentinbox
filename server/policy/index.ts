@@ -125,6 +125,13 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     }
   };
 
+  /** The grant reads calendars it didn't before (calendar.read added, or the calendar scope widened). */
+  const readsMore = (prev: Grant | null, next: Grant) => {
+    if (!prev?.capabilities.includes("calendar.read")) return true;
+    if (prev.calendarScope === null) return false;
+    return next.calendarScope === null || next.calendarScope.some((id) => !prev.calendarScope!.includes(id));
+  };
+
   const grantSummary = (g: GrantInput) => ({
     capabilities: g.capabilities,
     sendMode: g.sendMode,
@@ -313,10 +320,10 @@ export function createPolicyService(ctx: AppContext): PolicyService {
         throw badRequest("The grant's accountId does not match the URL");
       }
       const g = parseGrantInput(raw);
-      const prev = db.get<GrantRow>("SELECT * FROM grants WHERE agent_id = ? AND account_id = ?", agentId, accountId);
-      const hadCalendarRead = !!prev && toGrant(prev).capabilities.includes("calendar.read");
+      const row = db.get<GrantRow>("SELECT * FROM grants WHERE agent_id = ? AND account_id = ?", agentId, accountId);
+      const prev = row ? toGrant(row) : null;
       const grant = writeGrant(agentId, g);
-      if (!hadCalendarRead && g.capabilities.includes("calendar.read")) kickCalendar(accountId);
+      if (grant.capabilities.includes("calendar.read") && readsMore(prev, grant)) kickCalendar(accountId);
       if (!g.capabilities.includes("send")) approvals.cancelForAgent(agentId, accountId, "the agent's send permission was removed", "mail");
       if (!g.capabilities.includes("calendar.write")) approvals.cancelForAgent(agentId, accountId, "the agent's calendar.write permission was removed", "calendar");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.upsert", accountId, target: agentId, outcome: "ok", detail: grantSummary(g) });

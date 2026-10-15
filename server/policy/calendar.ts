@@ -45,11 +45,12 @@ const isResource = (email: string) => /@resource\.calendar\.google\.com$/i.test(
  * - `emailed`: addresses Google emails when notifying (sendUpdates "all"). Create/update: every attendee
  *   after the change plus removed ones (they get a cancellation) and the organizer when it's someone else.
  *   Delete: every attendee of an event the account organizes, else the organizer. RSVP: the organizer.
- *   Empty without notify. A non-empty `emailed` makes the write count toward the send caps.
- * - `checked`: addresses the grant's allowTo must cover, whatever notify says (the event stays visible to
- *   them and anyone who can edit it can read what the agent wrote): every attendee after the change and the
- *   organizer when it's someone else, plus `emailed`. RSVP: the organizer only when a comment goes along
- *   (free text to whoever invited the account); a bare answer is like replying and isn't checked.
+ *   Empty without notify.
+ * - `checked`: addresses the grant's allowTo must cover. Create/update, whatever notify says (the event stays
+ *   visible to them and anyone who can edit it can read what the agent wrote): every attendee after the
+ *   change and the organizer when it's someone else, plus `emailed`. Delete: `emailed` only (nothing is
+ *   written to anyone else). RSVP with a comment: the organizer and every attendee, since Google shows the
+ *   note to all of them; a bare answer is like replying and isn't checked.
  */
 export function attendeeImpact(input: {
   kind: "create" | "update" | "delete" | "rsvp";
@@ -71,8 +72,8 @@ export function attendeeImpact(input: {
     ...new Set(xs.map((x) => (x ?? "").trim().toLowerCase()).filter((x) => x && x !== self && !isResource(x))),
   ];
   const organizer = input.organizerSelf ? [] : norm([input.organizer]);
-  if (input.kind === "rsvp") return { emailed: input.notify ? organizer : [], checked: input.comment ? organizer : [] };
   const before = norm(input.before);
+  if (input.kind === "rsvp") return { emailed: input.notify ? organizer : [], checked: input.comment ? norm([...organizer, ...before]) : [] };
   const after = input.kind === "delete" ? [] : norm(input.after);
   const removed = before.filter((x) => !after.includes(x));
   let emailed: string[] = [];
@@ -80,7 +81,7 @@ export function attendeeImpact(input: {
     if (input.kind === "delete") emailed = input.organizerSelf ? before : organizer;
     else emailed = norm([...after, ...removed, ...organizer]);
   }
-  return { emailed, checked: norm([...after, ...organizer, ...emailed]) };
+  return { emailed, checked: input.kind === "delete" ? emailed : norm([...after, ...organizer, ...emailed]) };
 }
 
 /** Throws allow_to when the grant's recipient allowlist doesn't cover every `checked` attendee. */
