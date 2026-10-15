@@ -10,7 +10,7 @@ import { ensurePrivateDir } from "./fsutil.ts";
 import { claudeMcpConfigPath, writeClaudeMcpConfig } from "./mcpheader.ts";
 import { forwardEvent } from "./forward.ts";
 import { createListenLogger, type ListenLogger } from "./logfile.ts";
-import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen } from "./options.ts";
+import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { describeGrants, grantsKey } from "./grants.ts";
 import { shellQuote } from "./recipes.ts";
@@ -155,7 +155,11 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     const fromStart = !!opts.flags.fromStart || backfill;
     const known = knownConsumers(profileName).includes(config.consumer);
     // A backfill (even a dry one) replays on its own cursor from the oldest event; a dry run peeks from the head.
-    const streamConsumer = backfill ? `${config.consumer.slice(0, 93)}-replay` : dryRun ? `${config.consumer.slice(0, 92)}-dry-run` : config.consumer;
+    const streamConsumer = backfill
+      ? throwawayConsumer(config.consumer, THROWAWAY_SUFFIXES.backfill)
+      : dryRun
+        ? throwawayConsumer(config.consumer, THROWAWAY_SUFFIXES.dryRun)
+        : config.consumer;
     let streamAfter = 0;
     if (dryRun && !fromStart) {
       streamAfter = await getSelf(profile.url, profile.apiKey, 8000).then(
@@ -165,7 +169,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     }
     // --backfill = the mail from before this listener started: it ends where the listener's consumer
     // started on the daemon, so nothing the listener handles (or will handle) runs twice.
-    const backfillHead = backfill ? await backfillEnd(profileName, profile, config.consumer, opts.flags.until) : 0;
+    const backfillHead = backfill ? await backfillEnd(profileName, profile, config.consumer, streamConsumer, opts.flags.until, log) : 0;
     const backfillHint = backfillCommand(profileName, profile, config);
 
     if (config.cwdIsDefault) ensurePrivateDir(config.cwd);
@@ -528,11 +532,8 @@ async function revokedExit(log: ListenLogger, status: StatusWriter, profileName:
  * consumer was created), or --until. Refuses when that can't be known, rather than replaying mail the
  * listener already handled.
  */
-async function backfillEnd(profileName: string, profile: Profile, consumer: string, until: number | undefined): Promise<number> {
-  if (until !== undefined) {
-    if (!Number.isSafeInteger(until) || until < 0) throw new Error("--until must be an event number (0 or more).");
-    return until;
-  }
+async function backfillEnd(profileName: string, profile: Profile, consumer: string, replay: string, until: number | undefined, log: ListenLogger): Promise<number> {
+  if (until !== undefined && (!Number.isSafeInteger(until) || until < 0)) throw new Error("--until must be an event number (0 or more).");
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   let self;
   try {
@@ -540,13 +541,30 @@ async function backfillEnd(profileName: string, profile: Profile, consumer: stri
   } catch (err) {
     throw new Error(`Couldn't ask the daemon where the listener started: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
   }
+  // The replay cursor must still be at 0 (it is never acknowledged): one that moved would skip the
+  // start of the range. Older daemons don't reserve the suffix, so check.
+  const replayCursor = self.consumers?.find((c) => c.consumer === replay);
+  if (replayCursor && replayCursor.ackedSeq > 0) {
+    throw new Error(
+      `The backfill cursor "${replay}" on the daemon has been moved to #${replayCursor.ackedSeq} (something acknowledged it), so a backfill would skip the oldest mail.\n` +
+        `  Use another consumer name for this listener (--consumer <name> --save), or remove that consumer in the console.`,
+    );
+  }
+  const mine = self.consumers?.find((c) => c.consumer === consumer);
+  if (until !== undefined) {
+    if (mine?.startSeq != null && until > mine.startSeq) {
+      log.warn(
+        `--until #${until} is past where the listener started (#${mine.startSeq}): ${until === mine.startSeq + 1 ? `event #${until} was` : `events #${mine.startSeq + 1}–#${until} were`} (or will be) handled by the listener too, so ${until === mine.startSeq + 1 ? "it runs" : "they run"} twice.`,
+      );
+    }
+    return until;
+  }
   if (!self.consumers) {
     throw new Error(
       "This agentinbox daemon doesn't report where listeners started (it's older than this CLI), so a backfill could re-run mail the listener already handled.\n" +
         `  Update agentinbox, or pass --until <event number>: the newest event to replay (events after it are the listener's).`,
     );
   }
-  const mine = self.consumers.find((c) => c.consumer === consumer);
   if (!mine) {
     throw new Error(
       `The listener (consumer "${consumer}") hasn't connected yet, so no mail predates it.\n` +

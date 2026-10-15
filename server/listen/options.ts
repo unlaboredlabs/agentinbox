@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
 import { normalizeFilter, webhookFilterSchema } from "../webhooks/filter.ts";
@@ -63,9 +64,24 @@ export function parseTypes(value: string): EventType[] {
 }
 
 const CONSUMER_RE = /^[A-Za-z0-9._-]{1,100}$/;
+/** Suffixes of the throwaway cursors `--backfill` and `--dry-run` derive from a consumer (the daemon reserves them too). */
+export const THROWAWAY_SUFFIXES = { backfill: "-replay", dryRun: "-dry-run" } as const;
+
 export function validConsumer(name: string): string {
   if (!CONSUMER_RE.test(name)) throw new Error(`Invalid consumer name "${name}": use up to 100 letters, digits, ".", "_" or "-".`);
+  const reserved = Object.values(THROWAWAY_SUFFIXES).find((s) => name.endsWith(s));
+  if (reserved) throw new Error(`Invalid consumer name "${name}": names ending in "${reserved}" are reserved for --backfill and --dry-run cursors.`);
   return name;
+}
+
+/**
+ * The throwaway cursor for `consumer`: `<consumer><suffix>`, or, when that would pass the 100-character
+ * limit, a truncated name plus a hash of the full one, so two long consumers never share a cursor.
+ */
+export function throwawayConsumer(consumer: string, suffix: (typeof THROWAWAY_SUFFIXES)[keyof typeof THROWAWAY_SUFFIXES]): string {
+  if (consumer.length + suffix.length <= 100) return `${consumer}${suffix}`;
+  const hash = createHash("sha256").update(consumer).digest("hex").slice(0, 8);
+  return `${consumer.slice(0, 100 - suffix.length - hash.length - 1)}-${hash}${suffix}`;
 }
 
 /** Default consumer: one server-side cursor per machine and profile. */

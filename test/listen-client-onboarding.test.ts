@@ -12,6 +12,7 @@ import { EXIT, runListener, type RunListenerOptions } from "../server/listen/lis
 import { backfillLockPath, lockPath } from "../server/listen/lock.ts";
 import { helperScriptPath } from "../server/listen/mcpheader.ts";
 import { setupMcp } from "../server/listen/mcpsetup.ts";
+import { throwawayConsumer, validConsumer } from "../server/listen/options.ts";
 import { readStatus } from "../server/listen/state.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { checkTransport } from "../server/listen/transport.ts";
@@ -256,6 +257,20 @@ describe("listen", () => {
     expect(lines(runs)).toEqual(["1", "2"]);
   });
 
+  it("--backfill refuses a replay cursor that has moved; warns when --until runs past the listener's start", async () => {
+    saveProfile("default", baseProfile());
+    for (const s of [1, 2, 3, 4]) api.events.push(makeEvent(s));
+    api.consumers.set("c", { startSeq: 2, acked: 4 });
+    api.consumers.set("c-replay", { startSeq: 0, acked: 3 }); // e.g. an older daemon let something ack it
+    await expect(start({ flags: { backfill: true } }).done).rejects.toThrow(/"c-replay" on the daemon has been moved to #3/);
+
+    api.consumers.delete("c-replay");
+    const runs = join(env.root, "past.txt");
+    expect(await start({ flags: { backfill: true, until: 3, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` } }).done).toBe(EXIT.ok);
+    expect(plain()).toContain("--until #3 is past where the listener started (#2): event #3 was (or will be) handled by the listener too, so it runs twice");
+    expect(lines(runs)).toEqual(["1", "2", "3"]);
+  });
+
   it("--backfill: nothing to do when the listener started at the oldest event", async () => {
     saveProfile("default", baseProfile());
     api.events.push(makeEvent(1));
@@ -299,6 +314,30 @@ describe("listen", () => {
     expect(plain()).toContain("npx agentinbox-cli listen --backfill --exec 'my-handler --x'");
     l.stop();
     await l.done;
+  });
+});
+
+describe("throwaway consumer names", () => {
+  it("reserves the suffixes and never lets two consumers share a throwaway cursor", () => {
+    expect(() => validConsumer("laptop-replay")).toThrow(/reserved/);
+    expect(() => validConsumer("laptop-dry-run")).toThrow(/reserved/);
+    expect(validConsumer("laptop-replayed")).toBe("laptop-replayed");
+    expect(throwawayConsumer("laptop-default", "-replay")).toBe("laptop-default-replay");
+    const a = `${"h".repeat(95)}-aaaa`;
+    const b = `${"h".repeat(95)}-bbbb`;
+    for (const suffix of ["-replay", "-dry-run"] as const) {
+      const [ra, rb] = [throwawayConsumer(a, suffix), throwawayConsumer(b, suffix)];
+      expect(ra).not.toBe(rb);
+      expect(ra.length).toBeLessThanOrEqual(100);
+      expect(ra.endsWith(suffix)).toBe(true);
+      expect(/^[A-Za-z0-9._-]{1,100}$/.test(ra)).toBe(true);
+      expect(throwawayConsumer(a, suffix)).toBe(ra); // stable
+    }
+  });
+
+  it("listen refuses a reserved --consumer", async () => {
+    saveProfile("default", baseProfile());
+    await expect(start({ flags: { consumer: "c-replay" } }).done).rejects.toThrow(/reserved/);
   });
 });
 

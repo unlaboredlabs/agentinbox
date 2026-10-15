@@ -472,6 +472,33 @@ describe("consumer start and reversible refusals", () => {
     expect(me.grants[0]).toMatchObject({ allowTo: expect.any(Array), replyOnly: expect.any(Boolean) });
   });
 
+  it("reserves the -replay / -dry-run suffixes: never acknowledged, always created at 0", async () => {
+    const s = await setup();
+    const old = ["m1", "m2"].map((id) => emitMessage(s.ctx, "acc_a", id));
+    for (const name of ["c-replay", "c-dry-run"]) {
+      const res = await s.ack(name, old[1]!);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/reserved/);
+    }
+    // Even without start=beginning, a throwaway cursor starts at 0 (a backfill replays everything).
+    const r = await s.open("?consumer=c-replay&start=now");
+    await r.until(() => r.mail().length >= 2);
+    expect(seqs(r)).toEqual(old);
+    r.cancel();
+    const me = (await (await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${s.apiKey}` } })).json()) as AgentSelf;
+    expect(me.consumers).toEqual([{ consumer: "c-replay", startSeq: 0, ackedSeq: 0, connected: expect.any(Boolean) }]);
+    expect((await s.ack("c-replayed", 0)).status).toBe(200); // only the suffix is reserved
+  });
+
+  it("/me lists only this agent's consumers", async () => {
+    const s = await setup();
+    const other = s.ctx.policy.createAgent({ name: "Other", grants: [readGrant("acc_a")] });
+    expect((await s.ack("mine", 0)).status).toBe(200);
+    expect((await s.ack("theirs", 0, other.apiKey)).status).toBe(200);
+    const me = (await (await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${s.apiKey}` } })).json()) as AgentSelf;
+    expect(me.consumers!.map((c) => c.consumer)).toEqual(["mine"]);
+  });
+
   it("accepts consumer names up to 100 characters", async () => {
     const s = await setup();
     expect((await s.ack("a".repeat(100), 0)).status).toBe(200);

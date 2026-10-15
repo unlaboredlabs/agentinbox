@@ -9,7 +9,7 @@ import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { buildPayload, scopeBodyCheck } from "../webhooks/payload.ts";
 import type { AgentApiEnv } from "./auth.ts";
 import { cleanText } from "./pairing.ts";
-import { accessProblem, ackedSeq, ensureConsumerSlot, newestGrantedSeq, parseConsumer, type RevokeReason } from "./listeners.ts";
+import { accessProblem, ackedSeq, ensureConsumerSlot, isThrowawayConsumer, newestGrantedSeq, parseConsumer, type RevokeReason } from "./listeners.ts";
 
 export const HEARTBEAT_MS = 15_000;
 const BATCH = 100;
@@ -120,14 +120,16 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
   // existing one resumes from its cursor.
   const newest = newestGrantedSeq(ctx, agentId);
   const isNew = !db.get("SELECT 1 FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, consumer);
+  // Throwaway cursors (`-replay`, `-dry-run`) always start at 0: the client positions them with `after`.
+  const startAt = isNew && start !== "beginning" && !isThrowawayConsumer(consumer) ? newest : 0;
   const t = new Date().toISOString();
   db.run(
     `INSERT INTO listener_cursors (agent_id, consumer, acked_seq, start_seq, client, connected, last_seen_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
      ON CONFLICT(agent_id, consumer) DO UPDATE SET client = excluded.client, connected = connected + 1, last_seen_at = excluded.last_seen_at`,
     agentId,
     consumer,
-    isNew && start !== "beginning" ? newest : 0,
-    isNew && start !== "beginning" ? newest : 0,
+    startAt,
+    startAt,
     json.str(clientInfo(c)),
     t,
     t,
