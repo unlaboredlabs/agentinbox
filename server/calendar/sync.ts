@@ -5,12 +5,12 @@
 // An account syncs only while it has every CALENDAR_SCOPES scope, isn't paused or needs_reauth, and some
 // enabled agent's grant on it has calendar.read: a mail-only install makes no Calendar API calls at all.
 
-import type { CalendarEventSummary, CalendarEventType, Settings } from "../../shared/types.ts";
+import type { CalendarEventSummary, CalendarEventType } from "../../shared/types.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
 import { type AccountRow, accountScopes, getRow, updateRow } from "../google/accounts.ts";
-import { type CalendarClient, type CalendarEventRaw, classifyCalendarError } from "../google/calendar.ts";
+import { type CalendarClient, type CalendarDateTimeRaw, type CalendarEventRaw, classifyCalendarError } from "../google/calendar.ts";
 import { sleep } from "../google/http.ts";
 import { googleRuntime } from "../google/runtime.ts";
 import { CALENDAR_SCOPES, hasScopes } from "../google/scopes.ts";
@@ -25,6 +25,8 @@ import {
   type EventState,
   eventStates,
   getEventState,
+  getSyncRow,
+  KEEP_ENDED_MS,
   putEventState,
   replaceEventStates,
   syncRows,
@@ -38,19 +40,35 @@ import type { CalendarService } from "./types.ts";
 export type CalendarSync = Pick<CalendarService, "kick" | "syncAccount" | "start" | "stop">;
 
 export interface CalendarSyncOptions {
-  /** The account's set of synced calendars changed (rows added or removed): push channels follow it (D). */
-  onSyncSetChanged?(accountId: string): void;
+  /**
+   * The account's set of synced calendars changed (rows added or removed): push channels follow it (D).
+   * Runs after the change, outside the pass; a throw or rejection is logged.
+   */
+  onSyncSetChanged?(accountId: string): void | Promise<void>;
+  /** Tests: the poll interval (default Settings.calendarPollSeconds) and how often the loop looks for due accounts. */
+  timing?: { pollMs?: number; tickMs?: number };
 }
 
 /** The calendar list (which calendars sync) is re-read this often, and on kick. */
 export const LIST_REFRESH_MS = 15 * 60_000;
 /** Calendars with a verified push channel are still polled this often, in case a notification was lost. */
 export const PUSH_SAFETY_NET_MS = 15 * 60_000;
-/** Events created this long before the baseline still count as new (a sync racing the creation, clock skew). */
+/** Events created this long before the previous sync still count as new (a sync racing the creation, clock skew). */
 const NEW_GRACE_MS = 5 * 60_000;
 const PAGE_SIZE = 1000;
+/** How often the loop looks for accounts that are due. */
+const TICK_MS = 1000;
+/** Failing accounts back off exponentially between polls, up to this (or the poll interval, if longer). */
+export const MAX_POLL_BACKOFF_MS = 30 * 60_000;
 
-/** Accounts some enabled agent reads calendars on (calendar.read), with the union of those grants' calendar scopes (null = every calendar). */
+/** Delay before the next poll of an account after `failures` failed passes in a row. */
+export const pollBackoffMs = (intervalMs: number, failures: number): number =>
+  Math.max(intervalMs, Math.min(MAX_POLL_BACKOFF_MS, intervalMs * 2 ** failures));
+
+/**
+ * Accounts some enabled agent reads calendars on (calendar.read), with the union of those grants' calendar
+ * scopes, lowercased (null = every calendar).
+ */
 function readers(ctx: Pick<AppContext, "db">): Map<string, Set<string> | null> {
   const rows = ctx.db.all<{ account_id: string; calendar_scope: string | null }>(
     `SELECT g.account_id, g.calendar_scope FROM grants g JOIN agents a ON a.id = g.agent_id
@@ -58,7 +76,7 @@ function readers(ctx: Pick<AppContext, "db">): Map<string, Set<string> | null> {
   );
   const out = new Map<string, Set<string> | null>();
   for (const r of rows) {
-    const scope = r.calendar_scope === null ? null : json.parse<string[]>(r.calendar_scope, []);
+    const scope = r.calendar_scope === null ? null : json.parse<string[]>(r.calendar_scope, []).map((id) => id.toLowerCase());
     const prev = out.get(r.account_id);
     if (prev === null || scope === null) out.set(r.account_id, null);
     else out.set(r.account_id, new Set([...(prev ?? []), ...scope]));
@@ -89,12 +107,16 @@ class Sync implements CalendarSync {
   private running = false;
   /** stop() was called: passes in progress end after the current request. */
   private stopping = false;
-  private loop: { ctrl: AbortController; done: Promise<void>; interval: number } | null = null;
+  private loop: { ctrl: AbortController; done: Promise<void> } | null = null;
   /** Tail of the per-account work queue: passes never overlap for one account. */
   private readonly chains = new Map<string, Promise<void>>();
   private readonly pending = new Map<string, { pass: Pass; done: Promise<void> }>();
   /** accountId → when its calendar list was last read. */
   private readonly listedAt = new Map<string, number>();
+  /** accountId → failed passes in a row and when the loop polls it next. */
+  private readonly health = new Map<string, { failures: number; nextAt: number }>();
+  /** Accounts with a loop poll queued or running. */
+  private readonly polling = new Set<string>();
 
   constructor(
     private readonly ctx: AppContext,
@@ -103,8 +125,10 @@ class Sync implements CalendarSync {
     this.log = ctx.log.child("calendar");
   }
 
-  private readonly onSettings = (s: Settings) => {
-    if (this.running && this.loop?.interval !== s.calendarPollSeconds) this.restart();
+  /** A shorter poll interval applies at once to accounts that aren't backing off. */
+  private readonly onSettings = () => {
+    const next = Date.now() + this.pollMs();
+    for (const h of this.health.values()) if (!h.failures) h.nextAt = Math.min(h.nextAt, next);
   };
 
   /** Grants changed: start (or stop) syncing the accounts they read. */
@@ -117,7 +141,8 @@ class Sync implements CalendarSync {
     this.stopping = false;
     this.ctx.bus.on("settings", this.onSettings);
     this.ctx.bus.on("agent", this.onAgent);
-    this.restart();
+    const ctrl = new AbortController();
+    this.loop = { ctrl, done: this.run(ctrl.signal) };
   }
 
   async stop(): Promise<void> {
@@ -182,29 +207,62 @@ class Sync implements CalendarSync {
     return done;
   }
 
-  private restart(): void {
-    const prev = this.loop;
-    prev?.ctrl.abort();
-    const interval = this.ctx.settings.get().calendarPollSeconds;
-    const ctrl = new AbortController();
-    const done = (prev?.done ?? Promise.resolve()).then(() => this.run(ctrl.signal, interval));
-    this.loop = { ctrl, done, interval };
+  private pollMs(): number {
+    return this.opts.timing?.pollMs ?? this.ctx.settings.get().calendarPollSeconds * 1000;
   }
 
-  private async run(signal: AbortSignal, intervalSeconds: number): Promise<void> {
+  /**
+   * Polls each account when it is due, on its own: a slow or failing account never holds up the others.
+   * Accounts nobody reads any more get one more pass, which forgets them.
+   */
+  private async run(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
-      const all = readers(this.ctx);
-      // Accounts nobody reads any more are forgotten; the rest poll (push-covered calendars less often).
-      const ids = [...new Set([...all.keys(), ...this.syncedAccounts()])];
-      const work = Promise.allSettled(ids.map((id) => this.schedule(id, { calendars: null, refresh: false, force: false })));
-      await untilAborted(work, signal);
-      await sleep(intervalSeconds * 1000, signal);
+      const t = Date.now();
+      for (const id of new Set([...readers(this.ctx).keys(), ...this.syncedAccounts()])) {
+        if (this.polling.has(id) || (this.health.get(id)?.nextAt ?? 0) > t) continue;
+        this.polling.add(id);
+        void this.schedule(id, { calendars: null, refresh: false, force: false })
+          .catch(() => {})
+          .finally(() => this.polling.delete(id));
+      }
+      await sleep(this.opts.timing?.tickMs ?? TICK_MS, signal);
     }
+  }
+
+  /** Next poll: one interval after a success; after failures, exponentially later (or when Google says to retry). */
+  private noteResult(accountId: string, err: unknown): void {
+    const interval = this.pollMs();
+    if (!err) {
+      this.health.set(accountId, { failures: 0, nextAt: Date.now() + interval });
+      return;
+    }
+    const failures = (this.health.get(accountId)?.failures ?? 0) + 1;
+    const retryAfter = err instanceof GoogleApiError ? (err.details.retryAfterMs ?? 0) : 0;
+    this.health.set(accountId, { failures, nextAt: Date.now() + Math.max(pollBackoffMs(interval, failures), retryAfter) });
+  }
+
+  /** Tells push the synced set changed, outside the pass (its failures are logged, never thrown). */
+  private syncSetChanged(accountId: string): void {
+    const hook = this.opts.onSyncSetChanged;
+    if (!hook) return;
+    Promise.resolve()
+      .then(() => hook(accountId))
+      .catch((err: unknown) => this.log.warn("Updating calendar push channels failed", { accountId, error: errorMessage(err) }));
   }
 
   // ───────────── One account ─────────────
 
   private async pass(accountId: string, p: Pass): Promise<void> {
+    try {
+      await this.passOnce(accountId, p);
+      this.noteResult(accountId, null);
+    } catch (err) {
+      this.noteResult(accountId, err);
+      throw err;
+    }
+  }
+
+  private async passOnce(accountId: string, p: Pass): Promise<void> {
     const row = getRow(this.ctx, accountId);
     if (!row) return;
     const scope = readers(this.ctx).get(accountId);
@@ -215,13 +273,20 @@ class Sync implements CalendarSync {
       const listed = this.listedAt.get(accountId);
       if (p.refresh || listed === undefined || Date.now() - listed > LIST_REFRESH_MS) await this.refreshList(row, client, scope);
       const failures: unknown[] = [];
-      for (const cal of syncRows(this.ctx.db, accountId)) {
+      for (const { calendar_id: calendarId } of syncRows(this.ctx.db, accountId)) {
         if (this.stopping) return;
-        if (p.calendars && !p.calendars.has(cal.calendar_id)) continue;
+        // Re-read: a refresh below may have dropped it.
+        const cal = getSyncRow(this.ctx.db, accountId, calendarId);
+        if (!cal || (p.calendars && !p.calendars.has(calendarId))) continue;
         if (!p.force && pushCovered(cal)) continue;
         try {
           await this.syncCalendar(row, client, cal);
         } catch (err) {
+          if (err instanceof GoogleApiError && err.status === 404) {
+            // Deleted or unshared since the list was read: re-read it now, which drops the calendar.
+            await this.refreshList(row, client, scope);
+            if (!getSyncRow(this.ctx.db, accountId, calendarId)) continue;
+          }
           // Account-wide problems end the pass; others are recorded per calendar and the rest still sync.
           if (err instanceof AccountNeedsReauthError || classifyCalendarError(err) === "api_disabled" || classifyCalendarError(err) === "scope_missing") throw err;
           updateSyncRow(this.ctx.db, accountId, cal.calendar_id, { last_error: errorMessage(err) });
@@ -239,7 +304,7 @@ class Sync implements CalendarSync {
   /** Synced calendars: owner/writer entries of the calendar list that some reading grant's scope covers. */
   private async refreshList(row: AccountRow, client: CalendarClient, scope: Set<string> | null): Promise<void> {
     const entries = await client.listCalendars();
-    const wanted = entries.filter((e) => (e.accessRole === "owner" || e.accessRole === "writer") && (scope === null || scope.has(e.id)));
+    const wanted = entries.filter((e) => (e.accessRole === "owner" || e.accessRole === "writer") && (scope === null || scope.has(e.id.toLowerCase())));
     let changed = false;
     for (const e of wanted) {
       const name = cleanLine(e.summaryOverride || e.summary || e.id, 200);
@@ -252,7 +317,7 @@ class Sync implements CalendarSync {
       changed = true;
     }
     this.listedAt.set(row.id, Date.now());
-    if (changed) this.opts.onSyncSetChanged?.(row.id);
+    if (changed) this.syncSetChanged(row.id);
   }
 
   /** No grant reads the account any more: drop its calendars (a later grant starts from a fresh baseline). */
@@ -261,7 +326,7 @@ class Sync implements CalendarSync {
     this.listedAt.delete(accountId);
     if (!rows.length) return;
     for (const cal of rows) await this.removeCalendar(cal);
-    this.opts.onSyncSetChanged?.(accountId);
+    this.syncSetChanged(accountId);
   }
 
   private async removeCalendar(cal: CalendarSyncRow): Promise<void> {
@@ -280,7 +345,8 @@ class Sync implements CalendarSync {
     if (cal.sync_token && cal.baseline_at) {
       try {
         const { items, syncToken } = await listAll(client, cal.calendar_id, { syncToken: cal.sync_token });
-        for (const raw of items) this.apply(row.id, cal, raw, getEventState(this.ctx.db, row.id, cal.calendar_id, raw.id));
+        const since = cal.last_sync_at ?? cal.baseline_at;
+        for (const raw of items) this.apply(row.id, cal, raw, getEventState(this.ctx.db, row.id, cal.calendar_id, raw.id), since);
         updateSyncRow(this.ctx.db, row.id, cal.calendar_id, { sync_token: syncToken, last_sync_at: now(), last_error: null });
         return;
       } catch (err) {
@@ -292,17 +358,28 @@ class Sync implements CalendarSync {
   }
 
   /**
-   * Lists the whole calendar and makes it the new baseline. The first one reports nothing (like Gmail's
-   * baseline historyId); after a 410 the listing is diffed against the stored state so changes since the
-   * last sync are still reported (gone → cancelled, changed → updated, new → created or invitation).
+   * Lists the calendar from a day ago on and makes that the new baseline. The first one reports nothing
+   * (like Gmail's baseline historyId); after a 410 the listing is diffed against the stored state so changes
+   * since the last sync are still reported (gone → cancelled, changed → updated, new → created or invitation).
    */
   private async fullSync(accountId: string, client: CalendarClient, cal: CalendarSyncRow): Promise<void> {
-    const { items, syncToken } = await listAll(client, cal.calendar_id, {});
+    const timeMin = new Date(Date.now() - KEEP_ENDED_MS).toISOString();
+    const { items, syncToken } = await listAll(client, cal.calendar_id, { timeMin });
     if (cal.baseline_at) {
+      const since = cal.last_sync_at ?? cal.baseline_at;
       const known = eventStates(this.ctx.db, accountId, cal.calendar_id);
-      for (const raw of items) this.apply(accountId, cal, raw, known.get(raw.id) ?? null);
+      for (const raw of items) {
+        const prev = known.get(raw.id) ?? null;
+        // Unknown and not kept (or an occurrence cancelled before the last sync): history, not news.
+        const stale = raw.status === "cancelled" ? !(Date.parse(raw.updated ?? "") >= Date.parse(since) - NEW_GRACE_MS) : !tracked(raw);
+        if (prev || !stale) this.apply(accountId, cal, raw, prev, since);
+      }
       const listed = new Set(items.map((e) => e.id));
-      for (const [id, prev] of known) if (!listed.has(id)) this.apply(accountId, cal, { id, status: "cancelled" }, prev);
+      for (const [id, prev] of known) {
+        // Missing from the listing: deleted, unless it simply ended before the listed window.
+        if (listed.has(id) || (prev.endsAt !== null && prev.endsAt < timeMin)) continue;
+        this.apply(accountId, cal, { id, status: "cancelled" }, prev, since);
+      }
     }
     const at = Date.now();
     const keep = items.filter((e) => e.status !== "cancelled" && tracked(e, at)).map((raw) => ({ raw, summary: summarizeEvent(raw, cal.calendar_id) }));
@@ -311,8 +388,11 @@ class Sync implements CalendarSync {
     updateSyncRow(this.ctx.db, accountId, cal.calendar_id, { sync_token: syncToken, baseline_at: stamp, last_sync_at: stamp, last_error: null });
   }
 
-  /** One changed event: emit what it means (docs/calendar.md "Incremental polling"), then store what was seen. */
-  private apply(accountId: string, cal: CalendarSyncRow, raw: CalendarEventRaw, prev: EventState | null): void {
+  /**
+   * One changed event: emit what it means (docs/calendar.md "Incremental polling"), then store what was seen.
+   * `since` is the previous successful sync: unknown events created after it (less the grace) are new.
+   */
+  private apply(accountId: string, cal: CalendarSyncRow, raw: CalendarEventRaw, prev: EventState | null, since: string | null): void {
     const calendarId = cal.calendar_id;
     const emit = (type: CalendarEventType, summary: CalendarEventSummary, detail?: Record<string, unknown>, version?: string | null) =>
       this.ctx.events.emit({
@@ -329,20 +409,28 @@ class Sync implements CalendarSync {
 
     if (raw.status === "cancelled") {
       // Deleted or cancelled; Google may send only the id, so the stored version is what gets reported.
-      if (!prev) return;
-      emit("calendar.event_cancelled", { ...prev.summary, status: "cancelled" }, { wasOrganizer: prev.summary.organizerSelf }, raw.updated ?? raw.etag ?? prev.summary.updated);
-      deleteEventState(this.ctx.db, accountId, calendarId, raw.id);
+      if (prev) {
+        emit("calendar.event_cancelled", { ...prev.summary, status: "cancelled" }, { wasOrganizer: prev.summary.organizerSelf }, raw.updated ?? raw.etag ?? prev.summary.updated);
+        deleteEventState(this.ctx.db, accountId, calendarId, raw.id);
+        return;
+      }
+      // One occurrence of a known series: `<series>_<time>` with recurringEventId and originalStartTime.
+      const series = raw.recurringEventId ? getEventState(this.ctx.db, accountId, calendarId, raw.recurringEventId) : null;
+      const times = series && raw.originalStartTime ? occurrenceTimes(series.summary, raw.originalStartTime) : null;
+      if (!series || !times || Date.parse(times.end) < Date.now() - KEEP_ENDED_MS) return;
+      const occurrence: CalendarEventSummary = { ...series.summary, ...times, id: raw.id, recurringEventId: series.eventId, recurring: false, status: "cancelled" };
+      emit("calendar.event_cancelled", occurrence, { wasOrganizer: series.summary.organizerSelf }, raw.updated ?? raw.etag);
       return;
     }
 
     const summary = summarizeEvent(raw, calendarId);
     const keep = tracked(raw);
     if (!prev) {
-      const created = Date.parse(raw.created ?? "");
-      const isNew = created >= Date.parse(cal.baseline_at!) - NEW_GRACE_MS;
+      const isNew = Date.parse(raw.created ?? "") >= Date.parse(since ?? "") - NEW_GRACE_MS;
       // Invitations first: being added to a meeting created long ago is the usual case.
       if (isInvitation(raw) && (isNew || keep)) emit("calendar.invitation_received", summary);
-      else if (isNew) emit("calendar.event_created", summary);
+      // Keyed by creation time: an event is created once, however often it is edited before it's kept.
+      else if (isNew) emit("calendar.event_created", summary, undefined, raw.created);
       else if (keep) emit("calendar.event_updated", summary, { changes: null });
     } else {
       const changes = changesBetween(prev, raw);
@@ -403,17 +491,14 @@ class Sync implements CalendarSync {
   }
 }
 
-/** Resolves when `p` settles or the signal aborts, whichever comes first (p keeps running). */
-function untilAborted(p: Promise<unknown>, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => {
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    signal.addEventListener("abort", done, { once: true });
-    p.then(done, done);
-  });
+/** Start and end of one occurrence of a series (all-day stays YYYY-MM-DD), from its original start. */
+function occurrenceTimes(series: CalendarEventSummary, original: CalendarDateTimeRaw): { start: string; end: string } | null {
+  const start = original.dateTime ?? original.date;
+  const at = Date.parse(original.dateTime ?? `${original.date}T00:00:00Z`);
+  const length = Date.parse(series.end) - Date.parse(series.start);
+  if (!start || Number.isNaN(at) || Number.isNaN(length)) return null;
+  const end = new Date(at + length).toISOString();
+  return { start, end: original.date ? end.slice(0, 10) : end };
 }
 
 /** A verified, unexpired push channel that synced recently: polling can wait (PUSH_SAFETY_NET_MS). */
@@ -423,7 +508,7 @@ function pushCovered(cal: CalendarSyncRow): boolean {
 }
 
 /** Every page of events.list (singleEvents=false, as the sync token requires). */
-async function listAll(client: CalendarClient, calendarId: string, p: { syncToken?: string }): Promise<{ items: CalendarEventRaw[]; syncToken: string }> {
+async function listAll(client: CalendarClient, calendarId: string, p: { syncToken?: string; timeMin?: string }): Promise<{ items: CalendarEventRaw[]; syncToken: string }> {
   const items: CalendarEventRaw[] = [];
   let pageToken: string | undefined;
   let syncToken: string | null = null;

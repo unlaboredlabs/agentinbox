@@ -5,8 +5,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Capability, GrantInput } from "../shared/types.ts";
 import { summarizeEvent } from "../server/calendar/summary.ts";
-import { createCalendarSync } from "../server/calendar/sync.ts";
-import { syncRows } from "../server/calendar/state.ts";
+import { createCalendarSync, MAX_POLL_BACKOFF_MS, pollBackoffMs } from "../server/calendar/sync.ts";
+import { endsAt, syncRows } from "../server/calendar/state.ts";
 import type { AppContext } from "../server/context.ts";
 import { CALENDAR_SCOPES, GMAIL_SCOPE } from "../server/google/scopes.ts";
 import { runMaintenance } from "../server/maintenance.ts";
@@ -51,12 +51,34 @@ async function setup(opts: { scopes?: string[]; capabilities?: Capability[]; eve
   fake.addAccount(BOB, { name: "Bob" });
   accountId = (await connectFakeAccount(ctx, fake, ME, { name: "Me", scopes: opts.scopes ?? [...MAIL, ...CALENDAR_SCOPES] })).id;
   agentId = ctx.policy.createAgent({ name: "Hermes", grants: [grant(accountId, opts.capabilities ?? ["read", "calendar.read"])] }).agent.id;
+  markCalls();
 }
 
 const sync = () => ctx.calendar.syncAccount(accountId);
-const calendarCalls = () => fake.requests.filter((r) => r.path.startsWith("/calendar/")).length;
+const allCalendarCalls = () => fake.requests.filter((r) => r.path.startsWith("/calendar/")).length;
+/** Calendar requests since the last connect (connecting may probe the calendar list: workstream D). */
+let callMark = 0;
+const markCalls = () => (callMark = allCalendarCalls());
+const calendarCalls = () => allCalendarCalls() - callMark;
 const types = () => rec.events.map((e) => e.type);
 const account = () => ctx.accounts.require(accountId);
+
+const eventsPath = (calendarId: string) => `/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+const listings = (calendarId: string) => fake.requests.filter((r) => r.method === "GET" && r.path === eventsPath(calendarId)).length;
+
+/** Copies of the sync tables, to put back as if the process had died right after emitting. */
+function snapshot() {
+  const tables = ["calendar_sync", "calendar_event_state"];
+  const rows = tables.map((t) => ctx.db.all<Record<string, string | number | null>>(`SELECT * FROM ${t}`));
+  return () =>
+    tables.forEach((t, i) => {
+      ctx.db.run(`DELETE FROM ${t}`);
+      for (const r of rows[i]!) {
+        const keys = Object.keys(r);
+        ctx.db.run(`INSERT INTO ${t} (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, ...Object.values(r));
+      }
+    });
+}
 
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
   const until = Date.now() + ms;
@@ -102,7 +124,7 @@ describe("events", () => {
     expect(types().sort()).toEqual(["calendar.event_created", "calendar.event_updated", "calendar.invitation_received"]);
     const [c, u, i] = (["calendar.event_created", "calendar.event_updated", "calendar.invitation_received"] as const).map((t) => rec.ofType(t)[0]);
     expect(c!.calendarEvent).toMatchObject({ id: created.id, calendarId: ME, summary: "Dentist", organizerSelf: true });
-    expect(c!.dedupeKey).toBe(`${accountId}:${ME}:${created.id}:calendar.event_created:${fake.calendar.event(ME, ME, created.id)!.updated}`);
+    expect(c!.dedupeKey).toBe(`${accountId}:${ME}:${created.id}:calendar.event_created:${created.created}`);
     expect(c!.message).toBeNull();
     expect(u!.detail).toEqual({ changes: ["summary", "location"] });
     expect(i!.calendarEvent).toMatchObject({ id: invite.id, selfResponse: "needsAction", organizer: { email: BOB, name: "Bob" } });
@@ -189,6 +211,97 @@ describe("events", () => {
   });
 });
 
+describe("edge cases", () => {
+  beforeEach(() => setup());
+
+  it("reports a cancelled occurrence of a known series with the occurrence's id and times, once", async () => {
+    const series = fake.calendar.putEvent(ME, ME, { summary: "Standup", ...slot(-50), recurrence: ["RRULE:FREQ=DAILY;COUNT=10"] });
+    await sync();
+    const client = ctx.google.calendar(accountId);
+    const window = { singleEvents: true, orderBy: "startTime" as const, timeMin: new Date(Date.now() - 3 * DAY).toISOString(), timeMax: new Date(Date.now() + 3 * DAY).toISOString() };
+    const occurrences = (await client.listEvents(ME, window)).items;
+    const past = occurrences[0]!;
+    const upcoming = occurrences.find((o) => Date.parse(o.start!.dateTime!) > Date.now())!;
+    await client.deleteEvent(ME, past.id, { sendUpdates: "none" });
+    await client.deleteEvent(ME, upcoming.id, { sendUpdates: "none" });
+    await sync();
+    await sync();
+    expect(rec.events).toHaveLength(1);
+    expect(rec.events[0]).toMatchObject({
+      type: "calendar.event_cancelled",
+      calendarEvent: { id: upcoming.id, recurringEventId: series.id, recurring: false, status: "cancelled", summary: "Standup", start: upcoming.start!.dateTime, end: upcoming.end!.dateTime },
+      detail: { wasOrganizer: true },
+    });
+    // A full resync lists the cancelled occurrences again: already reported, not news.
+    fake.calendar.expireSyncTokens(ME);
+    await sync();
+    expect(rec.events).toHaveLength(1);
+  });
+
+  it("reports a past event created after the last sync once, however often it is edited", async () => {
+    await sync();
+    const notes = fake.calendar.putEvent(ME, ME, { summary: "Notes", ...slot(-72) });
+    await sync();
+    for (const n of [1, 2, 3]) {
+      fake.calendar.putEvent(ME, ME, { id: notes.id, summary: `Notes v${n}` });
+      await sync();
+    }
+    expect(rec.events.map((e) => [e.type, e.calendarEvent!.summary])).toEqual([["calendar.event_created", "Notes"]]);
+    // After a 410 the edited past event is history, not a new event.
+    fake.calendar.putEvent(ME, ME, { id: notes.id, summary: "Notes v4" });
+    fake.calendar.expireSyncTokens(ME);
+    await sync();
+    expect(rec.events).toHaveLength(1);
+  });
+
+  it("replays changes after a crash between emitting and saving the cursor without reporting them twice", async () => {
+    const known = fake.calendar.putEvent(ME, ME, { summary: "Planning", ...slot(2) });
+    const gone = fake.calendar.putEvent(ME, ME, { summary: "Gone", ...slot(3) });
+    await sync();
+    fake.calendar.putEvent(ME, ME, { summary: "New", ...slot(4) });
+    fake.calendar.putEvent(ME, ME, { id: known.id, summary: "Planning v2" });
+    fake.calendar.cancelEvent(ME, ME, gone.id);
+    fake.calendar.invite(BOB, [ME], { summary: "Review", ...slot(5) });
+    const crash = snapshot();
+    await sync();
+    expect(rec.events).toHaveLength(4);
+    crash();
+    await sync();
+    expect(rec.events).toHaveLength(4);
+  });
+
+  it("follows an incremental sync across pages", async () => {
+    await sync();
+    const before = listings(ME);
+    for (let i = 0; i < 1005; i++) fake.calendar.putEvent(ME, ME, { summary: `E${i}`, ...slot(1 + i / 100) });
+    await sync();
+    expect(listings(ME) - before).toBe(2);
+    expect(rec.ofType("calendar.event_created")).toHaveLength(1005);
+    await sync();
+    expect(rec.events).toHaveLength(1005);
+  });
+
+  it("doesn't report events that ended before the resync window as deleted", async () => {
+    const e = fake.calendar.putEvent(ME, ME, { summary: "Yesterday-ish", ...slot(2) });
+    await sync();
+    // Stored as ending three days ago (the state outlived its event, e.g. maintenance hasn't run).
+    ctx.db.run("UPDATE calendar_event_state SET ends_at = ?", new Date(Date.now() - 3 * DAY).toISOString());
+    fake.calendar.cancelEvent(ME, ME, e.id);
+    fake.calendar.expireSyncTokens(ME);
+    await sync();
+    expect(rec.events).toEqual([]);
+  });
+
+  it("gives finite series an end, so their state is pruned", () => {
+    const start = { dateTime: "2030-01-01T09:00:00Z" };
+    const end = { dateTime: "2030-01-01T10:00:00Z" };
+    expect(endsAt({ id: "a", start, end, recurrence: ["RRULE:FREQ=DAILY"] })).toBeNull();
+    expect(endsAt({ id: "b", start, end, recurrence: ["RRULE:FREQ=DAILY;UNTIL=20300110"] })).toBe("2030-01-11T01:00:00.000Z");
+    expect(Date.parse(endsAt({ id: "c", start, end, recurrence: ["RRULE:FREQ=WEEKLY;COUNT=4"] })!)).toBeGreaterThanOrEqual(Date.parse("2030-01-22T10:00:00Z"));
+    expect(endsAt({ id: "d", start, end })).toBe("2030-01-01T10:00:00.000Z");
+  });
+});
+
 describe("what syncs", () => {
   it("syncs owner and writer calendars in the grants' calendar scope, not read-only subscriptions", async () => {
     await setup();
@@ -208,18 +321,49 @@ describe("what syncs", () => {
     fake.calendar.putEvent(ME, team, { summary: "Synced", ...slot(1) });
     await sync();
     expect(rec.events.map((e) => e.calendarEvent!.summary)).toEqual(["Synced"]);
+    // Calendar ids in grants match whatever their case.
+    ctx.policy.upsertGrant(agentId, accountId, grant(accountId, ["calendar.read"], { calendarScope: [other.toUpperCase()] }));
+    await sync();
+    expect(syncRows(ctx.db, accountId).map((r) => r.calendar_id)).toEqual([other]);
   });
 
   it("tells push about changes to the set of synced calendars", async () => {
     await setup();
     const changed: string[] = [];
-    const sync2 = createCalendarSync(ctx, { onSyncSetChanged: (id) => changed.push(id) });
+    const sync2 = createCalendarSync(ctx, {
+      onSyncSetChanged: (id) => {
+        changed.push(id);
+      },
+    });
     await sync2.syncAccount(accountId);
     await sync2.syncAccount(accountId);
     expect(changed).toEqual([accountId]);
     fake.calendar.addCalendar(ME, { name: "Team" });
     await sync2.syncAccount(accountId);
     expect(changed).toEqual([accountId, accountId]);
+  });
+
+  it("survives a push hook that throws or rejects", async () => {
+    await setup();
+    const calls: string[] = [];
+    const throwing = createCalendarSync(ctx, {
+      onSyncSetChanged: (id) => {
+        calls.push(id);
+        throw new Error("push down");
+      },
+    });
+    await throwing.syncAccount(accountId);
+    fake.calendar.addCalendar(ME, { name: "Team" });
+    const rejecting = createCalendarSync(ctx, {
+      onSyncSetChanged: async (id) => {
+        calls.push(id);
+        throw new Error("push down");
+      },
+    });
+    await rejecting.syncAccount(accountId);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual([accountId, accountId]);
+    expect(account().calendar!.status).toBe("active");
   });
 
   it("forgets an account's calendars once no grant reads them, stopping their push channels", async () => {
@@ -254,10 +398,10 @@ describe("what syncs", () => {
     expect(calendarCalls()).toBeGreaterThan(0);
 
     const mailOnly = (await connectFakeAccount(ctx, fake, BOB, { scopes: MAIL })).id;
+    markCalls();
     ctx.policy.upsertGrant(agentId, mailOnly, grant(mailOnly, ["read", "calendar.read"]));
-    const n = calendarCalls();
     await ctx.calendar.syncAccount(mailOnly);
-    expect(calendarCalls()).toBe(n);
+    expect(calendarCalls()).toBe(0);
   });
 
   it("skips paused and needs_reauth accounts", async () => {
@@ -326,6 +470,45 @@ describe("account status", () => {
 });
 
 describe("service", () => {
+  it("backs off a failing account exponentially without holding up the others", async () => {
+    await setup();
+    const bob = (await connectFakeAccount(ctx, fake, BOB, { scopes: [...MAIL, ...CALENDAR_SCOPES] })).id;
+    ctx.policy.upsertGrant(agentId, bob, grant(bob, ["calendar.read"]));
+    fake.failNext({ path: eventsPath(BOB), status: 429, retryAfter: 0, times: 100_000 });
+    const loop = createCalendarSync(ctx, { timing: { pollMs: 40, tickMs: 5 } });
+    loop.start?.();
+    await new Promise((r) => setTimeout(r, 800));
+    await loop.stop?.();
+    // Each failing pass makes 5 attempts (429 is retried); passes at 0, 80, 240, 560 ms.
+    const bobPasses = fake.requests.filter((r) => r.path === eventsPath(BOB)).length / 5;
+    expect(bobPasses).toBeGreaterThanOrEqual(2);
+    expect(bobPasses).toBeLessThanOrEqual(5);
+    expect(listings(ME)).toBeGreaterThanOrEqual(8);
+    expect(ctx.accounts.require(bob).calendar).toMatchObject({ status: "error" });
+    expect(account().calendar).toMatchObject({ status: "active" });
+  });
+
+  it("re-reads the calendar list at once when a synced calendar is gone (404)", async () => {
+    await setup();
+    const team = fake.calendar.addCalendar(ME, { name: "Team" });
+    await sync();
+    fake.calendar.removeCalendar(ME, team);
+    const lists = () => fake.requests.filter((r) => r.path === "/calendar/v3/users/me/calendarList").length;
+    const before = lists();
+    await ctx.calendar.start?.();
+    ctx.calendar.kick(accountId, team);
+    await waitFor(() => syncRows(ctx.db, accountId).length === 1);
+    expect(lists()).toBeGreaterThan(before);
+    expect(syncRows(ctx.db, accountId)[0]!.calendar_id).toBe(ME);
+    expect(account().calendar).toMatchObject({ status: "active", error: null });
+  });
+
+  it("caps the backoff, and never polls faster than the interval", () => {
+    expect([1, 2, 3].map((n) => pollBackoffMs(60_000, n))).toEqual([120_000, 240_000, 480_000]);
+    expect(pollBackoffMs(60_000, 20)).toBe(MAX_POLL_BACKOFF_MS);
+    expect(pollBackoffMs(3_600_000, 1)).toBe(3_600_000);
+  });
+
   it("syncs on start and on kick", async () => {
     await setup();
     await ctx.calendar.start?.();

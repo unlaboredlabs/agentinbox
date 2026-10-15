@@ -114,7 +114,7 @@ export interface EventState {
   /** As last seen (reported on cancellation, when Google only sends the id). */
   summary: CalendarEventSummary;
   descriptionHash: string | null;
-  /** null for recurring series (kept while the series lives). */
+  /** null for an open-ended series (kept while the series lives). */
   endsAt: string | null;
 }
 
@@ -142,15 +142,44 @@ export function changesBetween(prev: EventState, e: CalendarEventRaw): CalendarE
   return changed;
 }
 
-/** When the event ends (ISO), or null for a recurring series. */
+const DAY = 86_400_000;
+/** Upper bound of one RRULE period; units we don't bound (HOURLY, …) leave the series open-ended. */
+const PERIOD_MS: Record<string, number> = { DAILY: DAY, WEEKLY: 7 * DAY, MONTHLY: 31 * DAY, YEARLY: 366 * DAY };
+
+function icalTime(s: string): number {
+  const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z?)?$/.exec(s.trim());
+  return m ? Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +(m[4] ?? 0), +(m[5] ?? 0), +(m[6] ?? 0)) : NaN;
+}
+
+const timeOf = (d: CalendarDateTimeRaw | undefined) => Date.parse(d?.dateTime ?? (d?.date ? `${d.date}T00:00:00Z` : ""));
+
+/** When a series' last occurrence ends at the latest (UNTIL or COUNT), or null when it never ends. */
+function seriesEnd(e: CalendarEventRaw): number | null {
+  const rule = e.recurrence?.find((r) => /^RRULE:/i.test(r));
+  if (!rule) return null;
+  const p = Object.fromEntries(rule.slice(6).split(";").map((kv) => [kv.split("=")[0]!.toUpperCase(), kv.split("=")[1] ?? ""]));
+  const start = timeOf(e.start);
+  const length = Math.max(0, timeOf(e.end) - start) || 0;
+  // A date-only UNTIL includes that whole day.
+  if (p.UNTIL) return icalTime(p.UNTIL) + DAY + length;
+  const period = PERIOD_MS[p.FREQ ?? ""];
+  if (!p.COUNT || !period || Number.isNaN(start)) return null;
+  const perPeriod = p.FREQ === "WEEKLY" && p.BYDAY ? p.BYDAY.split(",").length : 1;
+  return start + Math.ceil(Number(p.COUNT) / perPeriod) * (Number(p.INTERVAL) || 1) * period + length;
+}
+
+/** When the event ends (ISO); for a series, when its last occurrence ends (null when it never ends). */
 export function endsAt(e: CalendarEventRaw): string | null {
-  if (e.recurrence?.length) return null;
+  if (e.recurrence?.length) {
+    const end = seriesEnd(e);
+    return end === null || Number.isNaN(end) ? null : new Date(end).toISOString();
+  }
   const end = e.end?.dateTime ?? (e.end?.date ? `${e.end.date}T00:00:00Z` : e.start?.dateTime ?? e.start?.date);
   const t = end ? Date.parse(end) : NaN;
   return new Date(Number.isNaN(t) ? Date.now() : t).toISOString();
 }
 
-/** Kept in state: recurring series, and events that haven't ended more than KEEP_ENDED_MS ago. */
+/** Kept in state: open-ended series, and events (or finite series) that haven't ended more than KEEP_ENDED_MS ago. */
 export function tracked(e: CalendarEventRaw, at = Date.now()): boolean {
   const end = endsAt(e);
   return end === null || Date.parse(end) >= at - KEEP_ENDED_MS;
@@ -195,7 +224,7 @@ export function replaceEventStates(db: Db, accountId: string, calendarId: string
   });
 }
 
-/** Maintenance: forgets events that ended before `before` (recurring series are kept). */
+/** Maintenance: forgets events (and finite series) that ended before `before`; open-ended series are kept. */
 export function pruneEventStates(db: Db, before: string): number {
   return db.run("DELETE FROM calendar_event_state WHERE ends_at IS NOT NULL AND ends_at < ?", before).changes;
 }
