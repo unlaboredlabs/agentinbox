@@ -1,5 +1,5 @@
 {
-  "name": "agentinbox",
+  "name": "agentinbox-cli",
   "version": "0.1.0",
   "description": "Self-hosted Gmail broker for AI agents: one place for credentials, MCP tools, real-time webhooks, guardrails, and a web console.",
   "license": "MIT",
@@ -33,12 +33,13 @@
     "dev": "concurrently -k -n server,web -c blue,magenta \"pnpm dev:server\" \"pnpm dev:web\"",
     "dev:server": "tsx watch server/cli.ts start --dev",
     "dev:web": "vite",
-    "build": "vite build && tsdown",
+    "build": "vite build && tsdown --config-loader native",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.app.json --noEmit",
     "lint": "oxlint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "node -e \"const m=['dist/cli.js','dist/web/index.html'].filter(f=>!require('fs').existsSync(f));if(m.length){console.error('Missing '+m.join(', ')+': run pnpm build before publishing.');process.exit(1)}\""
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",

@@ -1,0 +1,156 @@
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import type { Context } from "hono";
+import { type HealthResponse, type IngestStatus, NPM_PACKAGE, type SystemInfo, type UpdateInfo } from "../../shared/types.ts";
+import { type Config, DEFAULT_PORT } from "../config.ts";
+import type { AppContext } from "../context.ts";
+import { consoleUrls } from "../urls.ts";
+import { errorMessage } from "../util/errors.ts";
+import { setupState } from "./setup.ts";
+import { type AppEnv, router } from "./util.ts";
+
+const DEFAULT_HOST = "0.0.0.0";
+const LATEST_TTL_MS = 30 * 60_000;
+const LATEST_RETRY_MS = 5 * 60_000;
+
+/**
+ * Public health check for uptime monitors: 200 when healthy, 503 when degraded (an account needs
+ * re-auth or is erroring, or ingest reports an error). Only states and the version, never secrets.
+ */
+export function healthRoutes(ctx: AppContext) {
+  const handler = (c: Context<AppEnv>) => {
+    const body = health(ctx);
+    c.header("Cache-Control", "no-store");
+    return c.json<HealthResponse>(body, body.status === "ok" ? 200 : 503);
+  };
+  // Also with a trailing slash, which would otherwise fall through to the console and keep a monitor green.
+  return router().get("/health", handler).get("/health/", handler).get("/api/health", handler).get("/api/health/", handler);
+}
+
+export function health(ctx: AppContext): HealthResponse {
+  const counts = ctx.db.get<{ total: number; attention: number }>(
+    "SELECT COUNT(*) AS total, COALESCE(SUM(status IN ('needs_reauth', 'error')), 0) AS attention FROM accounts",
+  ) ?? { total: 0, attention: 0 };
+  let ingestError = false;
+  if (counts.total > 0) {
+    try {
+      ingestError = !!ctx.ingest.status().lastError;
+    } catch {
+      // Ingest unavailable: account states above still tell the story.
+    }
+  }
+  let setupComplete = false;
+  try {
+    setupComplete = setupState(ctx).complete;
+  } catch {
+    // Reported as not complete.
+  }
+  return {
+    status: counts.attention > 0 || ingestError ? "degraded" : "ok",
+    version: ctx.config.version,
+    setupComplete,
+  };
+}
+
+/** Authenticated: instance facts and the update notice. */
+export function systemApi(ctx: AppContext) {
+  return router()
+    .get("/system", (c) => {
+      let ingest: IngestStatus;
+      try {
+        ingest = ctx.ingest.status();
+      } catch (err) {
+        ingest = { mode: ctx.settings.get().ingestMode, running: false, lastPullAt: null, lastError: errorMessage(err) };
+      }
+      return c.json<SystemInfo>({
+        version: ctx.config.version,
+        nodeVersion: process.versions.node,
+        dataDir: ctx.config.dataDir,
+        service: ctx.config.service,
+        addresses: consoleUrls(ctx.config.host, ctx.config.port),
+        publicUrl: ctx.settings.publicUrl(),
+        ingest,
+      });
+    })
+    .get("/system/latest", async (c) => {
+      const latest = await latestVersion(ctx);
+      const current = ctx.config.version;
+      return c.json<UpdateInfo>({
+        current,
+        latest,
+        updateAvailable: !!latest && compareVersions(latest, current) > 0,
+        command: upgradeCommand(ctx.config),
+      });
+    });
+}
+
+let latestCache: { at: number; version: string | null } | undefined;
+
+/** The npm `latest` dist-tag, cached for 30 minutes (5 after a failed check). */
+async function latestVersion(ctx: AppContext): Promise<string | null> {
+  if (latestCache && Date.now() - latestCache.at < (latestCache.version ? LATEST_TTL_MS : LATEST_RETRY_MS)) {
+    return latestCache.version;
+  }
+  let version: string | null = null;
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE}/latest`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    version = ((await res.json()) as { version?: string }).version ?? null;
+  } catch (err) {
+    ctx.log.debug("Update check failed", { error: errorMessage(err) });
+  }
+  latestCache = { at: Date.now(), version };
+  return version;
+}
+
+/**
+ * Semver precedence: numeric core, then a pre-release sorts before its release, and pre-release
+ * identifiers compare numerically when both are numbers ("nightly.10" > "nightly.9").
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const clean = v.trim().replace(/^v/, "").split("+")[0]!;
+    const dash = clean.indexOf("-");
+    const core = dash === -1 ? clean : clean.slice(0, dash);
+    return { parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0), pre: dash === -1 ? null : clean.slice(dash + 1).split(".") };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < Math.max(x.parts.length, y.parts.length); i++) {
+    const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0);
+    if (d) return Math.sign(d);
+  }
+  if (!x.pre || !y.pre) return x.pre === y.pre ? 0 : x.pre ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) {
+      const d = Number(p) - Number(q);
+      if (d) return Math.sign(d);
+    } else if (pn !== qn) {
+      return pn ? -1 : 1;
+    } else if (p !== q) {
+      return p < q ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+const DEFAULT_DATA_DIR = () => resolve(join(homedir(), ".agentinbox"));
+
+/** Runs, or reinstalls as a service, the latest version with this instance's options. */
+export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "port" | "host" | "trustProxy">): string {
+  // A service keeps TRUST_PROXY from its previous install, but a foreground run needs it again.
+  const args = [...(config.trustProxy ? ["TRUST_PROXY=1"] : []), "npx", "-y", NPM_PACKAGE];
+  if (config.service) args.push("service", "install");
+  if (config.dataDir !== DEFAULT_DATA_DIR()) args.push("--data", config.dataDir);
+  if (config.port !== DEFAULT_PORT) args.push("--port", String(config.port));
+  if (config.host !== DEFAULT_HOST) args.push("--host", config.host);
+  return args.map(shellQuote).join(" ");
+}
+
+export const shellQuote = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);

@@ -1,0 +1,207 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
+import { serveStatic } from "@hono/node-server/serve-static";
+import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
+import type { ApiError } from "../shared/types.ts";
+import { accountsApi } from "./api/accounts.ts";
+import { agentsApi } from "./api/agents.ts";
+import { approvalsApi } from "./api/approvals.ts";
+import { auditApi } from "./api/audit.ts";
+import { authApi, authPublicApi } from "./api/auth.ts";
+import { eventsApi } from "./api/events.ts";
+import { googleApi } from "./api/google.ts";
+import { oauthRoutes } from "./api/oauth.ts";
+import { overviewApi } from "./api/overview.ts";
+import { settingsApi } from "./api/settings.ts";
+import { setupApi, setupPublicApi } from "./api/setup.ts";
+import { healthRoutes, systemApi } from "./api/system.ts";
+import type { AppEnv } from "./api/util.ts";
+import { webhooksApi } from "./api/webhooks.ts";
+import { csrfGuard, currentSetupToken, requireAdmin } from "./auth/index.ts";
+import type { AppContext } from "./context.ts";
+import { contentSecurityPolicy, inlineScriptHashes } from "./csp.ts";
+import { mcpRoutes } from "./mcp/index.ts";
+import { renderSkill } from "./skill/index.ts";
+import { HttpError, PolicyDenied } from "./util/errors.ts";
+
+export interface AppOptions {
+  /** Built console directory. Defaults to dist/web next to the running module. */
+  webDir?: string;
+}
+
+/**
+ * dist/web relative to the running module: the bundle (dist/cli.js) and source runs
+ * (server/app.ts via tsx) both resolve to <package root>/dist/web.
+ */
+export const DEFAULT_WEB_DIR = resolve(import.meta.dirname, "..", "dist", "web");
+
+const API_BODY_LIMIT = 1024 * 1024;
+const AUTH_BODY_LIMIT = 16 * 1024;
+const AUTH_PATHS = ["/api/setup/claim", "/api/auth/login", "/api/auth/password"];
+const MCP_BODY_LIMIT = 4 * 1024 * 1024;
+const AGENT_BODY_LIMIT = 64 * 1024;
+
+/** Extensions served as files; any other path (even with a dot, e.g. /accounts/me@example.com) is a console route. */
+const ASSET_EXTENSIONS = new Set([
+  ".js", ".mjs", ".css", ".map", ".json", ".webmanifest", ".txt", ".xml",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico",
+  ".woff", ".woff2", ".ttf", ".otf", ".wasm",
+]);
+
+/** Paths the console's index.html fallback must never answer. */
+const SERVER_PREFIXES = ["/api", "/mcp", "/oauth", "/skill.md", "/health"];
+const isServerPath = (path: string) => SERVER_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
+
+export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> {
+  const app = new Hono<AppEnv>();
+  // Make sure the setup link exists before anyone needs it.
+  currentSetupToken(ctx);
+
+  // Hashes of index.html's inline scripts; set once the console is wired up below.
+  let consoleHashes: () => string[] = () => [];
+  app.use("*", async (c, next) => {
+    await next();
+    try {
+      c.res.headers.set("Content-Security-Policy", contentSecurityPolicy(consoleHashes()));
+      c.res.headers.set("X-Frame-Options", "DENY");
+      c.res.headers.set("X-Content-Type-Options", "nosniff");
+      c.res.headers.set("Referrer-Policy", "no-referrer");
+    } catch {
+      // Immutable headers (a proxied Response): leave them as they are.
+    }
+  });
+
+  app.onError((err, c) => errorResponse(ctx, err, c));
+  app.notFound((c) => {
+    if (c.req.path === "/api" || c.req.path.startsWith("/api/")) return apiError(c, 404, "not_found", "No such API route");
+    return c.text("Not found", 404);
+  });
+
+  // ── Public ──
+  const tooLarge = (c: Context) => apiError(c, 413, "payload_too_large", "Request body is too large");
+  const limit = (maxSize: number) => bodyLimit({ maxSize, onError: tooLarge });
+  for (const path of AUTH_PATHS) app.use(path, limit(AUTH_BODY_LIMIT));
+  app.use("/api/*", limit(API_BODY_LIMIT));
+  app.use("/mcp", limit(MCP_BODY_LIMIT));
+  app.use("/mcp/*", limit(MCP_BODY_LIMIT));
+  app.use("/agent/*", limit(AGENT_BODY_LIMIT));
+  app.use("/api/*", csrfGuard());
+  app.route("/", healthRoutes(ctx));
+  app.route("/api", setupPublicApi(ctx));
+  app.route("/api", authPublicApi(ctx));
+  app.get("/skill.md", (c) => {
+    c.header("Content-Type", "text/markdown; charset=utf-8");
+    c.header("Cache-Control", "no-cache");
+    return c.body(renderSkill(ctx.settings.publicUrl()));
+  });
+  app.route("/", oauthRoutes(ctx));
+  app.route("/", mcpRoutes(ctx));
+
+  // ── Admin console API ──
+  app.use("/api/*", requireAdmin(ctx));
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi]) {
+    app.route("/api", api(ctx));
+  }
+
+  // ── Console ──
+  if (ctx.config.dev) app.get("*", (c) => (isServerPath(c.req.path) ? c.notFound() : devPage(c)));
+  else consoleHashes = serveConsole(app, opts.webDir ?? DEFAULT_WEB_DIR);
+
+  return app;
+}
+
+/** Serves the built console; returns the CSP hashes of index.html's inline scripts (re-read when the file changes). */
+function serveConsole(app: Hono<AppEnv>, webDir: string): () => string[] {
+  const index = join(webDir, "index.html");
+  if (!existsSync(index)) {
+    app.get("*", (c) => (isServerPath(c.req.path) ? c.notFound() : missingBuildPage(c, webDir)));
+    return () => [];
+  }
+  let cached = { mtimeMs: -1, hashes: [] as string[] };
+  const hashes = () => {
+    try {
+      const { mtimeMs } = statSync(index);
+      if (mtimeMs !== cached.mtimeMs) cached = { mtimeMs, hashes: inlineScriptHashes(readFileSync(index, "utf8")) };
+    } catch {
+      // Removed while running: keep the last known hashes.
+    }
+    return cached.hashes;
+  };
+  const assets = serveStatic<AppEnv>({ root: webDir });
+  const assetsDir = join(webDir, "assets") + sep;
+  app.use("*", async (c, next) => {
+    if (isServerPath(c.req.path)) return next();
+    const res = await assets(c, next);
+    if (res instanceof Response) {
+      // Vite fingerprints everything under assets/; the rest (index.html, favicon) must revalidate.
+      const hashed = join(webDir, c.req.path).startsWith(assetsDir);
+      res.headers.set("Cache-Control", hashed ? "public, max-age=31536000, immutable" : "no-cache");
+    }
+    return res;
+  });
+  app.get("*", (c) => {
+    const path = c.req.path;
+    // Client routes get index.html; a missing file (e.g. a stale /assets/x.js) is a real 404.
+    if (isServerPath(path) || path.startsWith("/assets/") || ASSET_EXTENSIONS.has(extname(path).toLowerCase())) return c.notFound();
+    c.header("Cache-Control", "no-cache");
+    return c.html(readFileSync(index, "utf8"));
+  });
+  return hashes;
+}
+
+function errorResponse(ctx: AppContext, err: Error, c: Context): Response {
+  if (err instanceof HttpError) return c.json(err.toJSON(), err.status as 400);
+  if (err instanceof PolicyDenied) return apiError(c, 403, "policy_denied", err.message);
+  if (err instanceof z.ZodError) return apiError(c, 400, "bad_request", z.prettifyError(err));
+  if (err instanceof HTTPException) return err.res ? err.getResponse() : apiError(c, err.status, "http_error", err.message || "Request failed");
+  if (err instanceof SyntaxError && /JSON/i.test(err.message)) return apiError(c, 400, "bad_request", "Request body must be valid JSON");
+  ctx.log.error(`${c.req.method} ${c.req.path} failed`, { error: err.message, stack: err.stack });
+  return apiError(c, 500, "internal", "Something went wrong. Check the agentinbox logs for details.");
+}
+
+function apiError(c: Context, status: number, code: string, message: string): Response {
+  return c.json<ApiError>({ error: { code, message } }, status as 400);
+}
+
+const page = (title: string, body: string) => `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>
+  :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+  main { max-width: 34rem; padding: 2rem; line-height: 1.55; }
+  h1 { font-size: 1.25rem; margin: 0 0 .75rem; }
+  code { font-family: ui-monospace, monospace; padding: .1rem .35rem; border-radius: .3rem; background: color-mix(in srgb, CanvasText 10%, transparent); }
+  p { margin: .5rem 0; opacity: .85; }
+</style></head><body><main>${body}</main></body></html>`;
+
+const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (ch) => `&#${ch.charCodeAt(0)};`);
+
+function missingBuildPage(c: Context, webDir: string): Response {
+  c.header("Cache-Control", "no-store");
+  return c.html(
+    page(
+      "agentinbox: console not built",
+      `<h1>The web console hasn't been built</h1>
+<p>agentinbox is running, but there is no console build in <code>${escapeHtml(webDir)}</code>.</p>
+<p>From a source checkout, run <code>pnpm build</code> and restart, or use <code>pnpm dev</code> for development.</p>
+<p>The API (<code>/api</code>), MCP endpoint (<code>/mcp</code>) and <code>/health</code> work as usual.</p>`,
+    ),
+    503,
+  );
+}
+
+function devPage(c: Context): Response {
+  const url = new URL(c.req.url);
+  const target = `http://localhost:5173${url.pathname}${url.search}`;
+  return c.html(
+    page(
+      "agentinbox (dev)",
+      `<h1>agentinbox is running in dev mode</h1>
+<p>The console is served by Vite: open <a href="${escapeHtml(target)}">${escapeHtml(target)}</a>.</p>`,
+    ),
+  );
+}
