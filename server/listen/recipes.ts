@@ -103,6 +103,23 @@ export function recipe(tool: AgentTool, profile: string = DEFAULT_PROFILE): Reci
   }
 }
 
+/** Tools with a built-in recipe (`listen --recipe <tool>`): every tool but "other", which brings its own command. */
+export const RECIPE_TOOLS = TOOLS.filter((t) => t !== "other") as readonly Exclude<AgentTool, "other">[];
+
+/** The tool named by `--recipe`, or a clear error (accepts "claude" for claude-code, any case). */
+export function parseRecipeTool(value: string): Exclude<AgentTool, "other"> {
+  const v = value.trim().toLowerCase().replace(/^claude$/, "claude-code");
+  const found = RECIPE_TOOLS.find((t) => t === v);
+  if (found) return found;
+  const hint = v === "other" ? ' "other" has no built-in recipe: pass your own command with --exec "<command>".' : ' For your own command, use --exec "<command>" instead.';
+  throw new Error(`Unknown --recipe "${value}". Built-in recipes: ${RECIPE_TOOLS.join(", ")}.${hint}`);
+}
+
+/** The built-in recipe whose command is exactly `exec` for this profile, if any (to print `--recipe <tool>` back). */
+export function recipeToolFor(exec: string | null, profile: string = DEFAULT_PROFILE): Exclude<AgentTool, "other"> | null {
+  return (exec && RECIPE_TOOLS.find((t) => recipe(t, profile).exec === exec)) || null;
+}
+
 /** Single-quotes a string for POSIX shells (for printing copy-pasteable commands). */
 export const shellQuote = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'"'"'`)}'`);
 
@@ -114,19 +131,24 @@ export function recipesHelp(): string {
     "  Change it with --types: --types thread.reply_received (only replies to threads you sent), or --types all.",
     "  thread.reply_received is a subset of message.received: don't combine them, or each reply runs twice.",
     "",
-    "Recipes (--exec runs via /bin/sh; the event arrives on stdin, never in the command line):",
+    `Recipes: --recipe <tool> runs the built-in, confined command for ${RECIPE_TOOLS.join(", ")} (shown below with`,
+    "this machine's default paths). --print-recipe <tool> prints it to see or edit; pass your edit with --exec '…'.",
+    "--exec runs via /bin/sh; the event arrives on stdin, never in the command line. --recipe and --exec don't combine.",
     "",
   ];
-  for (const tool of TOOLS) {
-    const r = recipe(tool);
-    lines.push(`  ${TOOL_LABELS[tool] === "agent" ? "Your own script" : TOOL_LABELS[tool]}:`);
-    lines.push(`    ${NPX} listen --exec ${shellQuote(r.exec)}`);
+  for (const tool of RECIPE_TOOLS) {
+    lines.push(`  ${TOOL_LABELS[tool]}:`);
+    lines.push(`    ${NPX} listen --recipe ${tool}`);
+    lines.push(`      runs: ${recipe(tool).exec}`);
     lines.push("");
   }
+  lines.push("  Your own script:");
+  lines.push(`    ${NPX} listen --exec ${shellQuote(recipe("other").exec)}`);
+  lines.push("");
   lines.push(`  Forward to a local HTTP handler (Standard Webhooks signature; secret: ${NPX} listen secret):`);
   lines.push(`    ${NPX} listen --forward http://localhost:8787/agentinbox`);
   lines.push("");
-  lines.push(`  Keep it running in the background:  ${NPX} listen service install --exec '…'`);
+  lines.push(`  Keep it running in the background:  ${NPX} listen service install --recipe claude-code`);
   lines.push("  Guide: https://github.com/unlaboredlabs/agentinbox/blob/main/docs/listen.md");
   return lines.join("\n");
 }

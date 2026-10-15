@@ -182,7 +182,7 @@ describe("Testing mode and Workspace detection", () => {
       severity: "warning",
       accountId: acct.id,
       url: `https://console.cloud.google.com/auth/audience?project=${FAKE_CLIENT.projectId}`,
-      hint: "Google Cloud → Google Auth Platform → Audience → Publish app → Confirm. Then reconnect the account so it gets a long-lived token.",
+      hint: "Google Cloud → Google Auth Platform → Audience → Publish app → Push to production? → Confirm. Then reconnect the account so it gets a long-lived token.",
     });
     expect(w!.message).toContain("tess@gmail.com");
     expect(w!.message).toContain(acct.refreshTokenExpiresAt!.slice(0, 10));

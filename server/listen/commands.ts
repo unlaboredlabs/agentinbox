@@ -3,7 +3,7 @@ import { EVENT_TYPES } from "../../shared/types.ts";
 import type { ConnectFlags } from "./connect.ts";
 import type { ListenFlags } from "./options.ts";
 import { DEFAULT_PROFILE } from "./paths.ts";
-import { recipesHelp, TOOLS } from "./recipes.ts";
+import { RECIPE_TOOLS, recipesHelp, TOOLS } from "./recipes.ts";
 import { NPX } from "./version.ts";
 
 /** `agentinbox connect`, `agentinbox setup-mcp` and `agentinbox listen …`, all lazily loaded. */
@@ -26,6 +26,7 @@ const profileOption = (cmd: Command) => cmd.option("--profile <name>", `profile 
 function listenFlags(cmd: Command): Command {
   return profileOption(cmd)
     .option("--exec <command>", "run this command for each event (via /bin/sh; the event arrives on stdin as JSON, never in the command)")
+    .option("--recipe <tool>", `run the built-in command for ${RECIPE_TOOLS.join(", ")} (instead of --exec; see it with --print-recipe)`)
     .option("--forward <url>", "POST each event to this localhost URL, signed per Standard Webhooks")
     .option("--types <list>", `comma-separated event types, or "all" (default: message.received, new mail only; also ${EVENT_TYPES.filter((t) => t !== "message.received").join(", ")})`)
     .option("--from <glob>", 'only senders matching this glob, e.g. "*@stripe.com" (repeatable)', collect)
@@ -132,7 +133,7 @@ Example:
     .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists: use --backfill)")
     .option("--backfill", "run the mail from before this listener started through --exec/--forward once, oldest first, then exit; safe while the listener runs (own cursor)")
     .option("--until <seq>", "with --backfill: replay up to this event number instead of where the listener started", int("--until"))
-    .option("--print-recipe <tool>", `print the ready-made --exec command for ${TOOLS.join(", ")} (with this machine's paths) and exit`)
+    .option("--print-recipe <tool>", `print the command --recipe <tool> runs, for ${RECIPE_TOOLS.join(", ")} (with this machine's paths), and exit`)
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags & { printRecipe?: string }) => {
       if (flags.printRecipe !== undefined) {

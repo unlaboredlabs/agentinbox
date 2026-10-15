@@ -20,7 +20,7 @@ agent). Requires Node.js 22.13 or newer.
 
 - [Reference](docs/reference.md): features, configuration, running as a service or behind a proxy, security model,
   webhooks, data and backups, development
-- [Waking local agents with `agentinbox listen`](docs/listen.md)
+- [Waking local agents with `agentinbox listen`](docs/listen.md), e.g. `npx agentinbox-cli listen --recipe claude-code`
 - [Screenshots](docs/screenshots/README.md)
 
 ## License

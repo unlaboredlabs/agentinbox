@@ -23,7 +23,7 @@ export function useAgentOrigin(agent: Agent | undefined): { paired: boolean; too
 }
 
 /** An MCP tool call by this agent (the server counts them with the same rule, see isMcpToolAction). */
-const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && isMcpToolAction(e.action);
+export const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && isMcpToolAction(e.action);
 
 /**
  * Evidence that the agent's tool talks to agentinbox over MCP.

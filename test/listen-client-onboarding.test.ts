@@ -8,11 +8,12 @@ import { loadConfig } from "../server/config.ts";
 import { printStatus } from "../server/listen/admin.ts";
 import { approveLinks, CONNECT_EXIT, runConnect } from "../server/listen/connect.ts";
 import { describeGrant, describeGrants } from "../server/listen/grants.ts";
-import { EXIT, runListener, type RunListenerOptions } from "../server/listen/listen.ts";
+import { backfillCommand, EXIT, runListener, type RunListenerOptions } from "../server/listen/listen.ts";
 import { backfillLockPath, lockPath } from "../server/listen/lock.ts";
 import { helperScriptPath } from "../server/listen/mcpheader.ts";
 import { setupMcp } from "../server/listen/mcpsetup.ts";
-import { throwawayConsumer, validConsumer } from "../server/listen/options.ts";
+import { resolveListen, throwawayConsumer, validConsumer } from "../server/listen/options.ts";
+import { recipe } from "../server/listen/recipes.ts";
 import { readStatus } from "../server/listen/state.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { checkTransport } from "../server/listen/transport.ts";
@@ -117,7 +118,7 @@ describe("connect", () => {
     expect(check).toBeGreaterThan(fg);
     expect(svc).toBeGreaterThan(check);
     expect(text).toContain("test email");
-    expect(text).toContain("listen --save --exec");
+    expect(text).toContain("listen --save --recipe claude-code");
   });
 });
 
@@ -314,6 +315,15 @@ describe("listen", () => {
     expect(plain()).toContain("npx agentinbox-cli listen --backfill --exec 'my-handler --x'");
     l.stop();
     await l.done;
+  });
+
+  it("the backfill hint gives a recipe back as --recipe <tool>", () => {
+    const profile = { ...baseProfile(), exec: undefined };
+    const hint = (flags: { recipe?: string; exec?: string }, name = "default") => backfillCommand(name, profile, resolveListen(name, profile, flags).config);
+    expect(hint({ recipe: "hermes" })).toBe("npx agentinbox-cli listen --backfill --recipe hermes");
+    expect(hint({ recipe: "claude-code" }, "work")).toBe("npx agentinbox-cli listen --profile work --backfill --recipe claude-code");
+    // An edited recipe is no longer the recipe: it is printed as the command it is.
+    expect(hint({ exec: `${recipe("codex").exec} --x` })).toContain("--backfill --exec 'codex exec");
   });
 });
 

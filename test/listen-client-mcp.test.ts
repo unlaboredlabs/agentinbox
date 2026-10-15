@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { helperNode, helperNodeChoice } from "../server/listen/mcpheader.ts";
 import { codexBlock, removeTomlServer, setupMcp, upsertYamlServer } from "../server/listen/mcpsetup.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { FAKE_KEY, isolateXdg } from "./listen-client-fake.ts";
@@ -56,6 +57,12 @@ describe("setup-mcp", () => {
     const entry = JSON.parse(calls[2]![5]!) as { type: string; url: string; headersHelper: string };
     expect(entry).toMatchObject({ type: "http", url: "https://mail.example.com/mcp" });
     expect(backups(home)).toHaveLength(1);
+    // It names the Node.js the helper runs with, and how to recover after replacing it.
+    // (The node chosen for this machine: process.execPath, or a stable path under Homebrew, fnm, nvm….)
+    const node = helperNodeChoice().path;
+    expect(entry.headersHelper.startsWith(`'${node}' `)).toBe(true);
+    expect(r.notes).toEqual([expect.stringContaining(`Node.js: Claude Code runs the header helper with ${node}`)]);
+    expect(r.notes![0]).toContain("run `npx agentinbox-cli setup-mcp --tool claude-code` again");
 
     // The helper prints the header from the 0600 profile (to a pipe, never a terminal).
     const helper = spawnSync("/bin/sh", ["-c", entry.headersHelper], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -71,6 +78,31 @@ describe("setup-mcp", () => {
     } finally {
       delete process.env.FAIL;
     }
+  });
+
+  it("Claude Code: prefers a stable node over a version manager's, only when it exists and works", () => {
+    const fnm = "/home/u/.local/share/fnm/node-versions/v24.21.0/installation/bin/node";
+    const fnmDefault = "/home/u/.local/share/fnm/aliases/default/bin/node";
+    expect(helperNode(fnm, (p) => p === fnmDefault)).toEqual({ path: fnmDefault, versioned: false });
+    expect(helperNode(fnm, (p) => p === "/usr/bin/node")).toEqual({ path: "/usr/bin/node", versioned: false });
+    expect(helperNode(fnm, () => false)).toEqual({ path: fnm, versioned: true });
+    // The older ~/.fnm layout too.
+    expect(helperNode("/home/u/.fnm/node-versions/v22.1.0/installation/bin/node", () => true).path).toBe("/home/u/.fnm/aliases/default/bin/node");
+    // Homebrew: the keg's opt/ link first (same formula across upgrades), then the prefix's bin/node.
+    const cellar = "/opt/homebrew/Cellar/node/24.1.0/bin/node";
+    expect(helperNode(cellar, () => true)).toEqual({ path: "/opt/homebrew/opt/node/bin/node", versioned: false });
+    expect(helperNode(cellar, (p) => p === "/opt/homebrew/bin/node")).toEqual({ path: "/opt/homebrew/bin/node", versioned: false });
+    const keg22 = "/usr/local/Cellar/node@22/22.1.0/bin/node";
+    expect(helperNode(keg22, () => true).path).toBe("/usr/local/opt/node@22/bin/node");
+    expect(helperNode(keg22, (p) => p === "/usr/local/bin/node").path).toBe("/usr/local/bin/node");
+    const nvm = "/home/u/.nvm/versions/node/v22.13.0/bin/node";
+    expect(helperNode(nvm, () => false)).toEqual({ path: nvm, versioned: true });
+    // asdf, mise and Volta pick a version per directory: only system nodes are tried, never their shims.
+    const tried: string[] = [];
+    helperNode("/home/u/.asdf/installs/nodejs/22.1.0/bin/node", (p) => (tried.push(p), false));
+    expect(tried).toEqual(["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]);
+    // A non-versioned node is kept as is, without trying anything.
+    expect(helperNode("/usr/bin/node", () => true)).toEqual({ path: "/usr/bin/node", versioned: false });
   });
 
   it("Claude Code: explains the manual command when the CLI is missing", () => {

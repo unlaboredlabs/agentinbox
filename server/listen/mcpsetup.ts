@@ -4,8 +4,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "../../shared/agent-api.ts";
 import { backupFile, isTooOpen, writePrivateFile } from "./fsutil.ts";
-import { claudeServerEntry, helperScriptPath } from "./mcpheader.ts";
+import { claudeServerEntry, helperNodeNote, helperScriptPath } from "./mcpheader.ts";
 import type { Profile } from "./profile.ts";
+import { DEFAULT_PROFILE } from "./paths.ts";
 import { mcpServerName } from "./recipes.ts";
 import { NPX } from "./version.ts";
 import { safeText } from "./ui.ts";
@@ -29,6 +30,8 @@ export interface McpSetupResult {
   verify?: string[];
   /** Nothing was changed (--dry-run). */
   dryRun?: boolean;
+  /** Things to know afterwards, e.g. which Node.js the setup depends on. */
+  notes?: string[];
 }
 
 export interface McpSetupOptions {
@@ -96,6 +99,8 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
   const manual = [addCommand];
   const file = claudeConfigFile();
   const verify = [`claude mcp list   (shows "${t.name}" as connected; inside Claude Code: /mcp)`];
+  // The helper command names a node binary: say which, and how to recover when it goes away.
+  const notes = [helperNodeNote(profile, `${NPX} setup-mcp --tool claude-code${profile === DEFAULT_PROFILE ? "" : ` --profile ${profile}`}`)];
   const changes = [
     `write the header helper ${helperScriptPath()} (0600; reads the key from your profile when Claude Code connects)`,
     backupLine(file),
@@ -103,7 +108,7 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
     `run: ${addCommand}`,
     `the key stays in your agentinbox profile: neither the command line nor ${file} contains it`,
   ];
-  if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Claude Code: nothing was changed. setup-mcp would:`, changes, verify };
+  if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Claude Code: nothing was changed. setup-mcp would:`, changes, verify, notes };
   const probe = spawnSync("claude", ["--version"], { stdio: "ignore" });
   if (probe.error || probe.status !== 0) return { ok: false, message: "The `claude` CLI was not found on PATH.", manual };
   const backup = backupFile(file);
@@ -121,6 +126,7 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
     backup,
     changes: [`ran: ${addCommand}`, `${file} now lists "${t.name}" (user scope)`],
     verify,
+    notes,
   };
 }
 

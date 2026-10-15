@@ -199,7 +199,7 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   // Service settings live in the profile: save whatever was passed with this command.
   const { config, next } = resolveListen(profileName, profile, { ...flags, save: true });
   if (!config.exec && !config.forward) {
-    throw new Error(`Nothing for the service to run. Pass --exec "<command>" and/or --forward <url> (they are saved to profile "${profileName}").`);
+    throw new Error(`Nothing for the service to run. Pass --recipe <tool> (claude-code, codex, cursor, hermes), --exec "<command>" and/or --forward <url> (they are saved to profile "${profileName}").`);
   }
   await checkTransport(next.url, { insecure: config.insecure });
   preflight(ops);
