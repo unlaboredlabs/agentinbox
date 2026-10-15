@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import pc from "picocolors";
 import {
   assertSupported,
@@ -30,12 +30,24 @@ import { NPM_PACKAGE, NPX } from "./version.ts";
 export const unitName = (profile: string) => `agentinbox-listen-${profile}`;
 export const launchdLabel = (profile: string) => `com.unlaboredlabs.agentinbox.listen.${profile}`;
 
+/**
+ * PATH for the service: this shell's PATH (so `claude`, `codex`… resolve as they do here) minus
+ * transient entries npx, npm scripts and version-manager shells add, plus node's own directory.
+ */
+export function servicePath(raw = process.env.PATH ?? ""): string {
+  const transient = /\/_npx\/|node_modules\/\.bin|node-gyp-bin|fnm_multishells|\/\.pnpm\//;
+  const dirs = [dirname(process.execPath), ...raw.split(delimiter)].filter((d) => d && d.startsWith("/") && !transient.test(d));
+  if (!dirs.includes("/usr/bin")) dirs.push("/usr/local/bin", "/usr/bin", "/bin");
+  return [...new Set(dirs)].join(delimiter);
+}
+
 /** Environment the service needs to behave like the shell `service install` ran in. Never contains the key. */
 export function serviceEnvironment(): Record<string, string> {
   const env: Record<string, string> = { AGENTINBOX_SERVICE: "1" };
   // PATH matters most: `claude`, `codex`, `hermes`… usually live in ~/.local/bin, nvm or Homebrew dirs
   // that a service manager's minimal PATH doesn't include.
-  for (const key of ["PATH", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "LANG", "AGENTINBOX_DEBUG"]) {
+  env.PATH = servicePath();
+  for (const key of ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "LANG", "AGENTINBOX_DEBUG"]) {
     if (process.env[key]) env[key] = process.env[key]!;
   }
   return env;

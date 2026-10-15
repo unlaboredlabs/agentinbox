@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { launchdLabel, launchdListenPlist, systemdListenUnit, unitName } from "../server/listen/service.ts";
 import { FAKE_KEY, isolateXdg } from "./listen-client-fake.ts";
@@ -26,6 +27,12 @@ describe("listener service units", () => {
     } finally {
       delete process.env.AGENTINBOX_TEST_SECRET_IN_ENV;
     }
+  });
+
+  it("cleans npx and version-manager shims out of PATH", async () => {
+    const { servicePath } = await import("../server/listen/service.ts");
+    const p = servicePath("/repo/node_modules/.bin:/run/user/1000/fnm_multishells/1_2/bin:/home/u/.local/bin:/home/u/.npm/_npx/abc/node_modules/.bin:relative:/usr/bin:/home/u/.local/bin");
+    expect(p.split(":")).toEqual([dirname(process.execPath), "/home/u/.local/bin", "/usr/bin"].filter((d, i, a) => a.indexOf(d) === i));
   });
 
   it("launchd: label per profile, restarts only on failure, escapes XML", () => {
