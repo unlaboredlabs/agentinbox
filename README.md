@@ -27,22 +27,26 @@ project, with no cloud service in between.
   approvals inbox, live events, delivery logs and the audit trail. Dark mode included.
 - **A ready-made agent skill.** `SKILL.md` teaches agents to use the tools well and to treat email as data.
 
-<!--
 ## Preview
 
 ![Overview](docs/screenshots/overview.png)
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/setup.png" alt="Setup wizard"><br>Guided Google Cloud setup.</td>
-    <td width="50%"><img src="docs/screenshots/agents.png" alt="Agents"><br>Agents, grants and connect snippets.</td>
+    <td width="50%"><img src="docs/screenshots/wizard-consent.png" alt="Setup wizard"><br>Guided Google Cloud setup.</td>
+    <td width="50%"><img src="docs/screenshots/agent-grant-editor.png" alt="Grant editor"><br>Per-account grants: capabilities, label scope, send mode, limits.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/pairing-approve.png" alt="Pairing approval"><br>Approve an agent by typing the code from its terminal.</td>
+    <td><img src="docs/screenshots/connect-agent.png" alt="Connect an agent"><br>Copy-paste setup for Claude Code, Codex, Cursor and Hermes.</td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/approvals.png" alt="Approvals"><br>Approve or reject sends.</td>
-    <td><img src="docs/screenshots/webhooks.png" alt="Webhooks"><br>Webhooks with delivery log and replay.</td>
+    <td><img src="docs/screenshots/webhook-deliveries.png" alt="Webhooks"><br>Webhooks with delivery log and replay.</td>
   </tr>
 </table>
--->
+
+More in [docs/screenshots](docs/screenshots/README.md).
 
 ## Quick start
 

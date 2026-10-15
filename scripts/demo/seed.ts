@@ -14,7 +14,7 @@
 //
 // Writes /tmp/agentinbox-demo-<port>.json with { url, password, cookie } for screenshot scripts.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,7 +56,9 @@ const dataDir = mkdtempSync(join(tmpdir(), "agentinbox-demo-"));
 const fake = await startFakeGoogle();
 fake.pullWaitMs = 1000;
 const proxy = await startClientProxy(fake.url);
-const config = loadConfig({ dataDir, host: "127.0.0.1", port: PORT }, "0.4.2");
+// Report the real package version, so screenshots match what users install.
+const pkgVersion = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
+const config = loadConfig({ dataDir, host: "127.0.0.1", port: PORT }, pkgVersion);
 config.google = { oauthBase: proxy.url, authBase: proxy.url, gmailBase: proxy.url, pubsubBase: proxy.url };
 const running = await startServer({ config });
 const { ctx } = running;
@@ -292,7 +294,7 @@ const claudeStart = await startPairing({
   name: "Claude Code on wynn-mbp",
   description: "Personal assistant: triages the ops inbox and drafts replies.",
   requested: { accounts: [OPS], capabilities: ["read", "draft"], reason: "Wake me when support mail arrives so I can draft replies." },
-  client: { hostname: "wynn-mbp", platform: "darwin-arm64", tool: "claude-code", version: "0.4.2" },
+  client: { hostname: "wynn-mbp", platform: "darwin-arm64", tool: "claude-code", version: pkgVersion },
 });
 setPairingIp(claudeStart.userCode, "100.101.34.7");
 const pendingClaude = (await api<PairingRequest[]>("GET", "/api/pairings?status=pending")).find((p) => p.userCode === claudeStart.userCode)!;
@@ -307,7 +309,7 @@ const claudePoll = await poll(claudeStart.deviceCode);
 if (claudePoll.status !== "approved") throw new Error(`pairing poll: ${JSON.stringify(claudePoll)}`);
 const claudeKey = claudePoll.apiKey;
 const claudeAgentId = claudePoll.agent.id;
-listen(claudeKey, "wynn-mbp", { hostname: "wynn-mbp", platform: "darwin-arm64", version: "0.4.2" });
+listen(claudeKey, "wynn-mbp", { hostname: "wynn-mbp", platform: "darwin-arm64", version: pkgVersion });
 log("paired Claude Code agent, listener connected");
 
 /** Keeps one pending request around, polled like a real `connect` would (approve it in the console to see the key delivered). */
@@ -323,7 +325,7 @@ async function ensurePendingPairing() {
       sendMode: "direct",
       reason: "Triage CI and Datadog alert emails, then email the on-call engineer a summary.",
     },
-    client: { hostname: "build-01", platform: "linux-x64", tool: "codex", version: "0.4.2" },
+    client: { hostname: "build-01", platform: "linux-x64", tool: "codex", version: pkgVersion },
   });
   setPairingIp(start.userCode, "100.87.120.44");
   const entry = { start, done: false };
@@ -335,7 +337,7 @@ async function ensurePendingPairing() {
       const r = await poll(start.deviceCode).catch(() => ({ status: "pending" }) as PairingPoll);
       if (r.status === "approved") {
         log(`pairing ${start.userCode} approved: key delivered to the demo CLI, listener starting`);
-        listen(r.apiKey, "build-01", { hostname: "build-01", platform: "linux-x64", version: "0.4.2" });
+        listen(r.apiKey, "build-01", { hostname: "build-01", platform: "linux-x64", version: pkgVersion });
         entry.done = true;
       } else if (r.status === "denied" || r.status === "expired" || r.status === "consumed") {
         log(`pairing ${start.userCode} ${r.status}`);

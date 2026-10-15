@@ -226,7 +226,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             </form.Field>
             <form.Field name="retentionDays" validators={{ onChange: ({ value }) => intError("Retention", 1, 3650)(value) }}>
               {(field) => (
-                <NumberField field={field} label="Keep history for" unit="days" description="Events, webhook deliveries and audit entries older than this are deleted." />
+                <NumberField field={field} label="Keep history for" unit="days" description="Events, webhook deliveries, audit entries and decided approvals older than this are deleted." />
               )}
             </form.Field>
           </FieldGroup>

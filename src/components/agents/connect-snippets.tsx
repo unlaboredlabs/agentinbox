@@ -11,7 +11,7 @@ export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
 export function snippets(publicUrl: string, key: string) {
   const mcp = `${publicUrl}/mcp`;
   return {
-    claude: `claude mcp add --transport http agentinbox ${shellQuote(mcp)} \\\n  --header "Authorization: Bearer ${key}"`,
+    claude: `claude mcp add --transport http --scope user agentinbox ${shellQuote(mcp)} \\\n  --header "Authorization: Bearer ${key}"`,
     codexToml: `[mcp_servers.agentinbox]\nurl = ${JSON.stringify(mcp)}\nbearer_token_env_var = "AGENTINBOX_API_KEY"`,
     codexEnv: `export AGENTINBOX_API_KEY="${key}"`,
     cursor: JSON.stringify({ mcpServers: { agentinbox: { url: mcp, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
