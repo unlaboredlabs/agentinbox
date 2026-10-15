@@ -10,7 +10,8 @@ import { recipe } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
 import { deniedDescription, linkedPairing } from "../src/components/approvals/pairing-link.ts";
 import { listenerHandled } from "../src/components/agents/listener-handled.ts";
-import { allStepsDone, type SetupDraft, showsSetupLink, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, wizardStep } from "../src/components/setup/steps.ts";
+import { allStepsDone, type SetupDraft, showsSetupLink, skippedPatch, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, verifyDoneHeading, wizardStep } from "../src/components/setup/steps.ts";
+import { lastCallShown } from "../src/components/agents/last-call.ts";
 import { activeTest, checksComplete, doneSummary, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks, verifyFooter, verifyMode } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
 import { accountsStat, agentOnHost, fmtAgo } from "../src/lib/format.ts";
@@ -373,6 +374,7 @@ describe("stepStatuses: the verify step", () => {
     expect(verifiedPatch(false, draft)).toBeNull();
     const patched = { ...draft, ...verifiedPatch(checksComplete(green), draft) };
     expect(patched.verified).toBe(true);
+    expect(patched.verifiedBy).toBe("checks");
     const statuses = stepStatuses(state(true), patched);
     expect(statuses.verify).toBe("done");
     expect(allStepsDone(statuses)).toBe(true);
@@ -399,6 +401,36 @@ describe("stepStatuses: the verify step", () => {
     expect(verifyFooter(false, true).nextDisabled).toBe(false);
   });
 
+  it("records how step 8 was finished", () => {
+    expect(skippedPatch({ verifyStarted: true })).toEqual({ verified: true, verifiedBy: "skip" });
+    // Skipping after the checks passed doesn't forget that they did.
+    expect(skippedPatch({ verified: true, verifiedBy: "checks" })).toEqual({ verified: true, verifiedBy: "checks" });
+    // Checks that pass later (Run the checks again) replace a skip, and an older draft without verifiedBy.
+    expect(verifiedPatch(true, { verified: true, verifiedBy: "skip" })).toEqual({ verified: true, verifiedBy: "checks" });
+    expect(verifiedPatch(true, { verified: true })).toEqual({ verified: true, verifiedBy: "checks" });
+    expect(verifiedPatch(true, { verified: true, verifiedBy: "checks" })).toBeNull();
+  });
+
+  it("says 'Setup complete' only when every required step is done", () => {
+    const all = stepStatuses(state(true), { verified: true, pubsubSkipped: true });
+    expect(verifyDoneHeading(all)).toEqual({ title: "Setup complete", nextStep: null });
+    // Optional real-time delivery left to do doesn't matter; step 8 itself (about to be marked) neither.
+    expect(verifyDoneHeading({ ...all, pubsub: "todo", verify: "todo" })).toEqual({ title: "Setup complete", nextStep: null });
+    // A required step is still to do: the first one is linked.
+    expect(verifyDoneHeading({ ...all, consent: "todo", accounts: "todo" })).toEqual({ title: "This check is done", nextStep: "consent" });
+    expect(verifyDoneHeading({ ...all, url: "todo", pubsub: "todo" })).toEqual({ title: "This check is done", nextStep: "url" });
+  });
+
+  it("shows the last successful tool call, or marks a failed one", () => {
+    expect(lastCallShown([])).toBeNull();
+    const rejected = { ...call("get_message", "error", later(9)), reason: "invalid_arguments" };
+    const ok = call("search_threads", "ok", later(5));
+    expect(lastCallShown([rejected, ok])).toEqual({ call: ok, ok: true, note: null });
+    expect(lastCallShown([rejected])).toEqual({ call: rejected, ok: false, note: "rejected: invalid_arguments" });
+    expect(lastCallShown([{ ...call("send_message", "denied", later(1)), reason: "allow_to" }])?.note).toBe("denied: allow_to");
+    expect(lastCallShown([{ ...call("get_thread", "error", later(1)), reason: "gmail_error" }])?.note).toBe("failed: gmail_error");
+  });
+
   it("summarizes what was verified from what is still known", () => {
     const old = { ...listener("host-default", 9, false), lastSeenAt: later(60), client: { hostname: "anvil" } };
     expect(
@@ -409,8 +441,10 @@ describe("stepStatuses: the verify step", () => {
         connectedAt: later(90),
         listeners: [old],
         skipListen: false,
+        verifiedBy: "checks",
       }),
     ).toEqual([
+      { id: "checked" },
       // The last successful call, not the newer rejected one.
       { id: "mcp", at: later(30), action: "get_message" },
       { id: "listener", connected: false, hostname: "anvil", at: later(60) },
@@ -421,7 +455,12 @@ describe("stepStatuses: the verify step", () => {
       { id: "mcp", at: later(5), action: null },
       { id: "mcpOnly" },
     ]);
-    // A connected listener wins over an older one; finished without checking is said so.
+    // Skipped: said so, whatever the server knows; nothing claims checks passed.
+    expect(doneSummary({ serverVerified: true, test: undefined, calls: [], connectedAt: null, listeners: [], skipListen: true, verifiedBy: "skip" })).toEqual([
+      { id: "mcpOnly" },
+      { id: "skipped" },
+    ]);
+    // A connected listener wins over an older one; unknown how it finished, and no evidence: said so.
     expect(
       doneSummary({ serverVerified: false, test: undefined, calls: [], connectedAt: null, listeners: [old, { ...listener("b", 0), client: {} }], skipListen: false }),
     ).toEqual([{ id: "listener", connected: true, hostname: null, at: null }, { id: "unchecked" }]);

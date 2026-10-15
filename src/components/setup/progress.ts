@@ -54,7 +54,7 @@ export function useSetupDraft(): SetupDraft {
 }
 
 export { generateProjectId, PROJECT_ID_RE } from "@/lib/gcp-project";
-export { allStepsDone, type SetupDraft, STEP_IDS, STEP_META, type StepId, type StepStatus, showsSetupLink, startsVerify, stepStatuses, verifiedPatch, wizardStep } from "./steps";
+export { allStepsDone, type SetupDraft, STEP_IDS, STEP_META, type StepId, type StepStatus, showsSetupLink, skippedPatch, startsVerify, stepStatuses, verifiedPatch, verifyDoneHeading, wizardStep } from "./steps";
 
 /** Setup checklist state shared by the wizard, the overview card and the sidebar. */
 export function useSetupProgress() {

@@ -20,7 +20,8 @@ import { api, apiGet } from "@/lib/api";
 import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { readDraft, updateDraft, useSetupProgress, verifiedPatch } from "./progress";
+import { lastCallShown } from "@/components/agents/last-call";
+import { readDraft, skippedPatch, STEP_IDS, STEP_META, updateDraft, useSetupProgress, verifiedPatch, verifyDoneHeading } from "./progress";
 import {
   activeTest,
   checksComplete,
@@ -102,8 +103,13 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
   const [recheck, setRecheck] = useState(false);
   const mode = verifyMode(doneWhenOpened, recheck);
 
+  const heading = verifyDoneHeading(progress.statuses);
   const finish = () => {
-    updateDraft({ verified: true });
+    if (!readDraft().verified) updateDraft({ verified: true });
+    onNext();
+  };
+  const skip = () => {
+    updateDraft(skippedPatch(readDraft()));
     onNext();
   };
   // A fresh check: forget the last test email. The step stays done (nothing here un-verifies it).
@@ -118,21 +124,26 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
       title="Check that it works"
       description={
         mode === "complete"
-          ? "Setup is complete. Here's what was checked and what to do next."
+          ? heading.nextStep
+            ? "This check is done. Here's what was checked."
+            : "Setup is complete. Here's what was checked and what to do next."
           : "Each line turns green on its own as your agent connects. Then send a test email and watch it arrive."
       }
-      footer={<VerifyFooter agent={agent} stepDone={stepDone} onBack={onBack} onFinish={finish} />}
+      footer={<VerifyFooter agent={agent} stepDone={stepDone} onBack={onBack} onFinish={finish} onSkip={skip} />}
     >
       {agents.isPending ? (
         <Skeleton className="h-72 rounded-xl" />
       ) : agents.isError ? (
         <ErrorAlert error={agents.error} title="Couldn't load your agents" />
-      ) : mode === "complete" ? (
-        agent ? (
-          <CompletedView key={agent.id} agent={agent} state={state} serverVerified={!!progress.state?.verified} onRunAgain={runAgain} />
-        ) : (
-          <CompletedNoAgent />
-        )
+      ) : mode === "complete" && agent ? (
+        <CompletedView
+          key={agent.id}
+          agent={agent}
+          state={state}
+          serverVerified={!!progress.state?.verified}
+          verifiedBy={progress.draft.verifiedBy}
+          onRunAgain={runAgain}
+        />
       ) : !agent ? (
         <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
           No agent yet. Go back one step, run <code className="font-mono text-foreground">connect</code> and approve the request.
@@ -181,7 +192,19 @@ function setComplete(agentId: string | null) {
 }
 const useComplete = () => useSyncExternalStore((l) => (completeSubs.add(l), () => completeSubs.delete(l)), () => completeFor);
 
-function VerifyFooter({ agent, stepDone, onBack, onFinish }: { agent: Agent | undefined; stepDone: boolean; onBack?: () => void; onFinish: () => void }) {
+function VerifyFooter({
+  agent,
+  stepDone,
+  onBack,
+  onFinish,
+  onSkip,
+}: {
+  agent: Agent | undefined;
+  stepDone: boolean;
+  onBack?: () => void;
+  onFinish: () => void;
+  onSkip: () => void;
+}) {
   const complete = useComplete() === agent?.id && !!agent;
   const f = verifyFooter(stepDone, complete);
   return (
@@ -193,7 +216,7 @@ function VerifyFooter({ agent, stepDone, onBack, onFinish }: { agent: Agent | un
       hint={f.hint ?? undefined}
       extra={
         f.skip && (
-          <Button variant="ghost" onClick={onFinish}>
+          <Button variant="ghost" onClick={onSkip}>
             Finish without checking
           </Button>
         )
@@ -259,6 +282,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
   const Label = label[0]!.toUpperCase() + label.slice(1);
   const c = connectCommands(publicUrl, tool);
   const mcp = useMcpActivity(agent, { since: agent.createdAt });
+  const lastCall = lastCallShown(mcp.calls);
   const now = useNow(60_000);
   const test = activeTest(state.test, now);
 
@@ -291,7 +315,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
     setComplete(complete ? agent.id : null);
     return () => setComplete(null);
   }, [complete, agent.id]);
-  // "Setup complete" means done: step 8 is marked done now; "Finish setup" just leaves the page.
+  // Every check green means step 8 is done now (verifiedBy "checks"); "Finish setup" just leaves the page.
   useEffect(() => {
     const patch = verifiedPatch(complete, readDraft());
     if (patch) updateDraft(patch);
@@ -365,9 +389,10 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
           title={mcpDone ? `${Label} is connected to agentinbox` : `Waiting for ${label} to call agentinbox`}
           detail={
             mcpDone ? (
-              mcp.lastToolCall ? (
+              lastCall ? (
                 <>
-                  Last tool call <TimeAgo date={mcp.lastToolCall.ts} /> ({mcp.lastToolCall.action}).
+                  Last tool call <TimeAgo date={lastCall.call.ts} /> ({lastCall.call.action}
+                  {lastCall.note && <span className="text-warning">, {lastCall.note}</span>}).
                 </>
               ) : (
                 <>
@@ -650,7 +675,19 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
 }
 
 /** Step 8 revisited once done: what was verified, the same next steps, and a way to check again. */
-function CompletedView({ agent, state, serverVerified, onRunAgain }: { agent: Agent; state: VerifyState; serverVerified: boolean; onRunAgain: () => void }) {
+function CompletedView({
+  agent,
+  state,
+  serverVerified,
+  verifiedBy,
+  onRunAgain,
+}: {
+  agent: Agent;
+  state: VerifyState;
+  serverVerified: boolean;
+  verifiedBy: "checks" | "skip" | undefined;
+  onRunAgain: () => void;
+}) {
   const origin = useAgentOrigin(agent);
   const { publicUrl } = usePublicUrl();
   const tool: AgentTool = origin.tool ?? "other";
@@ -666,6 +703,7 @@ function CompletedView({ agent, state, serverVerified, onRunAgain }: { agent: Ag
     connectedAt: agent.lastMcpAt,
     listeners: agent.listeners,
     skipListen,
+    verifiedBy,
   });
   const readIt = mcp.calls.some((e) => e.outcome === "ok" && READ_TOOLS.has(e.action));
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -699,7 +737,7 @@ function CompletedView({ agent, state, serverVerified, onRunAgain }: { agent: Ag
           <RotateCcwIcon />
           Run the checks again
         </Button>
-        <span className="text-xs text-muted-foreground">Optional: sends a new test email. Setup stays complete.</span>
+        <span className="text-xs text-muted-foreground">Optional: sends a new test email. This step stays done.</span>
       </div>
     </div>
   );
@@ -744,6 +782,14 @@ function DoneSummaryLine({ line: l, Label }: { line: DoneLine; Label: string }) 
           )}
         </DoneItem>
       );
+    case "checked":
+      return <DoneItem ok>Every check passed in this browser</DoneItem>;
+    case "skipped":
+      return (
+        <DoneItem ok={false}>
+          <span className="text-muted-foreground">You finished without running every check. Run them again below to make sure.</span>
+        </DoneItem>
+      );
     case "mcpOnly":
       return <DoneItem ok>No listener: MCP only</DoneItem>;
     case "test":
@@ -759,35 +805,6 @@ function DoneSummaryLine({ line: l, Label }: { line: DoneLine; Label: string }) 
         </DoneItem>
       );
   }
-}
-
-/** Done, but no agent left to summarize (deleted since). */
-function CompletedNoAgent() {
-  const system = useQuery(queries.system());
-  return (
-    <section aria-labelledby="verify-done" className="space-y-4 rounded-xl border border-success/40 bg-success/5 p-4 sm:p-5">
-      <div className="flex items-start gap-3">
-        <PartyPopperIcon className="mt-0.5 size-5 shrink-0 text-success" />
-        <div className="space-y-1">
-          <h3 id="verify-done" className="font-semibold">
-            Setup complete
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            No agent is connected now.{" "}
-            <Link to="/agents" className="font-medium text-foreground underline underline-offset-4">
-              Connect one on the Agents page
-            </Link>
-            .
-          </p>
-        </div>
-      </div>
-      {system.data?.service === false && (
-        <ul className="space-y-3 text-sm">
-          <DaemonServiceItem command={system.data.serviceCommand} />
-        </ul>
-      )}
-    </section>
-  );
 }
 
 /** Keep the daemon itself running: it's in a terminal now. serviceCommand carries this instance's flags. */
@@ -830,14 +847,25 @@ function SuccessPanel({
   summary?: React.ReactNode;
 }) {
   const system = useQuery(queries.system());
+  const heading = verifyDoneHeading(useSetupProgress().statuses);
+  const Icon = heading.nextStep ? CheckCircle2Icon : PartyPopperIcon;
   return (
     <section aria-labelledby="verify-done" className="space-y-4 rounded-xl border border-success/40 bg-success/5 p-4 sm:p-5">
       <div className="flex items-start gap-3">
-        <PartyPopperIcon className="mt-0.5 size-5 shrink-0 text-success" />
+        <Icon className="mt-0.5 size-5 shrink-0 text-success" />
         <div className="space-y-1">
           <h3 id="verify-done" ref={headingRef} tabIndex={-1} className="font-semibold outline-none">
-            Setup complete
+            {heading.title}
           </h3>
+          {heading.nextStep && (
+            <p className="text-sm">
+              Setup isn't finished yet:{" "}
+              <Link to="/get-started" search={{ step: heading.nextStep }} className="font-medium underline underline-offset-4">
+                step {STEP_IDS.indexOf(heading.nextStep) + 1}, {STEP_META[heading.nextStep].short}
+              </Link>{" "}
+              is still to do.
+            </p>
+          )}
           <p className="text-sm text-muted-foreground">
             New mail reaches <Visible text={agent.name} />
             {listening ? (

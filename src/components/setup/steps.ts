@@ -35,6 +35,8 @@ export interface SetupDraft {
   verifyStarted?: boolean;
   /** Set by the "Check that it works" step: as soon as every check is green, or by "Finish without checking". */
   verified?: boolean;
+  /** How step 8 was finished in this browser: every check green, or "Finish without checking". Unset before this was recorded. */
+  verifiedBy?: "checks" | "skip";
 }
 
 export const STEP_IDS = ["url", "project", "consent", "client", "accounts", "pubsub", "agent", "verify"] as const;
@@ -87,7 +89,23 @@ export function startsVerify(step: StepId, statuses: Record<StepId, StepStatus>,
  * right away, so leaving without "Finish setup" doesn't leave setup at 7 of 8. null when nothing changes.
  */
 export function verifiedPatch(complete: boolean, draft: SetupDraft): Partial<SetupDraft> | null {
-  return complete && !draft.verified ? { verified: true } : null;
+  // Also after "Finish without checking" (or before verifiedBy existed): the checks have passed now.
+  return complete && (!draft.verified || draft.verifiedBy !== "checks") ? { verified: true, verifiedBy: "checks" } : null;
+}
+
+/** "Finish without checking": done, recorded as skipped unless the checks already passed. */
+export function skippedPatch(draft: SetupDraft): Partial<SetupDraft> {
+  return { verified: true, verifiedBy: draft.verifiedBy === "checks" ? "checks" : "skip" };
+}
+
+/**
+ * The heading once step 8's checks are done: "Setup complete" only when every required step is (or
+ * only step 8 is left, about to be marked); otherwise "This check is done" and the first required
+ * step still to do, for a link.
+ */
+export function verifyDoneHeading(statuses: Record<StepId, StepStatus>): { title: string; nextStep: StepId | null } {
+  const next = STEP_IDS.find((id) => id !== "verify" && statuses[id] === "todo" && !STEP_META[id].optional);
+  return next ? { title: "This check is done", nextStep: next } : { title: "Setup complete", nextStep: null };
 }
 
 /** The sidebar's "Get started" entry: while setup is unfinished, and on /get-started itself (it goes on navigating away). */

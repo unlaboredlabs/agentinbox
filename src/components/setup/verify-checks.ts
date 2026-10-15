@@ -124,21 +124,28 @@ export interface DoneSummaryInput {
   listeners: ListenerInfo[];
   /** No listener expected ("MCP only", or an agent that can't run one). */
   skipListen: boolean;
+  /** SetupDraft.verifiedBy: how this browser finished the step; undefined when unknown (another browser, older drafts). */
+  verifiedBy?: "checks" | "skip";
 }
 
 export type DoneLine =
+  /** Every check went green in this browser. */
+  | { id: "checked" }
+  /** Finished with "Finish without checking". */
+  | { id: "skipped" }
   /** The agent reached agentinbox: its last successful tool call, else when it last connected. */
   | { id: "mcp"; at: string; action: string | null }
   | { id: "listener"; connected: boolean; hostname: string | null; at: string | null }
   | { id: "mcpOnly" }
   /** A test email was sent from this browser. */
   | { id: "test"; at: string }
-  /** agentinbox has no record of any agent working (finished without checking). */
+  /** How it was finished is unknown here, and agentinbox has no record of any agent working. */
   | { id: "unchecked" };
 
 /** The completed step's summary of what was verified, from what is still known now. */
-export function doneSummary({ serverVerified, test, calls, connectedAt, listeners, skipListen }: DoneSummaryInput): DoneLine[] {
+export function doneSummary({ serverVerified, test, calls, connectedAt, listeners, skipListen, verifiedBy }: DoneSummaryInput): DoneLine[] {
   const lines: DoneLine[] = [];
+  if (verifiedBy === "checks") lines.push({ id: "checked" });
   const ok = calls.find((e) => e.outcome === "ok");
   if (ok || connectedAt) lines.push({ id: "mcp", at: ok?.ts ?? connectedAt!, action: ok?.action ?? null });
   const listener =
@@ -146,6 +153,7 @@ export function doneSummary({ serverVerified, test, calls, connectedAt, listener
   if (listener) lines.push({ id: "listener", connected: listener.connected, hostname: listener.client.hostname ?? null, at: listener.lastSeenAt });
   else if (skipListen) lines.push({ id: "mcpOnly" });
   if (test) lines.push({ id: "test", at: test.sentAt });
-  if (!serverVerified) lines.push({ id: "unchecked" });
+  if (verifiedBy === "skip") lines.push({ id: "skipped" });
+  else if (!verifiedBy && !serverVerified) lines.push({ id: "unchecked" });
   return lines;
 }
