@@ -100,9 +100,10 @@ export interface ConnectCommands {
   insecure: boolean;
 }
 
-export function connectCommands(publicUrl: string, tool: AgentTool): ConnectCommands {
+/** `acceptInsecure`: the human explicitly accepted plain http; only then is --insecure added. */
+export function connectCommands(publicUrl: string, tool: AgentTool, acceptInsecure = false): ConnectCommands {
   const insecure = transportOf(publicUrl) === "insecure";
-  const flag = insecure ? " --insecure" : "";
+  const flag = insecure && acceptInsecure ? " --insecure" : "";
   const toolFlags = tool === "other" ? "" : ` --tool ${tool} --setup-mcp`;
   return {
     connect: `${NPX} connect ${shellQuote(publicUrl)}${toolFlags}${flag}`,

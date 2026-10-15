@@ -169,7 +169,8 @@ export function PairingCard({
 }: {
   p: PairingRequest;
   accounts: Account[];
-  highlighted?: boolean;
+  /** "link": opened from a ?pairing= link; "found": looked up by code on this page. */
+  highlighted?: "link" | "found";
   onApprove: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -207,7 +208,7 @@ export function PairingCard({
               <Badge variant="outline" className="font-normal text-muted-foreground">
                 self-reported by the agent
               </Badge>
-              {highlighted && <Badge className="bg-chart-1 font-normal text-white">Opened from a link</Badge>}
+              {highlighted && <Badge className="bg-chart-1 font-normal text-white">{highlighted === "found" ? "Matches the code you entered" : "Opened from a link"}</Badge>}
             </div>
             {p.description && (
               <p className="text-sm break-words whitespace-pre-wrap text-muted-foreground">
@@ -244,7 +245,8 @@ export function PairingCard({
       <CardFooter className="flex-wrap justify-between gap-3 border-t">
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <KeyRoundIcon className="size-3.5 shrink-0" />
-          To approve, you'll type the code shown in the agent's terminal.
+          To approve, you'll type the code shown in the agent's terminal. If you didn't just run <code className="font-mono">connect</code> yourself,
+          deny this request.
         </p>
         <div className="flex gap-2">
           {denying ? (
@@ -602,13 +604,17 @@ export function RecentPairings({ items }: { items: PairingRequest[] }) {
                 <span className="min-w-0 flex-1 truncate font-medium">
                   {agentExists ? (
                     <Link to="/agents/$agentId" params={{ agentId: p.agentId! }} className="hover:underline">
-                      {p.name}
+                      <Visible text={p.name} />
                     </Link>
                   ) : (
-                    p.name
+                    <Visible text={p.name} />
                   )}
                 </span>
-                {p.decisionNote && <span className="max-w-xs truncate text-muted-foreground">“{p.decisionNote}”</span>}
+                {p.decisionNote && (
+                  <span className="max-w-xs truncate text-muted-foreground">
+                    “<Visible text={p.decisionNote} />”
+                  </span>
+                )}
                 <span className="font-mono text-xs text-muted-foreground">{p.ip}</span>
                 <TimeAgo date={p.decidedAt ?? p.expiresAt} className="text-xs text-muted-foreground" />
               </li>

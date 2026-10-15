@@ -165,19 +165,29 @@ const resolveLabels = (names: string[]) => names.map((n) => labelIds[n] ?? n);
 
 // ───────────── Webhook receivers (n8n.localhost etc. resolve to 127.0.0.1) ─────────────
 
-function receiver(port: number, handler: (req: IncomingMessage, res: ServerResponse) => void) {
+/** Listens on the preferred port (pretty URLs in screenshots), or any free port if another demo holds it. */
+async function receiver(port: number, handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<number> {
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => handler(req, res));
   });
-  server.listen(port, "127.0.0.1");
+  const bind = (p: number) =>
+    new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(p, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve((server.address() as { port: number }).port);
+      });
+    });
+  const bound = await bind(port).catch(() => bind(0));
   receivers.push({ close: () => server.close() });
+  return bound;
 }
 let relayCalls = 0;
-receiver(5678, (_req, res) => {
+const n8nPort = await receiver(5678, (_req, res) => {
   res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ message: "Workflow was started" }));
 });
-receiver(8787, (_req, res) => {
+const relayPort = await receiver(8787, (_req, res) => {
   relayCalls++;
   if (relayCalls % 3 === 0) {
     res.writeHead(502, { "content-type": "text/html" }).end("<html><body><h1>502 Bad Gateway</h1><p>upstream connect error or disconnect/reset before headers</p></body></html>");
@@ -335,7 +345,7 @@ await ensurePendingPairing();
 const n8n = await api<WebhookWithSecret>("POST", "/api/webhooks", {
   agentId: support.agent.id,
   name: "n8n · support triage",
-  url: "http://n8n.localhost:5678/webhook/support-triage",
+  url: `http://n8n.localhost:${n8nPort}/webhook/support-triage`,
   eventTypes: ["message.received", "thread.reply_received"],
   filter: { labelIds: [labelIds.Support!] },
   includeBody: true,
@@ -344,7 +354,7 @@ const n8n = await api<WebhookWithSecret>("POST", "/api/webhooks", {
 await api<WebhookWithSecret>("POST", "/api/webhooks", {
   agentId: billing.agent.id,
   name: "Slack relay · #billing",
-  url: "http://relay.localhost:8787/hooks/billing",
+  url: `http://relay.localhost:${relayPort}/hooks/billing`,
   eventTypes: ["message.received"],
   filter: { labelIds: [labelIds.Billing!], from: ["*@stripe.com", "*@northwind.io", "*@amazon.com", "*@vercel.com", "*@gusto.com"] },
   includeBody: false,

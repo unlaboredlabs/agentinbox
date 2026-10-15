@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { KeyRoundIcon } from "lucide-react";
+import { KeyRoundIcon, ShieldAlertIcon } from "lucide-react";
 import { CodeBlock, ExternalLink } from "@/components/common";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { NPX, shellQuote } from "@/lib/cli";
+import { NPX, shellQuote, transportOf } from "@/lib/cli";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { queries } from "@/lib/queries";
 
 export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
@@ -37,6 +38,16 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
 
   return (
     <div className="space-y-3">
+      {transportOf(publicUrl) === "insecure" && (
+        <Alert variant="destructive">
+          <ShieldAlertIcon />
+          <AlertTitle>{new URL(publicUrl).host} is plain http</AlertTitle>
+          <AlertDescription>
+            With these settings the agent's key and every email it reads cross the network unencrypted. Use https or Tailscale for the public URL
+            (Settings) before connecting agents on other machines.
+          </AlertDescription>
+        </Alert>
+      )}
       {!apiKey && (
         <p className="flex items-start gap-2 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
           <KeyRoundIcon className="mt-px size-3.5 shrink-0" />

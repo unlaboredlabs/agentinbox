@@ -118,7 +118,8 @@ function WebhookForm({
     events: draft.eventTypes.length === 0,
     subject: regexError(draft.filter.subject),
   };
-  const valid = !errors.agent && !errors.name && !errors.url && !errors.events && !errors.subject;
+  const [filterTyping, setFilterTyping] = useState(false);
+  const valid = !errors.agent && !errors.name && !errors.url && !errors.events && !errors.subject && !filterTyping;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -198,7 +199,7 @@ function WebhookForm({
             <SectionLabel>Only when the message matches</SectionLabel>
             <p className="text-xs text-muted-foreground">All conditions you set must match. Leave everything empty to get every event.</p>
           </div>
-          <FilterBuilder value={draft.filter} onChange={(filter) => set({ filter })} accounts={accounts.data ?? []} />
+          <FilterBuilder value={draft.filter} onChange={(filter) => set({ filter })} accounts={accounts.data ?? []} onPendingChange={setFilterTyping} />
           <Separator />
           <IncludeBodyField value={draft.includeBody} onChange={(includeBody) => set({ includeBody })} />
 
@@ -215,7 +216,7 @@ function WebhookForm({
         <Button type="button" variant="ghost" onClick={onDone}>
           Cancel
         </Button>
-        <Button type="submit" disabled={save.isPending || (touched && !valid)}>
+        <Button type="submit" disabled={save.isPending || (touched && !valid) || filterTyping}>
           {save.isPending && <Spinner />}
           {webhook ? "Save changes" : "Create webhook"}
         </Button>

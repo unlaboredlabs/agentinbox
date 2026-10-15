@@ -5,15 +5,21 @@ import { cn } from "@/lib/utils";
 /**
  * Characters a reviewer can't see: zero-width and joiner characters, bidi controls (which reorder
  * what's displayed), invisible operators, BOM, soft hyphen and Unicode tag characters (U+E0000–E007F,
- * used to smuggle hidden text).
+ * used to smuggle hidden text), and variation selectors that carry data instead of picking a glyph:
+ * U+E0100–E01EF and U+FE00–FE0E always, U+FE0F only when repeated (one after an emoji is normal).
  */
-const HIDDEN = /\u034F|[\u00AD\u061C\u115F\u1160\u17B4\u17B5\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFEFF\uFFA0\u{E0000}-\u{E007F}]/gu;
+// Variation selectors are listed on purpose as single code points to find, not to combine with anything.
+// oxlint-disable-next-line no-misleading-character-class
+const HIDDEN = /\u034F|\uFE0F{2,}|[\u00AD\u061C\u115F\u1160\u17B4\u17B5\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFEFF\uFFA0\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}\uFE00-\uFE0E]/gu;
 
 export function hasHidden(...texts: (string | null | undefined)[]): boolean {
   return texts.some((t) => !!t && new RegExp(HIDDEN.source, "u").test(t));
 }
 
-const label = (ch: string) => `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`;
+const label = (match: string) => {
+  const n = [...match].length;
+  return `U+${match.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}${n > 1 ? ` ×${n}` : ""}`;
+};
 
 /** Renders text with every hidden character replaced by a visible ⟨U+XXXX⟩ marker. Plain text only. */
 export function Visible({ text, className }: { text: string; className?: string }) {

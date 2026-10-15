@@ -14,8 +14,9 @@ import { InsecureTransportAlert, ToolTabs } from "./connect-agent-guide";
 export function AgentListeners({ agent }: { agent: Agent }) {
   const settings = useQuery(queries.settings());
   const [tool, setTool] = useState<AgentTool>("claude-code");
+  const [acceptInsecure, setAcceptInsecure] = useState(false);
   const publicUrl = settings.data?.publicUrl ?? window.location.origin;
-  const c = connectCommands(publicUrl, tool);
+  const c = connectCommands(publicUrl, tool, acceptInsecure);
   const listeners = [...agent.listeners].sort((a, b) => Number(b.connected) - Number(a.connected));
 
   return (
@@ -78,7 +79,7 @@ export function AgentListeners({ agent }: { agent: Agent }) {
         <div className="space-y-3">
           <div className="text-sm font-medium">{listeners.length ? "Add or update a listener" : "Start a listener"}</div>
           <ToolTabs value={tool} onChange={setTool} />
-          <InsecureTransportAlert publicUrl={publicUrl} />
+          <InsecureTransportAlert publicUrl={publicUrl} accepted={acceptInsecure} onAcceptedChange={setAcceptInsecure} />
           <CodeBlock code={c.listen} wrap />
           <p className="text-xs text-muted-foreground">{RECIPES[tool].note}</p>
           <p className="text-xs text-muted-foreground">

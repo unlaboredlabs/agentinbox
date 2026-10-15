@@ -196,7 +196,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             </form.Field>
             <form.Field name="pollIntervalSeconds" validators={{ onChange: ({ value }) => intError("Poll interval", 5, 3600)(value) }}>
               {(field) => (
-                <NumberField field={field} label="Poll interval" unit="seconds" description="How often polling mode checks each account. Real-time mode doesn't use it (it re-checks on its own every 5 minutes)." />
+                <NumberField field={field} label="Poll interval" unit="seconds" description="How often polling checks each account. Real-time mode also polls at this interval while Pub/Sub isn't set up or is failing; otherwise it re-checks every 5 minutes." />
               )}
             </form.Field>
           </FieldGroup>

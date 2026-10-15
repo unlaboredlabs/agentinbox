@@ -5,22 +5,37 @@ import { BellRingIcon, MessageSquareTextIcon, ShieldAlertIcon, ShieldCheckIcon, 
 import { useState } from "react";
 import { CodeBlock, CopyButton } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { connectCommands, RECIPES, TOOL_LABEL, TOOLS, transportOf } from "@/lib/cli";
 import { queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
-/** Loud warning for plain-http public URLs that aren't loopback or Tailscale (the CLI needs --insecure there). */
-export function InsecureTransportAlert({ publicUrl, className }: { publicUrl: string; className?: string }) {
+/**
+ * Loud warning for plain-http public URLs that aren't loopback or Tailscale. The CLI refuses them
+ * without --insecure; the flag is only added to copied commands after an explicit opt-in.
+ */
+export function InsecureTransportAlert({
+  publicUrl,
+  accepted,
+  onAcceptedChange,
+  className,
+}: {
+  publicUrl: string;
+  accepted: boolean;
+  onAcceptedChange: (v: boolean) => void;
+  className?: string;
+}) {
   if (transportOf(publicUrl) !== "insecure") return null;
   return (
     <Alert variant="destructive" className={className}>
       <ShieldAlertIcon />
-      <AlertTitle>These commands include --insecure because {new URL(publicUrl).host} is plain http</AlertTitle>
+      <AlertTitle>{new URL(publicUrl).host} is plain http: agent traffic would be unencrypted</AlertTitle>
       <AlertDescription>
         <p>
-          The agent's API key and every email event would cross the network unencrypted, readable and changeable by anyone in between. The CLI
-          refuses this unless you pass <code className="font-mono">--insecure</code>.
+          The agent's API key, the skill it reads and every email event would cross the network in the clear, readable and changeable by anyone
+          in between. <code className="font-mono">connect</code> and <code className="font-mono">listen</code> refuse this address unless you add{" "}
+          <code className="font-mono">--insecure</code>.
         </p>
         <p className="text-foreground/80">
           Put agentinbox behind https (a reverse proxy or tunnel), or reach it over Tailscale, then update the{" "}
@@ -29,6 +44,10 @@ export function InsecureTransportAlert({ publicUrl, className }: { publicUrl: st
           </Link>
           .
         </p>
+        <label className="mt-1 flex cursor-pointer items-center gap-2 text-foreground">
+          <Checkbox checked={accepted} onCheckedChange={(v) => onAcceptedChange(v === true)} />
+          I understand the risk: include <code className="font-mono">--insecure</code> in the commands
+        </label>
       </AlertDescription>
     </Alert>
   );
@@ -73,8 +92,10 @@ export function ToolTabs({ value, onChange, className }: { value: AgentTool; onC
 export function ConnectAgentGuide({ className }: { className?: string }) {
   const settings = useQuery(queries.settings());
   const [tool, setTool] = useState<AgentTool>("claude-code");
+  const [acceptInsecure, setAcceptInsecure] = useState(false);
   const publicUrl = settings.data?.publicUrl ?? window.location.origin;
-  const c = connectCommands(publicUrl, tool);
+  const insecure = transportOf(publicUrl) === "insecure";
+  const c = connectCommands(publicUrl, tool, acceptInsecure);
   const label = tool === "other" ? "your agent" : TOOL_LABEL[tool];
 
   return (
@@ -95,6 +116,9 @@ export function ConnectAgentGuide({ className }: { className?: string }) {
         </Alert>
       )}
 
+      <InsecureTransportAlert publicUrl={publicUrl} accepted={acceptInsecure} onAcceptedChange={setAcceptInsecure} />
+
+      {!insecure && (
       <div className="rounded-lg border bg-muted/30 p-3">
         <div className="mb-2 flex items-center gap-2 text-sm font-medium">
           <SparklesIcon className="size-4 text-chart-1" /> Quickest: let the agent set itself up
@@ -106,11 +130,11 @@ export function ConnectAgentGuide({ className }: { className?: string }) {
         </div>
         <p className="mt-2 text-xs text-muted-foreground">It reads the skill, runs the commands below and asks you to approve it here.</p>
       </div>
+      )}
 
       <div className="space-y-3">
-        <div className="text-sm font-medium">Or run it yourself</div>
+        <div className="text-sm font-medium">{insecure ? "Run it yourself" : "Or run it yourself"}</div>
         <ToolTabs value={tool} onChange={setTool} />
-        <InsecureTransportAlert publicUrl={publicUrl} />
         <ol>
           <Step n={1} icon={TerminalIcon} title={`On the machine where ${label} runs`}>
             <CodeBlock code={c.connect} wrap />
