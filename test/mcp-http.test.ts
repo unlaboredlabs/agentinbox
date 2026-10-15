@@ -75,6 +75,28 @@ describe("MCP over HTTP", () => {
     expect((await http.request("/mcp", { ...init, headers: { ...init.headers, authorization: `Bearer ${apiKey}` } })).status).toBe(401);
   });
 
+  it("sets lastMcpAt on any authenticated request, even an unaudited tools/list, and pushes the agent", async () => {
+    const { http, ctx, addAgent } = setup();
+    const { agent, apiKey } = addAgent("tools", [grantInput("acc_a", { capabilities: ["read"] })]);
+    const pushed: Agent[] = [];
+    ctx.bus.on("agentState", (a) => pushed.push(a));
+    // Other uses of the key (the listener API authenticates the same way) leave it unset.
+    ctx.policy.authenticate(apiKey);
+    expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBeNull();
+
+    const client = await mcpClient(http, apiKey);
+    await client.listTools();
+    const seen = ctx.policy.getAgent(agent.id)!.lastMcpAt;
+    expect(Date.parse(seen!)).toBeGreaterThan(Date.now() - 5_000);
+    expect(ctx.audit.list({ agentId: agent.id }).items.filter((e) => e.actorType === "agent")).toEqual([]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(pushed.filter((a) => a.id === agent.id).at(-1)).toMatchObject({ lastMcpAt: seen });
+
+    // Bad keys don't count.
+    await http.request("/mcp", { method: "POST", headers: { authorization: "Bearer aib_wrong", "content-type": "application/json" }, body: "{}" });
+    expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBe(seen);
+  });
+
   it("serves instructions and a tool list that depends on the grants", async () => {
     const { http, addAgent } = setup();
     const reader = addAgent("reader", [grantInput("acc_a", { capabilities: ["read"] })]);

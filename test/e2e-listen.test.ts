@@ -56,7 +56,11 @@ async function setup() {
 
 const deliver = (subject: string, extra: { labelIds?: string[]; to?: string } = {}) =>
   s.fake.deliver(extra.to ?? email, { from: "Sender <sender@else.test>", subject, text: `body of ${subject}`, labelIds: extra.labelIds });
-const eventFor = (id: string) => s.waitForEvent((e: MailEvent) => e.message?.id === id);
+/** The event as agents get it: the console's copy also carries threadLabelIds, which agents never see. */
+const eventFor = async (id: string) => {
+  const { threadLabelIds: _scope, ...ev } = await s.waitForEvent((e: MailEvent) => e.message?.id === id);
+  return ev;
+};
 
 describe.runIf(HAS_AGENT_API)("pairing (device flow)", () => {
   beforeAll(setup);

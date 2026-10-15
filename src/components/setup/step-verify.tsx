@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, apiGet } from "@/lib/api";
-import { connectCommands, LISTEN_TEST_EXEC, NPX, shellQuote } from "@/lib/cli";
+import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { updateDraft } from "./progress";
@@ -610,8 +610,6 @@ function SuccessPanel({
   serviceCmd: string;
 }) {
   const system = useQuery(queries.system());
-  // The daemon itself in a terminal: closing it stops everything. serviceCommand carries this instance's flags.
-  const daemonCmd = system.data?.serviceCommand ?? `${NPX} service install`;
   return (
     <section aria-labelledby="verify-done" className="space-y-4 rounded-xl border border-success/40 bg-success/5 p-4 sm:p-5">
       <div className="flex items-start gap-3">
@@ -639,13 +637,14 @@ function SuccessPanel({
             </p>
           </li>
         )}
+        {/* The daemon itself in a terminal: closing it stops everything. serviceCommand carries this instance's flags. */}
         {system.data?.service === false && (
           <li className="space-y-1.5">
             <p>
               <span className="font-medium">Keep agentinbox itself running.</span>{" "}
               <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On this server, run:</span>
             </p>
-            <Command code={daemonCmd} label="agentinbox service command" />
+            <Command code={system.data.serviceCommand} label="agentinbox service command" />
           </li>
         )}
         {!readIt && (
