@@ -199,19 +199,24 @@ interface RawReceived {
  * One pull on the subscription as the principal account. Test messages (from testPubsub) are acked and
  * resolved here, so they never reach ingest. Updates lastMessageAt when anything arrives.
  */
-export async function pullPubsub(ctx: AppContext, opts: { signal?: AbortSignal; maxMessages?: number } = {}): Promise<PulledMessage[]> {
+export async function pullPubsub(
+  ctx: AppContext,
+  opts: { signal?: AbortSignal; maxMessages?: number; returnImmediately?: boolean } = {},
+): Promise<PulledMessage[]> {
   const state = readPubsub(ctx);
   if (!state.subscription) throw badRequest("Pub/Sub isn't provisioned yet.", "Provision it in the setup wizard or stay on poll mode.");
   const acct = pubsubPrincipal(ctx);
   if (!acct) throw badRequest("No active account can pull the Pub/Sub subscription.", "Connect or reconnect an account.");
   if (acct.id !== state.principalAccountId) writePubsub(ctx, { principalAccountId: acct.id });
-  // Real pulls long-poll until messages arrive; bound them so shutdown and retries stay responsive.
+  // Long-polling pulls wait until messages arrive; bound them so shutdown and retries stay responsive.
+  // Note: aborting a pull in flight can strand messages Google already put in its response (they are
+  // redelivered only after the ack deadline), so only the ingest loop long-polls, and only it aborts.
   const signal = AbortSignal.any([AbortSignal.timeout(90_000), ...(opts.signal ? [opts.signal] : [])]);
   const res = await pubsubCall<{ receivedMessages?: RawReceived[] }>(ctx, acct.id, `${state.subscription}:pull`, {
     method: "POST",
-    body: { maxMessages: opts.maxMessages ?? 100 },
+    body: { maxMessages: opts.maxMessages ?? 100, ...(opts.returnImmediately ? { returnImmediately: true } : {}) },
     signal,
-    timeoutMs: 0,
+    timeoutMs: opts.returnImmediately ? undefined : 0,
   });
   const received = res?.receivedMessages ?? [];
   if (!received.length) return [];
@@ -267,30 +272,21 @@ export async function testPubsub(ctx: AppContext, timeoutMs = 20_000): Promise<P
   const received = new Promise<void>((r) => (resolve = r));
   waiters.set(nonce, resolve);
   const started = Date.now();
-  const stop = new AbortController();
+  let got = false;
+  void received.then(() => (got = true));
   try {
     const data = Buffer.from(JSON.stringify({ agentinboxTest: nonce })).toString("base64");
     await pubsubCall(ctx, acct.id, `${state.topic}:publish`, { method: "POST", body: { messages: [{ data }] } });
-    const deadline = AbortSignal.any([stop.signal, AbortSignal.timeout(timeoutMs)]);
-    // Pull ourselves too, in case the ingest loop isn't running in pubsub mode.
-    const pulling = (async () => {
-      while (!deadline.aborted) {
-        const msgs = await pullPubsub(ctx, { signal: deadline, maxMessages: 10 }).catch((err: unknown) => {
-          if (!isAbortError(err)) throw err;
-          return [];
-        });
-        // Real Gmail notifications we happened to pull go straight back to the subscription for the ingest loop.
-        await nackPubsub(ctx, msgs.map((m) => m.ackId));
-        if (msgs.length) await sleep(250, deadline);
-      }
-    })();
-    const outcome = await Promise.race([
-      received.then(() => "ok" as const),
-      pulling.then(() => "timeout" as const),
-    ]);
-    stop.abort();
-    await pulling.catch(() => undefined);
-    if (outcome === "ok") {
+    // Pull ourselves too, in case the ingest loop isn't running in pubsub mode. These pulls return
+    // immediately and are never aborted mid-flight: an abandoned pull would strand whatever Google put
+    // in its response (e.g. a Gmail notification) until the ack deadline.
+    while (!got && Date.now() - started < timeoutMs) {
+      const msgs = await pullPubsub(ctx, { maxMessages: 10, returnImmediately: true });
+      // Real Gmail notifications we happened to pull go straight back to the subscription for the ingest loop.
+      await nackPubsub(ctx, msgs.map((m) => m.ackId));
+      if (!got) await Promise.race([received, sleep(250)]);
+    }
+    if (got) {
       const ms = Date.now() - started;
       writePubsub(ctx, { lastError: null });
       return { ok: true, message: `Published and received a test message in ${ms} ms. Pub/Sub is working.` };
@@ -300,7 +296,6 @@ export async function testPubsub(ctx: AppContext, timeoutMs = 20_000): Promise<P
       message: `Published a test message but didn't receive it within ${Math.round(timeoutMs / 1000)}s. Check that ${state.subscription} is attached to ${state.topic}.`,
     };
   } catch (err) {
-    stop.abort();
     const { message, hint } = explainPubsubError(err, project, acct.email);
     writePubsub(ctx, { lastError: `${message} ${hint}`.trim() });
     return { ok: false, message: `${message} ${hint}`.trim() };

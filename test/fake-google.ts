@@ -28,7 +28,9 @@
  *   failNext({ method?, path, status, reason?, message?, retryAfter?, times?, afterProcessing? })  inject errors for matching
  *                                                  requests (afterProcessing: the request takes effect, then the error is returned)
  *   accessTokenTtl                                 seconds for newly issued access tokens (default 3600)
- *   pullWaitMs                                     how long an empty Pub/Sub pull is held open (default 1000)
+ *   pullWaitMs                                     how long an empty Pub/Sub pull is held open (default 1000;
+ *                                                  returnImmediately pulls answer at once)
+ *   abortedPulls                                   count of waiting pulls the client cancelled (seen server-side)
  *
  * Inspection
  *   sent(email) / drafts(email) / messages(email) / message(email, id)   format=full Gmail JSON (+ drafts as {id, message})
@@ -115,6 +117,8 @@ export interface FakeGoogle {
   iamPolicy(topic: string): { bindings: { role: string; members: string[] }[] } | null;
   accessTokenTtl: number;
   pullWaitMs: number;
+  /** Long-poll pulls the client cancelled while they were waiting (seen by the server). */
+  abortedPulls: number;
   revoked: string[];
   requests: { method: string; path: string }[];
 }
@@ -1144,22 +1148,33 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
   pubsubRoute("POST", /^\/v1\/(projects\/[^/]+\/subscriptions\/[^/:]+):pull$/, async (_u, body, m, res) => {
     const s = subOr404(m[1]!);
-    const max = Number(json(body).maxMessages ?? 100) || 100;
+    const b = json(body);
+    const max = Number(b.maxMessages ?? 100) || 100;
     let got = take(s, max);
-    if (!got.length) {
+    if (!got.length && b.returnImmediately !== true) {
+      let closed = false;
       await new Promise<void>((resolve) => {
+        const onClose = () => {
+          closed = true;
+          done();
+        };
         const done = () => {
           clearTimeout(timer);
           s.waiters.delete(done);
-          res.off("close", done);
+          res.off("close", onClose);
           closers.delete(done);
           resolve();
         };
         const timer = setTimeout(done, fake.pullWaitMs);
         s.waiters.add(done);
         closers.add(done);
-        res.on("close", done);
+        res.on("close", onClose);
       });
+      // Like Pub/Sub, never dispatch messages into a pull the client already cancelled.
+      if (closed) {
+        fake.abortedPulls++;
+        return {};
+      }
       got = take(s, max);
     }
     return got.length ? { receivedMessages: got } : {};
@@ -1237,6 +1252,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     google: { oauthBase: url, authBase: url, gmailBase: url, pubsubBase: url },
     accessTokenTtl: 3600,
     pullWaitMs: 1000,
+    abortedPulls: 0,
     revoked: [],
     requests: [],
     async close() {

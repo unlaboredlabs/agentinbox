@@ -140,6 +140,22 @@ describe("Pub/Sub provisioning", () => {
     expect(new URL(ctx.google.startConnect({ reauthAccountId: acct.id }).authUrl).searchParams.get("scope")).toContain(PUBSUB_SCOPE);
   });
 
+  it("keeps real-time delivery working after a test while the ingest loop is pulling", async () => {
+    // Regression (seen on Node 22.13): testPubsub aborted its own in-flight long-poll pull; the next
+    // Gmail notification was dispatched into that abandoned response and stranded until the ack deadline.
+    fake.pullWaitMs = 1000;
+    await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
+    await ctx.google.provisionPubsub();
+    ctx.ingest.start?.();
+    await new Promise((r) => setTimeout(r, 300));
+    for (let i = 1; i <= 2; i++) {
+      expect(await ctx.google.testPubsub()).toMatchObject({ ok: true });
+      fake.deliver("a@example.com", { from: "x@y.test", subject: `Live ${i}`, text: "x" });
+      await waitFor(() => rec.ofType("message.received").length === i, 3000);
+    }
+    expect(fake.abortedPulls).toBe(0);
+  });
+
   it("tests the pipeline by publishing and pulling a message, leaving Gmail notifications for ingest", async () => {
     expect((await ctx.google.testPubsub()).ok).toBe(false);
     await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
