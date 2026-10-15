@@ -7,7 +7,8 @@ import pc from "picocolors";
  * only accepted where the network itself is private and encrypted.
  *
  *  - https://…                                     always
- *  - http:// to loopback                           localhost, *.localhost, 127.0.0.0/8, ::1
+ *  - http:// to loopback                           localhost, 127.0.0.0/8, ::1, or a *.localhost name that
+ *                                                  resolves only to loopback addresses
  *  - http:// to Tailscale                          100.64.0.0/10 and fd7a:115c:a1e0::/48 (WireGuard-encrypted
  *                                                  tailnet), or a MagicDNS name (*.ts.net) that resolves only to
  *                                                  those ranges. The name is resolved and checked, so a public DNS
@@ -29,9 +30,15 @@ tailnet.addSubnet("fd7a:115c:a1e0::", 48, "ipv6");
 const family = (ip: string) => (isIP(ip) === 6 ? "ipv6" : "ipv4");
 const bare = (host: string) => host.replace(/^\[|\]$/g, "").toLowerCase();
 
+/** localhost or a loopback IP literal. `*.localhost` names are only trusted after resolving (see checkTransport). */
 export const isLoopbackHost = (host: string): boolean => {
   const h = bare(host);
-  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "localhost") return true;
+  return isLoopbackIp(h);
+};
+
+const isLoopbackIp = (ip: string) => {
+  const h = bare(ip);
   return isIP(h) !== 0 && loopback.check(h, family(h));
 };
 
@@ -63,9 +70,12 @@ export async function checkTransport(rawUrl: string, opts: { insecure?: boolean;
   const host = bare(url.hostname);
   if (isLoopbackHost(host)) return { ok: true, kind: "loopback" };
   if (isTailnetIp(host)) return { ok: true, kind: "tailscale" };
-  if (host.endsWith(".ts.net")) {
+  // Names are checked by what they resolve to right now. The listener re-checks before every
+  // reconnect and ack, so a record that later changes is caught (only a race inside one connect remains).
+  if (host.endsWith(".localhost") || host.endsWith(".ts.net")) {
     const addresses = await (opts.resolve ?? defaultResolver)(host).catch(() => [] as string[]);
-    if (addresses.length && addresses.every(isTailnetIp)) return { ok: true, kind: "tailscale" };
+    const want = host.endsWith(".localhost") ? isLoopbackIp : isTailnetIp;
+    if (addresses.length && addresses.every(want)) return { ok: true, kind: host.endsWith(".localhost") ? "loopback" : "tailscale" };
   }
   if (opts.insecure) {
     return {

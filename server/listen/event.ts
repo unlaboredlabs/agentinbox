@@ -20,20 +20,46 @@ export function matchesLocal(payload: WebhookPayload, f: LocalFilter): boolean {
   return matchesFilter(f.filter, { ...payload.data, threadLabelIds: [] });
 }
 
+/** Untrusted header text (subject, names, filenames, labels): invisible characters removed and our delimiter tag defused. */
+export const cleanField = (text: string): string => stripInvisible(text).text.replace(/<(\/?)(email_content)/gi, "&lt;$1$2");
+
+const cleanAddress = <T extends { name: string | null; email: string }>(a: T): T => ({ ...a, name: a.name === null ? null : cleanField(a.name), email: cleanField(a.email) });
+
 /**
- * What a command gets on stdin (and in AGENTINBOX_EVENT_FILE): the notice plus the payload, with any
- * body cleaned of invisible characters and wrapped in the `<email_content … untrusted>` delimiter.
- * Everything else (subject, from, snippet) is passed through byte-exact as JSON strings.
+ * What a command gets on stdin (and in AGENTINBOX_EVENT_FILE): the notice plus the payload. The body is
+ * cleaned of invisible characters and wrapped in the `<email_content … untrusted>` delimiter; subject,
+ * snippet, names, addresses, attachment filenames and label ids get the same cleaning (invisible
+ * characters removed, delimiter tags escaped) so nothing can forge or hide the delimiter. Everything
+ * else (ids, seq, dates) is passed through unchanged.
  */
 export function commandInput(payload: WebhookPayload): { notice: string; event: WebhookPayload } {
-  const content = payload.data.content;
-  if (!content || typeof content.body !== "string") return { notice: UNTRUSTED_NOTICE, event: payload };
-  const body = wrapUntrusted(payload.data.message?.from?.email, stripInvisible(content.body).text);
-  return { notice: UNTRUSTED_NOTICE, event: { ...payload, data: { ...payload.data, content: { ...content, body } } } };
+  const d = payload.data;
+  const m = d.message;
+  const message = m
+    ? {
+        ...m,
+        subject: cleanField(m.subject),
+        snippet: cleanField(m.snippet),
+        from: m.from ? cleanAddress(m.from) : m.from,
+        to: m.to.map(cleanAddress),
+        cc: m.cc.map(cleanAddress),
+        labelIds: m.labelIds.map(cleanField),
+      }
+    : m;
+  const content = d.content
+    ? {
+        ...d.content,
+        body: typeof d.content.body === "string" ? wrapUntrusted(m?.from?.email, stripInvisible(d.content.body).text) : d.content.body,
+        attachments: (d.content.attachments ?? []).map((a) => ({ ...a, filename: cleanField(a.filename) })),
+      }
+    : undefined;
+  const data = { ...d, message, ...(d.labelIds ? { labelIds: d.labelIds.map(cleanField) } : {}), ...(content ? { content } : {}) };
+  return { notice: UNTRUSTED_NOTICE, event: { ...payload, data } };
 }
 
 /** Values that may go into a child's environment: ids and addresses only, never free text. */
-const SAFE_ENV = /^[A-Za-z0-9._@+:=-]{1,256}$/;
+// No leading "-", so a careless `cmd $AGENTINBOX_THREAD_ID` can't be fed an option.
+const SAFE_ENV = /^(?!-)[A-Za-z0-9._@+:=-]{1,256}$/;
 
 /**
  * The only event data placed in the environment. Subjects, senders' names and bodies never are, so a

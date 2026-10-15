@@ -18,6 +18,9 @@ export interface StreamRequest {
   authorization: string | null;
   userAgent: string | null;
   client: string | null;
+  start: string | null;
+  origin: string | null;
+  secFetchSite: string | null;
 }
 
 export function makeEvent(seq: number, patch: { type?: EventType; message?: Partial<MessageSummary> | null; content?: WebhookPayload["data"]["content"] } = {}): WebhookPayload {
@@ -73,6 +76,10 @@ export class FakeAgentApi {
   pingMs = 15_000;
   sendPings = true;
   keyValid = true;
+  /** Reversible refusal: the stream answers 403 with this code. */
+  blockedCode: string | null = null;
+  /** Every request's method, path and content-type (contract checks). */
+  requests: { method: string; path: string; contentType: string | null; origin: string | null }[] = [];
 
   constructor() {
     this.server = createServer((req, res) => void this.handle(req, res));
@@ -150,6 +157,7 @@ export class FakeAgentApi {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://x");
+    this.requests.push({ method: req.method ?? "", path: url.pathname, contentType: req.headers["content-type"] ?? null, origin: (req.headers.origin as string | undefined) ?? null });
     if (req.method === "POST" && url.pathname === "/agent/v1/pairings") {
       this.pairingStarts.push((await this.body(req)) as unknown as PairingStartInput);
       const start: PairingStart = {
@@ -196,7 +204,11 @@ export class FakeAgentApi {
         authorization: req.headers.authorization ?? null,
         userAgent: req.headers["user-agent"] ?? null,
         client: (req.headers["x-agentinbox-client"] as string | undefined) ?? null,
+        start: url.searchParams.get("start"),
+        origin: (req.headers.origin as string | undefined) ?? null,
+        secFetchSite: (req.headers["sec-fetch-site"] as string | undefined) ?? null,
       });
+      if (this.blockedCode && this.authed(req)) return this.json(res, 403, { error: { code: this.blockedCode, message: "refused" } });
       if (!this.authed(req)) return this.json(res, 401, { error: { code: "unauthorized", message: this.revoked ?? "invalid API key" } });
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       res.write(": connected\n\n");

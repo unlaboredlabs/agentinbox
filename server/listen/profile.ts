@@ -17,6 +17,8 @@ export interface Profile extends ListenerConfig {
   skillUrl?: string;
   /** Forward-mode signing secret while no forward URL is saved (see forwardSecret()). */
   forwardSecret?: string;
+  /** Working directory for --exec commands (default: a private dir in the state dir). */
+  cwd?: string;
   createdAt?: string;
 }
 
@@ -42,6 +44,7 @@ const profileSchema = z
     mcpUrl: z.string().optional(),
     skillUrl: z.string().optional(),
     forwardSecret: z.string().startsWith("whsec_").optional(),
+    cwd: z.string().startsWith("/").optional(),
     createdAt: z.string().optional(),
   })
   .loose();
@@ -64,13 +67,18 @@ export function loadProfile(name: string = DEFAULT_PROFILE): Profile {
     const hint = others.length ? ` Known profiles: ${others.join(", ")} (pick one with --profile).` : ` Run \`${NPX} connect <daemon-url>\` first.`;
     throw new Error(`No agentinbox profile "${n}" (${path}).${hint}`);
   }
-  // Someone loosened the permissions: tighten them rather than keep a readable key around.
-  if (isTooOpen(path)) chmodSync(path, 0o600);
+  // Someone loosened the permissions: tighten them, and say the key may have been read meanwhile.
+  if (isTooOpen(path)) {
+    chmodSync(path, 0o600);
+    process.stderr.write(
+      `warning: ${path} was readable by other users; it is 0600 again. If anyone else could have read it, rotate the agent's key in the console and run \`${NPX} connect … --force\`.\n`,
+    );
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    throw new Error(`Profile ${path} is not valid JSON (${(err as Error).message}). Fix it or run \`agentinbox connect\` again.`);
+    throw new Error(`Profile ${path} is not valid JSON (${(err as Error).message}). Fix it or run \`${NPX} connect\` again.`);
   }
   const parsed = profileSchema.safeParse(raw);
   if (!parsed.success) {

@@ -1,8 +1,11 @@
+import { closeSync, constants, fchmodSync, lstatSync, openSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import pc from "picocolors";
 import type { AgentTool, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
 import { CAPABILITIES, type Capability } from "../../shared/types.ts";
 import { ApiError, clientInfo, pollPairing, startPairing } from "./api.ts";
+import { writeClaudeMcpConfig } from "./mcpheader.ts";
+import { isServiceInstalled } from "./service.ts";
 import { setupMcp, mcpTarget, type McpSetupResult } from "./mcpsetup.ts";
 import { defaultConsumer, validConsumer } from "./options.ts";
 import { DEFAULT_PROFILE, profilePath, validProfileName } from "./paths.ts";
@@ -23,6 +26,8 @@ export interface ConnectFlags {
   insecure?: boolean;
   force?: boolean;
   setupMcp?: boolean;
+  /** Also write the output (plain text) to this file: created 0600, never through a symlink or someone else's file. */
+  log?: string;
 }
 
 /** Exit codes, so scripts (and agents setting themselves up) can tell outcomes apart. */
@@ -68,15 +73,65 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     );
   });
 
-const out = (s = "") => process.stdout.write(`${s}\n`);
-const err = (s = "") => process.stderr.write(`${s}\n`);
+// eslint-disable-next-line no-control-regex
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+/** --log target (fd), written in parallel with the console. */
+let logFd: number | null = null;
+const toLog = (s: string) => {
+  if (logFd !== null) writeSync(logFd, stripAnsi(s) + "\n");
+};
+const out = (s = "") => {
+  process.stdout.write(`${s}\n`);
+  toLog(s);
+};
+const err = (s = "") => {
+  process.stderr.write(`${s}\n`);
+  toLog(s);
+};
+
+/**
+ * Opens --log safely: a new file is created 0600 with O_EXCL; an existing one (e.g. from `mktemp`) is
+ * only reused if it is a regular file owned by us, opened without following symlinks. This is what
+ * keeps another local user from pre-creating the log and reading the pairing as it happens.
+ */
+export function openConnectLog(path: string): number {
+  try {
+    return openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  }
+  const st = lstatSync(path);
+  const uid = process.getuid?.();
+  if (!st.isFile() || (uid !== undefined && st.uid !== uid)) throw new Error(`Refusing --log ${path}: it exists and is not a regular file owned by you.`);
+  const fd = openSync(path, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+  fchmodSync(fd, 0o600);
+  return fd;
+}
 
 export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions = {}): Promise<number> {
+  if (flags.log) logFd = openConnectLog(flags.log);
+  try {
+    return await connect(rawUrl, flags, opts);
+  } finally {
+    if (logFd !== null) closeSync(logFd);
+    logFd = null;
+  }
+}
+
+async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions): Promise<number> {
   const url = normalizeDaemonUrl(rawUrl);
   const verdict = await checkTransport(url, { insecure: flags.insecure });
   if (verdict.warning) err(insecureBanner(verdict.warning));
 
   const profileName = validProfileName(flags.profile ?? DEFAULT_PROFILE);
+  let replacing: Profile | null = null;
+  if (profileExists(profileName) && flags.force) {
+    try {
+      replacing = loadProfile(profileName);
+    } catch {
+      // Unreadable: it's being replaced anyway.
+    }
+  }
   if (profileExists(profileName) && !flags.force) {
     let who = "";
     try {
@@ -93,8 +148,9 @@ export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: Conn
   }
   const tool = parseTool(flags.tool);
   const capabilities = parseCapabilities(flags.capabilities);
-  const consumer = validConsumer(flags.consumer ?? defaultConsumer(profileName));
-  const name = (flags.name?.trim() || `${tool === "other" ? "Agent" : TOOL_LABELS[tool]} on ${shortHost()}`).slice(0, 100);
+  // --force keeps the listener's consumer, so the server-side cursor carries on (no replay, no gap).
+  const consumer = validConsumer(flags.consumer ?? replacing?.consumer ?? defaultConsumer(profileName));
+  const name = (flags.name?.trim() || `${tool === "other" ? "Agent" : TOOL_LABELS[tool]} on ${shortHost()}`).slice(0, 80);
 
   const input: PairingStartInput = {
     name,
@@ -122,8 +178,8 @@ export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: Conn
     box([
       pc.bold("Approve this agent in the agentinbox console"),
       "",
-      `Code:   ${pc.bold(pc.yellow(start.userCode))}`,
-      `Open:   ${pc.cyan(start.verificationUrl)}`,
+      `Code:   ${pc.bold(pc.yellow(safeText(start.userCode, 40)))}`,
+      `Open:   ${pc.cyan(safeText(start.verificationUrl, 300))}`,
       `Agent:  ${safeText(name)}`,
       "",
       pc.gray("Only approve if the console shows this exact code."),
@@ -202,7 +258,7 @@ export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: Conn
       return CONNECT_EXIT.expired;
     case "consumed":
       err(pc.red("✖ This pairing was already completed and its key handed out once (perhaps by an earlier run of this command)."));
-      err("  For safety the key is never delivered twice. Start over with `agentinbox connect`, or rotate the agent's key in the console.");
+      err(`  For safety the key is never delivered twice. Start over with \`${NPX} connect\`, or rotate the agent's key in the console.`);
       return CONNECT_EXIT.consumed;
     case "approved":
       break;
@@ -210,7 +266,24 @@ export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: Conn
       throw new Error(`Unexpected pairing status ${JSON.stringify((result as { status: unknown }).status)}`);
   }
 
+  // --force keeps everything about the listener (targets, filters, limits, forward secret, cwd); only
+  // the pairing (daemon, key, agent) is replaced.
+  const kept: Partial<Profile> = replacing
+    ? {
+        types: replacing.types,
+        filter: replacing.filter,
+        includeBody: replacing.includeBody,
+        exec: replacing.exec,
+        forward: replacing.forward,
+        forwardSecret: replacing.forwardSecret,
+        concurrency: replacing.concurrency,
+        timeoutSeconds: replacing.timeoutSeconds,
+        maxAttempts: replacing.maxAttempts,
+        cwd: replacing.cwd,
+      }
+    : {};
   const profile: Profile = {
+    ...kept,
     url,
     apiKey: result.apiKey,
     agentId: result.agent.id,
@@ -218,14 +291,34 @@ export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: Conn
     consumer,
     ...(verdict.kind === "insecure" ? { insecure: true } : {}),
     tool,
-    mcpUrl: result.mcpUrl,
-    skillUrl: result.skillUrl,
+    // Derived from the URL the user chose and transport-checked; the daemon's advertised URLs come
+    // from its publicUrl setting and are never trusted with the key.
+    mcpUrl: `${url}/mcp`,
+    skillUrl: `${url}/skill.md`,
     createdAt: new Date().toISOString(),
   };
   const path = saveProfile(profileName, profile);
+  writeClaudeMcpConfig(profileName, profile.mcpUrl!);
+  if (typeof result.mcpUrl === "string" && result.mcpUrl !== profile.mcpUrl) {
+    err(
+      pc.yellow(
+        `! The daemon advertises its MCP endpoint as ${safeText(result.mcpUrl, 200)} (its "public URL" setting); using ${profile.mcpUrl}, the address you connected to. Set the public URL in the console if agents should use another address.`,
+      ),
+    );
+  }
 
   out(`${pc.green("✔")} Approved. Agent ${pc.bold(safeText(result.agent.name))} ${pc.gray(`(${result.agent.id})`)} is connected.`);
   out(`  Key saved to ${pc.cyan(path)} ${pc.gray("(mode 0600; never displayed. Rotate it in the console if it leaks.)")}`);
+  if (replacing && (replacing.exec || replacing.forward)) {
+    out(`  Kept this profile's listener settings. Restart the listener to use the new key${isServiceInstalled(profileName) ? `: ${NPX} listen service install${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`}` : "."}`);
+  }
+  if (replacing && replacing.agentId !== profile.agentId) {
+    err(
+      pc.yellow(
+        `! Replaced profile "${profileName}" (agent "${safeText(replacing.agentName)}", ${replacing.agentId}). Its key still works until you rotate it or delete that agent in the console; config backups made by setup-mcp (*.agentinbox-backup-*) may contain it.`,
+      ),
+    );
+  }
 
   let mcp: McpSetupResult | null = null;
   if (flags.setupMcp) {
@@ -284,6 +377,7 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   out(`       ${pc.cyan(`${NPX} listen${p} --save --exec ${execArg}`)}`);
   out(`     then keep it running in the background (systemd / launchd, starts at login):`);
   out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
+  out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   for (const note of r.notes) out(pc.gray(`     ${note}`));
   out();
   out(pc.gray("  What this agent may do (mailboxes, capabilities, send mode) was set by whoever approved it. New grants are draft-only:"));

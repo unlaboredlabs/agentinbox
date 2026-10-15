@@ -95,9 +95,9 @@ describe("listen stream", () => {
   it("exits with the revoked code on `event: revoked`", async () => {
     const l = start();
     await waitFor(() => api.live.size === 1, 5000, "stream");
-    api.revoke("the agent's key was rotated");
+    api.revoke("key_rotated");
     expect(await l.done).toBe(EXIT.revoked);
-    expect(output).toContain("Access revoked: the agent's key was rotated");
+    expect(output).toContain("Access revoked: This agent's API key was replaced (rotated)");
     expect(output).toContain("connect");
     expect(readStatus("default")!.exitReason).toMatch(/revoked/);
   });

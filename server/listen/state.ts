@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EventType, WebhookPayload } from "../../shared/types.ts";
 import type { Target } from "./dispatcher.ts";
-import { ensurePrivateDir, writePrivateFile } from "./fsutil.ts";
+import { ensurePrivateDir, tighten, writePrivateFile } from "./fsutil.ts";
 import { deadPath, statusPath } from "./paths.ts";
 
 // ───────────── Dead letters ─────────────
@@ -23,6 +23,7 @@ export function appendDead(profile: string, entry: DeadEntry): void {
   const path = deadPath(profile);
   ensurePrivateDir(dirname(path));
   appendFileSync(path, JSON.stringify(entry) + "\n", { mode: 0o600 });
+  tighten(path);
 }
 
 export function readDead(profile: string): DeadEntry[] {

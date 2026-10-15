@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import pc from "picocolors";
-import { ensurePrivateDir } from "./fsutil.ts";
+import { ensurePrivateDir, tighten } from "./fsutil.ts";
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;]*m/g;
@@ -34,7 +34,10 @@ export function createListenLogger(opts: LogFileOptions): ListenLogger {
   const maxBytes = opts.maxBytes ?? 5 * 1024 * 1024;
   const keep = opts.keep ?? 3;
   let size = -1;
-  if (opts.path) ensurePrivateDir(dirname(opts.path));
+  if (opts.path) {
+    ensurePrivateDir(dirname(opts.path));
+    tighten(opts.path);
+  }
 
   const rotate = (path: string) => {
     rmSync(`${path}.${keep}`, { force: true });

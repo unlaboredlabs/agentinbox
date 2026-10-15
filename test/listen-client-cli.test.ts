@@ -35,7 +35,7 @@ describe("agentinbox CLI (subprocess)", () => {
     expect(await run.exit).toBe(0);
     const out = run.output();
     expect(out).toContain("K7QM-2XPD");
-    expect(out).toContain("hermes -z");
+    expect(out).toContain("hermes chat --oneshot -Q -t mcp-agentinbox --query-file -");
     expect(out).toContain("npx agentinbox-cli listen --save --exec");
     expect(out).toContain("npx agentinbox-cli listen service install");
     expect(out).not.toContain(FAKE_KEY);
@@ -47,15 +47,15 @@ describe("agentinbox CLI (subprocess)", () => {
     await waitFor(() => api.live.size === 1, 15_000, "stream");
     api.publish(makeEvent(1));
     await waitFor(() => api.acked === 1, 10_000, "ack");
-    api.revoke("agent disabled");
+    api.revoke("agent_deleted");
     expect(await run.exit).toBe(78);
-    expect(run.output()).toContain("Access revoked: agent disabled");
+    expect(run.output()).toContain("Access revoked: This agent was deleted");
     expect(run.output()).not.toContain(FAKE_KEY);
 
     const status = cli(["listen", "status"], xdg);
     expect(await status.exit).toBe(0);
     expect(status.output()).toMatch(/Key\s+rejected/);
-    expect(status.output()).toMatch(/not running \(stopped .*revoked: agent disabled\)/);
+    expect(status.output()).toMatch(/not running \(stopped .*revoked: This agent was deleted/);
     expect(status.output()).toMatch(/acked #1/);
   }, 30_000);
 

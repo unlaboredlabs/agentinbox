@@ -14,6 +14,7 @@ import {
   systemdUnitPath,
   xmlEscape,
 } from "../service.ts";
+import { ensurePrivateDir } from "./fsutil.ts";
 import { EXIT } from "./listen.ts";
 import { type ListenFlags, resolveListen } from "./options.ts";
 import { DEFAULT_PROFILE, listenAppDir, logPath, profilePath, profileStateDir, validProfileName } from "./paths.ts";
@@ -85,7 +86,9 @@ export function launchdListenPlist(profile: string, entry: string, cwd: string):
   const vars = Object.entries(serviceEnvironment())
     .map(([k, v]) => `    <key>${esc(k)}</key><string>${esc(v)}</string>`)
     .join("\n");
-  const out = esc(join(profileStateDir(profile), "service.log"));
+  // The listener logs to the rotated listen.log and stays quiet on the console under launchd; only
+  // crashes reach stderr, so this file stays small.
+  const errLog = esc(join(profileStateDir(profile), "service-stderr.log"));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -107,8 +110,8 @@ ${vars}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>${out}</string>
-  <key>StandardErrorPath</key><string>${out}</string>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>${errLog}</string>
 </dict>
 </plist>
 `;
@@ -146,16 +149,20 @@ export async function installListenService(flags: ListenFlags): Promise<void> {
   saveProfile(profileName, next);
 
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
-  uninstallListenService(profileName, true);
+  // Install first (into a new dir, swapped in on success); the current unit keeps running until then.
   const entry = installPackage(listenAppDir(), { where: listenAppDir(), requireWeb: false, pkg: NPM_PACKAGE });
-  const cwd = process.cwd();
+  // Commands run in config.cwd (a private dir unless --cwd was given); the unit uses it too.
+  const cwd = config.cwd;
   mkdirSync(profileStateDir(profileName), { recursive: true, mode: 0o700 });
+  if (config.cwdIsDefault) ensurePrivateDir(cwd);
 
   if (process.platform === "linux") {
     mkdirSync(dirname(unitFile(profileName)), { recursive: true });
     writeFileSync(unitFile(profileName), systemdListenUnit(profileName, entry, cwd));
     systemctl("daemon-reload");
-    systemctl("enable", "--now", unitName(profileName));
+    systemctl("enable", unitName(profileName));
+    // restart, not start: a re-install must pick up the new install and settings.
+    systemctl("restart", unitName(profileName));
     enableLinger();
     for (const other of otherInstalled(profileName)) {
       try {
@@ -166,6 +173,11 @@ export async function installListenService(flags: ListenFlags): Promise<void> {
     }
   } else {
     mkdirSync(dirname(plistFile(profileName)), { recursive: true });
+    try {
+      run("launchctl", ["bootout", `${launchdTarget()}/${launchdLabel(profileName)}`], true);
+    } catch {
+      // Not loaded yet.
+    }
     writeFileSync(plistFile(profileName), launchdListenPlist(profileName, entry, cwd), { mode: 0o600 });
     run("launchctl", ["bootstrap", launchdTarget(), plistFile(profileName)]);
     for (const other of otherInstalled(profileName)) {
@@ -177,14 +189,14 @@ export async function installListenService(flags: ListenFlags): Promise<void> {
     }
   }
 
-  const kind = process.platform === "linux" ? "systemd user service" : "launchd agent";
+  const kind = process.platform === "linux" ? (isRoot() ? "systemd system service" : "systemd user service") : "launchd agent";
   console.log(`\n  ${pc.green("✔")} Installed the listener for profile "${profileName}" as a ${kind} (${process.platform === "linux" ? unitName(profileName) : launchdLabel(profileName)}).`);
   console.log(`    Runs:      ${config.exec ? `--exec ${config.exec}` : ""}${config.exec && config.forward ? "  and  " : ""}${config.forward ? `--forward ${config.forward.url}` : ""}`);
-  console.log(`    Directory: ${cwd}`);
+  console.log(`    Directory: ${cwd}${config.cwdIsDefault ? " (private; pass --cwd to run in a project)" : ""}`);
   console.log(`    Settings:  ${profilePath(profileName)} (change them with \`${NPX} listen${p} … --save\`, then restart)`);
   console.log(`    Log:       ${logPath(profileName)}`);
   console.log(`    Status:    ${NPX} listen status${p}`);
-  if (process.platform === "linux") console.log(`    Follow:    journalctl --user -u ${unitName(profileName)} -f`);
+  if (process.platform === "linux") console.log(`    Follow:    journalctl ${isRoot() ? "" : "--user "}-u ${unitName(profileName)} -f`);
   console.log();
 }
 

@@ -1,7 +1,10 @@
 import { hostname } from "node:os";
 import { EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
 import { normalizeFilter, webhookFilterSchema } from "../webhooks/filter.ts";
+import { resolve } from "node:path";
 import { newSecret, validateForwardUrl } from "./forward.ts";
+import { assertTrustedDir } from "./fsutil.ts";
+import { workDir } from "./paths.ts";
 import type { Profile } from "./profile.ts";
 
 /** `listen` flags. Each group overrides the profile as a unit: targets (--exec/--forward), --types, and the filter (--from/--to/--label/--subject). */
@@ -20,8 +23,11 @@ export interface ListenFlags {
   maxAttempts?: number;
   consumer?: string;
   insecure?: boolean;
+  cwd?: string;
   save?: boolean;
   dryRun?: boolean;
+  /** A new consumer starts at the oldest stored event instead of now (never saved). */
+  fromStart?: boolean;
 }
 
 export interface EffectiveConfig {
@@ -35,6 +41,9 @@ export interface EffectiveConfig {
   maxAttempts: number;
   consumer: string;
   insecure: boolean;
+  /** Working directory for commands: validated --cwd, else the profile's private work dir. */
+  cwd: string;
+  cwdIsDefault: boolean;
 }
 
 export const DEFAULTS = { concurrency: 2, timeoutSeconds: 300, maxAttempts: 5 } as const;
@@ -62,7 +71,8 @@ export function defaultConsumer(profile: string): string {
     .replace(/\.local$/, "")
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
+    // Fits the 100-character consumer limit with "-<profile>" (profiles are at most 40).
+    .slice(0, 99 - profile.length);
   return `${host || "host"}-${profile}`;
 }
 
@@ -124,6 +134,9 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
   const maxAttempts = positiveInt(flags.maxAttempts, "--max-attempts", 100) ?? profile.maxAttempts ?? DEFAULTS.maxAttempts;
   const consumer = validConsumer(flags.consumer ?? profile.consumer ?? defaultConsumer(profileName));
   const insecure = flags.insecure ?? profile.insecure ?? false;
+  const chosenCwd = flags.cwd !== undefined ? resolve(flags.cwd) : profile.cwd;
+  if (chosenCwd) assertTrustedDir(chosenCwd);
+  const cwd = chosenCwd ?? workDir(profileName);
 
   if (flags.save) {
     changed = true;
@@ -140,9 +153,10 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
     if (flags.maxAttempts !== undefined) next.maxAttempts = maxAttempts;
     if (flags.consumer !== undefined) next.consumer = consumer;
     if (flags.insecure !== undefined) next.insecure = insecure;
+    if (flags.cwd !== undefined) next.cwd = chosenCwd;
   }
 
-  return { config: { exec, forward, types, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure }, next, changed };
+  return { config: { exec, forward, types, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
 }
 
 /** One-line description of the filter for the console. */

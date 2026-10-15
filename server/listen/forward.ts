@@ -22,6 +22,7 @@ export function validateForwardUrl(raw: string): string {
     throw new Error(`Invalid --forward URL "${raw}". Use e.g. http://localhost:8787/agentinbox.`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("--forward must be an http(s) URL.");
+  // Literal loopback only: a *.localhost name would need resolving first.
   if (!isLoopbackHost(url.hostname)) {
     throw new Error(`--forward must point at this machine (localhost, 127.0.0.1 or [::1]), not ${url.host}. For remote receivers, use a webhook in the agentinbox console.`);
   }
@@ -52,6 +53,8 @@ export async function forwardEvent(url: string, secret: string, payload: Webhook
         "webhook-id": id,
         "webhook-timestamp": String(timestamp),
         "webhook-signature": sign(secret, id, timestamp, body),
+        // Subjects, senders, snippets and bodies in this payload are untrusted email content.
+        "x-agentinbox-untrusted": "1",
       },
       body,
     });

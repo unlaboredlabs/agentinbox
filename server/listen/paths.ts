@@ -25,6 +25,8 @@ export const profileStateDir = (name: string) => join(stateDir(), "listen", name
 export const logPath = (name: string) => join(profileStateDir(name), "listen.log");
 export const deadPath = (name: string) => join(profileStateDir(name), "dead.jsonl");
 export const statusPath = (name: string) => join(profileStateDir(name), "status.json");
+/** Default working directory for --exec commands: private (0700), so no planted CLAUDE.md, .mcp.json or hooks apply. */
+export const workDir = (name: string) => join(profileStateDir(name), "work");
 export const listenAppDir = () => join(dataDir(), "listen-app");
 
 export const DEFAULT_PROFILE = "default";

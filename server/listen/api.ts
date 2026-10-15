@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import type { AgentSelf, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
+import { safeText } from "./ui.ts";
 import { version } from "./version.ts";
 
 /** Identifies the client to the daemon (shown on the agent's Listeners list). Never includes the key. */
@@ -35,9 +36,10 @@ export async function apiError(res: Response, what: string): Promise<ApiError> {
   try {
     const text = await res.text();
     const body = JSON.parse(text) as { error?: { code?: string; message?: string; hint?: string } };
-    if (body.error?.message) message = body.error.message;
-    code = body.error?.code ?? null;
-    hint = body.error?.hint ?? null;
+    // Daemon-provided text goes to a terminal: strip escape sequences and control characters.
+    if (typeof body.error?.message === "string") message = safeText(body.error.message, 500);
+    code = typeof body.error?.code === "string" ? safeText(body.error.code, 60) : null;
+    hint = typeof body.error?.hint === "string" ? safeText(body.error.hint, 500) : null;
   } catch {
     // Not JSON: keep the generic message.
   }

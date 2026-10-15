@@ -73,11 +73,11 @@ export class Dispatcher {
   }
 
   /** Adds an event. Returns false when it is a duplicate of one already seen this session. */
-  push(payload: WebhookPayload, opts: { skip?: boolean } = {}): boolean {
+  push(payload: WebhookPayload, opts: { skip?: boolean; targets?: Target[] } = {}): boolean {
     const seq = payload.data.seq;
     if (this.stopped || seq <= this.highestSeen) return false;
     this.highestSeen = seq;
-    const job: Job = { seq, payload, remaining: new Set(this.opts.targets), attempts: 0, lastError: null, state: "queued", firstSeenAt: Date.now() };
+    const job: Job = { seq, payload, remaining: new Set(opts.targets ? this.opts.targets.filter((t) => opts.targets!.includes(t)) : this.opts.targets), attempts: 0, lastError: null, state: "queued", firstSeenAt: Date.now() };
     this.jobs.push(job);
     if (opts.skip || job.remaining.size === 0) {
       job.state = "done";

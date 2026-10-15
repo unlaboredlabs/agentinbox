@@ -1,7 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { codexBlock, removeTomlServer, setupMcp, upsertYamlServer } from "../server/listen/mcpsetup.ts";
+import { saveProfile } from "../server/listen/profile.ts";
 import { FAKE_KEY, isolateXdg } from "./listen-client-fake.ts";
 
 let env: ReturnType<typeof isolateXdg>;
@@ -29,32 +31,42 @@ afterEach(() => {
 const backups = (dir: string) => readdirSync(dir).filter((f) => f.includes(".agentinbox-backup-"));
 
 describe("setup-mcp", () => {
-  it("Claude Code: runs `claude mcp add` with an argv array and never relays the key", () => {
+  it("Claude Code: registers a header helper with add-json, so the key is never in argv", () => {
     const bin = join(env.root, "bin");
     mkdirSync(bin);
     const log = join(env.root, "claude-args.txt");
     writeFileSync(
       join(bin, "claude"),
       `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a" >> ${log}; done; printf -- '--\\n' >> ${log}\n` +
-        `if [ "$1 $2" = "mcp add" ] && [ -n "$FAIL" ]; then echo "error: header $8 $9 \${10} \${11}"; exit 1; fi\nexit 0\n`,
+        `if [ "$1 $2" = "mcp add-json" ] && [ -n "$FAIL" ]; then echo "error: bad server $5 $6"; exit 1; fi\nexit 0\n`,
     );
     chmodSync(join(bin, "claude"), 0o755);
     process.env.PATH = `${bin}:${saved.PATH}`;
     writeFileSync(join(home, ".claude.json"), "{}");
 
-    const r = setupMcp("claude-code", target, "/p.json");
+    saveProfile("default", { url: "https://mail.example.com", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c" });
+    const r = setupMcp("claude-code", { ...target, profile: "default" }, "/p.json");
     expect(r.ok).toBe(true);
     expect(r.message).not.toContain(FAKE_KEY);
-    const calls = readFileSync(log, "utf8").split("--\n").filter(Boolean).map((c) => c.trim().split("\n"));
+    const argvLog = readFileSync(log, "utf8");
+    expect(argvLog).not.toContain(FAKE_KEY);
+    const calls = argvLog.split("--\n").filter(Boolean).map((c) => c.trim().split("\n"));
     expect(calls[1]).toEqual(["mcp", "remove", "agentinbox", "--scope", "user"]);
-    expect(calls[2]).toEqual(["mcp", "add", "--transport", "http", "--scope", "user", "agentinbox", "https://mail.example.com/mcp", "--header", `Authorization: Bearer ${FAKE_KEY}`]);
+    expect(calls[2]!.slice(0, 5)).toEqual(["mcp", "add-json", "--scope", "user", "agentinbox"]);
+    const entry = JSON.parse(calls[2]![5]!) as { type: string; url: string; headersHelper: string };
+    expect(entry).toMatchObject({ type: "http", url: "https://mail.example.com/mcp" });
     expect(backups(home)).toHaveLength(1);
+
+    // The helper prints the header from the 0600 profile (to a pipe, never a terminal).
+    const helper = spawnSync("/bin/sh", ["-c", entry.headersHelper], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    expect(helper.status).toBe(0);
+    expect(JSON.parse(helper.stdout)).toEqual({ Authorization: `Bearer ${FAKE_KEY}` });
 
     process.env.FAIL = "1";
     try {
       const failed = setupMcp("claude-code", target, "/p.json");
       expect(failed.ok).toBe(false);
-      expect(failed.message).toContain("aib_…(redacted)");
+      expect(failed.message).toContain("add-json failed");
       expect(JSON.stringify(failed)).not.toContain(FAKE_KEY);
     } finally {
       delete process.env.FAIL;
@@ -65,7 +77,8 @@ describe("setup-mcp", () => {
     process.env.PATH = "/nonexistent";
     const r = setupMcp("claude-code", target, "/p.json");
     expect(r.ok).toBe(false);
-    expect(r.manual?.join("\n")).toContain("claude mcp add --transport http --scope user agentinbox");
+    expect(r.manual?.join("\n")).toContain("claude mcp add-json --scope user agentinbox");
+    expect(r.manual?.join("\n")).toContain("headersHelper");
     expect(JSON.stringify(r)).not.toContain(FAKE_KEY);
   });
 

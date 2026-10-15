@@ -2,6 +2,7 @@ import pc from "picocolors";
 import { ApiError, getSelf } from "./api.ts";
 import { Dispatcher, type Job, type Target } from "./dispatcher.ts";
 import { runCommand } from "./exec.ts";
+import { ensurePrivateDir } from "./fsutil.ts";
 import { forwardEvent } from "./forward.ts";
 import { type ListenFlags, resolveListen } from "./options.ts";
 import { DEFAULT_PROFILE, deadPath, logPath, profilePath, validProfileName } from "./paths.ts";
@@ -9,6 +10,7 @@ import { loadProfile, saveProfile } from "./profile.ts";
 import { forwardSecret } from "./options.ts";
 import { isServiceInstalled, launchdLabel, unitName } from "./service.ts";
 import { type DeadEntry, pidAlive, readDead, readStatus, writeDead } from "./state.ts";
+import { checkTransport, TransportError } from "./transport.ts";
 import { formatDuration, safeText } from "./ui.ts";
 import { NPX } from "./version.ts";
 
@@ -63,12 +65,15 @@ export async function printStatus(profileName: string): Promise<void> {
   out(`${pc.bold("Service")}   ${svc}`);
 
   try {
+    // Never send the key over a connection `listen` itself would refuse.
+    await checkTransport(profile.url, { insecure: profile.insecure });
     const self = await getSelf(profile.url, profile.apiKey, 5000);
     out(`${pc.bold("Key")}       ${pc.green("valid")} · ${self.grants.length ? self.grants.map((g) => `${g.accountEmail} (${g.capabilities.join(", ")}; ${g.sendMode})`).join(", ") : pc.yellow("no mailbox grants")}`);
   } catch (err) {
     const revoked = err instanceof ApiError && (err.status === 401 || err.status === 403);
-    const why = err instanceof ApiError && err.status === 0 ? (err.cause as string) : err instanceof Error ? err.message : String(err);
-    out(`${pc.bold("Key")}       ${revoked ? pc.red(`rejected: ${(err as Error).message}`) : pc.yellow(`not checked (${why})`)}`);
+    const why = err instanceof ApiError && err.status === 0 ? (err.cause as string) : err instanceof Error ? err.message.split("\n")[0] : String(err);
+    if (err instanceof TransportError) out(`${pc.bold("Key")}       ${pc.red(`not checked: ${why}`)}`);
+    else out(`${pc.bold("Key")}       ${revoked ? pc.red(`rejected: ${(err as Error).message}`) : pc.yellow(`not checked (${why})`)}`);
   }
 
   if (!st) {
@@ -115,6 +120,7 @@ export function printDead(profileName: string, opts: { json?: boolean }): void {
   out();
   out(pc.gray(`${entries.length} dead event${entries.length > 1 ? "s" : ""} in ${deadPath(name)}.`));
   out(pc.gray(`Replay with: ${NPX} listen dead --replay${flagFor(name)}   (one: --id <evt_…>; drop all: --clear)`));
+  out(pc.gray(`Replay uses the profile's saved --exec/--forward; if you ran them as flags only, pass them again, e.g. --replay --exec '<command>'.`));
 }
 
 export function clearDead(profileName: string, id?: string): void {
@@ -142,9 +148,11 @@ export async function replayDead(flags: ListenFlags & { id?: string }, opts: { r
   const available: Target[] = [];
   if (config.exec) available.push("exec");
   if (config.forward) available.push("forward");
-  if (!available.length) throw new Error("Nothing to replay to: pass --exec or --forward, or save one in the profile.");
+  if (!available.length) throw new Error(`Nothing to replay to: pass --exec '<command>' and/or --forward <url> (or save them in the profile with \`${NPX} listen --save …\`).`);
+  if (config.exec && process.platform === "win32") throw new Error("--exec isn't supported on Windows; replay with --forward instead.");
 
   const timeoutMs = config.timeoutSeconds * 1000;
+  if (config.cwdIsDefault) ensurePrivateDir(config.cwd);
   const failed = new Map<string, DeadEntry>();
   const bySeq = new Map(chosen.map((e) => [e.seq, e]));
   const dispatcher = new Dispatcher({
@@ -155,7 +163,7 @@ export async function replayDead(flags: ListenFlags & { id?: string }, opts: { r
     run: async (job: Job, signal) => {
       const errors: string[] = [];
       if (job.remaining.has("exec") && config.exec) {
-        const r = await runCommand(config.exec, job.payload, { timeoutMs, signal });
+        const r = await runCommand(config.exec, job.payload, { timeoutMs, signal, cwd: config.cwd });
         if (r.ok) job.remaining.delete("exec");
         else errors.push(`command: ${r.error}`);
       }
@@ -177,7 +185,16 @@ export async function replayDead(flags: ListenFlags & { id?: string }, opts: { r
     },
   });
   out(`Replaying ${chosen.length} dead event${chosen.length > 1 ? "s" : ""} (up to ${config.maxAttempts} attempts each)…`);
-  for (const e of [...chosen].sort((a, b) => a.seq - b.seq)) dispatcher.push(e.payload);
+  // Only the targets that never succeeded (a forward that went through isn't POSTed again).
+  for (const e of [...chosen].sort((a, b) => a.seq - b.seq)) {
+    const targets = e.targets?.length ? e.targets.filter((t) => available.includes(t)) : available;
+    if (!targets.length) {
+      out(`${pc.yellow("!")} #${e.seq} needs ${e.targets.join(" and ")}, which isn't configured now; pass --${e.targets[0]} to replay it.`);
+      failed.set(e.id, e);
+      continue;
+    }
+    dispatcher.push(e.payload, { targets });
+  }
   await dispatcher.idle();
 
   const replayed = new Set(chosen.map((e) => e.id));

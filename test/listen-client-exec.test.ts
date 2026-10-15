@@ -24,7 +24,7 @@ const alive = (pid: number) => {
 };
 
 describe("command mode", () => {
-  it("never executes event data: shell metacharacters arrive byte-exact on stdin", async () => {
+  it("never executes event data: shell metacharacters arrive intact on stdin", async () => {
     const marker = join(dir, "pwned");
     const tricks = [
       `$(touch ${marker})`,
@@ -52,9 +52,11 @@ describe("command mode", () => {
 
     const got = JSON.parse(readFileSync(out, "utf8")) as { notice: string; event: typeof event };
     expect(got.notice).toBe(UNTRUSTED_NOTICE);
-    expect(got.event.data.message!.subject).toBe(tricks);
-    expect(got.event.data.message!.snippet).toBe(tricks);
-    expect(got.event.data.message!.from!.name).toBe(tricks);
+    // Header text arrives intact apart from invisible characters (and our delimiter tag, absent here).
+    const cleaned = tricks.replace("\u202e", "");
+    expect(got.event.data.message!.subject).toBe(cleaned);
+    expect(got.event.data.message!.snippet).toBe(cleaned);
+    expect(got.event.data.message!.from!.name).toBe(cleaned);
     // The body is wrapped in the untrusted delimiter; its text is intact apart from invisible characters.
     const body = got.event.data.content!.body;
     expect(body.startsWith('<email_content from="$(touch')).toBe(true);

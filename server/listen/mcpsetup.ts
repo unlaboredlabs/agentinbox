@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "../../shared/agent-api.ts";
-import { backupFile, writePrivateFile } from "./fsutil.ts";
+import { backupFile, isTooOpen, writePrivateFile } from "./fsutil.ts";
+import { claudeServerEntry } from "./mcpheader.ts";
 import type { Profile } from "./profile.ts";
 import { mcpServerName } from "./recipes.ts";
+import { NPX } from "./version.ts";
+import { safeText } from "./ui.ts";
 
 /**
  * `--setup-mcp`: registers the agentinbox MCP server in the agent's own tool without the key ever
@@ -30,14 +33,19 @@ export interface McpSetupTarget {
 
 const redact = (s: string, key: string) => s.split(key).join("aib_…(redacted)");
 
-export function mcpTarget(profileName: string, profile: Profile): McpSetupTarget {
-  return { name: mcpServerName(profileName), url: profile.mcpUrl ?? `${profile.url}/mcp`, key: profile.apiKey };
+/**
+ * The MCP endpoint is always derived from the URL the user connected to (and transport-checked
+ * there), never taken from the daemon: a daemon's advertised mcpUrl comes from its publicUrl setting,
+ * which defaults to http://localhost:8425 and could also point the key somewhere else entirely.
+ */
+export function mcpTarget(profileName: string, profile: Profile): McpSetupTarget & { profile: string } {
+  return { name: mcpServerName(profileName), url: `${profile.url}/mcp`, key: profile.apiKey, profile: profileName };
 }
 
-export function setupMcp(tool: AgentTool, t: McpSetupTarget, profileFile: string): McpSetupResult {
+export function setupMcp(tool: AgentTool, t: McpSetupTarget & { profile?: string }, profileFile: string): McpSetupResult {
   switch (tool) {
     case "claude-code":
-      return setupClaude(t, profileFile);
+      return setupClaude(t, t.profile ?? "default");
     case "codex":
       return setupCodex(t, profileFile);
     case "cursor":
@@ -52,7 +60,7 @@ export function setupMcp(tool: AgentTool, t: McpSetupTarget, profileFile: string
 function manualGeneric(t: McpSetupTarget, profileFile: string): string[] {
   return [
     `MCP endpoint (streamable HTTP): ${t.url}`,
-    `Header: Authorization: Bearer <key>  (the key is the "apiKey" field in ${profileFile}; e.g. jq -r .apiKey ${profileFile})`,
+    `Header: Authorization: Bearer <key>. The key is the "apiKey" field in ${profileFile}; tools that run a header helper can use \`${NPX} mcp-header\`, which prints it as JSON to a pipe.`,
   ];
 }
 
@@ -60,24 +68,24 @@ function manualGeneric(t: McpSetupTarget, profileFile: string): string[] {
 
 export const claudeConfigFile = () => (process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : join(homedir(), ".claude.json"));
 
-function setupClaude(t: McpSetupTarget, profileFile: string): McpSetupResult {
-  const manual = [
-    `claude mcp add --transport http --scope user ${t.name} ${t.url} --header "Authorization: Bearer $(jq -r .apiKey ${profileFile})"`,
-  ];
+function setupClaude(t: McpSetupTarget, profile: string): McpSetupResult {
+  // headersHelper: Claude Code asks our helper for the header at connect time, so the key is never in
+  // argv (visible in `ps`), in ~/.claude.json, or on screen.
+  const json = JSON.stringify(claudeServerEntry(t.url, profile));
+  const manual = [`claude mcp add-json --scope user ${t.name} '${json.replace(/'/g, `'"'"'`)}'`];
   const probe = spawnSync("claude", ["--version"], { stdio: "ignore" });
   if (probe.error || probe.status !== 0) return { ok: false, message: "The `claude` CLI was not found on PATH.", manual };
-  const backup = backupFile(claudeConfigFile());
-  // `add` refuses an existing name, so replace it. argv arrays only: no shell ever sees the key.
+  const file = claudeConfigFile();
+  const backup = backupFile(file);
+  // `add-json` refuses an existing name, so replace it. argv arrays only, and nothing secret in them.
   spawnSync("claude", ["mcp", "remove", t.name, "--scope", "user"], { stdio: "ignore" });
-  const r = spawnSync("claude", ["mcp", "add", "--transport", "http", "--scope", "user", t.name, t.url, "--header", `Authorization: Bearer ${t.key}`], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const r = spawnSync("claude", ["mcp", "add-json", "--scope", "user", t.name, json], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   if (r.status !== 0) {
     const out = redact(`${r.stderr ?? ""}${r.stdout ?? ""}`, t.key).trim();
-    return { ok: false, message: `claude mcp add failed${out ? `: ${out}` : ""}`, backup, manual };
+    return { ok: false, message: `claude mcp add-json failed${out ? `: ${safeText(out, 300)}` : ""}`, backup, manual };
   }
-  return { ok: true, message: `Registered MCP server "${t.name}" in Claude Code (user scope).`, backup };
+  if (existsSync(file) && isTooOpen(file)) chmodSync(file, 0o600);
+  return { ok: true, message: `Registered MCP server "${t.name}" in Claude Code (user scope). The key stays in your agentinbox profile; Claude Code asks for it through a header helper.`, backup };
 }
 
 // ───────────── Codex (~/.codex/config.toml) ─────────────
@@ -98,14 +106,17 @@ export function removeTomlServer(toml: string, name: string): string | null {
   let skipping = false;
   for (const line of toml.split("\n")) {
     if (anyHeader.test(line)) skipping = header.test(line);
-    if (!skipping) out.push(line);
+    // Our own marker comment sits just above the table: drop it too, so re-running doesn't pile them up.
+    if (!skipping && line.trim() !== CODEX_MARKER) out.push(line);
   }
-  return out.join("\n");
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
+
+const CODEX_MARKER = "# Added by `agentinbox setup-mcp`. The key is also in your agentinbox profile; rotate it in the console.";
 
 export function codexBlock(t: McpSetupTarget): string {
   return [
-    `# Added by \`agentinbox connect --setup-mcp\`. The key is also in your agentinbox profile; rotate it in the console.`,
+    CODEX_MARKER,
     `[mcp_servers.${t.name}]`,
     `url = ${tomlString(t.url)}`,
     `http_headers = { Authorization = ${tomlString(`Bearer ${t.key}`)} }`,
@@ -121,7 +132,7 @@ function setupCodex(t: McpSetupTarget, profileFile: string): McpSetupResult {
     `Add to ${file}:`,
     `  [mcp_servers.${t.name}]`,
     `  url = "${t.url}"`,
-    `  http_headers = { Authorization = "Bearer <key>" }   # key: jq -r .apiKey ${profileFile}`,
+    `  http_headers = { Authorization = "Bearer <key>" }   # <key>: the apiKey field of ${profileFile}`,
     `  default_tools_approval_mode = "approve"`,
   ];
   const current = existsSync(file) ? readFileSync(file, "utf8") : "";
@@ -141,7 +152,7 @@ function setupCursor(t: McpSetupTarget, profileFile: string): McpSetupResult {
   const file = cursorConfigFile();
   const manual = [
     `Add to ${file} under "mcpServers":`,
-    `  "${t.name}": { "url": "${t.url}", "headers": { "Authorization": "Bearer <key>" } }   // key: jq -r .apiKey ${profileFile}`,
+    `  "${t.name}": { "url": "${t.url}", "headers": { "Authorization": "Bearer <key>" } }   // <key>: the apiKey field of ${profileFile}`,
   ];
   let doc: Record<string, unknown> = {};
   if (existsSync(file)) {
@@ -215,13 +226,13 @@ function setupHermes(t: McpSetupTarget, profileFile: string): McpSetupResult {
   const configFile = join(home, "config.yaml");
   const envFile = join(home, ".env");
   const envVar = hermesEnvVar(t.name);
-  const entry = [`url: "${t.url}"`, `headers:`, `  Authorization: "Bearer \${${envVar}}"`];
+  const entry = [`url: ${JSON.stringify(t.url)}`, `headers:`, `  Authorization: "Bearer \${${envVar}}"`];
   const manual = [
     `Add to ${configFile}:`,
     `  mcp_servers:`,
     `    ${t.name}:`,
     ...entry.map((e) => `      ${e}`),
-    `and to ${envFile}:  ${envVar}=<key>   (key: jq -r .apiKey ${profileFile})`,
+    `and to ${envFile}:  ${envVar}=<key>   (<key>: the apiKey field of ${profileFile})`,
     `then check it with: hermes mcp test ${t.name}`,
   ];
   const current = existsSync(configFile) ? readFileSync(configFile, "utf8") : "";

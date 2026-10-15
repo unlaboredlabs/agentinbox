@@ -39,6 +39,28 @@ export function childEnv(payload: WebhookPayload, eventFile: string): NodeJS.Pro
   return { ...env, ...eventEnv(payload), AGENTINBOX_EVENT_FILE: eventFile };
 }
 
+/** Running commands, so a forced exit (second Ctrl-C) can still kill their process groups and remove temp files. */
+const active = new Map<number, string>();
+
+/** Synchronous last-resort cleanup before process.exit. */
+export function killAllRuns(): void {
+  for (const [pid, dir] of active) {
+    killGroup(pid, "SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
+  }
+  active.clear();
+}
+
+function groupAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function killGroup(pid: number | undefined, signal: NodeJS.Signals): void {
   if (!pid) return;
   try {
@@ -77,23 +99,36 @@ export function runCommand(command: string, payload: WebhookPayload, opts: { tim
       detached: true,
     });
 
+    if (child.pid) active.set(child.pid, dir);
+
+    let terminatedAt: number | null = null;
+
     const finish = (r: Omit<CommandResult, "durationMs" | "stdoutTail" | "stderrTail" | "timedOut">) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
       opts.signal?.removeEventListener("abort", onAbort);
-      if (timedOut) killGroup(child.pid, "SIGKILL");
-      // Background processes that inherited the pipes must not keep us waiting.
-      setTimeout(() => {
+      void (async () => {
+        if (terminatedAt !== null) {
+          // sh is gone, but what it started may not be: wait out the grace period for the group to
+          // exit on SIGTERM, then SIGKILL whatever is left.
+          while (groupAlive(child.pid) && Date.now() - terminatedAt < KILL_GRACE_MS) await new Promise((res) => setTimeout(res, 100));
+          killGroup(child.pid, "SIGKILL");
+        }
+        if (child.pid) active.delete(child.pid);
+        // Background processes that inherited the pipes must not keep us waiting.
+        await new Promise((res) => setTimeout(res, 50));
         child.stdout?.destroy();
         child.stderr?.destroy();
         rmSync(dir, { recursive: true, force: true });
         resolve({ ...r, ok: r.ok && !timedOut, timedOut, durationMs: Math.round(performance.now() - started), stdoutTail: stdout.toString(), stderrTail: stderr.toString() });
-      }, 50);
+      })();
     };
 
     const terminate = () => {
+      if (terminatedAt !== null) return;
+      terminatedAt = Date.now();
       killGroup(child.pid, "SIGTERM");
       killTimer = setTimeout(() => killGroup(child.pid, "SIGKILL"), KILL_GRACE_MS);
       killTimer.unref();

@@ -38,6 +38,7 @@ function listenFlags(cmd: Command): Command {
     .option("--timeout <seconds>", "per-event time limit; the whole process group is killed after it (default 300)", int("--timeout"))
     .option("--max-attempts <n>", "attempts before an event goes to dead letters (default 5)", int("--max-attempts"))
     .option("--consumer <name>", "server-side cursor name (default <hostname>-<profile>)")
+    .option("--cwd <dir>", "directory --exec commands run in (default: a private dir in the state dir; must be yours and not group/world-writable)")
     .option("--insecure", "allow plain http to a non-loopback, non-Tailscale daemon (loud warning)")
     .option("--save", "save these settings to the profile");
 }
@@ -81,10 +82,19 @@ Example:
       const profile = loadProfile(name);
       const tool = flags.tool ? parseTool(flags.tool) : (profile.tool ?? "other");
       if (tool === "other") throw new Error(`Which tool? Pass --tool ${TOOLS.filter((t) => t !== "other").join("|")}.`);
+      const { writeClaudeMcpConfig } = await import("./mcpheader.ts");
+      writeClaudeMcpConfig(name, `${profile.url}/mcp`);
       const r = setupMcp(tool, mcpTarget(name, profile), profilePath(name));
       printMcpResult(r);
       if (!r.ok) process.exitCode = 1;
     });
+
+  profileOption(
+    program.command("mcp-header").description("print the agent's Authorization header as JSON for an MCP client's header helper (refuses to print to a terminal)"),
+  ).action(async (flags: { profile?: string }) => {
+    const { printMcpHeader } = await import("./mcpheader.ts");
+    process.exitCode = printMcpHeader(flags.profile ?? DEFAULT_PROFILE);
+  });
 
   const listen = listenFlags(
     program
@@ -92,6 +102,7 @@ Example:
       .description("wake a local agent on new mail: hold an outbound stream to the daemon and run a command or POST to localhost per event"),
   )
     .option("--dry-run", "print matching events without running anything or advancing the cursor")
+    .option("--from-start", "first run of a consumer: also process events stored before now (default: only new ones)")
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags) => {
       const { runListener } = await import("./listen.ts");
