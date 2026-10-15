@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { connectAccount } from "@/components/accounts/connect-host";
-import { api, ApiError, describeError, toastError } from "@/lib/api";
+import { api, ApiError, toastError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -77,7 +77,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
 
   const needsScope =
     provisionError instanceof ApiError &&
-    (provisionError.code === "pubsub_scope_required" || /pub\/?sub (access|scope)/i.test(`${provisionError.message} ${provisionError.hint ?? ""}`));
+    (provisionError.code === "pubsub_scope_required" || /access to (cloud )?pub\/?sub|pub\/?sub (access|scope|permission)/i.test(`${provisionError.message} ${provisionError.hint ?? ""}`));
 
   if (state.isPending) return <Skeleton className="h-32 rounded-xl" />;
   const p = state.data?.pubsub;
@@ -129,7 +129,6 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
               <p className="text-muted-foreground">
                 Connecting Gmail only asks for mail access. To create the topic and subscription, agentinbox needs Pub/Sub access too, granted once
                 by an account that can manage the Google Cloud project.
-                {describeError(provisionError).hint && <span className="mt-1 block text-foreground/80">{describeError(provisionError).hint}</span>}
               </p>
             </div>
           </div>
@@ -171,9 +170,11 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
       )}
 
       <div className="flex flex-wrap gap-2">
+        {provisionError === undefined && (
         <Button onClick={provision} disabled={provisioning || accounts === 0} variant={active ? "outline" : "default"}>
           {provisioning ? <Spinner /> : <RadioTowerIcon />} {active ? "Re-provision Pub/Sub" : "Set up Pub/Sub automatically"}
         </Button>
+        )}
         {active && (
           <Button variant="outline" onClick={sendTest} disabled={testing}>
             {testing ? <Spinner /> : <SendIcon />} Send test

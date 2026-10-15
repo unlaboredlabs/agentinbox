@@ -31,7 +31,8 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
           </div>
           <p className="text-muted-foreground">
             Gmail announces every change to a Pub/Sub topic in your project within seconds; agentinbox picks it up. Works even when this machine
-            isn't reachable from the internet. Needs the Pub/Sub API enabled and project owner/editor rights for the account you connected.
+            isn't reachable from the internet. Needs the Pub/Sub API enabled, and a one-time Pub/Sub permission from a Google account that can
+            manage the project (you'll be asked if it's missing).
           </p>
         </div>
         <div className="space-y-1.5 rounded-lg border p-3 text-sm">

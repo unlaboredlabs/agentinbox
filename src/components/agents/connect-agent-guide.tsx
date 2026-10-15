@@ -100,9 +100,9 @@ export function ConnectAgentGuide({ className }: { className?: string }) {
           <SparklesIcon className="size-4 text-chart-1" /> Quickest: let the agent set itself up
         </div>
         <p className="mb-2 text-sm text-muted-foreground">Tell your agent:</p>
-        <div className="flex items-start gap-2 rounded-md border bg-background py-1.5 pr-1.5 pl-3">
+        <div className="flex flex-col items-start gap-2 rounded-md border bg-background py-1.5 pr-1.5 pl-3 sm:flex-row">
           <p className="min-w-0 flex-1 py-1 text-sm [overflow-wrap:anywhere]">“{c.selfSetup}”</p>
-          <CopyButton value={c.selfSetup} withText variant="outline" />
+          <CopyButton value={c.selfSetup} withText variant="outline" className="self-end sm:self-auto" />
         </div>
         <p className="mt-2 text-xs text-muted-foreground">It reads the skill, runs the commands below and asks you to approve it here.</p>
       </div>

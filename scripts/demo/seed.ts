@@ -5,6 +5,8 @@
 //   pnpm exec tsx scripts/demo/seed.ts --port 8531            seeded instance (prints the password)
 //   pnpm exec tsx scripts/demo/seed.ts --port 8531 --fresh    unclaimed first run (prints the setup link)
 //   --public-url <url>   publicUrl to store (default: https://inbox.acme.dev; use the local URL to click through OAuth)
+//   --fresh --stage pubsub              claimed, client set, ops@acme.dev connected: the wizard's Pub/Sub step
+//   --pubsub-fail org-policy|scope|api  make Pub/Sub provisioning fail the way real projects do
 //
 // Serves the console from dist/web (run `pnpm build` or `pnpm exec vite build` first), or point
 // Vite at it: AGENTINBOX_DEV_SERVER=http://127.0.0.1:8531 pnpm exec vite --host 127.0.0.1
@@ -23,7 +25,7 @@ import type { Account, Agent, AgentWithKey, Approval, GrantInput, PairingRequest
 import { readSetupToken } from "../../server/auth/setup-token.ts";
 import { loadConfig } from "../../server/config.ts";
 import { startServer } from "../../server/server.ts";
-import { startFakeGoogle } from "../../test/fake-google.ts";
+import { GMAIL_SCOPE, startFakeGoogle } from "../../test/fake-google.ts";
 import { authHeader, type DemoMail, OPS_MAIL, PERSONAL_MAIL } from "./mail.ts";
 import { DEMO_CLIENT, startClientProxy } from "./proxy.ts";
 
@@ -32,6 +34,8 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "8531" },
     fresh: { type: "boolean", default: false },
     "public-url": { type: "string" },
+    stage: { type: "string" },
+    "pubsub-fail": { type: "string" },
   },
 });
 
@@ -75,10 +79,31 @@ process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
 
 fake.addAccount(OPS, { name: "Acme Ops" });
-fake.addAccount(PERSONAL, { name: "Wynn" });
+
+const fail = args["pubsub-fail"];
+if (fail === "org-policy") fake.orgPolicyBlocksIam(true);
+if (fail === "api") fake.disableApi("pubsub", true);
+// Gmail-only consent, as normal connects will be once Pub/Sub access is requested incrementally.
+const consentScopes = fail === "scope" ? [GMAIL_SCOPE, "https://www.googleapis.com/auth/userinfo.email"] : undefined;
 
 if (args.fresh) {
   const token = readSetupToken(dataDir);
+  if (args.stage === "pubsub") {
+    const post = (path: string, body: unknown, cookie = "") =>
+      fetch(base + path, { method: path.includes("client") ? "PUT" : "POST", headers: { cookie, "x-agentinbox-csrf": "1", "content-type": "application/json" }, body: JSON.stringify(body) });
+    const claim = await post("/api/setup/claim", { token, password: PASSWORD });
+    const cookie = claim.headers.get("set-cookie")!.split(";")[0]!;
+    await fetch(base + "/api/settings", { method: "PATCH", headers: { cookie, "x-agentinbox-csrf": "1", "content-type": "application/json" }, body: JSON.stringify({ publicUrl: base }) });
+    await post("/api/google/client", { ...DEMO_CLIENT, projectId: "acme-agentinbox", appType: "internal" }, cookie);
+    fake.consentAs(OPS, { scopes: consentScopes });
+    const { authUrl } = (await (await post("/api/accounts/connect", {}, cookie)).json()) as { authUrl: string };
+    const location = (await fetch(authUrl, { redirect: "manual" })).headers.get("location")!;
+    await post("/api/accounts/connect/complete", { url: location }, cookie);
+    writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify({ url: base, password: PASSWORD, cookie, fresh: true }));
+    console.log(`\n  agentinbox demo (wizard at the Pub/Sub step${fail ? `, provisioning fails: ${fail}` : ""}) on ${base}\n  Password: ${PASSWORD}\n`);
+    if (consentScopes) setInterval(() => fake.consentAs(OPS, { scopes: [...consentScopes, "https://www.googleapis.com/auth/pubsub"] }), 3000).unref();
+    await new Promise(() => {});
+  }
   console.log(`
   agentinbox demo (fresh, unclaimed) on ${base}
 
@@ -88,11 +113,12 @@ if (args.fresh) {
   Fake accounts:  ${OPS} (consent is automatic; queue another with the next connect)
 `);
   writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify({ url: base, setupUrl: `${base}/setup?token=${token}`, fresh: true }));
-  // Consent for whoever connects next in the browser.
-  setInterval(() => fake.consentAs(OPS), 2000).unref();
-  fake.consentAs(OPS);
+  // The only mailbox consents automatically; with --pubsub-fail scope, consent is Gmail-only.
+  if (consentScopes) setInterval(() => fake.consentAs(OPS, { scopes: consentScopes }), 3000).unref();
   await new Promise(() => {});
 }
+
+fake.addAccount(PERSONAL, { name: "Wynn" });
 
 // ───────────── Console API client ─────────────
 

@@ -233,8 +233,17 @@ export function ConnectAccountHost() {
         {phase?.kind === "done" && (
           <div className="flex flex-col items-center gap-2 py-6 text-center">
             <CheckCircle2Icon className="size-10 text-success" />
-            <div className="font-medium">{phase.email} is connected</div>
-            <p className="text-sm text-muted-foreground">Mail starts syncing now. Give agents access from the Agents page.</p>
+            {req.scopes?.includes("pubsub") ? (
+              <>
+                <div className="font-medium">Pub/Sub access granted</div>
+                <p className="text-sm text-muted-foreground">Finishing real-time setup with {phase.email}…</p>
+              </>
+            ) : (
+              <>
+                <div className="font-medium">{phase.email} is connected</div>
+                <p className="text-sm text-muted-foreground">Mail starts syncing now. Give agents access from the Agents page.</p>
+              </>
+            )}
           </div>
         )}
 
@@ -288,7 +297,7 @@ export function ConnectAccountHost() {
           )}
           {phase?.kind === "done" && (
             <>
-              {!reauthEmail && (
+              {!reauthEmail && !req.scopes?.length && (
                 <Button variant="outline" onClick={() => connectAccount()}>
                   Connect another
                 </Button>
