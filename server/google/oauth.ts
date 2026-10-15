@@ -12,10 +12,11 @@ import { provisioningPrincipal } from "./pubsub.ts";
 import { postToken, refreshExpiry, refreshExpiryKind, type TokenResponse } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
 
-export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
-export const PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
-/** Every account: Gmail plus identity (for the display name). */
-export const BASE_SCOPES = [GMAIL_SCOPE, "openid", "email", "profile"];
+import { GMAIL_SCOPE, MAIL_SCOPES, PUBSUB_SCOPE } from "./scopes.ts";
+
+export { GMAIL_SCOPE, PUBSUB_SCOPE };
+/** Every account: Gmail plus identity (for the display name). See server/google/scopes.ts. */
+export const BASE_SCOPES = [...MAIL_SCOPES];
 /** Optional extra scopes, requested incrementally (include_granted_scopes) only when needed. */
 export const EXTRA_SCOPES = { pubsub: PUBSUB_SCOPE } as const;
 export type ExtraScope = keyof typeof EXTRA_SCOPES;

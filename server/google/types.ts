@@ -21,6 +21,7 @@ import type {
   TestEmailResult,
 } from "../../shared/types.ts";
 import type { Lifecycle } from "../context.ts";
+import type { CalendarClient } from "./calendar.ts";
 
 // ───────────── Raw Gmail REST shapes (subset of https://developers.google.com/gmail/api/reference/rest) ─────────────
 
@@ -277,6 +278,8 @@ export interface GoogleService extends Lifecycle {
 
   /** FROZEN. Gmail client for an account (cheap; may be cached). */
   gmail(accountId: string): GmailClient;
+  /** FROZEN. Google Calendar client for an account (cheap; may be cached). See server/google/calendar.ts. */
+  calendar(accountId: string): CalendarClient;
   /** FROZEN. */
   readonly mime: MimeTools;
   /**

@@ -22,9 +22,11 @@ export function createEventsService(ctx: AppContext): EventsService {
       const id = newId("evt");
       const message = e.message ?? null;
       const threadLabelIds = e.threadLabelIds ?? message?.labelIds ?? [];
+      const calendarEvent = e.calendarEvent ?? null;
       const inserted = ctx.db.get<{ seq: number }>(
-        `INSERT INTO events (id, type, account_id, gmail_message_id, gmail_thread_id, label_ids, message, changed_label_ids, detail, dedupe_key, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO events (id, type, account_id, gmail_message_id, gmail_thread_id, label_ids, message, changed_label_ids, detail, dedupe_key, created_at,
+           calendar_id, calendar_event)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(dedupe_key) DO NOTHING RETURNING seq`,
         id,
         e.type,
@@ -37,6 +39,8 @@ export function createEventsService(ctx: AppContext): EventsService {
         e.detail ? json.str(e.detail) : null,
         e.dedupeKey,
         createdAt,
+        calendarEvent?.calendarId ?? null,
+        calendarEvent ? json.str(calendarEvent) : null,
       );
       if (!inserted) return null;
       const event = eventBySeq(ctx.db, inserted.seq)!;

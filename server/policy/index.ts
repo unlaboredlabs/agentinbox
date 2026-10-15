@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Agent, AgentOrigin, AgentWithKey, CreateAgentInput, Grant, GrantInput } from "../../shared/types.ts";
+import { type Agent, type AgentOrigin, type AgentWithKey, type CreateAgentInput, type Grant, type GrantInput, isCalendarEventType } from "../../shared/types.ts";
 import { listenersOf } from "../agentapi/listeners.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { BusEvents } from "../bus.ts";
@@ -9,7 +9,8 @@ import { bool, json, now } from "../db/index.ts";
 import { badRequest, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { Approvals } from "../mail/approvals.ts";
-import { type GrantRow, parseGrantInput, toGrant } from "./grants.ts";
+import { CALENDAR_GRANT_DEFAULTS, type GrantRow, parseGrantInput, toGrant } from "./grants.ts";
+import { calendarInScope } from "./calendar.ts";
 import type { AgentPrincipal, PolicyService } from "./types.ts";
 
 export const API_KEY_PREFIX = "aib_";
@@ -17,7 +18,7 @@ export const API_KEY_PREFIX = "aib_";
 const KEY_RANDOM_CHARS = 32;
 /** `last_used_at` and `last_mcp_at` are written at most this often per agent (the first write is immediate). */
 const LAST_USED_THROTTLE_MS = 60_000;
-/** Account-level events visible to any agent with `read` on the account, regardless of label scope. */
+/** Account-level events visible to any agent with `read` or `calendar.read` on the account, regardless of scope. */
 const ACCOUNT_EVENTS = new Set(["account.auth_failed", "sync.gap"]);
 
 interface AgentRow {
@@ -82,14 +83,19 @@ export function createPolicyService(ctx: AppContext): PolicyService {
 
   const writeGrant = (agentId: string, g: GrantInput): Grant => {
     requireAccount(g.accountId);
+    // Omitted calendar fields keep the stored values (an older client must never widen the calendar scope).
+    const prev = db.get<GrantRow>("SELECT * FROM grants WHERE agent_id = ? AND account_id = ?", agentId, g.accountId);
+    const calendarScope = g.calendarScope !== undefined ? g.calendarScope : prev ? toGrant(prev).calendarScope : CALENDAR_GRANT_DEFAULTS.calendarScope;
+    const calendarWriteMode = g.calendarWriteMode ?? (prev ? toGrant(prev).calendarWriteMode : CALENDAR_GRANT_DEFAULTS.calendarWriteMode);
     db.run(
       `INSERT INTO grants (id, agent_id, account_id, capabilities, label_scope, send_mode, allow_to, reply_only,
-         max_sends_per_hour, max_sends_per_day, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         max_sends_per_hour, max_sends_per_day, calendar_scope, calendar_write_mode, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(agent_id, account_id) DO UPDATE SET
          capabilities = excluded.capabilities, label_scope = excluded.label_scope, send_mode = excluded.send_mode,
          allow_to = excluded.allow_to, reply_only = excluded.reply_only,
-         max_sends_per_hour = excluded.max_sends_per_hour, max_sends_per_day = excluded.max_sends_per_day`,
+         max_sends_per_hour = excluded.max_sends_per_hour, max_sends_per_day = excluded.max_sends_per_day,
+         calendar_scope = excluded.calendar_scope, calendar_write_mode = excluded.calendar_write_mode`,
       newId("grt"),
       agentId,
       g.accountId,
@@ -100,6 +106,8 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       g.replyOnly ? 1 : 0,
       g.maxSendsPerHour,
       g.maxSendsPerDay,
+      calendarScope === null ? null : json.str(calendarScope),
+      calendarWriteMode,
       now(),
     );
     return toGrant(db.get<GrantRow>("SELECT * FROM grants WHERE agent_id = ? AND account_id = ?", agentId, g.accountId)!);
@@ -108,6 +116,8 @@ export function createPolicyService(ctx: AppContext): PolicyService {
   const grantSummary = (g: GrantInput) => ({
     capabilities: g.capabilities,
     sendMode: g.sendMode,
+    ...(g.calendarWriteMode !== undefined ? { calendarWriteMode: g.calendarWriteMode } : {}),
+    ...(g.calendarScope !== undefined ? { calendarScope: g.calendarScope === null ? null : g.calendarScope.length } : {}),
     labelScope: g.labelScope,
     allowTo: g.allowTo.length,
     replyOnly: g.replyOnly,
@@ -291,7 +301,8 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       }
       const g = parseGrantInput(raw);
       const grant = writeGrant(agentId, g);
-      if (!g.capabilities.includes("send")) approvals.cancelForAgent(agentId, accountId, "the agent's send permission was removed");
+      if (!g.capabilities.includes("send")) approvals.cancelForAgent(agentId, accountId, "the agent's send permission was removed", "mail");
+      if (!g.capabilities.includes("calendar.write")) approvals.cancelForAgent(agentId, accountId, "the agent's calendar.write permission was removed", "calendar");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.upsert", accountId, target: agentId, outcome: "ok", detail: grantSummary(g) });
       changed(agentId, "grant_changed");
       return grant;
@@ -321,8 +332,13 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       );
       if (!r || bool(r.disabled)) return false;
       const g = toGrant(r);
+      if (ACCOUNT_EVENTS.has(ev.type)) return g.capabilities.includes("read") || g.capabilities.includes("calendar.read");
+      if (isCalendarEventType(ev.type)) {
+        const calendarId = ev.calendarEvent?.calendarId;
+        return g.capabilities.includes("calendar.read") && !!calendarId && calendarInScope(g, calendarId);
+      }
       if (!g.capabilities.includes("read")) return false;
-      if (ACCOUNT_EVENTS.has(ev.type) || g.labelScope === null) return true;
+      if (g.labelScope === null) return true;
       return ev.threadLabelIds.some((id) => g.labelScope!.includes(id));
     },
   };

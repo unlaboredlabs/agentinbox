@@ -1296,7 +1296,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
   const fake: FakeGoogle = {
     url,
-    google: { oauthBase: url, authBase: url, gmailBase: url, pubsubBase: url },
+    google: { oauthBase: url, authBase: url, gmailBase: url, pubsubBase: url, calendarBase: url },
     accessTokenTtl: 3600,
     refreshTokenTtl: null,
     registeredRedirectUris: null,

@@ -1,7 +1,7 @@
 // Events domain contract. Owned by the events + webhooks work area.
 // Members marked FROZEN are used by other domains: do not rename or change them. Adding members is fine.
 
-import type { EventType, MailEvent, MessageSummary, Page } from "../../shared/types.ts";
+import type { CalendarEventSummary, EventType, MailEvent, MessageSummary, Page } from "../../shared/types.ts";
 import type { Lifecycle } from "../context.ts";
 
 /** FROZEN. What ingest (and google, for account.auth_failed) hand to events.emit. */
@@ -17,8 +17,13 @@ export interface NewEvent {
   threadLabelIds?: string[];
   /** For label.added / label.removed: the labels that changed. */
   labelIds?: string[];
+  /** calendar.* events: the event (its calendarId drives calendar scopes and webhook calendarIds filters). */
+  calendarEvent?: CalendarEventSummary | null;
   detail?: Record<string, unknown>;
-  /** Unique per logical event, e.g. `${accountId}:${messageId}:message.received`. Pub/Sub is at-least-once. */
+  /**
+   * Unique per logical event, e.g. `${accountId}:${messageId}:message.received`. Pub/Sub is at-least-once.
+   * Calendar: `${accountId}:${calendarId}:${eventId}:${type}:${updated}` (invitation: without `updated`).
+   */
   dedupeKey: string;
 }
 

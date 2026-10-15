@@ -60,7 +60,7 @@ const proxy = await startClientProxy(fake.url);
 // Report the real package version, so screenshots match what users install.
 const pkgVersion = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const config = loadConfig({ dataDir, host: "127.0.0.1", port: PORT }, pkgVersion);
-config.google = { oauthBase: proxy.url, authBase: proxy.url, gmailBase: proxy.url, pubsubBase: proxy.url };
+config.google = { oauthBase: proxy.url, authBase: proxy.url, gmailBase: proxy.url, pubsubBase: proxy.url, calendarBase: proxy.url };
 const running = await startServer({ config });
 const { ctx } = running;
 const base = running.url;

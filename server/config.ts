@@ -17,9 +17,10 @@ export interface Config {
   version: string;
   /**
    * Base URLs for Google APIs. Overridable so tests can point at test/fake-google.ts.
-   * Defaults: https://oauth2.googleapis.com, https://accounts.google.com, https://gmail.googleapis.com, https://pubsub.googleapis.com
+   * Defaults: https://oauth2.googleapis.com, https://accounts.google.com, https://gmail.googleapis.com, https://pubsub.googleapis.com,
+   * https://www.googleapis.com (Calendar: paths start with /calendar/v3).
    */
-  google: { oauthBase: string; authBase: string; gmailBase: string; pubsubBase: string };
+  google: { oauthBase: string; authBase: string; gmailBase: string; pubsubBase: string; calendarBase: string };
 }
 
 export interface ConfigInput {
@@ -52,6 +53,7 @@ export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
       authBase: process.env.AGENTINBOX_GOOGLE_AUTH_BASE ?? "https://accounts.google.com",
       gmailBase: process.env.AGENTINBOX_GOOGLE_GMAIL_BASE ?? "https://gmail.googleapis.com",
       pubsubBase: process.env.AGENTINBOX_GOOGLE_PUBSUB_BASE ?? "https://pubsub.googleapis.com",
+      calendarBase: process.env.AGENTINBOX_GOOGLE_CALENDAR_BASE ?? "https://www.googleapis.com",
     },
   };
 }

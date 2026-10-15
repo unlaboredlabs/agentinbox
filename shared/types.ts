@@ -8,8 +8,19 @@ export const NPM_PACKAGE = "agentinbox-cli";
 // ───────────────────────────── Domain enums ─────────────────────────────
 
 /** What an agent may do with a mailbox. `read` also grants search, labels, attachments and the event feed. */
-export const CAPABILITIES = ["read", "draft", "send", "organize", "trash"] as const;
+export const MAIL_CAPABILITIES = ["read", "draft", "send", "organize", "trash"] as const;
+/**
+ * What an agent may do with the account's Google Calendar (see docs/calendar.md). Independent of the mail
+ * capabilities: existing grants have none of these (mail-only).
+ * - calendar.read: list calendars, list/search/get events, free/busy, and calendar.* events in the feed.
+ * - calendar.write: create, update and delete events and respond to invitations. How a write executes is
+ *   Grant.calendarWriteMode. The console shows "no calendar.write" as write mode "None".
+ */
+export const CALENDAR_CAPABILITIES = ["calendar.read", "calendar.write"] as const;
+export const CAPABILITIES = [...MAIL_CAPABILITIES, ...CALENDAR_CAPABILITIES] as const;
 export type Capability = (typeof CAPABILITIES)[number];
+export type CalendarCapability = (typeof CALENDAR_CAPABILITIES)[number];
+export const isCalendarCapability = (c: string): c is CalendarCapability => (CALENDAR_CAPABILITIES as readonly string[]).includes(c);
 
 /**
  * How `send`/`reply`/`forward` behave for a grant.
@@ -20,6 +31,15 @@ export type Capability = (typeof CAPABILITIES)[number];
  */
 export const SEND_MODES = ["direct", "draft_only", "approval"] as const;
 export type SendMode = (typeof SEND_MODES)[number];
+
+/**
+ * How calendar writes (create/update/delete event, RSVP) execute for a grant that has `calendar.write`.
+ * - direct: applied to Google Calendar at once (attendee allowlist and send caps still apply)
+ * - approval: nothing touches Google until a human approves it in the console; approving applies the
+ *   stored change, rejecting discards it. Default for new grants.
+ */
+export const CALENDAR_WRITE_MODES = ["direct", "approval"] as const;
+export type CalendarWriteMode = (typeof CALENDAR_WRITE_MODES)[number];
 
 /** Prefix of Account.lastError when the account's Gmail watch (Pub/Sub push) couldn't be started or renewed. */
 export const GMAIL_WATCH_ERROR = "Gmail watch failed";
@@ -41,8 +61,22 @@ export const EVENT_TYPES = [
   "label.removed",
   "account.auth_failed", // refresh token revoked/expired; account needs re-auth
   "sync.gap", // history was too old; a bounded resync ran and events may be missing
+  // Google Calendar (MailEvent.calendarEvent is set, message is null). Visible with calendar.read + calendar scope.
+  "calendar.event_created", // a new event appeared on a synced calendar (not an invitation)
+  "calendar.event_updated", // a material change (detail.changes) to a known event
+  "calendar.event_cancelled", // the event was cancelled or deleted
+  "calendar.invitation_received", // someone else's event now lists the account as an attendee awaiting a response
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
+
+export const CALENDAR_EVENT_TYPES = [
+  "calendar.event_created",
+  "calendar.event_updated",
+  "calendar.event_cancelled",
+  "calendar.invitation_received",
+] as const satisfies readonly EventType[];
+export type CalendarEventType = (typeof CALENDAR_EVENT_TYPES)[number];
+export const isCalendarEventType = (t: string): t is CalendarEventType => (CALENDAR_EVENT_TYPES as readonly string[]).includes(t);
 
 export type AccountStatus = "active" | "needs_reauth" | "paused" | "error";
 export type IngestMode = "pubsub" | "poll";
@@ -143,6 +177,14 @@ export interface SetupState {
  * - client_secret_invalid: the last GoogleClientCheck found Google rejects the secret. "error".
  * - needs_reauth: an account's sign-in was rejected; one per account (accountId set). Severity "error".
  * - pubsub_failing: ingest mode is pubsub and Pub/Sub has an error (hint carries the remediation). "error".
+ * - calendar_not_added: Google Calendar isn't added to this install yet (existing installs after the upgrade).
+ *   "info"; `url` is unset, the console links its "Add Google Calendar" flow. Gone once added or dismissed.
+ * - calendar_api_disabled: Google said the Calendar API is disabled in the project (SERVICE_DISABLED). "error"
+ *   when some grant has a calendar capability, else "warning". `url` = the enable-API deep link.
+ * - calendar_scope_missing: Calendar is added to this install but this account hasn't granted the calendar
+ *   scopes (Account.calendar.missingScopes). One per account. "warning" ("error" when a grant on the account
+ *   has a calendar capability). Fixed by the per-account incremental consent.
+ * - calendar_sync_failing: calendar sync for this account keeps failing (Account.calendar.error). "error".
  */
 export type SetupWarningCode =
   | "testing_mode"
@@ -153,7 +195,11 @@ export type SetupWarningCode =
   | "redirect_uri_missing"
   | "redirect_uri_changed"
   | "needs_reauth"
-  | "pubsub_failing";
+  | "pubsub_failing"
+  | "calendar_not_added"
+  | "calendar_api_disabled"
+  | "calendar_scope_missing"
+  | "calendar_sync_failing";
 
 export interface SetupWarning {
   code: SetupWarningCode;
@@ -200,6 +246,11 @@ export interface PubsubState {
 }
 
 export interface Settings {
+  /**
+   * How often calendars are polled for changes (incremental sync with syncToken), in seconds. With a
+   * working push channel (public https publicUrl) polling slows to a 15-minute safety net. Default 60.
+   */
+  calendarPollSeconds: number;
   /** Externally reachable base URL of this instance, e.g. https://mail.example.com. Used in MCP snippets + OAuth redirect. */
   publicUrl: string;
   ingestMode: IngestMode;
@@ -330,6 +381,35 @@ export interface Account {
   refreshTokenExpiryKind: "testing" | "time_based" | null;
   /** Google Workspace domain (id_token `hd` claim), or null for a personal (non-Workspace) Google account (or not yet known). */
   workspaceDomain: string | null;
+  /**
+   * OAuth scopes Google says this account granted (token response `scope`, refreshed on every token
+   * refresh), full URLs. null when unknown.
+   */
+  grantedScopes: string[] | null;
+  /**
+   * Google Calendar state of this account. null when the account has granted none of the calendar scopes
+   * and nothing calendar-related was recorded for it (a mail-only account). Whether Calendar is wanted
+   * for it is install-wide: see CalendarSetupState (its `accounts` list covers every account).
+   */
+  calendar: AccountCalendar | null;
+}
+
+/**
+ * - not_granted: some CALENDAR_SCOPES are missing (missingScopes); mail is unaffected. Fix: per-account consent.
+ * - api_disabled: Google answered SERVICE_DISABLED: the Calendar API is off in the Cloud project.
+ * - active: scopes granted and the last probe/sync worked (or nothing has run yet).
+ * - error: the last sync failed for another reason (error says why); retried on the next poll.
+ */
+export type AccountCalendarStatus = "not_granted" | "api_disabled" | "active" | "error";
+
+export interface AccountCalendar {
+  status: AccountCalendarStatus;
+  /** CALENDAR_SCOPES (full URLs) the account hasn't granted; empty when all are granted. */
+  missingScopes: string[];
+  /** Last successful incremental sync of any of its calendars. null = never (no grant has calendar.read yet, or not granted). */
+  lastSyncAt: string | null;
+  /** Human-readable reason for api_disabled / error, null otherwise. */
+  error: string | null;
 }
 
 /** POST /api/accounts/:id/test-email: a self-addressed message sent through Gmail to prove delivery end to end. */
@@ -440,7 +520,7 @@ export interface PairingRequest {
   userCode: string;
   name: string;
   description: string | null;
-  requested: { accounts?: string[]; capabilities?: Capability[]; sendMode?: SendMode; reason?: string };
+  requested: { accounts?: string[]; capabilities?: Capability[]; sendMode?: SendMode; calendarWriteMode?: CalendarWriteMode; reason?: string };
   client: { hostname?: string; platform?: string; tool?: string; version?: string };
   /** Requester IP as seen by the daemon. */
   ip: string | null;
@@ -473,12 +553,27 @@ export interface Grant {
   allowTo: string[];
   /** Only allow sending replies inside threads the agent can already see. */
   replyOnly: boolean;
+  /** Counts mail sends and calendar writes that email people (see docs/calendar.md, "Send caps"). */
   maxSendsPerHour: number | null;
   maxSendsPerDay: number | null;
+  /**
+   * Calendar ids (CalendarInfo.id) the agent's calendar capabilities are confined to. The primary calendar is
+   * stored by its real id (the account email), never the alias "primary". null = every calendar in the
+   * account's list.
+   * Ignored without a calendar capability. Default null.
+   */
+  calendarScope: string[] | null;
+  /** How calendar.write executes. Ignored without calendar.write. Default "approval". */
+  calendarWriteMode: CalendarWriteMode;
   createdAt: string;
 }
 
-export type GrantInput = Omit<Grant, "id" | "agentId" | "createdAt">;
+/**
+ * The calendar fields are optional for older callers: omitted means "unchanged" on an existing grant and
+ * the default (calendarScope null, calendarWriteMode "approval") on a new one. Never widened by omission.
+ */
+export type GrantInput = Omit<Grant, "id" | "agentId" | "createdAt" | "calendarScope" | "calendarWriteMode"> &
+  Partial<Pick<Grant, "calendarScope" | "calendarWriteMode">>;
 
 export interface CreateAgentInput {
   name: string;
@@ -520,6 +615,162 @@ export interface MessageSummary {
   hasAttachments: boolean;
 }
 
+/**
+ * One item of the agent event feed, webhooks and listeners. The name is historical: calendar.* events use
+ * the same envelope with `message: null` and `calendarEvent` set.
+ */
+// ───────────────────────────── Calendar ─────────────────────────────
+
+export type CalendarResponseStatus = "needsAction" | "declined" | "tentative" | "accepted";
+export type CalendarAccessRole = "owner" | "writer" | "reader" | "freeBusyReader";
+
+/** A calendar in the account's calendar list (calendarList.list). */
+export interface CalendarInfo {
+  /** Google calendar id: the account email for the primary calendar, "…@group.calendar.google.com" for others. */
+  id: string;
+  /** Display name (the user's override if any). Cleaned single line. */
+  name: string;
+  primary: boolean;
+  accessRole: CalendarAccessRole;
+  timeZone: string | null;
+  /** Google's color for the calendar, e.g. "#9fe1e7" (console only). */
+  color: string | null;
+  /** Changes on it are synced into calendar.* events (owner/writer calendars, while a grant reads them). */
+  synced: boolean;
+}
+
+export interface CalendarAttendee {
+  email: string;
+  name: string | null;
+  responseStatus: CalendarResponseStatus;
+  optional: boolean;
+  organizer: boolean;
+  /** This attendee is the account itself. */
+  self: boolean;
+  /** A room or other resource. */
+  resource: boolean;
+}
+
+/** Fields compared to report a calendar.event_updated (detail.changes). */
+export type CalendarEventChange = "summary" | "time" | "location" | "description" | "attendees" | "responses" | "status" | "recurrence" | "conference";
+
+/**
+ * Normalized event metadata carried in calendar.* events and tool results. Like MessageSummary, no
+ * free text body: the description is fetched (cleaned and wrapped as untrusted) on demand. Free-text
+ * fields (summary, location, names) are third-party input: cleaned single lines, never instructions.
+ */
+export interface CalendarEventSummary {
+  /** Google event id (unique within its calendar). */
+  id: string;
+  calendarId: string;
+  /** Same across calendars (an invitation's copy on each attendee's calendar shares it). */
+  iCalUID: string | null;
+  /** Set on instances/exceptions of a recurring event: the series' event id. */
+  recurringEventId: string | null;
+  /** The event is a recurring series (has RRULEs). */
+  recurring: boolean;
+  status: "confirmed" | "tentative" | "cancelled";
+  summary: string;
+  location: string | null;
+  /** RFC 3339 date-time, or YYYY-MM-DD for all-day events (end is exclusive, as in Google). */
+  start: string;
+  end: string;
+  allDay: boolean;
+  /** The event's time zone (IANA), null when Google gave none. */
+  timeZone: string | null;
+  organizer: Address | null;
+  /** The account organizes this event. */
+  organizerSelf: boolean;
+  /** At most 50 attendees (attendeeCount has the total). */
+  attendees: CalendarAttendee[];
+  attendeeCount: number;
+  /** The account's own response, null when it isn't an attendee. */
+  selfResponse: CalendarResponseStatus | null;
+  /** Video call link (Meet or another conference), null when none. */
+  conferenceUrl: string | null;
+  /** Link to the event in Google Calendar. */
+  htmlLink: string | null;
+  /** Google's eventType ("default", "outOfOffice", "focusTime", "workingLocation", "birthday", "fromGmail"). */
+  eventType: string;
+  created: string | null;
+  updated: string | null;
+}
+
+/**
+ * What an agent asked to write (create, or the changed fields of an update). Kept on calendar approvals so
+ * the human sees exactly what will be applied. Times as in CalendarEventSummary.
+ */
+export interface CalendarEventInput {
+  summary?: string;
+  description?: string;
+  location?: string;
+  start?: string;
+  end?: string;
+  allDay?: boolean;
+  timeZone?: string;
+  /** Full attendee list after the change (emails). Omitted on update = unchanged. */
+  attendees?: string[];
+  /** Add a Google Meet link. */
+  addConference?: boolean;
+  /** RRULE/EXDATE lines, e.g. ["RRULE:FREQ=WEEKLY;COUNT=4"]. */
+  recurrence?: string[];
+}
+
+/** POST /api/google/calendar/* and GET /api/google/calendar: the install's Google Calendar setup ("Add Google Calendar"). */
+export interface CalendarSetupState {
+  /**
+   * Calendar is part of this install: every connect/reconnect requests CALENDAR_SCOPES. True by default on
+   * new installs (no account connected before the upgrade); existing installs turn it on by starting "Add Google Calendar".
+   */
+  enabled: boolean;
+  /** The operator hid the calendar_not_added notice. */
+  dismissed: boolean;
+  /** CALENDAR_SCOPES (full URLs), to list on the consent screen's Data Access page. */
+  scopes: string[];
+  /**
+   * The Calendar API in the Cloud project, as last observed: "disabled" after a SERVICE_DISABLED answer,
+   * "enabled" after any successful call, "unknown" before any account could try (no account has the scopes).
+   */
+  api: "enabled" | "disabled" | "unknown";
+  /** Deep link enabling calendar-json.googleapis.com in the saved project (null without a project id). */
+  enableApiUrl: string | null;
+  /** `gcloud services enable calendar-json.googleapis.com --project=<id>` (null without a project id). */
+  enableApiCommand: string | null;
+  /** Google Auth Platform → Data Access page of the project, to add the scopes (null without a project id). */
+  dataAccessUrl: string | null;
+  /** Every connected account. */
+  accounts: {
+    accountId: string;
+    email: string;
+    status: AccountCalendarStatus;
+    missingScopes: string[];
+    /** Calendars whose changes are synced into events (owner/writer calendars), 0 while no grant reads them. */
+    syncedCalendars: number;
+    /** A verified push channel is live for at least one synced calendar (otherwise changes arrive by polling). */
+    push: boolean;
+  }[];
+  /**
+   * Next thing to do: enable_api (api "disabled"), connect_accounts (some active account lacks the scopes; the
+   * Data Access step is shown with it, it can't be detected), done. "off" when not enabled.
+   */
+  step: "off" | "enable_api" | "connect_accounts" | "done";
+}
+
+/** PATCH /api/google/calendar. */
+export interface CalendarSetupInput {
+  enabled?: boolean;
+  dismissed?: boolean;
+}
+
+/** POST /api/accounts/connect body. `scopes` adds optional scope sets incrementally (include_granted_scopes). */
+export interface ConnectAccountInput {
+  reauthAccountId?: string;
+  scopes?: ExtraScopeName[];
+}
+/** "pubsub": the Pub/Sub scope for the provisioning account. "calendar": CALENDAR_SCOPES. */
+export const EXTRA_SCOPE_NAMES = ["pubsub", "calendar"] as const;
+export type ExtraScopeName = (typeof EXTRA_SCOPE_NAMES)[number];
+
 export interface MailEvent {
   id: string; // evt_…
   seq: number; // monotonic, used as cursor
@@ -527,9 +778,14 @@ export interface MailEvent {
   accountId: string;
   accountEmail: string;
   message: MessageSummary | null;
+  /** calendar.* events only (absent on mail events, so their payloads are unchanged). */
+  calendarEvent?: CalendarEventSummary;
   /** For label.added / label.removed. */
   labelIds?: string[];
-  /** Free-form detail for account/sync events. */
+  /**
+   * Free-form detail for account/sync events. calendar.event_updated: `{ changes: CalendarEventChange[] | null }`
+   * (null = unknown: the previous version wasn't seen). calendar.event_cancelled: `{ wasOrganizer: boolean }`.
+   */
   detail?: Record<string, unknown>;
   createdAt: string;
   /**
@@ -552,6 +808,11 @@ export interface WebhookFilter {
   /** Case-insensitive regular expression tested against the subject. */
   subject?: string;
   hasAttachments?: boolean;
+  /**
+   * calendar.* events: only these calendar ids. On calendar events `from` matches the organizer, `to` any
+   * attendee and `subject` the event summary; labelIds and hasAttachments don't apply (ignored).
+   */
+  calendarIds?: string[];
 }
 
 export interface Webhook {
@@ -602,7 +863,10 @@ export interface WebhookPayload {
   type: EventType;
   timestamp: string;
   data: MailEvent & {
-    /** Present only when the webhook has includeBody and the event concerns a message. */
+    /**
+     * Present only when the webhook has includeBody and the event concerns a message, or (calendar.* except
+     * cancelled) an event with a description: then `body` is the cleaned description, attachments empty.
+     */
     content?: MessageContent;
     /** Set instead of `content` when includeBody was requested but the body could not be fetched. */
     contentError?: string;
@@ -640,14 +904,50 @@ export interface MessageContent {
 
 // ───────────────────────────── Approvals ─────────────────────────────
 
+export const MAIL_APPROVAL_KINDS = ["send", "reply", "forward"] as const;
+/** Calendar writes queued by calendarWriteMode "approval". Approving applies the stored change; rejecting discards it. */
+export const CALENDAR_APPROVAL_KINDS = ["calendar.create", "calendar.update", "calendar.delete", "calendar.rsvp"] as const;
+export type MailApprovalKind = (typeof MAIL_APPROVAL_KINDS)[number];
+export type CalendarApprovalKind = (typeof CALENDAR_APPROVAL_KINDS)[number];
+export type ApprovalKind = MailApprovalKind | CalendarApprovalKind;
+export const isCalendarApprovalKind = (k: string): k is CalendarApprovalKind => (CALENDAR_APPROVAL_KINDS as readonly string[]).includes(k);
+
+/** The calendar change a calendar.* approval applies. */
+export interface CalendarApprovalDetail {
+  calendarId: string;
+  calendarName: string | null;
+  /** Target event (update/delete/rsvp); for create, the created event's id once applied (else null). */
+  eventId: string | null;
+  /** create: the new event; update: only the changed fields; delete/rsvp: {}. */
+  change: CalendarEventInput;
+  /** The event when the change was queued (update/delete/rsvp), to show a before/after. null for create. */
+  before: CalendarEventSummary | null;
+  /** Google etag of `before`: applying sends If-Match, so an event changed since fails instead of being overwritten. */
+  etag: string | null;
+  /** rsvp only. */
+  response: CalendarResponseStatus | null;
+  /** Google emails attendees (sendUpdates "all"); false = "none". */
+  notifyAttendees: boolean;
+  /** Addresses Google will email when applied (checked against allowTo again at approval). */
+  notified: string[];
+}
+
+/**
+ * A send or calendar change waiting for (or decided by) a human. For calendar kinds the mail fields are
+ * filled so generic lists read well: to = `calendar.notified`, cc/bcc empty, subject = event summary,
+ * body = description, draftId "" and threadId null; status "sent" means "applied" and sentMessageId holds
+ * the Google event id.
+ */
 export interface Approval {
   id: string; // apr_…
   agentId: string;
   agentName: string;
   accountId: string;
   accountEmail: string;
-  kind: "send" | "reply" | "forward";
+  kind: ApprovalKind;
   status: ApprovalStatus;
+  /** Calendar kinds only. */
+  calendar?: CalendarApprovalDetail;
   draftId: string;
   to: Address[];
   cc: Address[];
@@ -750,8 +1050,10 @@ export interface ApiError {
 //              | pubsub_project_missing | pubsub_no_account | pubsub_provision_failed (anything else)
 //   POST   /api/google/pubsub/test                    → PubsubTestResult
 //   GET    /api/accounts                              → Account[]
-//   POST   /api/accounts/connect                      → ConnectAccountResponse
+//   POST   /api/accounts/connect ConnectAccountInput  → ConnectAccountResponse
 //          400 google_client_missing (no OAuth client saved yet)
+//          {reauthAccountId, scopes:["calendar"]}: the per-account "Add Google Calendar" consent (include_granted_scopes:
+//          mail keeps working throughout; denying or unticking Calendar changes nothing)
 //   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
 //   POST   /api/accounts/connect/status {state}       → ConnectAttempt (the console's fallback when the callback page can't post to it)
 //          Connect failures (same codes on this endpoint and in the callback page's OAuthCallbackMessage):
@@ -764,6 +1066,11 @@ export interface ApiError {
 //   POST   /api/accounts/:id/pause | /resume          → Account
 //   DELETE /api/accounts/:id                          → 204 (stops watch, revokes token, deletes grants)
 //   GET    /api/accounts/:id/labels                   → GmailLabel[]
+//   GET    /api/accounts/:id/calendars                → CalendarInfo[]   (live calendarList, for the grant editor's calendar scope)
+//          409 calendar_not_granted (missing scopes; hint: run the per-account consent) | 409 calendar_api_disabled | 409 needs_reauth
+//   GET    /api/google/calendar                       → CalendarSetupState
+//   PATCH  /api/google/calendar CalendarSetupInput    → CalendarSetupState   (enable = start "Add Google Calendar"; dismiss the notice)
+//   POST   /api/google/calendar/check                 → CalendarSetupState   (probes every account with the scopes: API on? scopes still granted?)
 //   POST   /api/accounts/:id/test-email               → TestEmailResult   (sends "agentinbox test: your setup works" from the
 //          account to itself, then processes new mail at once; the resulting events are message.sent and message.received
 //          (the latter only for this test message). Audited as account.test_email. 409 account_paused | 409 needs_reauth
@@ -801,6 +1108,9 @@ export interface ApiError {
 //   GET    /skill.md                                   the agent skill (public, no secrets)
 //   /agent/v1/*                                        pairing + listener stream (see shared/agent-api.ts)
 //   GET    /health                                     HealthResponse (alias of /api/health for uptime monitors; 503 when degraded)
+//
+// Google-facing (unauthenticated; verified by channel id + X-Goog-Channel-Token):
+//   POST   /google/calendar/push                       Calendar push notifications (events.watch channels) → 204
 
 export type ConsoleStreamMessage =
   | { kind: "event"; data: MailEvent }

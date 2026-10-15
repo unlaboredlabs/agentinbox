@@ -3,6 +3,7 @@ import type { AppContext } from "../context.ts";
 import { createAccountsService } from "./accounts.ts";
 import { checkClient } from "./check.ts";
 import { clientView, callbackMode, importClient, setClient } from "./client.ts";
+import { type CalendarClient, createCalendarClient } from "./calendar.ts";
 import { createGmailClient } from "./gmail.ts";
 import { mimeTools } from "./mime.ts";
 import { completeConnect, completeConnectFromUrl, connectAttempt, revokeAccount, startConnect } from "./oauth.ts";
@@ -26,6 +27,13 @@ export function createGoogleService(ctx: AppContext): GoogleService {
     return c;
   };
 
+  const calendars = new Map<string, CalendarClient>();
+  const calendar = (accountId: string) => {
+    let c = calendars.get(accountId);
+    if (!c) calendars.set(accountId, (c = createCalendarClient(ctx, accountId)));
+    return c;
+  };
+
   return {
     clientView: () => clientView(ctx),
     setClient: (input) => setClient(ctx, input),
@@ -40,6 +48,7 @@ export function createGoogleService(ctx: AppContext): GoogleService {
     connectAttempt: (state) => connectAttempt(ctx, state),
 
     gmail,
+    calendar,
     mime: mimeTools,
     async labels(accountId, opts = {}) {
       const cache = googleRuntime(ctx).labelCache;

@@ -1,4 +1,5 @@
 import type { Config } from "./config.ts";
+import { createCalendarService } from "./calendar/index.ts";
 import { type AppContext, createCore, SERVICE_ORDER, type Services } from "./context.ts";
 import { createEventsService } from "./events/index.ts";
 import { createAccountsService, createGoogleService } from "./google/index.ts";
@@ -18,6 +19,7 @@ const FACTORIES: { [K in keyof Services]: (ctx: AppContext) => Services[K] } = {
   policy: createPolicyService,
   mail: createMailService,
   webhooks: createWebhooksService,
+  calendar: createCalendarService,
 };
 
 /** Builds the full context. Nothing runs until `startServices`. */

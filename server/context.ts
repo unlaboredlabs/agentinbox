@@ -10,6 +10,7 @@
 
 import { AuditLog } from "./audit.ts";
 import { type Bus, createBus } from "./bus.ts";
+import type { CalendarService } from "./calendar/types.ts";
 import type { Config } from "./config.ts";
 import { Crypto } from "./crypto.ts";
 import { Db } from "./db/index.ts";
@@ -45,12 +46,13 @@ export interface Services {
   policy: PolicyService;
   mail: MailService;
   webhooks: WebhooksService;
+  calendar: CalendarService;
 }
 
 export interface AppContext extends CoreContext, Services {}
 
-/** Start order. Policy and events first (no I/O), ingest last so everything it emits into is running. */
-export const SERVICE_ORDER: (keyof Services)[] = ["policy", "accounts", "events", "webhooks", "mail", "google", "ingest"];
+/** Start order. Policy and events first (no I/O), ingest and calendar sync last so everything they emit into is running. */
+export const SERVICE_ORDER: (keyof Services)[] = ["policy", "accounts", "events", "webhooks", "mail", "google", "ingest", "calendar"];
 
 export function createCore(config: Config): CoreContext {
   const db = new Db(config.dbPath);

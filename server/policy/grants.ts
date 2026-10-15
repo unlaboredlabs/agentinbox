@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CAPABILITIES, type Grant, type GrantInput, SEND_MODES } from "../../shared/types.ts";
+import { CALENDAR_WRITE_MODES, CAPABILITIES, type Grant, type GrantInput, SEND_MODES } from "../../shared/types.ts";
 import { bool, json } from "../db/index.ts";
 import { badRequest } from "../util/errors.ts";
 
@@ -33,7 +33,19 @@ export const grantInputSchema = z.object({
   replyOnly: z.boolean(),
   maxSendsPerHour: positiveCap,
   maxSendsPerDay: positiveCap,
+  // Optional: omitted = unchanged on an existing grant, default on a new one (see GrantInput).
+  calendarScope: z
+    .array(z.string().trim().min(1).max(320))
+    .min(1, "Calendar scope must list at least one calendar, or be null for every calendar")
+    .max(200)
+    .transform((ids) => [...new Set(ids)])
+    .nullable()
+    .optional(),
+  calendarWriteMode: z.enum(CALENDAR_WRITE_MODES).optional(),
 });
+
+/** Calendar fields of a new grant when the input omits them. */
+export const CALENDAR_GRANT_DEFAULTS = { calendarScope: null, calendarWriteMode: "approval" } as const satisfies Pick<Grant, "calendarScope" | "calendarWriteMode">;
 
 /** Validates and normalizes a grant. Throws HttpError(400). */
 export function parseGrantInput(input: unknown): GrantInput {
@@ -53,6 +65,9 @@ export interface GrantRow {
   reply_only: number;
   max_sends_per_hour: number | null;
   max_sends_per_day: number | null;
+  /** JSON string[] | NULL (migration 7). */
+  calendar_scope: string | null;
+  calendar_write_mode: Grant["calendarWriteMode"];
   created_at: string;
 }
 
@@ -67,5 +82,7 @@ export const toGrant = (r: GrantRow): Grant => ({
   replyOnly: bool(r.reply_only),
   maxSendsPerHour: r.max_sends_per_hour,
   maxSendsPerDay: r.max_sends_per_day,
+  calendarScope: r.calendar_scope === null ? null : json.parse<string[] | null>(r.calendar_scope, null),
+  calendarWriteMode: r.calendar_write_mode === "direct" ? "direct" : "approval",
   createdAt: r.created_at,
 });
