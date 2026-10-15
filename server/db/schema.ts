@@ -211,4 +211,10 @@ export const MIGRATIONS: string[] = [
   -- id_token "hd" claim: Workspace domain, '' = personal (non-Workspace) Google account, NULL = not known (connected before this migration).
   ALTER TABLE accounts ADD COLUMN workspace_domain TEXT;
   `,
+  /* 4: where each listener consumer started */ `
+  -- Seq the consumer's cursor started at when it was created (the head, or 0 for start=beginning):
+  -- mail at or below it predates the listener (what \`listen --backfill\` replays). NULL = created
+  -- before this migration, or by an ack (unknown).
+  ALTER TABLE listener_cursors ADD COLUMN start_seq INTEGER;
+  `,
 ];

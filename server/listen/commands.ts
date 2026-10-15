@@ -43,6 +43,29 @@ function listenFlags(cmd: Command): Command {
     .option("--save", "save these settings to the profile");
 }
 
+/** `setup-mcp --help`: exactly what it changes, per tool. */
+function mcpSetupHelp(): string {
+  return `
+What it changes (the server is named "agentinbox", or "agentinbox-<profile>" for --profile):
+  claude-code  runs \`claude mcp remove agentinbox --scope user\` then
+               \`claude mcp add-json --scope user agentinbox '{"type":"http","url":"<daemon>/mcp","headersHelper":"…"}'\`.
+               The header helper (~/.config/agentinbox/bin/mcp-header.mjs) reads the key from your profile, so
+               the key is in neither the command line nor ~/.claude.json. Backs up ~/.claude.json first
+               ($CLAUDE_CONFIG_DIR/.claude.json if set).
+  codex        adds or replaces [mcp_servers.agentinbox] in ~/.codex/config.toml ($CODEX_HOME), with the key in
+               http_headers; the file becomes 0600.
+  cursor       adds or replaces mcpServers.agentinbox in ~/.cursor/mcp.json, with the key in headers; 0600.
+  hermes       adds or replaces mcp_servers.agentinbox in ~/.hermes/config.yaml ($HERMES_HOME) and puts the key in
+               ~/.hermes/.env as AGENTINBOX_API_KEY; both 0600.
+Every file is backed up first as <file>.agentinbox-backup-<timestamp> (0600; backups of files holding the key hold it
+too). It also refreshes ~/.config/agentinbox/mcp/<profile>.claude.json (no key), which the listen recipe uses.
+
+Check it afterwards: claude mcp list · codex mcp list · agent mcp list (Cursor) · hermes mcp test agentinbox
+
+Example:
+  ${NPX} setup-mcp --tool claude-code --dry-run`;
+}
+
 export function registerListenCommands(program: Command): void {
   program
     .command("connect")
@@ -53,7 +76,7 @@ export function registerListenCommands(program: Command): void {
     .option("--account <email>", "mailbox to request access to (repeatable; the approver decides)", collect)
     .option("--capabilities <list>", "capabilities to request, e.g. read,draft (the approver decides)")
     .option("--reason <text>", "why the agent needs access (shown to the approver)")
-    .option("--setup-mcp", "also register the MCP server in the chosen tool (the key is never shown)")
+    .option("--setup-mcp", "also register the MCP server in the chosen tool (the key is never shown; `setup-mcp --help` lists exactly what changes)")
     .option("--profile <name>", `profile to save the key in (default "${DEFAULT_PROFILE}")`)
     .option("--consumer <name>", "listener cursor name (default <hostname>-<profile>)")
     .option("--log <file>", "also write the output to this file (created 0600; for running connect in the background)")
@@ -74,7 +97,9 @@ Example:
 
   profileOption(program.command("setup-mcp").description("register the agentinbox MCP server in your agent's tool, without showing the key"))
     .option("--tool <tool>", `${TOOLS.filter((t) => t !== "other").join(", ")} (default: the tool given to connect)`)
-    .action(async (flags: { tool?: string; profile?: string }) => {
+    .option("--dry-run", "print the exact commands and file changes, and change nothing")
+    .addHelpText("after", mcpSetupHelp())
+    .action(async (flags: { tool?: string; profile?: string; dryRun?: boolean }) => {
       const { parseTool, printMcpResult } = await import("./connect.ts");
       const { loadProfile } = await import("./profile.ts");
       const { setupMcp, mcpTarget } = await import("./mcpsetup.ts");
@@ -83,9 +108,10 @@ Example:
       const profile = loadProfile(name);
       const tool = flags.tool ? parseTool(flags.tool) : (profile.tool ?? "other");
       if (tool === "other") throw new Error(`Which tool? Pass --tool ${TOOLS.filter((t) => t !== "other").join("|")}.`);
-      const { writeClaudeMcpConfig } = await import("./mcpheader.ts");
-      writeClaudeMcpConfig(name, `${profile.url}/mcp`);
-      const r = setupMcp(tool, mcpTarget(name, profile), profilePath(name));
+      const { claudeMcpConfigPath, writeClaudeMcpConfig } = await import("./mcpheader.ts");
+      const r = setupMcp(tool, mcpTarget(name, profile), profilePath(name), { dryRun: flags.dryRun });
+      if (flags.dryRun) r.changes = [...(r.changes ?? []), `refresh ${claudeMcpConfigPath(name)} (keyless MCP config the Claude Code listen recipe loads)`];
+      else writeClaudeMcpConfig(name, `${profile.url}/mcp`);
       printMcpResult(r);
       if (!r.ok) process.exitCode = 1;
     });
@@ -103,7 +129,9 @@ Example:
       .description("wake a local agent on new mail: hold an outbound stream to the daemon and run a command or POST to localhost per event"),
   )
     .option("--dry-run", "print matching events without running anything (uses a throwaway <consumer>-dry-run cursor)")
-    .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists; backfill with --consumer <name>-backfill)")
+    .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists: use --backfill)")
+    .option("--backfill", "run the mail from before this listener started through --exec/--forward once, oldest first, then exit; safe while the listener runs (own cursor)")
+    .option("--until <seq>", "with --backfill: replay up to this event number instead of where the listener started", int("--until"))
     .option("--print-recipe <tool>", `print the ready-made --exec command for ${TOOLS.join(", ")} (with this machine's paths) and exit`)
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags & { printRecipe?: string }) => {

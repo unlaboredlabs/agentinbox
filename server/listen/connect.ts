@@ -3,7 +3,8 @@ import { hostname } from "node:os";
 import pc from "picocolors";
 import type { AgentTool, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
 import { CAPABILITIES, type Capability } from "../../shared/types.ts";
-import { ApiError, clientInfo, pollPairing, startPairing } from "./api.ts";
+import { ApiError, clientInfo, getSelf, pollPairing, startPairing } from "./api.ts";
+import { describeGrants } from "./grants.ts";
 import { writeClaudeMcpConfig } from "./mcpheader.ts";
 import { isServiceInstalled } from "./service.ts";
 import { setupMcp, mcpTarget, type McpSetupResult } from "./mcpsetup.ts";
@@ -173,13 +174,17 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
     throw e;
   }
 
+  const links = approveLinks(url, start);
   out();
   out(
     box([
       pc.bold("Approve this agent in the agentinbox console"),
       "",
       `Code:   ${pc.bold(pc.yellow(safeText(start.userCode, 40)))}`,
-      `Open:   ${pc.cyan(safeText(start.verificationUrl, 300))}`,
+      `Open:   ${pc.cyan(safeText(links.primary, 300))}`,
+      ...(links.publicUrl
+        ? [`  or:   ${pc.cyan(safeText(links.publicUrl, 300))}`, pc.gray(`        (first: the address this CLI used; second: the console's public URL setting)`)]
+        : []),
       `Agent:  ${safeText(name)}`,
       "",
       pc.gray("Only approve if the console shows this exact code."),
@@ -320,6 +325,8 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
     );
   }
 
+  await printGrants(url, profile.apiKey, profileName);
+
   let mcp: McpSetupResult | null = null;
   if (flags.setupMcp) {
     mcp = setupMcp(tool, mcpTarget(profileName, profile), path);
@@ -329,14 +336,51 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
   return CONNECT_EXIT.approved;
 }
 
+/**
+ * The approve link. The daemon builds it from its public URL setting (default http://localhost:<port>),
+ * which may not be the address this CLI reached it at (127.0.0.1, a LAN IP, an SSH tunnel's port): then
+ * the link on the address we used comes first, and the public-URL one is shown as well.
+ */
+export function approveLinks(url: string, start: Pick<PairingStart, "verificationUrl" | "userCode">): { primary: string; publicUrl: string | null } {
+  let advertised: URL;
+  try {
+    advertised = new URL(start.verificationUrl);
+  } catch {
+    return { primary: start.verificationUrl, publicUrl: null };
+  }
+  const ours = new URL(url);
+  if (advertised.origin === ours.origin) return { primary: start.verificationUrl, publicUrl: null };
+  // Same page on our address: keep a path prefix we connected through (reverse proxy), else swap the origin.
+  const rest = `${advertised.search}${advertised.hash}`;
+  const primary = advertised.pathname.endsWith("/approvals") ? `${url}/approvals${rest}` : `${ours.origin}${advertised.pathname}${rest}`;
+  return { primary, publicUrl: start.verificationUrl };
+}
+
+/** What the approver actually granted, in plain words (the console's choice decides, not the request). */
+async function printGrants(url: string, key: string, profileName: string): Promise<void> {
+  const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
+  try {
+    const self = await getSelf(url, key, 8000);
+    out(`  ${pc.bold("Access granted")} ${pc.gray("(chosen by whoever approved it; change it in the console under Agents):")}`);
+    for (const line of describeGrants(self.grants)) out(`    ${self.grants.length ? line : pc.yellow(line)}`);
+  } catch (e) {
+    err(pc.yellow(`! Couldn't read this agent's access yet (${e instanceof Error ? e.message.split("\n")[0] : String(e)}). Check it with: ${NPX} listen status${p}`));
+  }
+}
+
 export function printMcpResult(r: McpSetupResult): void {
-  if (r.ok) out(`${pc.green("✔")} ${r.message}`);
+  if (r.ok) out(`${r.dryRun ? pc.cyan("○") : pc.green("✔")} ${r.message}`);
   else err(`${pc.yellow("!")} ${r.message}`);
+  if (r.ok && r.changes?.length) {
+    // Indented lines are file contents; the rest are steps.
+    for (const l of r.changes) out(l.startsWith(" ") ? pc.gray(`  ${l}`) : `  - ${l}`);
+  }
   if (r.backup) out(pc.gray(`  Backup: ${r.backup}`));
   if (!r.ok && r.manual?.length) {
     out("  Do it by hand:");
     for (const l of r.manual) out(`    ${l}`);
   }
+  if (r.ok && r.verify?.length) out(`  ${r.dryRun ? "Afterwards, check it with" : "Check it with"}: ${r.verify.map((v) => pc.cyan(v)).join("; ")}`);
 }
 
 function skillCommand(tool: AgentTool, url: string): string {
@@ -369,18 +413,18 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
     out(pc.gray(`     The key is the "apiKey" field in ${profilePath(profileName)}.`));
   } else {
     out(`  ${n++}. Give ${label} the agentinbox MCP tools without ever seeing the key:`);
-    out(`       ${pc.cyan(`${NPX} setup-mcp --tool ${tool}${p}`)}`);
+    out(`       ${pc.cyan(`${NPX} setup-mcp --tool ${tool}${p}`)}  ${pc.gray("(add --dry-run to see exactly what it changes first)")}`);
   }
   out(`  ${n++}. Install the agentinbox skill so ${label} knows the rules:`);
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
-  out(`  ${n++}. Wake ${label} when mail arrives. Try it in the foreground (--save keeps the command in the profile):`);
+  out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
   out(`       ${pc.cyan(`${NPX} listen${p} --save --exec ${execArg}`)}`);
-  out(`     then keep it running in the background (systemd / launchd, starts at login):`);
-  out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   for (const note of r.notes) out(pc.gray(`     ${note}`));
-  out();
-  out(pc.gray("  What this agent may do (mailboxes, capabilities, send mode) was set by whoever approved it. New grants are draft-only:"));
-  out(pc.gray("  sends become Gmail drafts until the operator changes that in the console."));
+  out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
+  out(`     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by ${pc.green("✓")} once ${label} handled it.`);
+  out(`  ${n++}. Then keep it running in the background (systemd / launchd, starts at login; stop the foreground one first):`);
+  out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
+  out(`       ${pc.cyan(`${NPX} listen status${p}`)}  ${pc.gray("(connection, cursor, recent events and the access granted)")}`);
   out();
 }

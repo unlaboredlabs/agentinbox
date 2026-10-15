@@ -61,7 +61,7 @@ describe("starting point", () => {
     l = start({ flags: { fromStart: true } });
     await waitFor(() => api.streamRequests.length === 2, 5000, "second stream");
     expect(output).toContain('already has a position on the daemon, so --from-start does nothing');
-    expect(output).toContain("listen --from-start --consumer c-backfill");
+    expect(output).toContain("npx agentinbox-cli listen --backfill");
     expect(output).not.toContain("Processing every stored event");
     l.stop();
     await l.done;
@@ -71,7 +71,7 @@ describe("starting point", () => {
     l = start({ flags: { consumer: "fresh" } });
     await waitFor(() => api.streamRequests.length === 3, 5000, "third stream");
     expect(api.streamRequests[2]!.start).toBeNull();
-    expect(output).toContain("Listening for new events from now on. To process existing mail once, run: npx agentinbox-cli listen --from-start --consumer fresh-backfill");
+    expect(output).toContain("Listening for new events from now on. To also run the mail from before this listener started, once (in another terminal, while this keeps running): npx agentinbox-cli listen --backfill");
     l.stop();
     await l.done;
   });

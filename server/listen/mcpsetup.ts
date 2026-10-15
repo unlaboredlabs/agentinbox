@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "../../shared/agent-api.ts";
 import { backupFile, isTooOpen, writePrivateFile } from "./fsutil.ts";
-import { claudeServerEntry } from "./mcpheader.ts";
+import { claudeServerEntry, helperScriptPath } from "./mcpheader.ts";
 import type { Profile } from "./profile.ts";
 import { mcpServerName } from "./recipes.ts";
 import { NPX } from "./version.ts";
@@ -23,7 +23,27 @@ export interface McpSetupResult {
   backup?: string | null;
   /** Manual steps when automatic setup isn't possible. Never contains the key. */
   manual?: string[];
+  /** Exactly what was (or, in a dry run, would be) changed. Never contains the key. */
+  changes?: string[];
+  /** How to check it worked. */
+  verify?: string[];
+  /** Nothing was changed (--dry-run). */
+  dryRun?: boolean;
 }
+
+export interface McpSetupOptions {
+  /** Print what would change; change nothing. */
+  dryRun?: boolean;
+}
+
+/** Placeholder shown wherever the key would go in printed file contents. */
+const KEY_SHOWN = "<the key from your agentinbox profile>";
+const backupLine = (file: string) => (existsSync(file) ? `back up ${file} to ${file}.agentinbox-backup-<timestamp> (0600)` : `${file} doesn't exist yet: nothing to back up`);
+const indent = (text: string) =>
+  text
+    .replace(/\n$/, "")
+    .split("\n")
+    .map((l) => `    ${l}`);
 
 export interface McpSetupTarget {
   name: string;
@@ -42,16 +62,16 @@ export function mcpTarget(profileName: string, profile: Profile): McpSetupTarget
   return { name: mcpServerName(profileName), url: `${profile.url}/mcp`, key: profile.apiKey, profile: profileName };
 }
 
-export function setupMcp(tool: AgentTool, t: McpSetupTarget & { profile?: string }, profileFile: string): McpSetupResult {
+export function setupMcp(tool: AgentTool, t: McpSetupTarget & { profile?: string }, profileFile: string, opts: McpSetupOptions = {}): McpSetupResult {
   switch (tool) {
     case "claude-code":
-      return setupClaude(t, t.profile ?? "default");
+      return setupClaude(t, t.profile ?? "default", opts);
     case "codex":
-      return setupCodex(t, profileFile);
+      return setupCodex(t, profileFile, opts);
     case "cursor":
-      return setupCursor(t, profileFile);
+      return setupCursor(t, profileFile, opts);
     case "hermes":
-      return setupHermes(t, profileFile);
+      return setupHermes(t, profileFile, opts);
     default:
       return { ok: false, message: "No automatic MCP setup for --tool other.", manual: manualGeneric(t, profileFile) };
   }
@@ -68,14 +88,24 @@ function manualGeneric(t: McpSetupTarget, profileFile: string): string[] {
 
 export const claudeConfigFile = () => (process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : join(homedir(), ".claude.json"));
 
-function setupClaude(t: McpSetupTarget, profile: string): McpSetupResult {
+function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions): McpSetupResult {
   // headersHelper: Claude Code asks our helper for the header at connect time, so the key is never in
   // argv (visible in `ps`), in ~/.claude.json, or on screen.
-  const json = JSON.stringify(claudeServerEntry(t.url, profile));
-  const manual = [`claude mcp add-json --scope user ${t.name} '${json.replace(/'/g, `'"'"'`)}'`];
+  const json = JSON.stringify(claudeServerEntry(t.url, profile, { install: !opts.dryRun }));
+  const addCommand = `claude mcp add-json --scope user ${t.name} '${json.replace(/'/g, `'"'"'`)}'`;
+  const manual = [addCommand];
+  const file = claudeConfigFile();
+  const verify = [`claude mcp list   (shows "${t.name}" as connected; inside Claude Code: /mcp)`];
+  const changes = [
+    `write the header helper ${helperScriptPath()} (0600; reads the key from your profile when Claude Code connects)`,
+    backupLine(file),
+    `run: claude mcp remove ${t.name} --scope user   (drops an earlier "${t.name}" entry, if any)`,
+    `run: ${addCommand}`,
+    `the key stays in your agentinbox profile: neither the command line nor ${file} contains it`,
+  ];
+  if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Claude Code: nothing was changed. setup-mcp would:`, changes, verify };
   const probe = spawnSync("claude", ["--version"], { stdio: "ignore" });
   if (probe.error || probe.status !== 0) return { ok: false, message: "The `claude` CLI was not found on PATH.", manual };
-  const file = claudeConfigFile();
   const backup = backupFile(file);
   // `add-json` refuses an existing name, so replace it. argv arrays only, and nothing secret in them.
   spawnSync("claude", ["mcp", "remove", t.name, "--scope", "user"], { stdio: "ignore" });
@@ -85,7 +115,13 @@ function setupClaude(t: McpSetupTarget, profile: string): McpSetupResult {
     return { ok: false, message: `claude mcp add-json failed${out ? `: ${safeText(out, 300)}` : ""}`, backup, manual };
   }
   if (existsSync(file) && isTooOpen(file)) chmodSync(file, 0o600);
-  return { ok: true, message: `Registered MCP server "${t.name}" in Claude Code (user scope). The key stays in your agentinbox profile; Claude Code asks for it through a header helper.`, backup };
+  return {
+    ok: true,
+    message: `Registered MCP server "${t.name}" in Claude Code (user scope). The key stays in your agentinbox profile; Claude Code asks for it through a header helper.`,
+    backup,
+    changes: [`ran: ${addCommand}`, `${file} now lists "${t.name}" (user scope)`],
+    verify,
+  };
 }
 
 // ───────────── Codex (~/.codex/config.toml) ─────────────
@@ -126,7 +162,7 @@ export function codexBlock(t: McpSetupTarget): string {
   ].join("\n");
 }
 
-function setupCodex(t: McpSetupTarget, profileFile: string): McpSetupResult {
+function setupCodex(t: McpSetupTarget, profileFile: string, opts: McpSetupOptions): McpSetupResult {
   const file = codexConfigFile();
   const manual = [
     `Add to ${file}:`,
@@ -138,17 +174,21 @@ function setupCodex(t: McpSetupTarget, profileFile: string): McpSetupResult {
   const current = existsSync(file) ? readFileSync(file, "utf8") : "";
   const without = removeTomlServer(current, t.name);
   if (without === null) return { ok: false, message: `${file} defines mcp_servers inline; not rewriting it automatically.`, manual };
+  const verify = [`codex mcp list   (shows "${t.name}")`];
+  const replaces = without !== current.replace(/\n{3,}/g, "\n\n") ? `replace [mcp_servers.${t.name}] in` : `add [mcp_servers.${t.name}] to`;
+  const changes = [backupLine(file), `${replaces} ${file} (other tables are kept) and set the file to 0600, since it will hold the key:`, ...indent(codexBlock({ ...t, key: KEY_SHOWN }))];
+  if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Codex: nothing was changed. setup-mcp would:`, changes, verify };
   const backup = backupFile(file);
   const base = without.replace(/\s*$/, "");
   writePrivateFile(file, `${base ? `${base}\n\n` : ""}${codexBlock(t)}`, { privateDir: false });
-  return { ok: true, message: `Added [mcp_servers.${t.name}] to ${file} (now mode 0600: it holds the key).`, backup };
+  return { ok: true, message: `Added [mcp_servers.${t.name}] to ${file} (now mode 0600: it holds the key).`, backup, verify };
 }
 
 // ───────────── Cursor (~/.cursor/mcp.json) ─────────────
 
 export const cursorConfigFile = () => join(homedir(), ".cursor", "mcp.json");
 
-function setupCursor(t: McpSetupTarget, profileFile: string): McpSetupResult {
+function setupCursor(t: McpSetupTarget, profileFile: string, opts: McpSetupOptions): McpSetupResult {
   const file = cursorConfigFile();
   const manual = [
     `Add to ${file} under "mcpServers":`,
@@ -167,11 +207,19 @@ function setupCursor(t: McpSetupTarget, profileFile: string): McpSetupResult {
     }
   }
   const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? (doc.mcpServers as Record<string, unknown>) : {};
-  servers[t.name] = { url: t.url, headers: { Authorization: `Bearer ${t.key}` } };
+  const verify = [`agent mcp list   (Cursor CLI; or Cursor Settings → MCP shows "${t.name}")`];
+  const entry = (key: string) => ({ url: t.url, headers: { Authorization: `Bearer ${key}` } });
+  const changes = [
+    backupLine(file),
+    `${t.name in servers ? "replace" : "add"} "mcpServers.${t.name}" ${t.name in servers ? "in" : "to"} ${file} (other servers are kept) and set the file to 0600, since it will hold the key:`,
+    ...indent(`"${t.name}": ${JSON.stringify(entry(KEY_SHOWN), null, 2)}`),
+  ];
+  if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Cursor: nothing was changed. setup-mcp would:`, changes, verify };
+  servers[t.name] = entry(t.key);
   doc.mcpServers = servers;
   const backup = backupFile(file);
   writePrivateFile(file, JSON.stringify(doc, null, 2) + "\n", { privateDir: false });
-  return { ok: true, message: `Added "${t.name}" to ${file} (now mode 0600: it holds the key). Cursor may ask you to enable it once.`, backup };
+  return { ok: true, message: `Added "${t.name}" to ${file} (now mode 0600: it holds the key). Cursor may ask you to enable it once.`, backup, verify };
 }
 
 // ───────────── Hermes (~/.hermes/config.yaml + ~/.hermes/.env) ─────────────
@@ -221,7 +269,7 @@ function upsertEnvLine(text: string, key: string, value: string): string {
   return `${base ? `${base}\n` : ""}${line}\n`;
 }
 
-function setupHermes(t: McpSetupTarget, profileFile: string): McpSetupResult {
+function setupHermes(t: McpSetupTarget, profileFile: string, opts: McpSetupOptions): McpSetupResult {
   const home = hermesHome();
   const configFile = join(home, "config.yaml");
   const envFile = join(home, ".env");
@@ -238,6 +286,15 @@ function setupHermes(t: McpSetupTarget, profileFile: string): McpSetupResult {
   const current = existsSync(configFile) ? readFileSync(configFile, "utf8") : "";
   const next = upsertYamlServer(current, t.name, entry);
   if (next === null) return { ok: false, message: `${configFile} uses a layout we won't rewrite automatically.`, manual };
+  const verify = [`hermes mcp test ${t.name}`];
+  const changes = [
+    backupLine(configFile),
+    backupLine(envFile),
+    `add (or replace) "mcp_servers.${t.name}" in ${configFile} (0600):`,
+    ...indent(["mcp_servers:", `  ${t.name}:`, ...entry.map((e) => `    ${e}`)].join("\n")),
+    `set ${envVar}=${KEY_SHOWN} in ${envFile} (0600; Hermes' place for secrets)`,
+  ];
+  if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Hermes: nothing was changed. setup-mcp would:`, changes, verify };
   const envCurrent = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
   const backup = backupFile(configFile);
   const envBackup = backupFile(envFile);
@@ -245,7 +302,8 @@ function setupHermes(t: McpSetupTarget, profileFile: string): McpSetupResult {
   writePrivateFile(configFile, next.endsWith("\n") ? next : `${next}\n`, { privateDir: false });
   return {
     ok: true,
-    message: `Added "${t.name}" to ${configFile}; the key is in ${envFile} as ${envVar} (0600). Check it with: hermes mcp test ${t.name}`,
+    message: `Added "${t.name}" to ${configFile}; the key is in ${envFile} as ${envVar} (0600).`,
     backup: [backup, envBackup].filter(Boolean).join(", ") || null,
+    verify,
   };
 }
