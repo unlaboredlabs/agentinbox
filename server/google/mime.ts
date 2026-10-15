@@ -79,12 +79,18 @@ export function decodeEntities(s: string): string {
 }
 
 /**
+ * Header values longer than this are cut before decoding or address parsing: any sender controls them,
+ * and nodemailer's addressparser costs ~1 µs per character of group syntax on the main thread.
+ */
+export const MAX_HEADER_CHARS = 16_384;
+
+/**
  * Parses an address header from its raw value. Encoded-words are decoded only inside display names,
  * after parsing, so an encoded name can never inject extra addresses ("=?UTF-8?B?…?= <evil@x>").
  */
 export function parseAddresses(value: string | null | undefined): Address[] {
   if (!value?.trim()) return [];
-  return addressparser(value, { flatten: true })
+  return addressparser(value.slice(0, MAX_HEADER_CHARS), { flatten: true })
     .filter((a) => a.address && a.address.includes("@") && !/[\s<>,;"]|=\?|\?=/.test(a.address.trim()))
     .map((a) => ({ name: decodeMimeWords(a.name ?? "").trim() || null, email: a.address.trim() }));
 }
@@ -97,7 +103,9 @@ function headerMap(part: GmailPart | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   for (const h of part?.headers ?? []) {
     const k = h.name.toLowerCase();
-    if (!(k in out)) out[k] = TEXT_HEADERS.has(k) ? decodeMimeWords(h.value) : h.value;
+    if (k in out) continue;
+    const value = h.value.slice(0, MAX_HEADER_CHARS);
+    out[k] = TEXT_HEADERS.has(k) ? decodeMimeWords(value) : value;
   }
   return out;
 }
