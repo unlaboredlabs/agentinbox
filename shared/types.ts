@@ -1,0 +1,452 @@
+// Shared contract between the server (server/) and the web console (src/).
+// Everything crossing the HTTP boundary of the console API (/api/*) is typed here.
+// Timestamps are ISO-8601 strings in UTC. IDs are prefixed opaque strings (e.g. "agt_…").
+
+// ───────────────────────────── Domain enums ─────────────────────────────
+
+/** What an agent may do with a mailbox. `read` also grants search, labels, attachments and the event feed. */
+export const CAPABILITIES = ["read", "draft", "send", "organize", "trash"] as const;
+export type Capability = (typeof CAPABILITIES)[number];
+
+/**
+ * How `send`/`reply`/`forward` behave for a grant.
+ * - direct: sent immediately (still subject to allowlist + rate limits)
+ * - draft_only: a Gmail draft is created instead; a human sends it from Gmail
+ * - approval: a draft is created and an approval request is queued in the console;
+ *   approving sends the draft, rejecting deletes it
+ */
+export const SEND_MODES = ["direct", "draft_only", "approval"] as const;
+export type SendMode = (typeof SEND_MODES)[number];
+
+export const EVENT_TYPES = [
+  "message.received", // new message landed in the mailbox (not sent by the account)
+  "message.sent", // message sent from the account (by an agent or by a human)
+  "thread.reply_received", // received message in a thread the account previously sent into
+  "label.added",
+  "label.removed",
+  "account.auth_failed", // refresh token revoked/expired; account needs re-auth
+  "sync.gap", // history was too old; a bounded resync ran and events may be missing
+] as const;
+export type EventType = (typeof EVENT_TYPES)[number];
+
+export type AccountStatus = "active" | "needs_reauth" | "paused" | "error";
+export type IngestMode = "pubsub" | "poll";
+export type DeliveryStatus = "pending" | "succeeded" | "failed" | "dead";
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "sent" | "failed" | "expired";
+export type AuditOutcome = "ok" | "denied" | "error";
+export type ActorType = "agent" | "admin" | "system";
+
+/** OAuth consent configuration the operator chose in Google Cloud. Drives setup guidance only. */
+export type GoogleAppType = "internal" | "external";
+
+// ───────────────────────────── Setup / system ─────────────────────────────
+
+export interface HealthResponse {
+  status: "ok" | "degraded";
+  version: string;
+  setupComplete: boolean;
+}
+
+/** Ordered setup checklist; the console's setup wizard and overview both render this. */
+export interface SetupState {
+  /** True once an admin password exists. Before that, only /api/setup/claim with the setup token works. */
+  claimed: boolean;
+  googleClientConfigured: boolean;
+  /** Google project id (needed for Pub/Sub). */
+  gcpProjectId: string | null;
+  googleAppType: GoogleAppType | null;
+  pubsub: PubsubState;
+  accountsConnected: number;
+  agentsCreated: number;
+  /** All required steps done (claimed + client configured + ≥1 account). Pub/Sub is optional (poll fallback). */
+  complete: boolean;
+}
+
+export interface PubsubState {
+  mode: IngestMode;
+  topic: string | null; // projects/{p}/topics/{t}
+  subscription: string | null; // projects/{p}/subscriptions/{s}
+  /** Last provisioning/health error, human readable, with remediation hint. */
+  lastError: string | null;
+  /** Last time a Pub/Sub message was pulled (proves the pipeline works end-to-end). */
+  lastMessageAt: string | null;
+}
+
+export interface Settings {
+  /** Externally reachable base URL of this instance, e.g. https://mail.example.com. Used in MCP snippets + OAuth redirect. */
+  publicUrl: string;
+  ingestMode: IngestMode;
+  pollIntervalSeconds: number;
+  /** Max characters of message body returned to agents per message (0 = unlimited). */
+  maxBodyChars: number;
+  /** Days to keep events, deliveries and audit entries. */
+  retentionDays: number;
+  /** Approval requests auto-expire after this many hours. */
+  approvalTtlHours: number;
+}
+
+export interface GoogleClientConfig {
+  clientId: string;
+  /** Write-only: never returned by the API. */
+  clientSecret?: string;
+  projectId: string;
+  appType: GoogleAppType;
+}
+
+/** Returned by GET /api/google/client. */
+export interface GoogleClientView {
+  clientId: string | null;
+  hasSecret: boolean;
+  projectId: string | null;
+  appType: GoogleAppType | null;
+  /** The exact redirect URI the operator must register on the OAuth client. */
+  redirectUri: string;
+  /**
+   * "direct": Google redirects straight back to this console (localhost or https publicUrl).
+   * "paste": publicUrl is plain-http non-localhost; Google can't redirect here, so the console
+   * asks the user to paste the URL they land on after consent.
+   */
+  callbackMode: "direct" | "paste";
+}
+
+// ───────────────────────────── Accounts ─────────────────────────────
+
+export interface Account {
+  id: string; // acc_…
+  email: string;
+  displayName: string | null;
+  status: AccountStatus;
+  lastError: string | null;
+  historyId: string | null;
+  watchExpiresAt: string | null;
+  lastSyncAt: string | null;
+  createdAt: string;
+}
+
+export interface GmailLabel {
+  id: string; // Gmail label id, e.g. "INBOX" or "Label_123"
+  name: string;
+  type: "system" | "user";
+}
+
+/** POST /api/accounts/connect → start OAuth. */
+export interface ConnectAccountResponse {
+  authUrl: string;
+  /** Echoed state; in paste mode the console POSTs the pasted URL to /api/accounts/connect/complete. */
+  state: string;
+  callbackMode: "direct" | "paste";
+}
+
+// ───────────────────────────── Agents & grants ─────────────────────────────
+
+export interface Agent {
+  id: string; // agt_…
+  name: string;
+  description: string | null;
+  /** First chars of the key, for identification (e.g. "aib_7Hk2"). The full key is shown once at creation/rotation. */
+  keyPrefix: string;
+  disabled: boolean;
+  lastUsedAt: string | null;
+  createdAt: string;
+  grants: Grant[];
+}
+
+export interface Grant {
+  id: string; // grt_…
+  agentId: string;
+  accountId: string;
+  capabilities: Capability[];
+  /** Gmail label ids the agent is confined to (thread-level: a thread is visible if any message carries one). null = whole mailbox. */
+  labelScope: string[] | null;
+  sendMode: SendMode;
+  /** Recipient allowlist: exact addresses or "*@domain.com" globs. Empty = any recipient. */
+  allowTo: string[];
+  /** Only allow sending replies inside threads the agent can already see. */
+  replyOnly: boolean;
+  maxSendsPerHour: number | null;
+  maxSendsPerDay: number | null;
+  createdAt: string;
+}
+
+export type GrantInput = Omit<Grant, "id" | "agentId" | "createdAt">;
+
+export interface CreateAgentInput {
+  name: string;
+  description?: string | null;
+  grants?: GrantInput[];
+}
+
+/** Returned once on create and on key rotation. */
+export interface AgentWithKey {
+  agent: Agent;
+  apiKey: string; // aib_…
+}
+
+// ───────────────────────────── Events ─────────────────────────────
+
+export interface Address {
+  name: string | null;
+  email: string;
+}
+
+/** Normalized message metadata carried in events. No bodies are stored server-side. */
+export interface MessageSummary {
+  id: string; // Gmail message id
+  threadId: string;
+  from: Address | null;
+  to: Address[];
+  cc: Address[];
+  subject: string;
+  snippet: string;
+  date: string; // ISO
+  labelIds: string[];
+  hasAttachments: boolean;
+}
+
+export interface MailEvent {
+  id: string; // evt_…
+  seq: number; // monotonic, used as cursor
+  type: EventType;
+  accountId: string;
+  accountEmail: string;
+  message: MessageSummary | null;
+  /** For label.added / label.removed. */
+  labelIds?: string[];
+  /** Free-form detail for account/sync events. */
+  detail?: Record<string, unknown>;
+  createdAt: string;
+}
+
+// ───────────────────────────── Webhooks ─────────────────────────────
+
+export interface WebhookFilter {
+  accountIds?: string[];
+  /** Match if the message has any of these label ids. */
+  labelIds?: string[];
+  /** Glob on sender address, e.g. "*@stripe.com". Any match passes. */
+  from?: string[];
+  /** Glob on any to/cc address. */
+  to?: string[];
+  /** Case-insensitive regular expression tested against the subject. */
+  subject?: string;
+  hasAttachments?: boolean;
+}
+
+export interface Webhook {
+  id: string; // whk_…
+  agentId: string;
+  name: string;
+  url: string;
+  eventTypes: EventType[];
+  filter: WebhookFilter;
+  /** Include the cleaned message body (markdown) in the payload. */
+  includeBody: boolean;
+  enabled: boolean;
+  /** Shown once at creation and on rotation ("whsec_…", Standard Webhooks format). */
+  secretPrefix: string;
+  createdAt: string;
+  stats: { succeeded24h: number; failed24h: number; lastDeliveryAt: string | null };
+}
+
+export type WebhookInput = Omit<Webhook, "id" | "secretPrefix" | "createdAt" | "stats">;
+
+export interface WebhookWithSecret {
+  webhook: Webhook;
+  secret: string;
+}
+
+export interface Delivery {
+  id: string; // dlv_…
+  webhookId: string;
+  eventId: string;
+  eventType: EventType;
+  status: DeliveryStatus;
+  attempts: number;
+  nextAttemptAt: string | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  /** First ~500 chars of the receiver's response body. */
+  lastResponse: string | null;
+  durationMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Webhook HTTP request body. Signed per https://www.standardwebhooks.com:
+ * headers webhook-id, webhook-timestamp, webhook-signature ("v1,<base64 hmac-sha256>").
+ */
+export interface WebhookPayload {
+  type: EventType;
+  timestamp: string;
+  data: MailEvent & {
+    /** Present only when the webhook has includeBody and the event concerns a message. */
+    content?: MessageContent;
+  };
+}
+
+// ───────────────────────────── Message content (returned to agents) ─────────────────────────────
+
+/** Signals attached to content. Informational: the content itself is still delivered (cleaned, not censored). */
+export interface ContentSignals {
+  /** Invisible content (display:none, zero-size/transparent text, HTML comments, zero-width/tag unicode) was removed. */
+  hiddenContentRemoved: boolean;
+  /** Phrases that commonly appear in prompt-injection attempts ("ignore previous instructions", …). */
+  suspiciousInstructions: string[];
+  /** SPF/DKIM/DMARC results parsed from Authentication-Results. null when the header is absent. */
+  auth: { spf: string | null; dkim: string | null; dmarc: string | null } | null;
+  /** Sender is outside the account's own domain. */
+  external: boolean;
+}
+
+export interface Attachment {
+  id: string; // Gmail attachment id
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface MessageContent {
+  /** Body converted to markdown (from HTML) or the plain-text part. */
+  body: string;
+  truncated: boolean;
+  attachments: Attachment[];
+  signals: ContentSignals;
+}
+
+// ───────────────────────────── Approvals ─────────────────────────────
+
+export interface Approval {
+  id: string; // apr_…
+  agentId: string;
+  agentName: string;
+  accountId: string;
+  accountEmail: string;
+  kind: "send" | "reply" | "forward";
+  status: ApprovalStatus;
+  draftId: string;
+  to: Address[];
+  cc: Address[];
+  bcc: Address[];
+  subject: string;
+  /** Full body as the agent wrote it (markdown/plain). */
+  body: string;
+  threadId: string | null;
+  attachments: { filename: string; size: number }[];
+  /** Why the agent says it is sending (optional `reason` tool arg). */
+  reason: string | null;
+  decidedAt: string | null;
+  decisionNote: string | null;
+  sentMessageId: string | null;
+  error: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
+
+// ───────────────────────────── Audit ─────────────────────────────
+
+export interface AuditEntry {
+  id: number;
+  ts: string;
+  actorType: ActorType;
+  actorId: string | null;
+  actorName: string | null;
+  action: string; // MCP tool name or console action, e.g. "send_message", "agent.create"
+  accountId: string | null;
+  target: string | null; // message/thread/draft id
+  outcome: AuditOutcome;
+  /** For denials: the guardrail that blocked it, e.g. "allow_to", "label_scope", "rate_limit". */
+  reason: string | null;
+  durationMs: number | null;
+  detail: Record<string, unknown> | null;
+}
+
+// ───────────────────────────── Overview ─────────────────────────────
+
+export interface OverviewStats {
+  accounts: { total: number; active: number; needsAttention: number };
+  agents: { total: number; activeLast24h: number };
+  events24h: number;
+  deliveries24h: { succeeded: number; failed: number };
+  pendingApprovals: number;
+  toolCalls24h: number;
+  denied24h: number;
+  /** Hourly buckets for the last 24h, oldest first. */
+  activity: { hour: string; events: number; toolCalls: number }[];
+}
+
+// ───────────────────────────── Pagination & errors ─────────────────────────────
+
+export interface Page<T> {
+  items: T[];
+  /** Opaque cursor for the next page; null when exhausted. */
+  nextCursor: string | null;
+}
+
+/** All non-2xx console API responses have this body. */
+export interface ApiError {
+  error: { code: string; message: string; hint?: string };
+}
+
+// ───────────────────────────── Console API route map ─────────────────────────────
+// Session: cookie `aib_session` (HttpOnly, SameSite=Lax). Mutating requests must send header
+// `x-agentinbox-csrf: 1` (simple CSRF guard; the console fetch wrapper always sets it).
+//
+// Unauthenticated:
+//   GET    /api/health                                → HealthResponse
+//   GET    /api/setup/status                          → { claimed: boolean }
+//   POST   /api/setup/claim {token,password}          → 204 + session cookie (only while unclaimed)
+//   POST   /api/auth/login {password}                 → 204 + session cookie (5 failures/IP → 15 min lockout)
+//   POST   /api/auth/logout                           → 204
+//   GET    /oauth/callback?code&state                 → HTML (redirects to console /accounts?connected=…)
+//
+// Authenticated (admin session):
+//   GET    /api/setup/state                           → SetupState
+//   GET    /api/settings                              → Settings
+//   PATCH  /api/settings Partial<Settings>            → Settings
+//   POST   /api/auth/password {current,next}          → 204
+//   GET    /api/google/client                         → GoogleClientView
+//   PUT    /api/google/client GoogleClientConfig      → GoogleClientView
+//   POST   /api/google/pubsub/provision               → PubsubState   (creates topic + IAM + subscription using a connected account's token)
+//   POST   /api/google/pubsub/test                    → { ok: boolean; message: string }
+//   GET    /api/accounts                              → Account[]
+//   POST   /api/accounts/connect                      → ConnectAccountResponse
+//   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
+//   POST   /api/accounts/:id/resync                   → Account
+//   POST   /api/accounts/:id/pause | /resume          → Account
+//   DELETE /api/accounts/:id                          → 204 (stops watch, revokes token, deletes grants)
+//   GET    /api/accounts/:id/labels                   → GmailLabel[]
+//   GET    /api/agents                                → Agent[]
+//   POST   /api/agents CreateAgentInput               → AgentWithKey
+//   GET    /api/agents/:id                            → Agent
+//   PATCH  /api/agents/:id {name?,description?,disabled?} → Agent
+//   POST   /api/agents/:id/rotate-key                 → AgentWithKey
+//   DELETE /api/agents/:id                            → 204
+//   PUT    /api/agents/:id/grants/:accountId GrantInput → Grant   (upsert; one grant per agent×account)
+//   DELETE /api/agents/:id/grants/:accountId          → 204
+//   POST   /api/agents/:id/test                       → { ok: boolean; tools: string[]; message: string } (runs MCP initialize+tools/list as the agent)
+//   GET    /api/webhooks?agentId                      → Webhook[]
+//   POST   /api/webhooks WebhookInput                 → WebhookWithSecret
+//   PATCH  /api/webhooks/:id Partial<WebhookInput>    → Webhook
+//   POST   /api/webhooks/:id/rotate-secret            → WebhookWithSecret
+//   POST   /api/webhooks/:id/test                     → Delivery  (sends a synthetic event synchronously)
+//   DELETE /api/webhooks/:id                          → 204
+//   GET    /api/deliveries?webhookId&status&cursor    → Page<Delivery>
+//   POST   /api/deliveries/:id/replay                 → Delivery
+//   GET    /api/events?accountId&type&cursor          → Page<MailEvent>
+//   GET    /api/events/stream                         → text/event-stream of {kind:"event"|"delivery"|"approval"|"audit", data}
+//   GET    /api/approvals?status                      → Approval[]
+//   POST   /api/approvals/:id/approve {note?}         → Approval
+//   POST   /api/approvals/:id/reject {note?}          → Approval
+//   GET    /api/audit?agentId&outcome&cursor          → Page<AuditEntry>
+//   GET    /api/overview                              → OverviewStats
+//
+// Agent-facing (bearer = agent API key):
+//   POST/GET/DELETE /mcp                               MCP streamable HTTP (stateless)
+//   GET    /skill.md                                   the agent skill (public, no secrets)
+
+export type ConsoleStreamMessage =
+  | { kind: "event"; data: MailEvent }
+  | { kind: "delivery"; data: Delivery }
+  | { kind: "approval"; data: Approval }
+  | { kind: "audit"; data: AuditEntry };
