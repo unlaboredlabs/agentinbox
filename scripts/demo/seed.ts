@@ -12,7 +12,8 @@
 // Serves the console from dist/web (run `pnpm build` or `pnpm exec vite build` first), or point
 // Vite at it: AGENTINBOX_DEV_SERVER=http://127.0.0.1:8531 pnpm exec vite --host 127.0.0.1
 //
-// Writes /tmp/agentinbox-demo-<port>.json with { url, password, cookie } for screenshot scripts.
+// Writes /tmp/agentinbox-demo-<port>.json with { url, password, cookie } for screenshot scripts
+// (--fresh: { url, setupUrl, client }, the OAuth client to import).
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -116,7 +117,7 @@ if (args.fresh) {
   Client secret:  ${DEMO_CLIENT.clientSecret}
   Fake accounts:  ${OPS} (consent is automatic; queue another with the next connect)
 `);
-  writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify({ url: base, setupUrl: `${base}/setup?token=${token}`, fresh: true }));
+  writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify({ url: base, setupUrl: `${base}/setup?token=${token}`, fresh: true, client: DEMO_CLIENT }));
   // The only mailbox consents automatically; with --pubsub-fail scope, consent is Gmail-only.
   if (consentScopes) setInterval(() => fake.consentAs(OPS, { scopes: consentScopes }), 3000).unref();
   await new Promise(() => {});
