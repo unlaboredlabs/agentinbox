@@ -38,6 +38,8 @@ export interface InternalState {
     pendingPrincipalAccountId?: string | null;
   };
   "admin.passwordHash": string;
+  /** When SetupState.verified first had evidence; kept so pruning the audit log doesn't undo it. */
+  "setup.verifiedAt": string;
 }
 
 export type InternalKey = keyof InternalState;

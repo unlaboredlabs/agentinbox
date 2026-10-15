@@ -38,7 +38,10 @@ export interface ListenFlags {
 export interface EffectiveConfig {
   exec: string | null;
   forward: { url: string; secret: string } | null;
-  types: EventType[] | undefined;
+  /** Never empty: DEFAULT_LISTEN_TYPES unless --types or the profile says otherwise. */
+  types: EventType[];
+  /** Neither --types nor the profile named types: `types` is DEFAULT_LISTEN_TYPES. */
+  typesDefaulted: boolean;
   filter: WebhookFilter | undefined;
   includeBody: boolean;
   concurrency: number;
@@ -53,11 +56,24 @@ export interface EffectiveConfig {
 
 export const DEFAULTS = { concurrency: 2, timeoutSeconds: 300, maxAttempts: 5 } as const;
 
+/**
+ * Event types a listener gets when neither --types nor the profile names any: new mail only. Each
+ * event can start a paid agent run, so mail the account sends (message.sent, also the console's
+ * test email) and label changes don't wake it unless asked for with --types.
+ */
+export const DEFAULT_LISTEN_TYPES: readonly EventType[] = ["message.received"];
+
+/** Comma-separated event types; "all" means every type. */
 export function parseTypes(value: string): EventType[] {
   const list = value
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  if (!list.length) throw new Error(`--types needs at least one event type (or "all"). Choose from: ${EVENT_TYPES.join(", ")}.`);
+  if (list.includes("all")) {
+    if (list.length > 1) throw new Error(`--types all can't be combined with other types.`);
+    return [...EVENT_TYPES];
+  }
   const bad = list.filter((t) => !(EVENT_TYPES as readonly string[]).includes(t));
   if (bad.length) throw new Error(`Unknown event type${bad.length > 1 ? "s" : ""} ${bad.join(", ")}. Choose from: ${EVENT_TYPES.join(", ")}.`);
   return [...new Set(list)] as EventType[];
@@ -146,7 +162,9 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
   }
   if (forward) validateForwardUrl(forward.url);
 
-  const types = flags.types !== undefined ? parseTypes(flags.types) : profile.types;
+  // Saved as given (no types saved = the default), so the profile follows the default if it changes.
+  const typesDefaulted = flags.types === undefined && !profile.types?.length;
+  const types = flags.types !== undefined ? parseTypes(flags.types) : typesDefaulted ? [...DEFAULT_LISTEN_TYPES] : profile.types!;
   const filter = filterFromFlags(flags) ?? profile.filter;
   const includeBody = flags.includeBody ?? profile.includeBody ?? false;
   const concurrency = positiveInt(flags.concurrency, "--concurrency", 32) ?? profile.concurrency ?? DEFAULTS.concurrency;
@@ -165,7 +183,7 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
       next.forward = forward ?? undefined;
       if (forward) delete next.forwardSecret;
     }
-    if (flags.types !== undefined) next.types = types?.length ? types : undefined;
+    if (flags.types !== undefined) next.types = types;
     if (filterFromFlags(flags)) next.filter = filter;
     if (flags.includeBody !== undefined) next.includeBody = includeBody;
     if (flags.concurrency !== undefined) next.concurrency = concurrency;
@@ -176,13 +194,29 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
     if (flags.cwd !== undefined) next.cwd = chosenCwd;
   }
 
-  return { config: { exec, forward, types, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
+  return { config: { exec, forward, types, typesDefaulted, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
+}
+
+/** Notes about the event types for the listener's log: the default in use, or types that overlap. */
+export function typesNotes(c: Pick<EffectiveConfig, "types" | "typesDefaulted">): { info: string[]; warn: string[] } {
+  const info: string[] = [];
+  const warn: string[] = [];
+  if (c.typesDefaulted) info.push(`Using default types: ${DEFAULT_LISTEN_TYPES.join(", ")} (add --types all for every event).`);
+  if (c.types.length === EVENT_TYPES.length) {
+    // Recommended for "every event", so a note rather than a warning.
+    info.push("With all types, each reply also arrives as thread.reply_received: dedupe on the message id.");
+  } else if (c.types.includes("message.received") && c.types.includes("thread.reply_received")) {
+    warn.push(
+      "thread.reply_received is a subset of message.received: with both, every reply to a thread you sent runs your command twice. Keep one of them (--types thread.reply_received for replies only).",
+    );
+  }
+  return { info, warn };
 }
 
 /** One-line description of the filter for the console. */
 export function describeFilter(c: Pick<EffectiveConfig, "types" | "filter">): string {
   const parts: string[] = [];
-  if (c.types?.length) parts.push(`types ${c.types.join(", ")}`);
+  if (c.types?.length) parts.push(c.types.length === EVENT_TYPES.length ? "all event types" : `types ${c.types.join(", ")}`);
   const f = c.filter ?? {};
   if (f.from?.length) parts.push(`from ${f.from.join(" | ")}`);
   if (f.to?.length) parts.push(`to ${f.to.join(" | ")}`);

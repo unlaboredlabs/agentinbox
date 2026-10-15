@@ -85,6 +85,38 @@ describe("migration 5", () => {
   });
 });
 
+describe("migration 6", () => {
+  const upTo5 = (dir: string, withMcp: boolean) => {
+    const path = join(dir, "db.sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+    MIGRATIONS.slice(0, 5).forEach((sql, i) => {
+      raw.exec(sql);
+      raw.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)").run(i + 1, "2026-01-01T00:00:00.000Z");
+    });
+    raw
+      .prepare("INSERT INTO agents (id, name, key_prefix, key_hash, created_at, last_mcp_at) VALUES ('agt_1', 'a', 'aib_x', 'h', ?, ?)")
+      .run("2026-01-01T00:00:00.000Z", withMcp ? "2026-01-02T00:00:00.000Z" : null);
+    raw.close();
+    return path;
+  };
+
+  it("keeps an install verified where an agent already reached /mcp (its audit rows may be pruned)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentinbox-mig-"));
+    try {
+      const db = new Db(upTo5(dir, true));
+      const v = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'setup.verifiedAt'");
+      expect(Date.parse(JSON.parse(v!.value) as string)).not.toBeNaN();
+      db.close();
+      const fresh = new Db(upTo5(mkdtempSync(join(dir, "b-")), false));
+      expect(fresh.get("SELECT 1 FROM settings WHERE key = 'setup.verifiedAt'")).toBeUndefined();
+      fresh.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("glob", () => {
   it("matches address globs case-insensitively", () => {
     expect(matchesGlob("Bob@Example.com", "*@example.com")).toBe(true);

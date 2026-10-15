@@ -4,8 +4,9 @@ Webhooks need a public endpoint, and MCP pull only works while an agent session 
 agent that's asleep on a laptop behind NAT: Claude Code, Codex, Cursor or Hermes.
 
 `agentinbox listen` runs on the agent's own machine. It keeps an **outbound** connection to the agentinbox daemon, so
-there are no open ports, tunnels or public URLs. For each new email event it runs a local command or POSTs to a
-localhost URL. The command runs on the agent's machine with that agent's own grant. The daemon never executes anything.
+there are no open ports, tunnels or public URLs. For each new email it runs a local command or POSTs to a
+localhost URL. By default only incoming mail (`message.received`) counts: mail the account sends doesn't wake your agent,
+so each run is for mail someone sent you. `--types` adds other events (see below). The command runs on the agent's machine with that agent's own grant. The daemon never executes anything.
 
 ```
  agentinbox daemon ──(event stream over HTTPS, opened by the laptop)──▶ agentinbox listen ──▶ claude -p … / codex exec … / your script
@@ -108,6 +109,22 @@ Flags override the profile, and `--save` writes them back. Overrides work group 
 - Passing `--exec` or `--forward` replaces both saved targets.
 - Passing any of `--from`, `--to`, `--label` or `--subject` replaces the saved filter.
 - `--types` replaces the saved types.
+
+**Which events:** without `--types` (and with none saved in the profile), a listener gets only `message.received`, so
+each run is for new mail someone sent the account. That keeps a paid agent from starting for every email you send
+yourself. Choose others with a comma-separated list, or `all`:
+
+```sh
+npx agentinbox-cli listen --save --types thread.reply_received --exec '…'  # only replies to threads the account sent
+npx agentinbox-cli listen --save --types message.received,label.added --exec '…'
+npx agentinbox-cli listen --save --types all --exec '…'   # also message.sent, label.added/removed, account.auth_failed, sync.gap
+```
+
+With `--types all`, each reply also arrives as `thread.reply_received` after its `message.received`: dedupe on the
+message id (`event.data.message.id`).
+
+`thread.reply_received` is a subset of `message.received`: a reply produces both events. Don't combine the two, or
+each reply runs your command twice (the listener warns about it). The startup log says when the default is in use.
 
 `--dry-run` prints matching events without running anything. It uses a separate throwaway consumer
 (`<consumer>-dry-run`) that starts at the current position and is never advanced, so it neither moves nor creates the

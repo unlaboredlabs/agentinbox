@@ -3,13 +3,15 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentTool } from "../shared/agent-api.ts";
-import type { AuditEntry, ListenerInfo, MailEvent } from "../shared/types.ts";
+import type { AuditEntry, ListenerInfo, MailEvent, SetupState } from "../shared/types.ts";
 import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
+import { allStepsDone, type SetupDraft, STEP_META, startsVerify, type StepId, type StepStatus, stepStatuses } from "../src/components/setup/steps.ts";
 import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
+import { fmtAgo } from "../src/lib/format.ts";
 
 // ───────────── Verify checks ─────────────
 
@@ -222,6 +224,10 @@ describe("connectCommands matches what `connect` prints", () => {
     // connect prints the bare service install (after --save); the console repeats --exec so it also works alone.
     expect(cli).toContain(`${NPX} listen service install`);
     expect(c.listenService).toBe(`${NPX} listen service install --exec ${sub}`);
+    // Neither passes --types: listen's default (new mail only) applies, and connect says so.
+    expect(c.listenTry).not.toContain("--types");
+    expect(c.listenService).not.toContain("--types");
+    expect(cli.some((l) => l.includes("Only new mail wakes it (message.received), not mail you send"))).toBe(true);
   });
 
   it("other: the service runs the same script connect suggests; the try command is a harmless test", () => {
@@ -261,5 +267,92 @@ describe("grantInWords", () => {
   });
   it("nothing granted", () => {
     expect(grantInWords({ capabilities: [], sendMode: "direct" })).toBe("No access");
+  });
+});
+
+// ───────────── Stepper: when "Check that it works" is done ─────────────
+
+describe("stepStatuses: the verify step", () => {
+  const state = (verified: boolean): SetupState => ({
+    claimed: true,
+    googleClientConfigured: true,
+    gcpProjectId: "p-123456",
+    googleAppType: "external",
+    pubsub: { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null, principalAccountId: null, principalEmail: null, pendingPrincipalAccountId: null, pendingPrincipalEmail: null },
+    accountsConnected: 1,
+    agentsCreated: 1,
+    verified,
+    complete: true,
+    warnings: [],
+  });
+  const verify = (verified: boolean, draft: SetupDraft) => stepStatuses(state(verified), draft).verify;
+
+  it("follows the server for browsers that never opened the step (old installs, other browsers)", () => {
+    expect(verify(true, {})).toBe("done");
+    expect(verify(false, {})).toBe("todo");
+  });
+
+  it("stays todo once this browser started the step, until Finish", () => {
+    // The server has evidence (a tool call) long before the listener and the test email.
+    expect(verify(true, { verifyStarted: true })).toBe("todo");
+    expect(allStepsDone(stepStatuses(state(true), { verifyStarted: true, pubsubSkipped: true }))).toBe(false);
+    // "Finish setup" or "Finish without checking".
+    expect(verify(true, { verifyStarted: true, verified: true })).toBe("done");
+    expect(verify(false, { verifyStarted: true, verified: true })).toBe("done");
+  });
+
+  it("calls setup done without the optional real-time delivery step", () => {
+    expect(allStepsDone(stepStatuses(state(true), {}))).toBe(true);
+    expect(STEP_META.pubsub.short).toBe("Real-time delivery");
+  });
+});
+
+// ───────────── Relative times ─────────────
+
+describe("fmtAgo", () => {
+  const now = Date.parse(SENT_AT);
+  it('says "just now" under 10 seconds instead of "0 seconds ago"', () => {
+    expect(fmtAgo(SENT_AT, now)).toBe("just now");
+    expect(fmtAgo(later(-9), now)).toBe("just now");
+    expect(fmtAgo(later(1), now)).toBe("just now"); // clock skew
+    expect(fmtAgo(later(-12), now)).toBe("12 seconds ago");
+    expect(fmtAgo(later(-180), now)).toBe("3 minutes ago");
+    expect(fmtAgo(later(30), now)).toBe("in 30 seconds");
+    expect(fmtAgo(null, now)).toBe("—");
+  });
+});
+
+describe("startsVerify: which steps start the end-to-end check in this browser", () => {
+  const statuses = (over: Partial<Record<StepId, StepStatus>> = {}): Record<StepId, StepStatus> => ({
+    url: "done",
+    project: "done",
+    consent: "done",
+    client: "done",
+    accounts: "done",
+    pubsub: "skipped",
+    agent: "todo",
+    verify: "todo",
+    ...over,
+  });
+
+  it("starts on step 7 while no agent exists, so an early tool call can't complete step 8", () => {
+    expect(startsVerify("agent", statuses(), {})).toBe(true);
+    // Then the server's evidence arrives (a tool call before step 8 is opened): step 8 stays todo.
+    const s = { claimed: true, googleClientConfigured: true, gcpProjectId: "p-123456", googleAppType: "external", accountsConnected: 1, agentsCreated: 1, verified: true } as SetupState;
+    expect(stepStatuses({ ...s, pubsub: { mode: "poll" } } as SetupState, { verifyStarted: true }).verify).toBe("todo");
+  });
+
+  it("starts on step 8 while it is todo", () => {
+    expect(startsVerify("verify", statuses({ agent: "done" }), {})).toBe(true);
+  });
+
+  it("doesn't start on an install already verified, or twice", () => {
+    expect(startsVerify("verify", statuses({ agent: "done", verify: "done" }), {})).toBe(false);
+    expect(startsVerify("agent", statuses({ agent: "done", verify: "done" }), {})).toBe(false);
+    expect(startsVerify("verify", statuses({ agent: "done" }), { verifyStarted: true })).toBe(false);
+    expect(startsVerify("verify", statuses({ agent: "done" }), { verified: true })).toBe(false);
+    // Revisiting step 7 to add a second agent changes nothing.
+    expect(startsVerify("agent", statuses({ agent: "done" }), {})).toBe(false);
+    expect(startsVerify("accounts", statuses(), {})).toBe(false);
   });
 });

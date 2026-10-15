@@ -19,7 +19,7 @@ import { api, apiGet } from "@/lib/api";
 import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { updateDraft } from "./progress";
+import { readDraft, updateDraft, useSetupProgress } from "./progress";
 import { activeTest, TEST_SUBJECT, type VerifyTest, verifyChecks } from "./verify-checks";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
@@ -367,7 +367,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
                 "Agents created with a copied key can't run a listener. Use a webhook from the agent's page instead."
               )
             ) : listenDone ? (
-              "It keeps a connection open and runs your command for each new email."
+              "It keeps a connection open and runs your command for each new email you receive."
             ) : undefined
           }
         >
@@ -380,7 +380,8 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
                   ? "This test command only confirms each email (a ✓ line per email); it starts nothing."
                   : (
                     <>
-                      Starts {label} for each new email, with only the agentinbox tools. Just testing delivery?{" "}
+                      Starts {label} for each new email you receive (not mail you send), with only the agentinbox tools. Add{" "}
+                      <code className="font-mono whitespace-nowrap text-foreground">--types</code> to wake it for other events too. Just testing delivery?{" "}
                       <code className="font-mono whitespace-nowrap text-foreground">--exec {shellQuote(LISTEN_TEST_EXEC)}</code> only confirms each email.
                     </>
                   )}
@@ -440,11 +441,11 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
           }
           detail={
             delivered
-              ? "Its terminal shows a ✓ line for the email."
+              ? "Its terminal shows one ✓ line for the email."
               : !skipListen && receivedDone
                 ? resendForListener
                   ? "The listener wasn't running when this email was sent, so it starts after it. Send another test email now that the listener is running."
-                  : "Look for a ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
+                  : "Look for one ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
                 : undefined
           }
         />
@@ -527,6 +528,7 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const selectId = useId();
+  const verifyTodo = useSetupProgress().statuses.verify === "todo";
 
   const send = async () => {
     if (!accountId) return;
@@ -537,6 +539,8 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
       // Only listeners known now can be credited with delivering it (see VerifyTest.listenersAtSend). A briefly
       // disconnected one keeps its cursor and handles the mail when it reconnects, so it counts too.
       writeState({ test: { ...res, accountId, listenersAtSend: agent.listeners.map((l) => l.consumer) } });
+      // Only while the step is unfinished: on an install already verified, a test changes nothing.
+      if (verifyTodo && !readDraft().verifyStarted) updateDraft({ verifyStarted: true });
     } catch (err) {
       setError(err);
     } finally {

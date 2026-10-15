@@ -57,7 +57,8 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    again any time with `npx -y agentinbox-cli listen status` (the `Access` line) or the `list_accounts` tool.
 4. To be woken when mail arrives, install the listener (ask the user first: it's a background service on their
    machine). It keeps an outbound connection to agentinbox (no open ports), starts with mail that arrives from now on,
-   and runs your command once per event with the event as JSON on stdin, in a private working directory:
+   and runs your command once per new email (`message.received` only: mail the account sends doesn't wake you; the
+   user can add others with `--types`) with the event as JSON on stdin, in a private working directory:
 
    ```sh
    npx -y agentinbox-cli listen service install --exec "$(npx -y agentinbox-cli listen --print-recipe <tool>)"
@@ -201,8 +202,9 @@ blocked and why. The usual ones:
 ## Reacting to new mail
 
 Events are `message.received`, `message.sent`, `thread.reply_received` (someone answered a thread the account sent
-into), `label.added`, `label.removed`, `account.auth_failed` and `sync.gap`. You only get events for mailboxes and
-labels you can read. Events carry metadata (sender, subject, snippet, labels, ids), not bodies: fetch the content with
+into), `label.added`, `label.removed`, `account.auth_failed` and `sync.gap`. `thread.reply_received` is a subset of
+`message.received` (a reply produces both), so filter on one or the other, never both, or you handle each reply twice.
+You only get events for mailboxes and labels you can read. Events carry metadata (sender, subject, snippet, labels, ids), not bodies: fetch the content with
 `get_thread` or `get_message`.
 
 ### Pull loop (MCP)
@@ -221,7 +223,7 @@ For agents without an HTTP endpoint. Your position is kept on the server, per ag
 
 ### Woken by `agentinbox listen`
 
-When the listener starts you for an event, stdin (and the file named by `$AGENTINBOX_EVENT_FILE`) holds
+When the listener starts you for an event (by default only `message.received`), stdin (and the file named by `$AGENTINBOX_EVENT_FILE`) holds
 `{ "notice": "…", "event": <webhook payload> }`, in the same shape as the webhook payload below. Only ids are in the
 environment (`AGENTINBOX_EVENT_ID`, `AGENTINBOX_EVENT_TYPE`, `AGENTINBOX_ACCOUNT`, `AGENTINBOX_THREAD_ID`,
 `AGENTINBOX_MESSAGE_ID`, …). Fetch the thread with the MCP tools, do the work, and exit. Exiting non-zero or timing out

@@ -27,7 +27,7 @@ function listenFlags(cmd: Command): Command {
   return profileOption(cmd)
     .option("--exec <command>", "run this command for each event (via /bin/sh; the event arrives on stdin as JSON, never in the command)")
     .option("--forward <url>", "POST each event to this localhost URL, signed per Standard Webhooks")
-    .option("--types <list>", `comma-separated event types (${EVENT_TYPES.join(", ")})`)
+    .option("--types <list>", `comma-separated event types, or "all" (default: message.received, new mail only; also ${EVENT_TYPES.filter((t) => t !== "message.received").join(", ")})`)
     .option("--from <glob>", 'only senders matching this glob, e.g. "*@stripe.com" (repeatable)', collect)
     .option("--to <glob>", "only when a to/cc address matches (repeatable)", collect)
     .option("--label <id>", "only messages with this Gmail label id, e.g. INBOX or Label_123 (repeatable)", collect)

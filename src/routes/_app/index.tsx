@@ -15,6 +15,18 @@ export const Route = createFileRoute("/_app/")({
   component: Overview,
 });
 
+/** "3 active today · 1 listening": wraps between parts, never inside one ("1" / "listening"). */
+function Parts({ items }: { items: (string | false | null | undefined | 0)[] }) {
+  return items
+    .filter((x): x is string => !!x)
+    .map((x, i) => (
+      <span key={x}>
+        {i > 0 && " · "}
+        <span className="whitespace-nowrap">{x}</span>
+      </span>
+    ));
+}
+
 function Overview() {
   const stats = useQuery(queries.overview());
   const accounts = useQuery(queries.accounts());
@@ -51,7 +63,7 @@ function Overview() {
             icon={BotIcon}
             loading={loading}
             value={fmtNumber(s?.agents.total)}
-            hint={s && [`${s.agents.activeLast24h} active today`, listening && `${listening} listening`].filter(Boolean).join(" · ")}
+            hint={s && <Parts items={[`${s.agents.activeLast24h} active today`, listening && `${listening} listening`]} />}
           />
           <StatCard label="Mail events" icon={ActivityIcon} loading={loading} value={fmtNumber(s?.events24h)} hint="last 24h" />
           <StatCard
@@ -76,7 +88,7 @@ function Overview() {
             value={fmtNumber(waiting)}
             hint={
               waiting
-                ? [s?.pendingApprovals && plural(s.pendingApprovals, "message"), pairingCount && plural(pairingCount, "agent")].filter(Boolean).join(" · ")
+                ? <Parts items={[s?.pendingApprovals && plural(s.pendingApprovals, "message"), pairingCount && plural(pairingCount, "agent")]} />
                 : "nothing waiting"
             }
           />

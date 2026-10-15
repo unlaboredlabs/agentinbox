@@ -92,7 +92,7 @@ describe("setup state", () => {
     expect((await json(await h.request("/health"))).setupComplete).toBe(true);
   });
 
-  it("is verified once an agent's tool called /mcp or a listener acked past where it started", async () => {
+  it("is verified by a successful MCP tool call or a listener that acked past where it started, and stays verified", async () => {
     h = harness();
     const cookie = await h.claim();
     const verified = async () => (await json(await h!.request("/api/setup/state", { cookie }))).verified;
@@ -106,16 +106,45 @@ describe("setup state", () => {
         startSeq,
         new Date().toISOString(),
       );
-    // Key use alone (lastUsedAt), and a listener that only connected (its cursor starts at the head), aren't proof.
+    const audit = (action: string, outcome: "ok" | "denied" | "error") => h!.ctx.audit.record({ actorType: "agent", actorId: agent.id, action, outcome });
+    // Key use alone (lastUsedAt), a bare /mcp connection (`claude mcp list`: initialize + tools/list, last_mcp_at),
+    // a listener that only connected (its cursor starts at the head), failed calls and pairing aren't proof.
     h.ctx.db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", new Date().toISOString(), agent.id);
+    h.ctx.policy.markMcpUse(agent.id);
+    cursor("fresh", 7, 7);
+    audit("pairing.key_delivered", "ok");
+    audit("get_message", "denied");
+    audit("search_threads", "error");
+    expect(await verified()).toBe(false);
+
+    audit("list_accounts", "ok");
+    // Unauthenticated health polls neither run the query nor write the remembered flag.
+    await h.request("/health");
+    expect(h.ctx.settings.getState("setup.verifiedAt")).toBeNull();
+    expect(await verified()).toBe(true);
+    expect(h.ctx.settings.getState("setup.verifiedAt")).not.toBeNull();
+    // Remembered: pruning the audit log doesn't undo it.
+    h.ctx.db.run("DELETE FROM audit_log");
+    expect(await verified()).toBe(true);
+  });
+
+  it("is verified by a listener that acked past where it started", async () => {
+    h = harness();
+    const cookie = await h.claim();
+    const verified = async () => (await json(await h!.request("/api/setup/state", { cookie }))).verified;
+    const { agent } = h.ctx.policy.createAgent({ name: "a" });
+    const cursor = (consumer: string, startSeq: number | null, ackedSeq: number) =>
+      h!.ctx.db.run(
+        "INSERT INTO listener_cursors (agent_id, consumer, acked_seq, start_seq, updated_at) VALUES (?, ?, ?, ?, ?)",
+        agent.id,
+        consumer,
+        ackedSeq,
+        startSeq,
+        new Date().toISOString(),
+      );
     cursor("fresh", 7, 7);
     expect(await verified()).toBe(false);
     cursor("acked", 7, 8);
-    expect(await verified()).toBe(true);
-
-    h.ctx.db.run("DELETE FROM listener_cursors");
-    expect(await verified()).toBe(false);
-    h.ctx.policy.markMcpUse(agent.id);
     expect(await verified()).toBe(true);
   });
 

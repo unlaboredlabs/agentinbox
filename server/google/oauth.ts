@@ -235,7 +235,7 @@ async function fetchProfile(ctx: AppContext, accessToken: string): Promise<{ ema
         400,
         "gmail_api_disabled",
         "The Gmail API isn't enabled in your Google Cloud project.",
-        "Enable it at https://console.cloud.google.com/apis/library/gmail.googleapis.com, wait a minute, then connect again.",
+        "Enable it at https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com, wait a minute, then connect again.",
       );
     }
     throw new HttpError(502, "google_error", `Couldn't read the Gmail profile: ${message}`);

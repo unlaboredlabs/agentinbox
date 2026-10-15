@@ -10,7 +10,7 @@ import { ensurePrivateDir } from "./fsutil.ts";
 import { claudeMcpConfigPath, writeClaudeMcpConfig } from "./mcpheader.ts";
 import { forwardEvent } from "./forward.ts";
 import { createListenLogger, type ListenLogger } from "./logfile.ts";
-import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer } from "./options.ts";
+import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { describeGrants, grantsKey } from "./grants.ts";
 import { shellQuote } from "./recipes.ts";
@@ -176,6 +176,10 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     // The Claude Code recipe loads this (keyless) MCP config; recreate it if it's missing.
     if (!existsSync(claudeMcpConfigPath(profileName))) writeClaudeMcpConfig(profileName, `${profile.url}/mcp`);
     if (!quietConsole) printBanner(log, profileName, profile, config, dryRun, backfill);
+    // The default narrows what the listener gets without any flag: say so (also in the log file).
+    const notes = typesNotes(config);
+    for (const m of notes.info) log.info(m);
+    for (const m of notes.warn) log.warn(m);
     if (backfill && backfillHead === 0) {
       log.info(`Nothing to backfill: the listener (consumer "${config.consumer}") started with the oldest stored mail, so it handles all of it.`);
       return EXIT.ok;

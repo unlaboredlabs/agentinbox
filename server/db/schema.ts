@@ -228,4 +228,12 @@ export const MIGRATIONS: string[] = [
     WHERE id IN (SELECT agent_id FROM pairings WHERE status = 'approved' AND agent_id IS NOT NULL)
        OR id IN (SELECT agent_id FROM listener_cursors);
   `,
+  /* 6: keep existing installs verified */ `
+  -- SetupState.verified now needs a successful tool call in the audit log (pruned after the retention
+  -- period) or a listener ack, and is remembered in setup.verifiedAt once seen. Installs where an agent
+  -- already reached /mcp counted as verified before: remember that, so the setup guide doesn't come back.
+  INSERT OR IGNORE INTO settings (key, value)
+    SELECT 'setup.verifiedAt', json_quote(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    WHERE EXISTS (SELECT 1 FROM agents WHERE last_mcp_at IS NOT NULL);
+  `,
 ];

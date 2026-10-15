@@ -25,9 +25,9 @@ export function DenialReason({ reason, action }: { reason: string | null; action
   if (!reason) return null;
   const text = action?.startsWith("pairing.") && reason === "rate_limit" ? "Too many requests from this address" : DENIAL_REASONS[reason];
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-md bg-warning/15 px-1.5 py-0.5 text-xs">
-      <code className="font-mono">{reason}</code>
-      {text && <span className="text-muted-foreground">{text}</span>}
+    <span className="inline-flex max-w-full flex-wrap items-baseline gap-x-1.5 rounded-md bg-warning/15 px-1.5 py-0.5 text-xs">
+      <code className="font-mono break-all">{reason}</code>
+      {text && <span className="min-w-0 break-words text-muted-foreground">{text}</span>}
     </span>
   );
 }

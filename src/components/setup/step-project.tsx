@@ -8,29 +8,12 @@ import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { generateProjectId, projectCommand, projectIdProblem } from "@/lib/gcp-project";
+import { cloudUrl, generateProjectId, projectCommand, projectIdProblem } from "@/lib/gcp-project";
 import { STEP_META, updateDraft, useSetupProgress } from "./progress";
 import type { StepProps } from "./step-url";
 import { CloudLink, Disclosure, Expect, FormValues, GoogleTabNote, Guide, GuideStep, Path, StepCard, StepFooter } from "./wizard-shell";
 
-const p = (id: string) => encodeURIComponent(id);
-
-export const cloudUrl = {
-  cloudShell: "https://shell.cloud.google.com/?show=terminal",
-  createProject: "https://console.cloud.google.com/projectcreate",
-  enableApis: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com,pubsub.googleapis.com&project=${p(id)}`,
-  dashboard: (id: string) => `https://console.cloud.google.com/home/dashboard?project=${p(id)}`,
-  authOverview: (id: string) => `https://console.cloud.google.com/auth/overview?project=${p(id)}`,
-  authAudience: (id: string) => `https://console.cloud.google.com/auth/audience?project=${p(id)}`,
-  authScopes: (id: string) => `https://console.cloud.google.com/auth/scopes?project=${p(id)}`,
-  clients: (id: string) => `https://console.cloud.google.com/auth/clients?project=${p(id)}`,
-  createClient: (id: string) => `https://console.cloud.google.com/auth/clients/create?project=${p(id)}`,
-  iam: (id: string) => `https://console.cloud.google.com/iam-admin/iam?project=${p(id)}`,
-  orgPolicies: (id: string) => `https://console.cloud.google.com/iam-admin/orgpolicies?project=${p(id)}`,
-  billing: (id: string) => `https://console.cloud.google.com/billing/linkedaccount?project=${p(id)}`,
-};
-
-export { projectCommand, projectIdProblem } from "@/lib/gcp-project";
+export { cloudUrl, projectCommand, projectIdProblem } from "@/lib/gcp-project";
 
 export function StepProject(props: StepProps) {
   const { state } = useSetupProgress();
@@ -52,7 +35,7 @@ function ProjectSaved({ index, onBack, onNext, projectId }: StepProps & { projec
       </p>
       <div className="flex flex-wrap gap-2">
         <CloudLink href={cloudUrl.dashboard(projectId)}>Open the project</CloudLink>
-        <CloudLink href={cloudUrl.enableApis(projectId)}>Check the APIs are enabled</CloudLink>
+        <CloudLink href={cloudUrl.enableGmail(projectId)}>Check the Gmail API is enabled</CloudLink>
       </div>
       <p className="text-xs text-muted-foreground">
         To move to another project, create an OAuth client there and import it in step 4; the project ID comes with it.
@@ -161,7 +144,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 <CloudLink href={cloudUrl.cloudShell}>Open Cloud Shell</CloudLink>
               </GuideStep>
               <GuideStep title="Paste this command and press Enter">
-                <p>It creates the project and turns on the Gmail and Pub/Sub APIs in it.</p>
+                <p>It creates the project and turns on the Gmail API in it.</p>
                 <div className="flex items-start gap-2">
                   <Checkbox id="project-in-org" checked={inOrg} onCheckedChange={(v) => updateDraft({ projectInOrg: v === true })} className="mt-0.5" />
                   <Label htmlFor="project-in-org" className="flex-1 text-sm leading-snug font-normal text-foreground">
@@ -197,7 +180,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                     </li>
                     <li>
                       The project was created but enabling failed: run only the second part again, or use the{" "}
-                      <a className="underline" href={cloudUrl.enableApis(id)} target="_blank" rel="noopener noreferrer">
+                      <a className="underline" href={cloudUrl.enableGmail(id)} target="_blank" rel="noopener noreferrer">
                         enable link
                       </a>
                       .
@@ -236,13 +219,13 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 </p>
                 <CloudLink href={cloudUrl.createProject}>Open Create a project</CloudLink>
               </GuideStep>
-              <GuideStep title="Turn on the Gmail and Pub/Sub APIs" expect="a confirmation that the APIs are enabled.">
+              <GuideStep title="Turn on the Gmail API" expect="a confirmation that the API is enabled.">
                 <p>
                   The link opens in your new project. Confirm the project, then click <strong className="text-foreground">Next</strong> and{" "}
                   <strong className="text-foreground">Enable</strong>.
                 </p>
-                <CloudLink href={valid ? cloudUrl.enableApis(id) : "#"} disabled={!valid} disabledReason="Fix the project ID above first">
-                  Enable the APIs
+                <CloudLink href={valid ? cloudUrl.enableGmail(id) : "#"} disabled={!valid} disabledReason="Fix the project ID above first">
+                  Enable the Gmail API
                 </CloudLink>
               </GuideStep>
             </Guide>
@@ -294,13 +277,13 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 </div>
               </Field>
             </GuideStep>
-            <GuideStep title="Turn on the Gmail and Pub/Sub APIs" expect="a confirmation that the APIs are enabled (or that they already were).">
+            <GuideStep title="Turn on the Gmail API" expect="a confirmation that the API is enabled (or that it already was).">
               <p>
                 Confirm the project, then click <strong className="text-foreground">Next</strong> and{" "}
                 <strong className="text-foreground">Enable</strong>.
               </p>
-              <CloudLink href={valid ? cloudUrl.enableApis(id) : "#"} disabled={!valid} disabledReason="Enter the project ID first">
-                Enable the APIs
+              <CloudLink href={valid ? cloudUrl.enableGmail(id) : "#"} disabled={!valid} disabledReason="Enter the project ID first">
+                Enable the Gmail API
               </CloudLink>
             </GuideStep>
           </Guide>

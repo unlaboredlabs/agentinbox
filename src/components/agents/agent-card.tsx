@@ -22,10 +22,14 @@ export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Acco
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className={cn("truncate font-medium", a.disabled && "text-muted-foreground")}>{a.name}</span>
+              <span className={cn("truncate font-medium", a.disabled && "text-muted-foreground")} title={a.name}>
+                {a.name}
+              </span>
               {a.disabled && <ToneBadge tone="idle">Disabled</ToneBadge>}
             </div>
-            <p className="line-clamp-2 text-xs text-muted-foreground">{a.description || "No description"}</p>
+            <p className="line-clamp-2 text-xs text-muted-foreground" title={a.description ?? undefined}>
+              {a.description || "No description"}
+            </p>
           </div>
           <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
         </div>
@@ -35,8 +39,11 @@ export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Acco
               <div key={g.id} className="flex min-w-0 items-start gap-2 text-muted-foreground">
                 <MailIcon className="mt-px size-3.5 shrink-0" />
                 <span className="min-w-0">
-                  <span className="block truncate text-foreground">{emailOf(g.accountId)}</span>
-                  <span className="block truncate">
+                  <span className="block truncate text-foreground" title={emailOf(g.accountId)}>
+                    {emailOf(g.accountId)}
+                  </span>
+                  {/* The grant summary wraps: it's what the card is for. */}
+                  <span className="block break-words">
                     {grantInWords(g)}
                     {g.labelScope && ` · ${g.labelScope.length} label${g.labelScope.length === 1 ? "" : "s"}`}
                   </span>
@@ -58,7 +65,7 @@ export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Acco
           {live.length > 0 && (
             <span className="flex min-w-0 items-center gap-1.5 text-foreground">
               <StatusDot tone="good" />
-              <span className="truncate">Listening on {live.map((l) => l.client.hostname ?? l.consumer).join(", ")}</span>
+              <span className="break-words">Listening on {live.map((l) => l.client.hostname ?? l.consumer).join(", ")}</span>
             </span>
           )}
         </div>

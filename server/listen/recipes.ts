@@ -108,7 +108,15 @@ export const shellQuote = (s: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s
 
 /** The recipes block for `listen --help`. */
 export function recipesHelp(): string {
-  const lines = ["", "Recipes (--exec runs via /bin/sh; the event arrives on stdin, never in the command line):", ""];
+  const lines = [
+    "",
+    "Which events: only new mail (message.received) by default, so mail you send doesn't start your agent.",
+    "  Change it with --types: --types thread.reply_received (only replies to threads you sent), or --types all.",
+    "  thread.reply_received is a subset of message.received: don't combine them, or each reply runs twice.",
+    "",
+    "Recipes (--exec runs via /bin/sh; the event arrives on stdin, never in the command line):",
+    "",
+  ];
   for (const tool of TOOLS) {
     const r = recipe(tool);
     lines.push(`  ${TOOL_LABELS[tool] === "agent" ? "Your own script" : TOOL_LABELS[tool]}:`);

@@ -5,7 +5,9 @@ import { replayDead } from "../server/listen/admin.ts";
 import { Dispatcher, type Job } from "../server/listen/dispatcher.ts";
 import { matchesLocal } from "../server/listen/event.ts";
 import { runListener } from "../server/listen/listen.ts";
-import { resolveListen } from "../server/listen/options.ts";
+import { EVENT_TYPES } from "../shared/types.ts";
+import { describeFilter, resolveListen, typesNotes } from "../server/listen/options.ts";
+import { recipesHelp } from "../server/listen/recipes.ts";
 import { deadPath } from "../server/listen/paths.ts";
 import { loadProfile, saveProfile } from "../server/listen/profile.ts";
 import { readDead } from "../server/listen/state.ts";
@@ -84,6 +86,57 @@ describe("local filter", () => {
     expect(() => resolveListen("default", profile, { subject: "(" })).toThrow(/regular expression/);
     expect(() => resolveListen("default", profile, { types: "message.received,nope" })).toThrow(/Unknown event type nope/);
     expect(() => resolveListen("default", profile, { forward: "http://example.com/x" })).toThrow(/this machine/);
+  });
+
+  it("wakes only on new mail unless --types or the profile asks for more", () => {
+    const profile = { url: "https://x", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c", exec: "run" };
+    // One test email produces message.sent and message.received: only the latter starts the agent.
+    expect(resolveListen("default", profile, {}).config.types).toEqual(["message.received"]);
+    // --save without --types keeps following the default (nothing saved).
+    expect(resolveListen("default", profile, { save: true, exec: "run" }).next.types).toBeUndefined();
+    // Opting in: a list, or all; both are saved.
+    const opted = resolveListen("default", profile, { save: true, types: "message.received,thread.reply_received" });
+    expect(opted.config.types).toEqual(["message.received", "thread.reply_received"]);
+    expect(opted.next.types).toEqual(["message.received", "thread.reply_received"]);
+    expect(resolveListen("default", { ...profile, types: ["message.sent"] }, {}).config.types).toEqual(["message.sent"]);
+    const all = resolveListen("default", profile, { types: "all" }).config;
+    expect(all.types).toContain("message.sent");
+    expect(all.types).toContain("sync.gap");
+    expect(describeFilter(all)).toBe("all event types");
+    expect(describeFilter(resolveListen("default", profile, {}).config)).toBe("types message.received");
+    expect(() => resolveListen("default", profile, { types: "" })).toThrow(/at least one event type/);
+    expect(() => resolveListen("default", profile, { types: "all,message.sent" })).toThrow(/can't be combined/);
+  });
+
+  it("says when the default types are in use, and warns when replies would run twice", () => {
+    const profile = { url: "https://x", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c", exec: "run" };
+    const defaulted = resolveListen("default", profile, {}).config;
+    expect(defaulted.typesDefaulted).toBe(true);
+    expect(typesNotes(defaulted).info).toEqual(["Using default types: message.received (add --types all for every event)."]);
+    expect(resolveListen("default", { ...profile, types: ["message.received"] }, {}).config.typesDefaulted).toBe(false);
+    // A reply produces message.received AND thread.reply_received (server/ingest/sync.ts).
+    const both = resolveListen("default", profile, { types: "message.received,thread.reply_received" }).config;
+    expect(typesNotes(both)).toEqual({ info: [], warn: [expect.stringMatching(/subset of message\.received.*twice/)] });
+    expect(typesNotes(resolveListen("default", profile, { types: "thread.reply_received" }).config).warn).toEqual([]);
+    // --types all is recommended in several places: a dedupe note, not the "keep one of them" warning.
+    expect(typesNotes(resolveListen("default", profile, { types: "all" }).config)).toEqual({
+      info: ["With all types, each reply also arrives as thread.reply_received: dedupe on the message id."],
+      warn: [],
+    });
+    expect(typesNotes(resolveListen("default", { ...profile, types: [...EVENT_TYPES] }, {}).config).warn).toEqual([]);
+  });
+
+  it("never suggests combining message.received with thread.reply_received (each reply would run twice)", () => {
+    const both = /message\.received,\s*thread\.reply_received|thread\.reply_received,\s*message\.received/;
+    const texts: Record<string, string> = {
+      "listen --help": recipesHelp(),
+      "docs/listen.md": readFileSync(join(import.meta.dirname, "../docs/listen.md"), "utf8"),
+      "docs/reference.md": readFileSync(join(import.meta.dirname, "../docs/reference.md"), "utf8"),
+      "SKILL.md": readFileSync(join(import.meta.dirname, "../server/skill/SKILL.md"), "utf8"),
+      "connect.ts": readFileSync(join(import.meta.dirname, "../server/listen/connect.ts"), "utf8"),
+    };
+    for (const [name, text] of Object.entries(texts)) expect(both.test(text), name).toBe(false);
+    for (const name of ["listen --help", "docs/listen.md", "docs/reference.md", "SKILL.md"]) expect(texts[name], name).toMatch(/subset of\s+`?message\.received/);
   });
 });
 
