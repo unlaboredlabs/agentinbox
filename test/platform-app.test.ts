@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { compareVersions, upgradeCommand } from "../server/api/system.ts";
 import { runMaintenance } from "../server/maintenance.ts";
+import { bannerLines } from "../server/server.ts";
 import { renderSkill, SKILL_URL_PLACEHOLDER, skillPath } from "../server/skill/index.ts";
 import type { EventsService } from "../server/events/types.ts";
 import type { WebhooksService } from "../server/webhooks/types.ts";
@@ -80,6 +81,7 @@ describe("setup state", () => {
       pubsub: { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null, principalAccountId: null, principalEmail: null, pendingPrincipalAccountId: null, pendingPrincipalEmail: null },
       accountsConnected: 0,
       agentsCreated: 0,
+      verified: false,
       complete: false,
       warnings: [],
     });
@@ -88,6 +90,33 @@ describe("setup state", () => {
     expect(state.accountsConnected).toBe(1);
     expect(state.complete).toBe(true);
     expect((await json(await h.request("/health"))).setupComplete).toBe(true);
+  });
+
+  it("is verified once an agent's tool called /mcp or a listener acked past where it started", async () => {
+    h = harness();
+    const cookie = await h.claim();
+    const verified = async () => (await json(await h!.request("/api/setup/state", { cookie }))).verified;
+    const { agent } = h.ctx.policy.createAgent({ name: "a" });
+    const cursor = (consumer: string, startSeq: number | null, ackedSeq: number) =>
+      h!.ctx.db.run(
+        "INSERT INTO listener_cursors (agent_id, consumer, acked_seq, start_seq, updated_at) VALUES (?, ?, ?, ?, ?)",
+        agent.id,
+        consumer,
+        ackedSeq,
+        startSeq,
+        new Date().toISOString(),
+      );
+    // Key use alone (lastUsedAt), and a listener that only connected (its cursor starts at the head), aren't proof.
+    h.ctx.db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", new Date().toISOString(), agent.id);
+    cursor("fresh", 7, 7);
+    expect(await verified()).toBe(false);
+    cursor("acked", 7, 8);
+    expect(await verified()).toBe(true);
+
+    h.ctx.db.run("DELETE FROM listener_cursors");
+    expect(await verified()).toBe(false);
+    h.ctx.policy.markMcpUse(agent.id);
+    expect(await verified()).toBe(true);
   });
 
   it("falls back to stored state when the google service is unavailable", async () => {
@@ -130,6 +159,10 @@ describe("system API", () => {
     expect(info.dataDir).toBe(h.ctx.config.dataDir);
     expect(info.addresses).toEqual(["http://127.0.0.1:0"]);
     expect(info.ingest.running).toBe(true);
+    // The banner's command: this run's non-default flags.
+    expect(info.serviceCommand).toMatch(/ service install --data \S+ --host 127\.0\.0\.1 --port 0$/);
+    expect(info.serviceCommand).toContain(h.ctx.config.dataDir);
+    expect(bannerLines(h.ctx, { mcp: true }).join("\n")).toContain(info.serviceCommand);
   });
 
   it("builds the upgrade command and compares versions", () => {

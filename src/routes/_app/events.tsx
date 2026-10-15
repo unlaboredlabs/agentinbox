@@ -30,8 +30,8 @@ function EventsPage() {
   const { accountId, type } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const accounts = useQuery(queries.accounts());
-  // Listener cursors aren't on the live stream: refresh them so "Delivered to …" appears on rows.
-  useQuery({ ...queries.agents(), refetchInterval: 5000 });
+  // Listener cursors ("Delivered to …" on rows) arrive on the live stream; the slow refetch is a fallback.
+  useQuery({ ...queries.agents(), refetchInterval: 30_000 });
   const history = useInfiniteQuery(queries.eventHistory({ accountId, type }));
   const stream = useStreamState();
   const [live, setLive] = useState<MailEvent[]>([]);

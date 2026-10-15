@@ -22,11 +22,18 @@ export function accessProblem(db: Db, agentId: string, keyHash: string): RevokeR
 /** `ListenerInfo[]` for an agent, from listener_cursors. */
 export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
   return db
-    .all<{ consumer: string; acked_seq: number; client: string; connected: number; last_seen_at: string | null }>(
-      "SELECT consumer, acked_seq, client, connected, last_seen_at FROM listener_cursors WHERE agent_id = ? ORDER BY consumer",
+    .all<{ consumer: string; acked_seq: number; start_seq: number | null; client: string; connected: number; last_seen_at: string | null }>(
+      "SELECT consumer, acked_seq, start_seq, client, connected, last_seen_at FROM listener_cursors WHERE agent_id = ? ORDER BY consumer",
       agentId,
     )
-    .map((r) => ({ consumer: r.consumer, connected: r.connected > 0, ackedSeq: r.acked_seq, lastSeenAt: r.last_seen_at, client: json.parse(r.client, {}) }));
+    .map((r) => ({
+      consumer: r.consumer,
+      connected: r.connected > 0,
+      startSeq: r.start_seq,
+      ackedSeq: r.acked_seq,
+      lastSeenAt: r.last_seen_at,
+      client: json.parse(r.client, {}),
+    }));
 }
 
 /**
@@ -127,6 +134,21 @@ export function ensureConsumerSlot(ctx: AppContext, agentId: string, consumer: s
   db.run("DELETE FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, idle.consumer);
 }
 
+/**
+ * Evidence that some agent works end to end (SetupState.verified): an agent's tool called /mcp, or
+ * a listener acked an event past where its cursor started (a new consumer starts at the head, so
+ * acked_seq alone isn't proof; start_seq is NULL for cursors from before migration 4 or made by an ack).
+ */
+export function anyAgentVerified(db: Db): boolean {
+  return !!db.get(
+    `SELECT 1 AS ok WHERE EXISTS (SELECT 1 FROM agents WHERE last_mcp_at IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM listener_cursors WHERE acked_seq > COALESCE(start_seq, 0))`,
+  );
+}
+
+/** Console pushes for acks: at most one per agent per this interval (the last ack in a burst still goes out). */
+const ACK_PUSH_INTERVAL_MS = 1000;
+
 /** Moves the consumer's cursor forward only, and never past the newest event in its granted accounts. */
 export function ackListener(ctx: AppContext, agentId: string, consumer: string, seq: number, maxConsumers: number): { ackedSeq: number } {
   const { db } = ctx;
@@ -141,5 +163,6 @@ export function ackListener(ctx: AppContext, agentId: string, consumer: string, 
     target,
     t,
   );
+  ctx.policy.publishAgent(agentId, ACK_PUSH_INTERVAL_MS);
   return { ackedSeq: ackedSeq(db, agentId, consumer) };
 }

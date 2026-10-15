@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { Account, Approval, AuditEntry, Delivery, MailEvent, PairingRequest, Settings } from "../shared/types.ts";
+import type { Account, Agent, Approval, AuditEntry, Delivery, MailEvent, PairingRequest, Settings } from "../shared/types.ts";
 
 /**
  * In-process notifications. Fired *after* the change is committed to the database, so listeners
@@ -23,6 +23,12 @@ export interface BusEvents {
    */
   agent: [{ agentId: string; reason: "updated" | "key_rotated" | "deleted" | "grant_changed" }];
   pairing: [PairingRequest];
+  /**
+   * The agent as the console shows it, after its state changed: listener connect/disconnect/ack,
+   * key use (lastUsedAt/lastMcpAt writes) and access changes. Coalesced per agent (policy.publishAgent).
+   * Sent to the console stream as `{ kind: "agent" }`.
+   */
+  agentState: [Agent];
 }
 
 export type Bus = EventEmitter<BusEvents>;

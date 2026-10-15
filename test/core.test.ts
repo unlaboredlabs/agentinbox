@@ -1,4 +1,10 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { Db } from "../server/db/index.ts";
+import { MIGRATIONS } from "../server/db/schema.ts";
 import { matchesAnyGlob, matchesGlob } from "../server/util/glob.ts";
 import { testContext } from "./helpers.ts";
 
@@ -39,6 +45,43 @@ describe("audit", () => {
     expect(p2.items.map((e) => e.action)).toEqual(["a1", "a0"]);
     expect(p2.nextCursor).toBeNull();
     expect(t.ctx.audit.list({ outcome: "denied" }).items[0]!.reason).toBe("rate_limit");
+  });
+});
+
+describe("migration 5", () => {
+  it("backfills agent origin from kept pairings and listeners, defaulting to key", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentinbox-mig-"));
+    try {
+      const path = join(dir, "db.sqlite");
+      const raw = new DatabaseSync(path);
+      raw.exec("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+      MIGRATIONS.slice(0, 4).forEach((sql, i) => {
+        raw.exec(sql);
+        raw.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)").run(i + 1, "2026-01-01T00:00:00.000Z");
+      });
+      const t = "2026-01-01T00:00:00.000Z";
+      for (const id of ["agt_paired", "agt_listener", "agt_key", "agt_denied"]) {
+        raw.prepare("INSERT INTO agents (id, name, key_prefix, key_hash, created_at) VALUES (?, ?, 'aib_x', ?, ?)").run(id, id, `h_${id}`, t);
+      }
+      const pairing = (id: string, status: string, agentId: string) =>
+        raw
+          .prepare(
+            "INSERT INTO pairings (id, device_code_hash, user_code, name, status, agent_id, created_at, expires_at) VALUES (?, ?, ?, 'x', ?, ?, ?, ?)",
+          )
+          .run(id, `d_${id}`, `U_${id}`, status, agentId, t, t);
+      pairing("prq_1", "approved", "agt_paired");
+      pairing("prq_2", "denied", "agt_denied");
+      raw.prepare("INSERT INTO listener_cursors (agent_id, consumer, updated_at) VALUES ('agt_listener', 'default', ?)").run(t);
+      raw.close();
+
+      const db = new Db(path);
+      const origins = Object.fromEntries(db.all<{ id: string; origin: string }>("SELECT id, origin FROM agents").map((r) => [r.id, r.origin]));
+      expect(origins).toEqual({ agt_paired: "paired", agt_listener: "paired", agt_key: "key", agt_denied: "key" });
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM agents WHERE last_mcp_at IS NULL")!.n).toBe(4);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

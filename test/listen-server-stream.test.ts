@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSelf } from "../shared/agent-api.ts";
+import type { Agent } from "../shared/types.ts";
 import { type AgentApiOptions, agentApi } from "../server/agentapi/index.ts";
 import { createApp } from "../server/app.ts";
 import { type RunningServer, startServer } from "../server/server.ts";
@@ -142,12 +143,41 @@ describe("GET /agent/v1/events/stream", () => {
     const r = await s.open("?consumer=laptop", { "user-agent": "agentinbox-listen/1.2.3", "x-agentinbox-client": JSON.stringify({ hostname: "wynn-mbp", platform: "darwin" }) });
     const listeners = s.ctx.policy.getAgent(s.agent.id)!.listeners;
     expect(listeners).toEqual([
-      { consumer: "laptop", connected: true, ackedSeq: 0, lastSeenAt: expect.any(String), client: { hostname: "wynn-mbp", platform: "darwin", version: "1.2.3" } },
+      { consumer: "laptop", connected: true, startSeq: 0, ackedSeq: 0, lastSeenAt: expect.any(String), client: { hostname: "wynn-mbp", platform: "darwin", version: "1.2.3" } },
     ]);
     r.cancel();
     const deadline = Date.now() + 2000;
     while (s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.connected && Date.now() < deadline) await new Promise((x) => setTimeout(x, 10));
     expect(s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.connected).toBe(false);
+  });
+
+  it("pushes the agent to the console bus on connect, disconnect and acks (at most once a second)", async () => {
+    const s = await setup();
+    const states: { at: number; agent: Agent }[] = [];
+    s.ctx.bus.on("agentState", (agent) => states.push({ at: Date.now(), agent }));
+    const listener = () => states.at(-1)?.agent.listeners.find((l) => l.consumer === "laptop");
+    const waitFor = async (pred: () => boolean, ms = 3000) => {
+      const deadline = Date.now() + ms;
+      while (!pred() && Date.now() < deadline) await new Promise((x) => setTimeout(x, 10));
+      expect(pred()).toBe(true);
+    };
+    const seq = [1, 2, 3].map((i) => emitMessage(s.ctx, "acc_a", `m${i}`));
+
+    const r = await s.open("?consumer=laptop");
+    await waitFor(() => listener()?.connected === true);
+
+    // A burst of acks right after connecting: one trailing push, a second after the last one, with the final cursor.
+    const before = states.length;
+    const lastPush = states.at(-1)!.at;
+    for (const n of seq) expect((await s.ack("laptop", n)).status).toBe(200);
+    await waitFor(() => listener()?.ackedSeq === seq[2]);
+    const ackPushes = states.slice(before);
+    expect(ackPushes).toHaveLength(1);
+    expect(ackPushes[0]!.at - lastPush).toBeGreaterThanOrEqual(990);
+
+    r.cancel();
+    await waitFor(() => listener()?.connected === false);
+    expect(states.at(-1)!.agent).toMatchObject({ id: s.agent.id, listeners: [{ consumer: "laptop", ackedSeq: seq[2] }] });
   });
 
   it("sends heartbeats and re-checks access on each one", async () => {

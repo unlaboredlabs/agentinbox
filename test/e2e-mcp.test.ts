@@ -303,6 +303,8 @@ describe.runIf(HAS_AGENTS)("MCP agent journey", () => {
     expect(out).toMatch(MCP_TEXT.eventCount(1));
     expect(out).toContain("message.received");
     expect(out).toContain("Subject: Wake up");
+    // Thread labels are the console's (label scopes match them); agents never see them.
+    expect(out).not.toMatch(/threadLabelIds|thread_label_ids/i);
 
     // Times out empty when nothing arrives.
     const quiet = await mcp.ok("wait_for_events", { timeout_seconds: 1, after: feedCursor(out) });
@@ -321,6 +323,7 @@ describe.runIf(HAS_AGENTS)("MCP agent journey", () => {
 
     const page = await mcp.ok("list_events", { limit: 2 });
     expect(page).toMatch(MCP_TEXT.eventCount(2));
+    expect(page).not.toMatch(/threadLabelIds|thread_label_ids/i);
     expect(page).toContain(MCP_TEXT.eventLine(e1.seq));
     expect(page).toContain(MCP_TEXT.eventLine(e2.seq));
     expect(feedCursor(page)).toBe(e2.seq);

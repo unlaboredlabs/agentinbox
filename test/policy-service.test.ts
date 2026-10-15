@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GmailLabel } from "../shared/types.ts";
 import { sha256 } from "../server/crypto.ts";
 import { parseGrantInput } from "../server/policy/grants.ts";
@@ -50,6 +50,76 @@ describe("agents and keys", () => {
     expect(ctx.policy.authenticate("not-a-key")).toBeNull();
     ctx.policy.updateAgent(agent.id, { disabled: true });
     expect(ctx.policy.authenticate(apiKey)).toBeNull();
+  });
+
+  it("records MCP use apart from other key use: first write immediate, then at most once a minute", () => {
+    const { ctx } = setup();
+    const { agent, apiKey } = ctx.policy.createAgent({ name: "a" });
+    expect(ctx.policy.getAgent(agent.id)).toMatchObject({ lastUsedAt: null, lastMcpAt: null });
+    // Any key use (e.g. `listen`) sets lastUsedAt only.
+    ctx.policy.authenticate(apiKey);
+    expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBeNull();
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      ctx.policy.markMcpUse(agent.id);
+      const first = ctx.policy.getAgent(agent.id)!.lastMcpAt;
+      expect(Date.parse(first!)).toBe(Date.now());
+      // Within the minute the UPDATE isn't even attempted (a write here would be visible).
+      ctx.db.run("UPDATE agents SET last_mcp_at = NULL WHERE id = ?", agent.id);
+      vi.setSystemTime(Date.now() + 59_000);
+      ctx.policy.markMcpUse(agent.id);
+      expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBeNull();
+      vi.setSystemTime(Date.now() + 2_000);
+      ctx.policy.markMcpUse(agent.id);
+      expect(ctx.policy.getAgent(agent.id)!.lastMcpAt).toBe(new Date().toISOString());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes the agent on bus agentState: coalesced, rate-limited with a trailing push, not after deletion", async () => {
+    const { ctx } = setup();
+    const states: { id: string; lastUsedAt: string | null; lastMcpAt: string | null; at: number }[] = [];
+    ctx.bus.on("agentState", (a) => states.push({ id: a.id, lastUsedAt: a.lastUsedAt, lastMcpAt: a.lastMcpAt, at: Date.now() }));
+    const { agent, apiKey } = ctx.policy.createAgent({ name: "a" });
+    const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+    // First use: lastUsedAt and lastMcpAt are written together and go out as one push carrying both.
+    ctx.policy.authenticate(apiKey);
+    ctx.policy.markMcpUse(agent.id);
+    expect(states).toHaveLength(0); // deferred to the next macrotask
+    await tick();
+    expect(states).toEqual([{ id: agent.id, lastUsedAt: expect.any(String), lastMcpAt: expect.any(String), at: expect.any(Number) }]);
+    // Throttled writes don't push.
+    ctx.policy.authenticate(apiKey);
+    ctx.policy.markMcpUse(agent.id);
+    await tick(10);
+    expect(states).toHaveLength(1);
+
+    // With a minimum interval, a burst folds into one trailing push no sooner than the interval.
+    for (let i = 0; i < 5; i++) ctx.policy.publishAgent(agent.id, 200);
+    await tick(400);
+    expect(states).toHaveLength(2);
+    expect(states[1]!.at - states[0]!.at).toBeGreaterThanOrEqual(190);
+
+    // Access changes push too; a deleted agent never does.
+    ctx.policy.updateAgent(agent.id, { name: "b" });
+    await tick(10);
+    expect(states).toHaveLength(3);
+    ctx.policy.updateAgent(agent.id, { name: "c" });
+    ctx.policy.deleteAgent(agent.id);
+    ctx.policy.publishAgent(agent.id);
+    await tick(10);
+    expect(states).toHaveLength(3);
+  });
+
+  it("records how an agent was added; console input can't claim it was paired", () => {
+    const { ctx } = setup();
+    expect(ctx.policy.createAgent({ name: "a" }).agent.origin).toBe("key");
+    expect(ctx.policy.createAgent({ name: "b", origin: "paired" } as never).agent.origin).toBe("key");
+    const paired = ctx.policy.createAgent({ name: "c" }, { origin: "paired" }).agent;
+    expect(ctx.policy.getAgent(paired.id)!.origin).toBe("paired");
   });
 
   it("rotates keys so the old one stops working", () => {

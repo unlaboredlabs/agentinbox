@@ -1,5 +1,5 @@
 import { streamSSE } from "hono/streaming";
-import { type ConsoleStreamMessage, EVENT_TYPES, type EventType } from "../../shared/types.ts";
+import { type ConsoleStreamMessage, EVENT_TYPES, type EventType, type MailEvent } from "../../shared/types.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { badRequest } from "../util/errors.ts";
@@ -10,8 +10,25 @@ const HEARTBEAT_MS = 20_000;
 /** A client this far behind has stalled; drop it rather than buffer without bound. It reconnects. */
 const MAX_PENDING_WRITES = 1000;
 
-/** Bus channel → stream message kind. */
-const CHANNELS = ["event", "delivery", "approval", "audit", "account", "pairing"] as const satisfies (keyof BusEvents & ConsoleStreamMessage["kind"])[];
+/** Bus channel → stream message kind (bus "agent" is the access-change signal for listener streams; the console gets "agentState"). */
+const CHANNELS = {
+  event: "event",
+  delivery: "delivery",
+  approval: "approval",
+  audit: "audit",
+  account: "account",
+  pairing: "pairing",
+  agentState: "agent",
+} as const satisfies Partial<Record<keyof BusEvents, ConsoleStreamMessage["kind"]>>;
+
+function withScopeLabels(ctx: AppContext, ev: MailEvent): MailEvent {
+  try {
+    const stored = ctx.events.get(ev.id);
+    return stored ? { ...ev, threadLabelIds: stored.threadLabelIds } : ev;
+  } catch {
+    return ev;
+  }
+}
 
 /** Paths are relative to /api. */
 export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPendingWrites?: number } = {}) {
@@ -45,10 +62,14 @@ export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPend
         };
         const send = (msg: ConsoleStreamMessage) => enqueue(() => stream.writeSSE({ data: JSON.stringify(msg) }));
         enqueue(() => stream.write(": connected\n\n"));
-        const listeners = CHANNELS.map((kind) => {
-          const listener = (data: unknown) => send({ kind, data } as ConsoleStreamMessage);
-          ctx.bus.on(kind, listener);
-          return () => ctx.bus.off(kind, listener);
+        const listeners = Object.entries(CHANNELS).map(([channel, kind]) => {
+          const listener = (data: unknown) => {
+            // The bus carries the public event; the console also gets the thread labels (as GET /events does).
+            if (kind === "event") data = withScopeLabels(ctx, data as MailEvent);
+            send({ kind, data } as ConsoleStreamMessage);
+          };
+          ctx.bus.on(channel as keyof typeof CHANNELS, listener);
+          return () => ctx.bus.off(channel as keyof typeof CHANNELS, listener);
         });
         const heartbeat = setInterval(() => enqueue(() => stream.write(": ping\n\n")), heartbeatMs);
 

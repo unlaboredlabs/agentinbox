@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, apiGet } from "@/lib/api";
-import { connectCommands, LISTEN_TEST_EXEC, NPX, shellQuote } from "@/lib/cli";
+import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { updateDraft } from "./progress";
@@ -78,8 +78,8 @@ function useLatch(on: boolean) {
 
 
 export function StepVerify({ index, onBack, onNext }: StepProps) {
-  // Listener state and lastUsedAt aren't on the console stream: poll while this step is open.
-  const agents = useQuery({ ...queries.agents(), refetchInterval: 3000 });
+  // Listener connect/ack and MCP use arrive on the console stream (`agent` messages); the slow refetch is a fallback.
+  const agents = useQuery({ ...queries.agents(), refetchInterval: 30_000 });
   const state = useVerifyState();
   const list = agents.data ?? [];
   const agent = list.find((a) => a.id === state.agentId) ?? [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
@@ -230,7 +230,8 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
     queryKey: [...keys.events, "verify", test?.accountId ?? ""],
     queryFn: () => apiGet<Page<MailEvent>>("/api/events", { accountId: test!.accountId }),
     enabled: !!test,
-    refetchInterval: 5000,
+    // New events arrive on the console stream (which invalidates this); the slow refetch is a fallback.
+    refetchInterval: 30_000,
   });
   const listener = agent.listeners.find((l) => l.connected) ?? agent.listeners[0];
 
@@ -609,9 +610,6 @@ function SuccessPanel({
   serviceCmd: string;
 }) {
   const system = useQuery(queries.system());
-  const latest = useQuery({ ...queries.systemLatest(), enabled: system.data?.service === false });
-  // The daemon itself in a terminal: closing it stops everything. UpdateInfo.command carries this instance's flags.
-  const daemonCmd = latest.data?.command.replace(/^(.*?agentinbox-cli)(?= |$)/, "$1 service install") ?? `${NPX} service install`;
   return (
     <section aria-labelledby="verify-done" className="space-y-4 rounded-xl border border-success/40 bg-success/5 p-4 sm:p-5">
       <div className="flex items-start gap-3">
@@ -639,13 +637,14 @@ function SuccessPanel({
             </p>
           </li>
         )}
+        {/* The daemon itself in a terminal: closing it stops everything. serviceCommand carries this instance's flags. */}
         {system.data?.service === false && (
           <li className="space-y-1.5">
             <p>
               <span className="font-medium">Keep agentinbox itself running.</span>{" "}
               <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On this server, run:</span>
             </p>
-            <Command code={daemonCmd} label="agentinbox service command" />
+            <Command code={system.data.serviceCommand} label="agentinbox service command" />
           </li>
         )}
         {!readIt && (

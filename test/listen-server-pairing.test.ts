@@ -119,7 +119,7 @@ describe("pairing poll", () => {
     expect(approved.status).toBe(200);
     const agentText = await approved.text();
     const agent = JSON.parse(agentText);
-    expect(agent).toMatchObject({ name: "Hermes", grants: [{ accountId: "acc_a", sendMode: "draft_only" }], listeners: [] });
+    expect(agent).toMatchObject({ name: "Hermes", origin: "paired", grants: [{ accountId: "acc_a", sendMode: "draft_only" }], listeners: [] });
     expect(agentText).not.toMatch(/aib_[0-9a-z]{32}/);
     const row = s.h.ctx.db.get<{ api_key_enc: string | null; status: string }>("SELECT api_key_enc, status FROM pairings WHERE id = ?", p.id)!;
     expect(row.status).toBe("approved");

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Agent, AgentWithKey, CreateAgentInput, Grant, GrantInput } from "../../shared/types.ts";
+import type { Agent, AgentOrigin, AgentWithKey, CreateAgentInput, Grant, GrantInput } from "../../shared/types.ts";
 import { listenersOf } from "../agentapi/listeners.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { BusEvents } from "../bus.ts";
@@ -15,7 +15,7 @@ import type { AgentPrincipal, PolicyService } from "./types.ts";
 export const API_KEY_PREFIX = "aib_";
 /** 32 base32 chars = 160 bits of entropy. */
 const KEY_RANDOM_CHARS = 32;
-/** `last_used_at` is written at most this often per agent. */
+/** `last_used_at` and `last_mcp_at` are written at most this often per agent (the first write is immediate). */
 const LAST_USED_THROTTLE_MS = 60_000;
 /** Account-level events visible to any agent with `read` on the account, regardless of label scope. */
 const ACCOUNT_EVENTS = new Set(["account.auth_failed", "sync.gap"]);
@@ -27,7 +27,9 @@ interface AgentRow {
   key_prefix: string;
   key_hash: string;
   disabled: number;
+  origin: string;
   last_used_at: string | null;
+  last_mcp_at: string | null;
   created_at: string;
 }
 
@@ -59,7 +61,9 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     description: r.description,
     keyPrefix: r.key_prefix,
     disabled: bool(r.disabled),
+    origin: r.origin === "paired" ? "paired" : "key",
     lastUsedAt: r.last_used_at,
+    lastMcpAt: r.last_mcp_at,
     createdAt: r.created_at,
     grants: grantsOf(r.id),
     listeners: listenersOf(db, r.id),
@@ -118,16 +122,79 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     } catch (err) {
       ctx.log.error("Bus listener failed", { error: err instanceof Error ? err.message : String(err) });
     }
+    if (reason === "deleted") {
+      clearTimeout(pushes.get(agentId)?.timer);
+      pushes.delete(agentId);
+      mcpWrittenAt.delete(agentId);
+    } else {
+      publishAgent(agentId);
+    }
+  };
+
+  // bus "agentState": per agent, when the last one went out and the one scheduled next.
+  const pushes = new Map<string, { last: number; timer?: ReturnType<typeof setTimeout> }>();
+  let stopped = false;
+  const publishAgent = (agentId: string, minIntervalMs = 0) => {
+    if (stopped) return;
+    let p = pushes.get(agentId);
+    if (!p) pushes.set(agentId, (p = { last: 0 }));
+    // Already scheduled: that one reads the agent when it fires, so it carries this change too.
+    if (p.timer) return;
+    const entry = p;
+    // Delay 0 still defers to the next macrotask, so changes made together (auth + MCP use) go out once.
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      entry.last = Date.now();
+      try {
+        const r = row(agentId);
+        if (r) ctx.bus.emit("agentState", toAgent(r));
+        else pushes.delete(agentId);
+      } catch (err) {
+        ctx.log.debug("Agent update not published", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }, Math.max(0, entry.last + minIntervalMs - Date.now()));
+    entry.timer.unref?.();
+  };
+
+  /**
+   * When this process last wrote (or found fresh) each agent's last_mcp_at: /mcp is hit on every tool
+   * call, so within the window markMcpUse skips the UPDATE (and the WAL write lock) entirely.
+   */
+  const mcpWrittenAt = new Map<string, number>();
+
+  /** Writes `column` = now unless it was written within the throttle window; true if it was written. */
+  const touchColumn = (column: "last_used_at" | "last_mcp_at", agentId: string): boolean => {
+    const ts = Date.now();
+    const cutoff = new Date(ts - LAST_USED_THROTTLE_MS).toISOString();
+    return (
+      db.run(`UPDATE agents SET ${column} = ? WHERE id = ? AND (${column} IS NULL OR ${column} <= ?)`, new Date(ts).toISOString(), agentId, cutoff).changes > 0
+    );
   };
 
   return {
+    stop() {
+      stopped = true;
+      for (const p of pushes.values()) clearTimeout(p.timer);
+      pushes.clear();
+    },
+
+    publishAgent,
+
+    markMcpUse(agentId) {
+      const ts = Date.now();
+      if (ts - (mcpWrittenAt.get(agentId) ?? -Infinity) < LAST_USED_THROTTLE_MS) return;
+      // Written now, or written recently by an earlier run: either way nothing to do for a while.
+      // (A recent write from an earlier run means the next one may come up to a window late.)
+      mcpWrittenAt.set(agentId, ts);
+      if (touchColumn("last_mcp_at", agentId)) publishAgent(agentId);
+    },
+
     authenticate(apiKey: string): AgentPrincipal | null {
       if (typeof apiKey !== "string" || !apiKey.startsWith(API_KEY_PREFIX) || apiKey.length > 200) return null;
       const r = db.get<AgentRow>("SELECT * FROM agents WHERE key_hash = ?", sha256(apiKey));
       if (!r || bool(r.disabled)) return null;
-      const ts = Date.now();
-      if (!r.last_used_at || ts - Date.parse(r.last_used_at) >= LAST_USED_THROTTLE_MS) {
-        db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", new Date(ts).toISOString(), r.id);
+      if ((!r.last_used_at || Date.now() - Date.parse(r.last_used_at) >= LAST_USED_THROTTLE_MS) && touchColumn("last_used_at", r.id)) {
+        publishAgent(r.id);
       }
       return { agentId: r.id, name: r.name };
     },
@@ -141,7 +208,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       return r ? toAgent(r) : null;
     },
 
-    createAgent(input: CreateAgentInput): AgentWithKey {
+    createAgent(input: CreateAgentInput, opts: { origin?: AgentOrigin } = {}): AgentWithKey {
       const fields = parseAgentFields(input);
       if (!fields.name) throw badRequest("Name is required");
       const grants = (input.grants ?? []).map(parseGrantInput);
@@ -154,12 +221,13 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       const id = newId("agt");
       db.tx(() => {
         db.run(
-          "INSERT INTO agents (id, name, description, key_prefix, key_hash, disabled, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+          "INSERT INTO agents (id, name, description, key_prefix, key_hash, disabled, origin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
           id,
           fields.name!,
           fields.description || null,
           apiKey.slice(0, 8),
           sha256(apiKey),
+          opts.origin ?? "key",
           now(),
         );
         for (const g of grants) writeGrant(id, g);

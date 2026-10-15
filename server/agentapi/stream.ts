@@ -135,6 +135,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
     t,
   );
   opts.open.set(agentId, (opts.open.get(agentId) ?? 0) + 1);
+  ctx.policy.publishAgent(agentId);
   // Client-supplied positions can't point past what this agent can see (that would skip future events).
   let cursor = Math.max(Math.min(after, newest), Math.min(lastEventId, newest), ackedSeq(db, agentId, consumer));
 
@@ -260,6 +261,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
       else opts.open.delete(agentId);
       try {
         touch(-1);
+        ctx.policy.publishAgent(agentId);
       } catch {
         // The database may already be closed on shutdown.
       }

@@ -10,6 +10,9 @@ import { type ReceivedHook, startWebhookReceiver, verifyStandardWebhook, type We
 import { stays, waitFor } from "./e2e/wait.ts";
 
 const MAIL_EVENT_KEYS = ["id", "seq", "type", "accountId", "accountEmail", "message", "labelIds", "detail", "createdAt"];
+/** The console's copy also has the thread labels (label scopes match them); agents and webhooks never get them. */
+const CONSOLE_KEYS = [...MAIL_EVENT_KEYS, "threadLabelIds"];
+const publicEvent = ({ threadLabelIds: _scope, ...ev }: MailEvent) => ev;
 
 let s: Stack;
 let rx: WebhookReceiver;
@@ -78,7 +81,8 @@ describe("events in the console", () => {
         message: { id: sent.id, threadId: sent.threadId, from: { name: "Ann Example", email: "ann@client.test" }, subject: "Console only", hasAttachments: false },
       });
       expect(ev.id).toMatch(/^evt_/);
-      expect(Object.keys(ev).filter((k) => !MAIL_EVENT_KEYS.includes(k))).toEqual([]);
+      expect(Object.keys(ev).filter((k) => !CONSOLE_KEYS.includes(k))).toEqual([]);
+      expect(ev.threadLabelIds).toContain("INBOX");
       expect(await stream.next("event", (e) => e.id === ev.id)).toEqual(ev);
     } finally {
       stream.close();
@@ -164,7 +168,7 @@ describe.runIf(HAS_AGENTS)("webhook delivery", () => {
       expect(payload.timestamp).toBe(ev.createdAt);
       expect(Object.keys(payload.data).filter((k) => !MAIL_EVENT_KEYS.includes(k)).sort()).toEqual(["content"]);
       const { content, ...event } = payload.data;
-      expect(event).toEqual(ev);
+      expect(event).toEqual(publicEvent(ev));
 
       // includeBody: cleaned markdown, hidden instructions gone, links and table kept, signals set.
       expect(content!.body).toContain("your **invoice** is ready");

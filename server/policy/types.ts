@@ -1,7 +1,7 @@
 // Policy domain contract. Owned by the policy + MCP + mail work area.
 // Members marked FROZEN are used by other domains: do not rename or change them. Adding members is fine.
 
-import type { Agent, AgentWithKey, CreateAgentInput, EventType, Grant, GrantInput } from "../../shared/types.ts";
+import type { Agent, AgentOrigin, AgentWithKey, CreateAgentInput, EventType, Grant, GrantInput } from "../../shared/types.ts";
 import type { Lifecycle } from "../context.ts";
 
 /** An authenticated agent (from its `aib_…` bearer key). */
@@ -14,9 +14,19 @@ export interface PolicyService extends Lifecycle {
   /** FROZEN. Looks up a key by sha256; null if unknown or the agent is disabled. Updates last_used_at. */
   authenticate(apiKey: string): AgentPrincipal | null;
 
+  /** Records a request to /mcp (`lastMcpAt`, throttled like last_used_at; the first write is immediate). */
+  markMcpUse(agentId: string): void;
+  /**
+   * Pushes the agent's current state to bus "agentState" (the console stream). Calls coalesce per
+   * agent: the state is read when the push goes out, on the next macrotask, and pushes are at least
+   * `minIntervalMs` apart (later calls in the window are folded into one trailing push).
+   */
+  publishAgent(agentId: string, minIntervalMs?: number): void;
+
   listAgents(): Agent[];
   getAgent(id: string): Agent | null;
-  createAgent(input: CreateAgentInput): AgentWithKey;
+  /** `origin` defaults to "key" (console); pairing approval passes "paired". Not settable through the API. */
+  createAgent(input: CreateAgentInput, opts?: { origin?: AgentOrigin }): AgentWithKey;
   updateAgent(id: string, patch: { name?: string; description?: string | null; disabled?: boolean }): Agent;
   rotateKey(id: string): AgentWithKey;
   deleteAgent(id: string): void;
