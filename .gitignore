@@ -4,5 +4,4 @@ dist
 .DS_Store
 .env
 .data
-src/routeTree.gen.ts
 coverage
