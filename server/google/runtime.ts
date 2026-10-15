@@ -1,0 +1,131 @@
+import type { GmailLabel } from "../../shared/types.ts";
+import type { AppContext } from "../context.ts";
+import {
+  backoffMs,
+  buildUrl,
+  errorFromResponse,
+  isAbortError,
+  isRetryable,
+  MAX_ATTEMPTS,
+  networkError,
+  type Query,
+  rejectedBeforeProcessing,
+  REQUEST_TIMEOUT_MS,
+  sleep,
+  TokenBucket,
+} from "./http.ts";
+import { TokenManager } from "./tokens.ts";
+import { GoogleApiError } from "./types.ts";
+
+export interface RequestOptions {
+  method?: string;
+  query?: Query;
+  body?: unknown;
+  /** Gmail quota units charged to the account's token bucket (0 = not throttled, e.g. Pub/Sub). */
+  cost?: number;
+  signal?: AbortSignal;
+  /**
+   * false for requests that must not run twice (messages.send, drafts.send, drafts.create): they are
+   * only retried when Google provably rejected them before processing (429, 403 rate limit, 401,
+   * connection refused), never after a 5xx, a timeout or a dropped connection.
+   */
+  idempotent?: boolean;
+  /** Per-attempt timeout; 0 disables it (long-polling Pub/Sub pulls bound themselves). */
+  timeoutMs?: number;
+}
+
+/**
+ * Per-context shared state for server/google and server/ingest: token manager, quota buckets, label
+ * cache and Pub/Sub test waiters. Keyed by the AppContext so every service sees the same instance.
+ */
+export class GoogleRuntime {
+  readonly tokens: TokenManager;
+  readonly labelCache = new Map<string, { at: number; labels: GmailLabel[] }>();
+  /** Pub/Sub test-message nonces → resolver (resolved by whichever pull sees the message). */
+  readonly pubsubTests = new Map<string, () => void>();
+  private readonly buckets = new Map<string, TokenBucket>();
+
+  constructor(ctx: AppContext) {
+    this.tokens = new TokenManager(ctx);
+  }
+
+  /**
+   * Authenticated JSON request as `accountId`. Throttles by quota cost, retries 429/5xx/403 rate
+   * limits, timeouts and network errors with backoff (see `idempotent`), refreshes the token once on 401.
+   */
+  async request<T>(accountId: string, base: string, path: string, opts: RequestOptions = {}): Promise<T> {
+    const url = buildUrl(base, path, opts.query);
+    const method = opts.method ?? "GET";
+    const idempotent = opts.idempotent ?? true;
+    const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    let forced = false;
+    for (let attempt = 0; ; attempt++) {
+      if (opts.cost) await this.bucket(accountId).take(opts.cost);
+      const token = await this.tokens.accessToken(accountId, { force: forced });
+      let err: GoogleApiError;
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/json",
+            ...(opts.body !== undefined ? { "content-type": "application/json" } : {}),
+          },
+          body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+          signal: attemptSignal(opts.signal, timeoutMs),
+        });
+        if (res.ok) {
+          const text = await res.text();
+          return (text ? JSON.parse(text) : undefined) as T;
+        }
+        err = await errorFromResponse(res);
+      } catch (e) {
+        if (opts.signal?.aborted) throw e;
+        if (e instanceof SyntaxError) throw new GoogleApiError(502, "Google returned an invalid JSON response", "invalid_response");
+        err = isAbortError(e)
+          ? new GoogleApiError(0, `Google (${new URL(url).host}) didn't respond within ${timeoutMs / 1000}s`, "timeout")
+          : networkError(e, new URL(url).host);
+      }
+      if (err.status === 401 && !forced) {
+        forced = true;
+        this.tokens.invalidate(accountId);
+        continue;
+      }
+      const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
+      if (!retry || attempt >= MAX_ATTEMPTS - 1) throw idempotent ? err : ambiguous(err);
+      await sleep(backoffMs(attempt, err.details.retryAfterMs), opts.signal);
+      if (opts.signal?.aborted) throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
+  }
+
+  private bucket(accountId: string): TokenBucket {
+    let b = this.buckets.get(accountId);
+    if (!b) this.buckets.set(accountId, (b = new TokenBucket()));
+    return b;
+  }
+}
+
+/** For non-idempotent calls, a timeout, dropped connection or 5xx may have happened after Google acted. */
+function ambiguous(err: GoogleApiError): GoogleApiError {
+  if (rejectedBeforeProcessing(err) || (err.status !== 0 && err.status < 500)) return err;
+  return new GoogleApiError(
+    err.status,
+    `${err.message}. The message may have been sent: check Sent in Gmail before retrying.`,
+    err.reason,
+    err.details,
+  );
+}
+
+function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
+  if (!timeoutMs) return outer;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return outer ? AbortSignal.any([outer, timeout]) : timeout;
+}
+
+const runtimes = new WeakMap<object, GoogleRuntime>();
+
+export function googleRuntime(ctx: AppContext): GoogleRuntime {
+  let r = runtimes.get(ctx);
+  if (!r) runtimes.set(ctx, (r = new GoogleRuntime(ctx)));
+  return r;
+}

@@ -1,13 +1,55 @@
+import type { GmailLabel } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
-import { stubService } from "../util/stub.ts";
-import type { AccountsService, GoogleService } from "./types.ts";
+import { createAccountsService } from "./accounts.ts";
+import { clientView, callbackMode, setClient } from "./client.ts";
+import { createGmailClient } from "./gmail.ts";
+import { mimeTools } from "./mime.ts";
+import { completeConnect, completeConnectFromUrl, revokeAccount, startConnect } from "./oauth.ts";
+import { provisionPubsub, pubsubState, testPubsub } from "./pubsub.ts";
+import { googleRuntime } from "./runtime.ts";
+import type { GmailClient, GoogleService } from "./types.ts";
 
-// PLACEHOLDER: replaced by the owning work area.
-export function createGoogleService(_ctx: AppContext): GoogleService {
-  return stubService<GoogleService>("google");
-}
+export { createAccountsService };
 
-// PLACEHOLDER: replaced by the owning work area.
-export function createAccountsService(_ctx: AppContext): AccountsService {
-  return stubService<AccountsService>("accounts");
+const LABEL_TTL_MS = 60_000;
+
+const SYSTEM_ORDER = ["INBOX", "STARRED", "IMPORTANT", "SENT", "DRAFT", "UNREAD", "SPAM", "TRASH"];
+
+export function createGoogleService(ctx: AppContext): GoogleService {
+  const clients = new Map<string, GmailClient>();
+  const gmail = (accountId: string) => {
+    let c = clients.get(accountId);
+    if (!c) clients.set(accountId, (c = createGmailClient(ctx, accountId)));
+    return c;
+  };
+
+  return {
+    clientView: () => clientView(ctx),
+    setClient: (input) => setClient(ctx, input),
+    redirectUri: () => callbackMode(ctx).redirectUri,
+
+    startConnect: (opts) => startConnect(ctx, opts),
+    completeConnect: (code, state) => completeConnect(ctx, code, state),
+    completeConnectFromUrl: (url) => completeConnectFromUrl(ctx, url),
+
+    gmail,
+    mime: mimeTools,
+    async labels(accountId, opts = {}) {
+      const cache = googleRuntime(ctx).labelCache;
+      const hit = cache.get(accountId);
+      if (hit && !opts.fresh && Date.now() - hit.at < LABEL_TTL_MS) return hit.labels;
+      const raw = await gmail(accountId).listLabels();
+      const rank = (l: GmailLabel) => (l.type === "system" ? (SYSTEM_ORDER.indexOf(l.id) + 1 || SYSTEM_ORDER.length + 1) : 100);
+      const labels: GmailLabel[] = raw
+        .map((l) => ({ id: l.id, name: l.name, type: l.type === "user" ? ("user" as const) : ("system" as const) }))
+        .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+      cache.set(accountId, { at: Date.now(), labels });
+      return labels;
+    },
+    revoke: (accountId) => revokeAccount(ctx, accountId),
+
+    pubsubState: () => pubsubState(ctx),
+    provisionPubsub: () => provisionPubsub(ctx),
+    testPubsub: () => testPubsub(ctx),
+  };
 }
