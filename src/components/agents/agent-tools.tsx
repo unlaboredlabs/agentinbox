@@ -87,9 +87,8 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
               )}
             </>
           )}
-          <p className="text-sm text-muted-foreground">
-            Teach it the rules with the skill: <code className="font-mono break-words text-foreground">{c.skillInstall}</code>
-          </p>
+          <p className="text-sm text-muted-foreground">Teach it the rules with the agentinbox skill:</p>
+          <Command code={c.skillInstall} label="skill install command" />
         </div>
         <TestConnection agentId={agent.id} />
       </CardContent>

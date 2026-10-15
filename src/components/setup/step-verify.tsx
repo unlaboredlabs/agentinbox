@@ -216,6 +216,7 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
   const { publicUrl } = usePublicUrl();
   const tool: AgentTool = origin.tool ?? "other";
   const label = origin.tool ? toolName(origin.tool) : agent.name;
+  const Label = label[0]!.toUpperCase() + label.slice(1);
   const c = connectCommands(publicUrl, tool);
   const mcp = useMcpActivity(agent, { since: agent.createdAt });
   const test = state.test;
@@ -253,15 +254,15 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
   useEffect(() => {
     const p = prev.current;
     const msg =
-      (!p.mcpDone && mcpDone && `${label} called agentinbox.`) ||
+      (!p.mcpDone && mcpDone && `${Label} called agentinbox.`) ||
       (!p.listenDone && listenDone && "The listener is connected.") ||
       (!p.receivedDone && receivedDone && "The test email arrived.") ||
       (!p.delivered && delivered && "The listener handled the test email.") ||
-      (!p.readIt && readIt && `${label} read your mail.`) ||
+      (!p.readIt && readIt && `${Label} read your mail.`) ||
       "";
     prev.current = { mcpDone, listenDone, receivedDone, delivered, readIt };
     if (msg) setAnnouncement(msg);
-  }, [mcpDone, listenDone, receivedDone, delivered, readIt, label]);
+  }, [mcpDone, listenDone, receivedDone, delivered, readIt, Label]);
   const doneRef = useRef<HTMLHeadingElement>(null);
   const wasComplete = useRef(complete);
   useEffect(() => {
@@ -297,7 +298,7 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
 
         <Item
           state={st("mcp", mcpDone)}
-          title={mcpDone ? `${label} is connected to agentinbox` : `Waiting for ${label} to call agentinbox`}
+          title={mcpDone ? `${Label} is connected to agentinbox` : `Waiting for ${label} to call agentinbox`}
           detail={
             mcpDone ? (
               mcp.lastToolCall ? (
@@ -348,7 +349,12 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
               <p className="text-xs text-muted-foreground">
                 {tool === "other"
                   ? "This test command only confirms each email (a ✓ line per email); it starts nothing."
-                  : `Starts ${label} for each new email, with only the agentinbox tools. Just testing delivery? ${NPX} listen --exec ${shellQuote(LISTEN_TEST_EXEC)} only confirms each email.`}
+                  : (
+                    <>
+                      Starts {label} for each new email, with only the agentinbox tools. Just testing delivery?{" "}
+                      <code className="font-mono whitespace-nowrap text-foreground">--exec {shellQuote(LISTEN_TEST_EXEC)}</code> only confirms each email.
+                    </>
+                  )}
               </p>
               <Button variant="outline" size="sm" onClick={() => writeState({ skipListen: true })}>
                 I'll use MCP only
@@ -367,7 +373,7 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
               </>
             ) : (
               <>
-                agentinbox sends <span className="text-foreground">“{TEST_SUBJECT}”</span> from your Gmail to itself. Nobody else gets it.
+                agentinbox sends <span className="text-foreground">“{TEST_SUBJECT}”</span> from your Gmail account to itself. Nobody else gets it.
               </>
             )
           }
@@ -377,7 +383,7 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
 
         <Item
           state={st("received", receivedDone)}
-          title={receivedDone ? "agentinbox saw it arrive" : "Waiting for the test email to arrive"}
+          title={receivedDone ? "agentinbox saw it arrive" : current === "received" ? "Waiting for the test email to arrive" : "agentinbox sees it arrive"}
           detail={
             receivedDone ? (
               <>
@@ -394,7 +400,15 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
 
         <Item
           state={st("delivered", delivered, skipListen)}
-          title={delivered ? "Your listener handled it" : skipListen ? "Delivery to a listener: skipped" : "Waiting for your listener to handle it"}
+          title={
+            delivered
+              ? "Your listener handled it"
+              : skipListen
+                ? "Delivery to a listener: skipped"
+                : current === "delivered"
+                  ? "Waiting for your listener to handle it"
+                  : "Your listener handles it"
+          }
           detail={
             delivered
               ? "Its terminal shows a ✓ line for the email."
@@ -406,8 +420,8 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
           }
         />
 
-        <Item state={readIt ? "done" : "todo"} optional title={readIt ? `${label} read your mail` : `Ask ${label} to read it`}>
-          {!readIt && <Prompt text="Use agentinbox to summarize my latest email." label="prompt" />}
+        <Item state={readIt ? "done" : "todo"} optional title={readIt ? `${Label} read your mail` : `Ask ${label} to read it`}>
+          {!readIt && receivedDone && <Prompt text="Use agentinbox to summarize my latest email." label="prompt" />}
         </Item>
       </ol>
     </div>
@@ -466,9 +480,8 @@ function McpHelp({
       )}
       <p>Then ask {label}:</p>
       <Prompt text="Use agentinbox to list my email accounts." label="prompt" />
-      <p>
-        Also teach it the rules (once): <code className="font-mono break-words text-foreground">{c.skillInstall}</code>
-      </p>
+      <p>Also teach it the rules once, with the agentinbox skill:</p>
+      <Command code={c.skillInstall} label="skill install command" />
     </div>
   );
 }
@@ -511,7 +524,6 @@ function SendTest({ agent, sent }: { agent: Agent; sent: boolean }) {
       </p>
     );
   }
-  const chosen = choices.find((a) => a.id === accountId);
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -536,7 +548,7 @@ function SendTest({ agent, sent }: { agent: Agent; sent: boolean }) {
         )}
         <Button variant={sent ? "outline" : "default"} onClick={() => void send()} disabled={pending || !accountId}>
           {pending ? <Spinner /> : sent ? <MailIcon /> : <SendIcon />}
-          {sent ? "Send another" : choices.length === 1 && chosen ? `Send a test email to ${chosen.email}` : "Send a test email"}
+          {sent ? "Send another" : "Send a test email"}
         </Button>
       </div>
       {!readable.length && (

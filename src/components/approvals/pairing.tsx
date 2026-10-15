@@ -328,6 +328,7 @@ interface AccountChoice {
   fields: GrantFields;
 }
 
+const NEW_CHOICE: AccountChoice = { on: false, preset: "read", fields: PAIRING_DEFAULT };
 const presetById = (id: string) => GRANT_PRESETS.find((p) => p.id === id);
 const PAIRING_CHOICES: Choice<string>[] = [
   { value: "read", title: "Read only", description: "Search and read mail, get events. Can't change or send anything.", badge: <Badge variant="secondary">Default</Badge> },
@@ -475,8 +476,7 @@ function ApproveForm({
           grants: selected.map((a) => ({ accountId: a.id, ...choices[a.id]!.fields })),
         },
       });
-      void qc.invalidateQueries({ queryKey: keys.pairings });
-      void qc.invalidateQueries({ queryKey: keys.agents });
+      for (const key of [keys.pairings, keys.agents, keys.setupState, keys.overview]) void qc.invalidateQueries({ queryKey: key });
       onApproved(agent);
     } catch (err) {
       if (err instanceof ApiError && err.code === "user_code_mismatch") setCodeError(err.message);
@@ -558,8 +558,9 @@ function ApproveForm({
           </p>
         ) : (
           usable.map((a) => {
-            const c = choices[a.id]!;
-            const set = (patch: Partial<AccountChoice>) => setChoices((all) => ({ ...all, [a.id]: { ...all[a.id]!, ...patch } }));
+            // An account that appeared after the form opened starts unticked.
+            const c = choices[a.id] ?? NEW_CHOICE;
+            const set = (patch: Partial<AccountChoice>) => setChoices((all) => ({ ...all, [a.id]: { ...(all[a.id] ?? NEW_CHOICE), ...patch } }));
             return (
               <div key={a.id} className={cn("rounded-lg border", c.on && "bg-card")}>
                 <label className="flex cursor-pointer items-center gap-3 p-3">
@@ -612,7 +613,7 @@ function ApproveForm({
           </Button>
         )}
         {problem && !gone && <span className="mr-auto self-center text-xs text-muted-foreground">{problem}</span>}
-        <Button type="submit" disabled={busy || gone || !!problem}>
+        <Button type="submit" disabled={busy || gone || !!problem} className={inline ? "h-auto min-h-9 whitespace-normal" : undefined}>
           {busy ? <Spinner /> : <CheckIcon />} Approve and send key to terminal
         </Button>
       </Footer>
@@ -698,17 +699,19 @@ export function PendingPairings({ onApproved, className }: { onApproved?: (agent
           </>
         )}
       </p>
-      {pending.map((p) => (
-        <PairingInline
-          key={p.id}
-          p={p}
-          accounts={accounts.data ?? []}
-          onApproved={(a) => {
-            setApproved(a);
-            onApproved?.(a);
-          }}
-        />
-      ))}
+      {/* The form's account choices are set up on mount, so wait for the accounts. */}
+      {accounts.data &&
+        pending.map((p) => (
+          <PairingInline
+            key={p.id}
+            p={p}
+            accounts={accounts.data}
+            onApproved={(a) => {
+              setApproved(a);
+              onApproved?.(a);
+            }}
+          />
+        ))}
     </div>
   );
 }

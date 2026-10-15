@@ -76,7 +76,7 @@ export function ToolTabs({ value, onChange, className }: { value: AgentTool; onC
   return (
     <Tabs value={value} onValueChange={(v) => onChange(v as AgentTool)} className={className}>
       <div className="-mx-1 overflow-x-auto px-1 pb-1">
-        <TabsList aria-label="Your agent's tool">
+        <TabsList aria-label="Your agent's tool" className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto">
           {TOOLS.map((t) => (
             <TabsTrigger key={t} value={t}>
               {TOOL_LABEL[t]}
