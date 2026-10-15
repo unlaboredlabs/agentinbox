@@ -1,0 +1,55 @@
+import type { MiddlewareHandler } from "hono";
+import type { AppEnv } from "../api/util.ts";
+import { clientIp, lockedOut } from "../auth/index.ts";
+import { BAN_MS, type LoginLimiter } from "../auth/lockout.ts";
+import type { AppContext } from "../context.ts";
+import { sha256 } from "../crypto.ts";
+
+/** AppEnv plus the hash of the key the request authenticated with (streams re-check it on revocation). */
+export type AgentApiEnv = { Variables: AppEnv["Variables"] & { keyHash: string } };
+
+export const bearer = (header: string | undefined): string | null => {
+  const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? "");
+  return m ? m[1]! : null;
+};
+
+/**
+ * Bearer `aib_…` auth for /agent/v1. Bad keys count toward a per-IP lockout like admin login
+ * (5 distinct wrong keys → 15 min); a locked-out address is refused even with a valid key, so the
+ * lockout can't be used as an oracle. Other addresses are unaffected. Success does not reset the count.
+ */
+export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): MiddlewareHandler<AgentApiEnv> {
+  return async (c, next) => {
+    const limiter = limiterOf();
+    const ip = clientIp(c, ctx.config.trustProxy);
+    const banned = limiter.bannedMinutes(ip);
+    if (banned) return lockedOut(c, banned);
+    const key = bearer(c.req.header("authorization"));
+    const principal = key ? ctx.policy.authenticate(key) : null;
+    if (!principal) {
+      if (key && limiter.fail(ip, key)) {
+        ctx.audit.record({
+          actorType: "system",
+          action: "agent_api.auth",
+          outcome: "denied",
+          reason: "lockout",
+          detail: { ip, path: c.req.path, minutes: BAN_MS / 60_000 },
+        });
+      }
+      c.header("WWW-Authenticate", 'Bearer realm="agentinbox"');
+      return c.json(
+        {
+          error: {
+            code: "unauthorized",
+            message: key ? "Invalid or disabled agent API key." : "Missing agent API key.",
+            hint: "Send the agent's key as `Authorization: Bearer aib_…`, or pair again with `npx agentinbox connect`.",
+          },
+        },
+        401,
+      );
+    }
+    c.set("agent", principal);
+    c.set("keyHash", sha256(key!));
+    await next();
+  };
+}
