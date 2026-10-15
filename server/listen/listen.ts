@@ -14,7 +14,7 @@ import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen }
 import { DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
 import { acquireProfileLock } from "./lock.ts";
-import { appendDead, readStatus, StatusWriter } from "./state.ts";
+import { appendDead, knownConsumers, rememberConsumer, StatusWriter } from "./state.ts";
 import { EventStream } from "./stream.ts";
 import { checkTransport, insecureBanner } from "./transport.ts";
 import { formatDuration, safeText } from "./ui.ts";
@@ -135,20 +135,42 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
   // One listener per profile (they would share the cursor and run every event twice).
   const releaseLock = acquireProfileLock(profileName);
   try {
-    const firstRun = readStatus(profileName)?.consumer !== config.consumer;
+    // The daemon creates a consumer's cursor on its first connection (at the head, or at the oldest
+    // event with --from-start); after that --from-start has no effect. Dry runs use their own
+    // throwaway consumer that starts at the head and is never advanced, so they create nothing here.
+    const known = knownConsumers(profileName).includes(config.consumer);
+    const streamConsumer = dryRun ? `${config.consumer.slice(0, 92)}-dry-run` : config.consumer;
+    let streamAfter = 0;
+    if (dryRun && !opts.flags.fromStart) {
+      streamAfter = await getSelf(profile.url, profile.apiKey, 8000).then(
+        (s) => s.headSeq ?? 0,
+        () => 0,
+      );
+    }
+    const backfill = `${NPX} listen${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`} --from-start --consumer ${config.consumer.slice(0, 91)}-backfill`;
 
     if (config.cwdIsDefault) ensurePrivateDir(config.cwd);
     // The Claude Code recipe loads this (keyless) MCP config; recreate it if it's missing.
     if (!existsSync(claudeMcpConfigPath(profileName))) writeClaudeMcpConfig(profileName, `${profile.url}/mcp`);
     if (!quietConsole) printBanner(log, profileName, profile, config, dryRun);
-    if (opts.flags.fromStart) log.info("Processing every stored event this agent can see, from the oldest (--from-start; only applies to a new consumer).");
-    else if (firstRun) log.info(`Listening for new events from now on (use --from-start to process existing ones).`);
+    if (dryRun) {
+      log.info(opts.flags.fromStart ? "Dry run from the oldest stored event." : "Dry run: showing new events from now on.");
+    } else if (opts.flags.fromStart && known) {
+      log.warn(
+        `This listener (consumer "${config.consumer}") already has a position on the daemon, so --from-start does nothing.\n` +
+          `--from-start only applies to a new consumer. To process existing mail once: ${backfill}`,
+      );
+    } else if (opts.flags.fromStart) {
+      log.info("Processing every stored event this agent can see, from the oldest (--from-start).");
+    } else if (!known) {
+      log.info(`Listening for new events from now on. To process existing mail once, run: ${backfill}`);
+    }
 
     const status = new StatusWriter(profileName, {
       pid: process.pid,
       profile: profileName,
       url: profile.url,
-      consumer: config.consumer,
+      consumer: streamConsumer,
       version,
       startedAt: new Date().toISOString(),
       connected: false,
@@ -279,7 +301,8 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     const stream = new EventStream({
       url: profile.url,
       apiKey: profile.apiKey,
-      consumer: config.consumer,
+      consumer: streamConsumer,
+      after: streamAfter,
       types: config.types,
       includeBody: config.includeBody,
       lastEventId: () => dispatcher.lastSeq,
@@ -301,6 +324,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         if (blocked) log.info("Access restored.");
         blocked = null;
         log.info(`${pc.green("●")} Connected${after}. Waiting for events…`);
+        if (!dryRun) rememberConsumer(profileName, config.consumer);
         downSince = null;
         status.update({ connected: true, connectedSince: new Date().toISOString() });
       },

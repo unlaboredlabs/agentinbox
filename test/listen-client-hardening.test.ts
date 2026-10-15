@@ -47,28 +47,56 @@ function start(extra: Partial<RunListenerOptions> = {}) {
 }
 
 describe("starting point", () => {
-  it("a new consumer listens from now on; --from-start asks for the beginning", async () => {
+  it("a new consumer listens from now on; --from-start asks for the beginning only while the consumer is new", async () => {
     saveProfile("default", baseProfile());
-    let l = start();
+    let l = start({ flags: { fromStart: true } });
     await waitFor(() => api.live.size === 1, 5000, "stream");
-    expect(api.streamRequests[0]!.start).toBeNull();
-    expect(output).toContain("Listening for new events from now on (use --from-start to process existing ones)");
+    expect(api.streamRequests[0]).toMatchObject({ start: "beginning", consumer: "c" });
+    expect(output).toContain("Processing every stored event");
     l.stop();
     await l.done;
 
-    // Same consumer again: no "from now on" notice.
+    // The consumer exists now: --from-start would do nothing, so say so and how to backfill.
     output = "";
-    l = start();
+    l = start({ flags: { fromStart: true } });
     await waitFor(() => api.streamRequests.length === 2, 5000, "second stream");
-    expect(output).not.toContain("from now on");
+    expect(output).toContain('already has a position on the daemon, so --from-start does nothing');
+    expect(output).toContain("listen --from-start --consumer c-backfill");
+    expect(output).not.toContain("Processing every stored event");
     l.stop();
     await l.done;
 
-    l = start({ flags: { fromStart: true } });
+    // A fresh consumer without the flag: "from now on" plus the backfill hint.
+    output = "";
+    l = start({ flags: { consumer: "fresh" } });
     await waitFor(() => api.streamRequests.length === 3, 5000, "third stream");
-    expect(api.streamRequests[2]!.start).toBe("beginning");
+    expect(api.streamRequests[2]!.start).toBeNull();
+    expect(output).toContain("Listening for new events from now on. To process existing mail once, run: npx agentinbox-cli listen --from-start --consumer fresh-backfill");
     l.stop();
     await l.done;
+  });
+
+  it("--dry-run uses a throwaway consumer that starts at the head and leaves the real one untouched", async () => {
+    saveProfile("default", { ...baseProfile(), consumer: "real" });
+    for (const s of [1, 2, 3]) api.events.push(makeEvent(s));
+    const l = start({ flags: { dryRun: true } });
+    await waitFor(() => api.live.size === 1, 5000, "stream");
+    expect(api.streamRequests[0]).toMatchObject({ consumer: "real-dry-run", after: "3", start: null });
+    api.publish(makeEvent(4));
+    await waitFor(() => output.includes("#4 message.received"), 5000, "dry-run event");
+    l.stop();
+    await l.done;
+    expect(api.acks).toEqual([]);
+    expect(output).not.toContain("#3 message.received");
+
+    // The real consumer is still new afterwards.
+    output = "";
+    const r = start();
+    await waitFor(() => api.streamRequests.length === 2, 5000, "real stream");
+    expect(api.streamRequests[1]!.consumer).toBe("real");
+    expect(output).toContain("Listening for new events from now on");
+    r.stop();
+    await r.done;
   });
 });
 

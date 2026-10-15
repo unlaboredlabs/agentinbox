@@ -182,7 +182,16 @@ export async function installListenService(flags: ListenFlags): Promise<void> {
       // Not loaded yet.
     }
     writeFileSync(plistFile(profileName), launchdListenPlist(profileName, entry, cwd), { mode: 0o600 });
-    run("launchctl", ["bootstrap", launchdTarget(), plistFile(profileName)]);
+    // Right after a bootout, launchd can still be tearing the old job down ("Input/output error"): retry briefly.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        run("launchctl", ["bootstrap", launchdTarget(), plistFile(profileName)], attempt < 5);
+        break;
+      } catch (err) {
+        if (attempt >= 5) throw err;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
     for (const other of otherInstalled(profileName)) {
       try {
         run("launchctl", ["kickstart", "-k", `${launchdTarget()}/${launchdLabel(other)}`], true);

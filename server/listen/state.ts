@@ -3,7 +3,8 @@ import { dirname } from "node:path";
 import type { EventType, WebhookPayload } from "../../shared/types.ts";
 import type { Target } from "./dispatcher.ts";
 import { ensurePrivateDir, tighten, writePrivateFile } from "./fsutil.ts";
-import { deadPath, statusPath } from "./paths.ts";
+import { join } from "node:path";
+import { deadPath, profileStateDir, statusPath } from "./paths.ts";
 
 // ───────────── Dead letters ─────────────
 
@@ -43,6 +44,33 @@ export function readDead(profile: string): DeadEntry[] {
 
 export function writeDead(profile: string, entries: DeadEntry[]): void {
   writePrivateFile(deadPath(profile), entries.map((e) => JSON.stringify(e) + "\n").join(""));
+}
+
+// ───────────── Consumers this machine has used (the daemon creates a cursor on first connect) ─────────────
+
+const consumersPath = (profile: string) => join(profileStateDir(profile), "consumers.json");
+
+export function knownConsumers(profile: string): string[] {
+  const list: string[] = [];
+  try {
+    const parsed = JSON.parse(readFileSync(consumersPath(profile), "utf8")) as unknown;
+    if (Array.isArray(parsed)) list.push(...parsed.filter((c): c is string => typeof c === "string"));
+  } catch {
+    // None yet.
+  }
+  const last = readStatus(profile)?.consumer;
+  if (last && !list.includes(last)) list.push(last);
+  return list;
+}
+
+export function rememberConsumer(profile: string, consumer: string): void {
+  const list = knownConsumers(profile);
+  if (list.includes(consumer)) return;
+  try {
+    writePrivateFile(consumersPath(profile), JSON.stringify([...list, consumer]) + "\n");
+  } catch {
+    // Best effort: only affects the first-run hints.
+  }
 }
 
 // ───────────── Status (for `listen status`) ─────────────

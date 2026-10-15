@@ -102,8 +102,8 @@ Example:
       .command("listen")
       .description("wake a local agent on new mail: hold an outbound stream to the daemon and run a command or POST to localhost per event"),
   )
-    .option("--dry-run", "print matching events without running anything or advancing the cursor")
-    .option("--from-start", "first run of a consumer: also process events stored before now (default: only new ones)")
+    .option("--dry-run", "print matching events without running anything (uses a throwaway <consumer>-dry-run cursor)")
+    .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists; backfill with --consumer <name>-backfill)")
     .option("--print-recipe <tool>", `print the ready-made --exec command for ${TOOLS.join(", ")} (with this machine's paths) and exit`)
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags & { printRecipe?: string }) => {

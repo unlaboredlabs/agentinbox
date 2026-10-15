@@ -98,11 +98,20 @@ Flags override the profile, and `--save` writes them back. Overrides work group 
 - Passing any of `--from`, `--to`, `--label` or `--subject` replaces the saved filter.
 - `--types` replaces the saved types.
 
-`--dry-run` prints matching events without running anything or advancing the cursor.
+`--dry-run` prints matching events without running anything. It uses a separate throwaway consumer
+(`<consumer>-dry-run`) that starts at the current position and is never advanced, so it neither moves nor creates the
+real listener's cursor.
 
-**Where it starts:** a listener's first run starts with mail that arrives from now on: a new consumer begins at the
-daemon's current position, so pairing never replays the mailbox's history into your agent. `--from-start` (first run
-of a consumer only) processes every stored event it can see instead.
+**Where it starts:** the daemon creates a consumer's cursor the first time it connects. A new consumer starts with mail
+that arrives from now on, so pairing never replays the mailbox's history into your agent. `--from-start` makes a *new*
+consumer start at the oldest stored event instead. Once a consumer exists, `--from-start` has no effect, and the
+listener warns you. To process existing mail once, run a separate backfill consumer next to the real one:
+
+```sh
+npx agentinbox-cli listen --from-start --consumer <consumer>-backfill --exec '…'
+```
+
+`connect --force` keeps the consumer, so re-pairing doesn't replay anything either.
 
 **One listener per profile.** A second `listen` on the same profile is refused (it would share the cursor and run every
 event twice). The lock lives in the state directory and is taken over if its process is gone.

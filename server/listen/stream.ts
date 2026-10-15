@@ -34,6 +34,8 @@ export interface StreamOptions {
   consumer: string;
   types?: EventType[];
   includeBody?: boolean;
+  /** `after=<seq>` on every connect (dry runs start at the current head). */
+  after?: number;
   /** Ask the daemon to start a new consumer at the oldest event (`start=beginning`) instead of the head. */
   fromStart?: boolean;
   /** Highest seq received so far, sent as Last-Event-ID on reconnect (0 = let the server cursor decide). */
@@ -115,6 +117,7 @@ export class EventStream {
     if (this.o.types?.length) u.searchParams.set("types", this.o.types.join(","));
     if (this.o.includeBody) u.searchParams.set("include_body", "1");
     if (this.o.fromStart) u.searchParams.set("start", "beginning");
+    if (this.o.after) u.searchParams.set("after", String(this.o.after));
     return u.toString();
   }
 
