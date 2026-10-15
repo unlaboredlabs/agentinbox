@@ -5,7 +5,7 @@ import { type Capability, EVENT_TYPES, type GmailLabel } from "../../shared/type
 import type { AppContext } from "../context.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import { AgentMail, MAX_ATTACHMENT_BYTES, ToolError, type ToolTrace } from "../mail/agent.ts";
-import { cleanLine, formatSize, labelNames, MAX_HTML_CHARS, stripInvisible, truncateText, wrapUntrusted } from "../mail/content.ts";
+import { cleanLine, formatSize, labelNames, MAX_HTML_CHARS, truncateText, wrapUntrusted } from "../mail/content.ts";
 import { contentPool } from "../mail/pool.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
 import { errorMessage, HttpError, PolicyDenied } from "../util/errors.ts";
@@ -264,7 +264,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
           // Bounded input: text beyond MAX_HTML_CHARS is never read (the agent sees a truncation note).
           const clipped = r.data.length > MAX_HTML_CHARS;
           const raw = r.data.subarray(0, MAX_HTML_CHARS).toString("utf8");
-          const cleaned = kind === "html" ? (await contentPool(ctx).html(raw)).markdown : stripInvisible(raw).text;
+          const cleaned = kind === "html" ? (await contentPool(ctx).html(raw)).markdown : await contentPool(ctx).text(raw);
           const t = truncateText(cleaned, r.maxChars);
           const note = t.truncated || clipped ? `\n[Truncated: showing ${t.text.length} characters of a ${formatSize(r.data.length)} file.]` : "";
           return `${head}\n${wrapUntrusted(r.from, t.text)}${note}`;

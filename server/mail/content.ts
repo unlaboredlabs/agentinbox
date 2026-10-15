@@ -63,29 +63,34 @@ const BIDI_OPEN_ISOLATE = new Set([0x2066, 0x2067, 0x2068]);
  */
 function unbalancedBidi(text: string): number {
   if (!/[\u202A-\u202E\u2066-\u2069]/.test(text)) return 0;
+  // Linear: the stack is capped at UAX #9's max depth (125), so every pop/scan is O(1); openers beyond it
+  // overflow and count as unmatched (no legitimate text nests that deep).
+  const MAX_DEPTH = 125;
   let unmatched = 0;
-  let stack: ("e" | "o" | "i")[] = [];
+  const stack: ("e" | "o" | "i")[] = [];
+  const counted = (from: number) => stack.slice(from).filter((x) => x !== "o").length;
   for (const c of text) {
     const cp = c.codePointAt(0)!;
-    if (BIDI_OPEN_EMBED.has(cp)) stack.push("e");
-    else if (BIDI_OPEN_OVERRIDE.has(cp)) stack.push("o");
-    else if (BIDI_OPEN_ISOLATE.has(cp)) stack.push("i");
-    else if (cp === 0x202c) {
+    const opener = BIDI_OPEN_EMBED.has(cp) ? "e" : BIDI_OPEN_OVERRIDE.has(cp) ? "o" : BIDI_OPEN_ISOLATE.has(cp) ? "i" : null;
+    if (opener) {
+      if (stack.length < MAX_DEPTH) stack.push(opener);
+      else if (opener !== "o") unmatched++;
+    } else if (cp === 0x202c) {
       if (stack.at(-1) === "e" || stack.at(-1) === "o") stack.pop();
       else unmatched++;
     } else if (cp === 0x2069) {
       const at = stack.lastIndexOf("i");
       if (at < 0) unmatched++;
       else {
-        unmatched += stack.slice(at + 1).filter((x) => x !== "o").length;
-        stack = stack.slice(0, at);
+        unmatched += counted(at + 1);
+        stack.length = at;
       }
     } else if (c === "\n" || c === "\u2029") {
-      unmatched += stack.filter((x) => x !== "o").length;
-      stack = [];
+      unmatched += counted(0);
+      stack.length = 0;
     }
   }
-  return unmatched + stack.filter((x) => x !== "o").length;
+  return unmatched + counted(0);
 }
 
 /** Removes invisible/smuggling characters. `removed` counts only the ones that can hide or disguise text. */
@@ -469,6 +474,36 @@ export function cleanPlainText(text: string): { text: string; removed: number } 
 
 // ───────────── Signals ─────────────
 
+/** Drops RFC 5322 comments (nested parentheses) and the contents of quoted strings, in one pass. */
+function withoutCommentsAndQuotes(s: string): string {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (quoted) {
+      if (c === '"') {
+        quoted = false;
+        out += '"';
+      }
+    } else if (c === '"' && depth === 0) {
+      quoted = true;
+      out += '"';
+    } else if (c === "(") {
+      depth++;
+    } else if (c === ")" && depth > 0) {
+      if (--depth === 0) out += " ";
+    } else if (depth === 0) {
+      out += c;
+    }
+  }
+  return out;
+}
+
 /**
  * SPF/DKIM/DMARC from the topmost Authentication-Results header only, which Gmail adds on receipt
  * (authserv-id mx.google.com). Lower headers can be supplied by the sender and never fill gaps. Comments
@@ -478,11 +513,7 @@ export function parseAuthResults(header: string | null): ContentSignals["auth"] 
   if (!header) return null;
   // Unfold continuation lines, then take the first header (several are joined with "\n").
   const top = header.slice(0, 8192).replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)[0] ?? "";
-  let s = top.replace(/"(?:[^"\\]|\\.)*"/g, '""');
-  for (let prev = ""; prev !== s; ) {
-    prev = s;
-    s = s.replace(/\([^()]*\)/g, " ");
-  }
+  const s = withoutCommentsAndQuotes(top);
   const [servId = "", ...resinfo] = s.split(";");
   if (!/^(?:[a-z0-9-]+\.)*google\.com$/i.test(servId.trim().split(/\s+/)[0] ?? "")) return null;
   const result = (method: string) => {
@@ -663,9 +694,12 @@ export function wrapUntrusted(from: string | null | undefined, body: string): st
   return `<email_content from="${escapeAttr(cleanLine(from ?? "unknown", 320))}" untrusted>\n${escapeDelimiters(body)}\n</email_content>`;
 }
 
+const MAX_LINE_INPUT = 4096;
+
 /** Untrusted header-ish text (subjects, names, snippets) on one line: cleaned, delimiter-escaped, optionally clipped. */
 export function cleanLine(s: string, max = 0): string {
-  const one = escapeDelimiters(stripInvisible(s).text.replace(/\s+/g, " ").trim());
+  // Clip first: header-ish values can be huge, and nothing past the clip is shown anyway.
+  const one = escapeDelimiters(stripInvisible(s.slice(0, max ? max * 4 : MAX_LINE_INPUT)).text.replace(/\s+/g, " ").trim());
   return max && one.length > max ? one.slice(0, max - 1) + "…" : one;
 }
 

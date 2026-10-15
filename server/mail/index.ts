@@ -19,10 +19,12 @@ export function createMailService(ctx: AppContext): MailService {
       const account = ctx.accounts.get(accountId);
       if (!account) throw notFound("Account");
       const msg = await ctx.google.gmail(accountId).getMessage(messageId, "full");
-      const { totalChars: _total, ...content } = await contentPool(ctx).content(ctx.google.mime.parse(msg), {
-        accountEmail: account.email,
-        maxChars: ctx.settings.get().maxBodyChars,
-      });
+      // Webhook bodies use the background lane so they can't starve interactive MCP reads.
+      const { totalChars: _total, ...content } = await contentPool(ctx).content(
+        ctx.google.mime.parse(msg),
+        { accountEmail: account.email, maxChars: ctx.settings.get().maxBodyChars },
+        "background",
+      );
       return content;
     },
 

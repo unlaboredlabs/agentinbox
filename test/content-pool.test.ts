@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import type { ParsedMessage } from "../server/google/types.ts";
-import { buildContent, escapeDelimiters } from "../server/mail/content.ts";
+import { buildContent, cleanLine, escapeDelimiters, fallbackContent, formatAddress, stripInvisible } from "../server/mail/content.ts";
 import { ContentPool } from "../server/mail/pool.ts";
 import { createLogger } from "../server/util/log.ts";
 
@@ -145,5 +145,88 @@ describe("review inputs finish well inside the deadline", () => {
       expect(m.lag, name).toBeLessThan(250);
       expect(m.result.body, name).not.toMatch(/too complex to display safely; showing its plain-text/);
     }
+  });
+});
+
+describe("queueing: total deadline, bounded queue, memory of slow inputs, lanes", () => {
+  const SLOW_WORKER = new URL("./content-slow-worker.ts", import.meta.url);
+  const msg = (html: string, id = html) => ({ ...message(html, "plain"), summary: { ...message(html).summary, id } });
+  const warm = async (p: ContentPool) => {
+    await Promise.all([p.content(msg("warm1"), OPTS, "interactive"), p.content(msg("warm2"), OPTS, "interactive")]);
+  };
+
+  it("measures the deadline from enqueue, so a benign read never waits behind many slow ones", async () => {
+    const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 300 });
+    await warm(p);
+    const bombs = Array.from({ length: 10 }, (_, i) => p.content(msg("SLOW", `bomb${i}`), OPTS));
+    const t0 = performance.now();
+    const benign = await p.content(msg("benign"), OPTS);
+    expect(performance.now() - t0).toBeLessThan(700);
+    expect(benign.truncated).toBe(true); // it waited past its deadline: fallback, not a 10 x 300 ms wait
+    await Promise.all(bombs);
+  });
+
+  it("falls back at once when the queue is full", async () => {
+    const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 5_000, maxQueue: 2, size: 1 });
+    await p.content(msg("warm"), OPTS);
+    const running = p.content(msg("SLOW", "a"), OPTS);
+    const queued = [p.content(msg("SLOW", "b"), OPTS), p.content(msg("SLOW", "c"), OPTS)];
+    const t0 = performance.now();
+    const overflow = await p.content(msg("SLOW", "d"), OPTS);
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(overflow.body).toMatch(/too complex to display safely/);
+    await p.close();
+    await Promise.all([running, ...queued]);
+  });
+
+  it("sends inputs that already timed out straight to the fallback", async () => {
+    const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 300 });
+    await warm(p);
+    await p.content(msg("SLOW", "same"), OPTS);
+    const t0 = performance.now();
+    const again = await p.content(msg("SLOW", "same"), OPTS);
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(again.truncated).toBe(true);
+  });
+
+  it("keeps a worker free for interactive reads while background jobs are slow", async () => {
+    const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 2_000 });
+    await warm(p);
+    const background = Array.from({ length: 5 }, (_, i) => p.content(msg("SLOW", `hook${i}`), OPTS, "background"));
+    const t0 = performance.now();
+    const read = await p.content(msg("benign"), OPTS, "interactive");
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(read.body).toBe("fast:benign");
+    await p.close();
+    await Promise.all(background);
+  });
+});
+
+describe("bidi bombs stay linear on every main-thread path", () => {
+  const pairs = (n: number) => String.fromCodePoint(0x202a).repeat(n) + String.fromCodePoint(0x2069).repeat(n);
+  const bomb = pairs(40_000);
+  const time = (fn: () => unknown) => {
+    const t0 = performance.now();
+    fn();
+    return performance.now() - t0;
+  };
+  it.each([
+    ["stripInvisible", () => stripInvisible(bomb)],
+    ["fallbackContent (text part)", () => fallbackContent(message(null, bomb), OPTS)],
+    ["fallbackContent (subject)", () => fallbackContent({ ...message(null, "x"), summary: { ...message(null).summary, subject: bomb } }, OPTS)],
+    ["in-process plain text", () => buildContent(message(null, bomb), OPTS)],
+    ["cleanLine", () => cleanLine(bomb)],
+    ["formatAddress", () => formatAddress({ name: bomb, email: "x@evil.example" })],
+    ["nested comments in Authentication-Results", () => buildContent({ ...message(null, "x"), authenticationResults: "mx.google.com; " + "(".repeat(4000) + ")".repeat(4000) + '"'.repeat(4000) }, OPTS)],
+  ])("%s", (_name, fn) => {
+    fn();
+    expect(time(fn)).toBeLessThan(50);
+  });
+
+  it("text attachments are cleaned in a worker", async () => {
+    const p = pool();
+    const m = await measure(() => p.text(`hi${bomb}`));
+    expect(m.result).toBe("hi");
+    expect(m.lag).toBeLessThan(50);
   });
 });
