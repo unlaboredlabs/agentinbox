@@ -33,8 +33,11 @@ export function calendarEnabled(ctx: Ctx): boolean {
   return setupRow(ctx).enabled;
 }
 
-/** A probe waits this long for Google; past it the state stays as it was (the connect still succeeds). */
-const PROBE_TIMEOUT_MS = 15_000;
+/**
+ * A connect waits this long for its probe; past it the probe finishes in the background (the callback
+ * page shouldn't hang on a slow Calendar API).
+ */
+export const CONNECT_PROBE_WAIT_MS = 3_000;
 
 /** Google Auth Platform → Data Access, where the consent screen's scopes are listed. */
 const dataAccessUrl = (projectId: string) => `https://console.cloud.google.com/auth/scopes?project=${encodeURIComponent(projectId)}`;
@@ -42,20 +45,34 @@ const dataAccessUrl = (projectId: string) => `https://console.cloud.google.com/a
 const projectId = (ctx: Pick<AppContext, "settings">) => ctx.settings.getState("google.client")?.projectId || null;
 
 /**
- * The Calendar API in the project, as last observed. An account's recorded SERVICE_DISABLED wins; a sync
- * that succeeded after the last probe means it is on again.
+ * The Calendar API in the project, as last observed. calendar.setup.api is the newest install-wide
+ * observation (probes and sync both record every change); a sync that succeeded after it also counts.
+ * Account rows only speak when nothing was recorded install-wide.
  */
 function apiState(s: InternalState["calendar.setup"], rows: AccountRow[]): CalendarSetupState["api"] {
-  if (rows.some((r) => r.calendar_status === "api_disabled")) return "disabled";
-  if (rows.some((r) => r.calendar_synced_at && (!s.api || r.calendar_synced_at > s.api.at))) return "enabled";
-  return s.api?.state ?? "unknown";
+  if (rows.some((r) => r.calendar_synced_at && s.api && r.calendar_synced_at > s.api.at)) return "enabled";
+  if (s.api) return s.api.state;
+  return rows.some((r) => r.calendar_status === "api_disabled") ? "disabled" : "unknown";
+}
+
+const CONSOLE_HOSTS = new Set(["console.cloud.google.com", "console.developers.google.com"]);
+
+/** Google's activationUrl, only if it really is a Google Cloud console link (it is shown as a clickable link). */
+export function safeActivationUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && CONSOLE_HOSTS.has(u.hostname) && !u.username && !u.password && !u.port ? u.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The link that turns the Calendar API on: Google's own activationUrl when it sent one (it names the right project). */
 export function enableApiLink(ctx: Pick<AppContext, "settings">): string | null {
   const s = setupRow(ctx);
   const project = projectId(ctx);
-  return (s.api?.state === "disabled" && s.api.activationUrl) || (project ? enableCalendarApiUrl(project) : null);
+  return (s.api?.state === "disabled" && safeActivationUrl(s.api.activationUrl)) || (project ? enableCalendarApiUrl(project) : null);
 }
 
 export function setupState(ctx: Pick<AppContext, "settings" | "db">): CalendarSetupState {
@@ -93,10 +110,20 @@ export function setupState(ctx: Pick<AppContext, "settings" | "db">): CalendarSe
   };
 }
 
-function recordApi(ctx: AppContext, state: "enabled" | "disabled", activation: string | null = null): void {
+/**
+ * Records what Google said about the Calendar API, for probes here and for sync (A). The API is per
+ * project, so "enabled" also clears api_disabled from every account; "disabled" keeps the newest valid
+ * activationUrl Google sent.
+ */
+export function noteCalendarApi(ctx: Pick<AppContext, "settings" | "db" | "bus">, state: "enabled" | "disabled", err?: GoogleApiError | null): void {
   const s = setupRow(ctx);
-  if (state === "enabled" && s.api?.state === "enabled") return;
-  ctx.settings.setState("calendar.setup", { ...s, api: { state, at: now(), activationUrl: activation } });
+  const activation = state === "disabled" ? (safeActivationUrl(err ? activationUrl(err) : null) ?? safeActivationUrl(s.api?.activationUrl)) : null;
+  if (s.api?.state !== state || (state === "disabled" && activation !== (s.api?.activationUrl ?? null))) {
+    ctx.settings.setState("calendar.setup", { ...s, api: { state, at: now(), error: err?.message ?? null, activationUrl: activation } });
+  }
+  if (state === "enabled") {
+    for (const row of allRows(ctx)) if (row.calendar_status === "api_disabled") updateRow(ctx, row.id, { calendar_status: null, calendar_error: null }, true);
+  }
 }
 
 /** Writes accounts.calendar_* and broadcasts the account when that changed what the console shows. */
@@ -144,7 +171,7 @@ async function backfillScopes(ctx: AppContext, row: AccountRow): Promise<Account
 }
 
 /**
- * calendarList.list as the account, recording what Google said: success clears API problems (on every
+ * calendarList.list as the account, recording what Google said: success clears api_disabled (on every
  * account: the API is per project), SERVICE_DISABLED marks the API off, a missing scope re-reads the
  * granted scopes (and retries once if they still look complete: the cached access token may predate a
  * consent). Throws the 409s of CalendarService.calendars.
@@ -152,15 +179,14 @@ async function backfillScopes(ctx: AppContext, row: AccountRow): Promise<Account
 async function listCalendars(ctx: AppContext, row: AccountRow, retried = false): Promise<CalendarListEntryRaw[]> {
   try {
     const list = await ctx.google.calendar(row.id).listCalendars();
-    recordApi(ctx, "enabled");
-    setStatus(ctx, row, null, null);
-    for (const other of allRows(ctx)) if (other.calendar_status === "api_disabled") setStatus(ctx, other, null, null);
+    // Only the API problem is ours to clear: a sync `error` stays until sync itself succeeds.
+    noteCalendarApi(ctx, "enabled");
     return list;
   } catch (err) {
     if (err instanceof AccountNeedsReauthError) throw needsReauth(row);
     const kind = classifyCalendarError(err);
     if (kind === "api_disabled") {
-      recordApi(ctx, "disabled", activationUrl(err as GoogleApiError));
+      noteCalendarApi(ctx, "disabled", err as GoogleApiError);
       setStatus(ctx, row, "api_disabled", API_DISABLED);
       throw apiDisabled(ctx);
     }
@@ -176,26 +202,23 @@ async function listCalendars(ctx: AppContext, row: AccountRow, retried = false):
 
 /**
  * Asks Google for the account's calendar list right after a connect (or on a check) to learn whether the
- * Calendar API is on. Only accounts with every calendar scope are probed. Never throws.
+ * Calendar API is on. Only accounts with every calendar scope are probed. Never throws. With `waitMs` it
+ * resolves after that long at the latest and the probe records its answer when it comes.
  */
-export async function probeCalendar(ctx: AppContext, accountId: string): Promise<void> {
+export async function probeCalendar(ctx: AppContext, accountId: string, opts: { waitMs?: number } = {}): Promise<void> {
   const row = getRow(ctx, accountId);
   if (!row || row.status === "needs_reauth" || !hasScopes(accountScopes(row), CALENDAR_SCOPES)) return;
+  const probe = listCalendars(ctx, row).then(
+    () => ctx.calendar.kick(accountId),
+    (err: unknown) => {
+      // The 409s are recorded on the account already; anything else is left for sync to report.
+      if (!(err instanceof HttpError)) ctx.log.child("calendar").warn("Calendar probe failed", { email: row.email, error: errorMessage(err) });
+    },
+  );
+  if (opts.waitMs === undefined) return probe;
   let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      listCalendars(ctx, row),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Google didn't answer within ${PROBE_TIMEOUT_MS / 1000}s`)), PROBE_TIMEOUT_MS);
-      }),
-    ]);
-    ctx.calendar.kick(accountId);
-  } catch (err) {
-    // The 409s are recorded on the account already; anything else is left for sync to report.
-    if (!(err instanceof HttpError)) ctx.log.child("calendar").warn("Calendar probe failed", { email: row.email, error: errorMessage(err) });
-  } finally {
-    clearTimeout(timer);
-  }
+  await Promise.race([probe, new Promise<void>((resolve) => (timer = setTimeout(resolve, opts.waitMs)))]);
+  clearTimeout(timer);
 }
 
 const toInfo = (e: CalendarListEntryRaw, synced: Set<string>): CalendarInfo => ({

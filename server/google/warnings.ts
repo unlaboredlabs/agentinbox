@@ -173,7 +173,7 @@ function calendarWarnings(ctx: Ctx, rows: AccountRow[]): SetupWarning[] {
       const none = missing.length === CALENDAR_SCOPES.length;
       out.push({
         code: "calendar_scope_missing",
-        severity: inUse.has(row.id) ? "error" : "warning",
+        severity: inUse.has(row.id) ? "error" : "info",
         message: none
           ? `Google Calendar isn't added to ${row.email} yet, so agents can't use its calendar. Its mail is unaffected.`
           : `${row.email} granted only part of Google Calendar access (not granted: ${describeScopes(missing)}). Its mail is unaffected.`,

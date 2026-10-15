@@ -4,6 +4,7 @@ import { CALENDAR_PUSH_PATH, createCalendarPush, pushAddress, type CalendarPush 
 import type { AppContext } from "../server/context.ts";
 import { sha256 } from "../server/crypto.ts";
 import { now } from "../server/db/index.ts";
+import { GoogleApiError } from "../server/google/types.ts";
 import type { LookupFn } from "../server/webhooks/ssrf.ts";
 import { consent, type FakeChannel, fakeCalendar } from "./calendar-setup-fakes.ts";
 import { FAKE_CLIENT, type FakeGoogle, recordingEvents, startFakeGoogle } from "./fake-google.ts";
@@ -203,7 +204,9 @@ describe("push channels", () => {
   });
 
   it("stays on polling when Google refuses the address", async () => {
-    cal.failWatch(new Error("Unauthorized WebHook callback channel"));
+    cal.failWatch(
+      new GoogleApiError(400, `Unauthorized WebHook callback channel: ${PUBLIC}${CALENDAR_PUSH_PATH}`, "push.webhookUrlUnauthorized", { reasons: ["push.webhookUrlUnauthorized"] }),
+    );
     await push.reconcile();
     expect(rows().every((r) => r.channel_id === null)).toBe(true);
     cal.failWatch(null);
@@ -211,10 +214,39 @@ describe("push channels", () => {
     expect(cal.channels).toEqual([]);
   });
 
+  it.each([
+    ["a 5xx", new GoogleApiError(503, "Backend Error", "backendError")],
+    ["a rate limit", new GoogleApiError(429, "Rate Limit Exceeded", "rateLimitExceeded")],
+    ["a network error", new GoogleApiError(0, "connect ECONNRESET", "network")],
+    ["one account's missing scope", new GoogleApiError(403, "Request had insufficient authentication scopes.", "ACCESS_TOKEN_SCOPE_INSUFFICIENT")],
+  ])("retries after %s instead of giving up on push", async (_what, err) => {
+    cal.failWatch(err);
+    await push.reconcile();
+    expect(cal.channels).toEqual([]);
+    cal.failWatch(null);
+    await push.reconcile();
+    expect(cal.channels).toHaveLength(2);
+  });
+
   it("stops an account's channels before the account is removed", async () => {
     await push.reconcile();
     await ctx.accounts.remove(accountId);
     expect(cal.stopped.map((s) => s.id).sort()).toEqual(cal.channels.map((c) => c.id).sort());
     expect(fake.revoked).toHaveLength(1);
+  });
+
+  it("never leaks a channel that was being created while the account is removed", async () => {
+    push.start?.();
+    await push.reconcile();
+    ctx.db.run("UPDATE calendar_sync SET channel_id = NULL, channel_token_hash = NULL WHERE account_id = ?", accountId);
+    cal.delayMs = 100;
+    const inflight = push.reconcile();
+    await vi.waitFor(() => expect(cal.calls.filter((c) => c.method === "watchEvents")).toHaveLength(3));
+    await ctx.accounts.remove(accountId);
+    await inflight;
+    // The one in flight was stopped after it was created; no new one was started for the account.
+    const created = cal.channels.slice(2);
+    expect(created).toHaveLength(1);
+    expect(cal.stopped.map((s) => s.id)).toContain(created[0]!.id);
   });
 });
