@@ -65,7 +65,7 @@ type Situation = "local" | "remote" | "tailscale" | "public";
 
 function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & { settings: Settings; addresses: string[] }) {
   const qc = useQueryClient();
-  const { draft, statuses } = useSetupProgress();
+  const { statuses } = useSetupProgress();
   const origin = window.location.origin;
   const browserRemote = !isLoopbackOrigin(origin);
   // First visit (nothing confirmed, no client, no account): the address in the browser's bar is the best
