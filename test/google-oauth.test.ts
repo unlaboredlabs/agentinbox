@@ -408,5 +408,10 @@ describe("Gmail client", () => {
     expect(fake.requests.filter((r) => r.path.endsWith("/labels")).length).toBe(calls);
     const res = await accountsApi(ctx).request(`/accounts/${accountId}/labels`);
     expect(await res.json()).toEqual(labels);
+    // A label created meanwhile shows up on a fresh lookup (and refreshes the cache).
+    const later = fake.addLabel("quinn@example.com", "Later");
+    expect((await ctx.google.labels(accountId)).map((l) => l.id)).not.toContain(later);
+    expect((await ctx.google.labels(accountId, { fresh: true })).map((l) => l.id)).toContain(later);
+    expect((await ctx.google.labels(accountId)).map((l) => l.id)).toContain(later);
   });
 });

@@ -34,10 +34,10 @@ export function createGoogleService(ctx: AppContext): GoogleService {
 
     gmail,
     mime: mimeTools,
-    async labels(accountId) {
+    async labels(accountId, opts = {}) {
       const cache = googleRuntime(ctx).labelCache;
       const hit = cache.get(accountId);
-      if (hit && Date.now() - hit.at < LABEL_TTL_MS) return hit.labels;
+      if (hit && !opts.fresh && Date.now() - hit.at < LABEL_TTL_MS) return hit.labels;
       const raw = await gmail(accountId).listLabels();
       const rank = (l: GmailLabel) => (l.type === "system" ? (SYSTEM_ORDER.indexOf(l.id) + 1 || SYSTEM_ORDER.length + 1) : 100);
       const labels: GmailLabel[] = raw

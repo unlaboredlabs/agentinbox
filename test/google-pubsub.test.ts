@@ -136,6 +136,8 @@ describe("Pub/Sub provisioning", () => {
     const scopes = JSON.parse(ctx.db.get<{ scopes: string }>("SELECT scopes FROM accounts")!.scopes) as string[];
     expect(scopes).toEqual(expect.arrayContaining([PUBSUB_SCOPE, "https://www.googleapis.com/auth/gmail.modify"]));
     await expect(ctx.google.provisionPubsub()).resolves.toMatchObject({ topic: TOPIC });
+    // A later reconnect asks for Pub/Sub again (Google forgets scopes after a revocation).
+    expect(new URL(ctx.google.startConnect({ reauthAccountId: acct.id }).authUrl).searchParams.get("scope")).toContain(PUBSUB_SCOPE);
   });
 
   it("tests the pipeline by publishing and pulling a message, leaving Gmail notifications for ingest", async () => {

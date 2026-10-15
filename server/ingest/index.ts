@@ -64,6 +64,11 @@ class Ingest implements IngestService {
   /** Aborted by stop(): in-flight syncs end after the current Gmail request. */
   private life = new AbortController();
   private lastPullAt: string | null = null;
+  /** Consecutive Pub/Sub pull failures (reset when an account becomes active). */
+  private pullFailures = 0;
+  /** Ends the current pull-retry wait early. */
+  private wakePull: (() => void) | null = null;
+  private readonly statuses = new Map<string, string>();
   private lastError: string | null = null;
 
   constructor(private readonly ctx: AppContext) {
@@ -78,10 +83,22 @@ class Ingest implements IngestService {
     void this.restart();
   };
 
+  /** A (re)activated account may be the Pub/Sub principal: retry the pull right away. */
+  private readonly onAccount = (a: Account) => {
+    const prev = this.statuses.get(a.id);
+    this.statuses.set(a.id, a.status);
+    if (a.status === "active" && prev !== "active") {
+      this.pullFailures = 0;
+      this.wakePull?.();
+    }
+  };
+
   start(): void {
     this.stopped = false;
     if (this.life.signal.aborted) this.life = new AbortController();
+    for (const r of allRows(this.ctx)) this.statuses.set(r.id, r.status);
     this.ctx.bus.on("settings", this.onSettings);
+    this.ctx.bus.on("account", this.onAccount);
     void this.restart();
   }
 
@@ -89,6 +106,7 @@ class Ingest implements IngestService {
     this.stopped = true;
     this.life.abort();
     this.ctx.bus.off("settings", this.onSettings);
+    this.ctx.bus.off("account", this.onAccount);
     await this.restarting;
     await this.stopLoop();
     const work = Promise.allSettled([...this.chains.values()]);
@@ -296,25 +314,30 @@ class Ingest implements IngestService {
       this.every(signal, WATCH_CHECK_MS, () => ensureWatches(this.ctx, { signal }), true),
       this.every(signal, SAFETY_NET_MS, () => this.syncAll(), true),
     ];
-    let failures = 0;
+    this.pullFailures = 0;
     while (!signal.aborted) {
       try {
         const msgs = await pullPubsub(this.ctx, { signal });
         this.lastPullAt = now();
         this.lastError = null;
-        failures = 0;
+        this.pullFailures = 0;
         if (msgs.length) await this.handleNotifications(msgs);
       } catch (err) {
         if (signal.aborted) break;
         if (isAbortError(err)) continue; // long-poll timeout
-        failures++;
+        const failures = ++this.pullFailures;
         const { message, hint } = explainPubsubError(err, this.ctx.settings.getState("google.client")?.projectId ?? null);
         this.lastError = `Pub/Sub pull failed: ${message} ${hint}`.trim();
         writePubsub(this.ctx, { lastError: this.lastError });
         if (failures === 1) this.log.warn("Pub/Sub pull failed; polling until it recovers", { error: errorMessage(err) });
-        // Keep mail flowing while the pull is broken.
+        // Keep mail flowing while the pull is broken: poll history at the poll interval, retrying the
+        // pull with backoff (or immediately once an account is reconnected).
         await untilAborted(this.syncAll(), signal);
-        await sleep(Math.min(MAX_PULL_BACKOFF_MS, 1000 * 2 ** failures), signal);
+        const pollMs = this.ctx.settings.get().pollIntervalSeconds * 1000;
+        const wake = new AbortController();
+        this.wakePull = () => wake.abort();
+        if (this.pullFailures > 0) await sleep(Math.min(MAX_PULL_BACKOFF_MS, pollMs, 1000 * 2 ** failures), AbortSignal.any([signal, wake.signal]));
+        this.wakePull = null;
       }
     }
     await Promise.all(background);

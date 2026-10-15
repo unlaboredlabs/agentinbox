@@ -5,7 +5,7 @@ import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
 import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
-import { type AccountRow, getRow, toAccount } from "./accounts.ts";
+import { type AccountRow, accountScopes, getRow, toAccount } from "./accounts.ts";
 import { callbackMode, clientCredentials } from "./client.ts";
 import { buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
 import { pubsubPrincipal } from "./pubsub.ts";
@@ -81,6 +81,12 @@ export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; 
     if (!reauthId) throw badRequest("Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
   }
   const reauth = reauthId ? ctx.accounts.require(reauthId) : null;
+  // A reconnect asks again for extra scopes the account had: after a revocation Google forgets them,
+  // and the Pub/Sub principal would otherwise come back without Pub/Sub access.
+  const had = reauthId ? accountScopes(getRow(ctx, reauthId)!) : [];
+  for (const [name, scope] of Object.entries(EXTRA_SCOPES) as [ExtraScope, string][]) {
+    if (had.includes(scope) && !extra.includes(name)) extra.push(name);
+  }
   const scopes = [...BASE_SCOPES, ...extra.map((x) => EXTRA_SCOPES[x])];
   const { mode, redirectUri } = callbackMode(ctx);
   const state = randomToken(32);

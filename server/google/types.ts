@@ -263,8 +263,11 @@ export interface GoogleService extends Lifecycle {
   gmail(accountId: string): GmailClient;
   /** FROZEN. */
   readonly mime: MimeTools;
-  /** FROZEN. Labels with ids and names, as shown in the console and to agents. */
-  labels(accountId: string): Promise<GmailLabel[]>;
+  /**
+   * FROZEN. Labels with ids and names, as shown in the console and to agents. Cached ~60 s; pass
+   * `fresh: true` on a lookup miss (e.g. a label just created in Gmail) to refetch.
+   */
+  labels(accountId: string, opts?: { fresh?: boolean }): Promise<GmailLabel[]>;
   revoke(accountId: string): Promise<void>;
 
   // Pub/Sub

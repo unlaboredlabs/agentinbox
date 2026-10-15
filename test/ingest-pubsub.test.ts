@@ -104,6 +104,25 @@ describe("pubsub ingest", () => {
     await waitFor(() => rec.events.length === 1);
   });
 
+  it("retries the pull right away when the principal account is reconnected", async () => {
+    await ctx.google.provisionPubsub();
+    ctx.ingest.start?.();
+    await waitFor(() => ctx.ingest.status().lastPullAt !== null);
+    fake.failRefresh(ME);
+    ctx.db.run("UPDATE accounts SET access_expires_at = ?", new Date(0).toISOString());
+    await waitFor(() => ctx.accounts.get(accountId)!.status === "needs_reauth" && ctx.ingest.status().lastError !== null);
+    // Let the backoff grow past two failures (the next retry would be ~4 s away).
+    await new Promise((r) => setTimeout(r, 2500));
+    await connectFakeAccount(ctx, fake, ME, { reauthAccountId: accountId });
+    // Let the reconnect's own catch-up sync finish, so only the pull can pick up the next mail.
+    await new Promise((r) => setTimeout(r, 300));
+    const t = Date.now();
+    fake.deliver(ME, { from: "x@y.test", subject: "After reconnect", text: "x" });
+    await waitFor(() => rec.ofType("message.received").length === 1);
+    expect(Date.now() - t).toBeLessThan(1000);
+    await waitFor(() => ctx.ingest.status().lastError === null);
+  });
+
   it("polls instead when pubsub mode is selected but not provisioned", async () => {
     ctx.settings.update({ ingestMode: "pubsub" });
     ctx.ingest.start?.();
