@@ -413,7 +413,7 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
     out(pc.gray(`     The key is the "apiKey" field in ${profilePath(profileName)}.`));
   } else {
     out(`  ${n++}. Give ${label} the agentinbox MCP tools without ever seeing the key:`);
-    out(`       ${pc.cyan(`${NPX} setup-mcp --tool ${tool}${p}`)}`);
+    out(`       ${pc.cyan(`${NPX} setup-mcp --tool ${tool}${p}`)}  ${pc.gray("(add --dry-run to see exactly what it changes first)")}`);
   }
   out(`  ${n++}. Install the agentinbox skill so ${label} knows the rules:`);
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
@@ -422,7 +422,7 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   for (const note of r.notes) out(pc.gray(`     ${note}`));
   out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
-  out(`     Watch it arrive in the listener above as ${pc.cyan("→ #… message.received")} followed by ${pc.green("✓")} once ${label} handled it.`);
+  out(`     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by ${pc.green("✓")} once ${label} handled it.`);
   out(`  ${n++}. Then keep it running in the background (systemd / launchd, starts at login; stop the foreground one first):`);
   out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
   out(`       ${pc.cyan(`${NPX} listen status${p}`)}  ${pc.gray("(connection, cursor, recent events and the access granted)")}`);
