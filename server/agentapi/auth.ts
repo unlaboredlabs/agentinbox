@@ -42,7 +42,7 @@ export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): Middl
           error: {
             code: "unauthorized",
             message: key ? "Invalid or disabled agent API key." : "Missing agent API key.",
-            hint: "Send the agent's key as `Authorization: Bearer aib_…`, or pair again with `npx agentinbox connect`.",
+            hint: "Send the agent's key as `Authorization: Bearer aib_…`, or pair again with `npx agentinbox-cli connect`.",
           },
         },
         401,

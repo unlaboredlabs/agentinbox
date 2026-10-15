@@ -1,5 +1,5 @@
 // Agent-facing API under /agent/v1 (contract: shared/agent-api.ts): device-flow pairing for
-// `npx agentinbox connect` and the event stream for `npx agentinbox listen`. Mounted at the root;
+// `npx agentinbox-cli connect` and the event stream for `npx agentinbox-cli listen`. Mounted at the root;
 // it uses bearer keys or no auth, so it sits outside the console's cookie/CSRF guard.
 
 import { Hono } from "hono";
