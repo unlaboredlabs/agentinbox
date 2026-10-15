@@ -12,8 +12,9 @@ export class ApiError extends Error {
     readonly code: string | null = null,
     readonly hint: string | null = null,
     readonly retryAfter: number | null = null,
+    cause?: string,
   ) {
-    super(message);
+    super(message, cause ? { cause } : undefined);
   }
 }
 
@@ -43,7 +44,8 @@ async function call<T>(base: string, path: string, init: RequestInit & { key?: s
   try {
     res = await fetch(`${base}${path}`, { ...init, headers, redirect: "error", signal: init.signal ?? AbortSignal.timeout(init.timeoutMs ?? 15_000) });
   } catch (err) {
-    throw new ApiError(`${what} failed: could not reach ${base} (${describeFetchError(err)})`, 0);
+    const reason = describeFetchError(err);
+    throw new ApiError(`${what} failed: could not reach ${base} (${reason})`, 0, null, null, null, `daemon unreachable: ${reason}`);
   }
   if (!res.ok) throw await apiError(res, what);
   return (await res.json()) as T;
@@ -54,8 +56,20 @@ export function describeFetchError(err: unknown): string {
   if (err.name === "TimeoutError") return "timed out";
   if (err.name === "AbortError") return "aborted";
   const cause = (err as { cause?: { code?: string; message?: string } }).cause;
-  if (cause?.code === "ECONNREFUSED") return "connection refused";
-  if (cause?.code === "ENOTFOUND") return "host not found";
+  const friendly: Record<string, string> = {
+    ECONNREFUSED: "connection refused",
+    ENOTFOUND: "host not found",
+    EAI_AGAIN: "DNS lookup failed (offline?)",
+    ECONNRESET: "connection reset",
+    ETIMEDOUT: "connection timed out",
+    EHOSTUNREACH: "host unreachable",
+    ENETUNREACH: "network unreachable (offline?)",
+    UND_ERR_SOCKET: "connection closed by the other side",
+    UND_ERR_CONNECT_TIMEOUT: "connection timed out",
+    UND_ERR_HEADERS_TIMEOUT: "no response",
+    UND_ERR_BODY_TIMEOUT: "response stalled",
+  };
+  if (cause?.code && friendly[cause.code]) return friendly[cause.code]!;
   if (cause?.code) return `${cause.code}${cause.message ? `: ${cause.message}` : ""}`;
   return cause?.message ?? err.message;
 }

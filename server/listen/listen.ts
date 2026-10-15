@@ -140,6 +140,8 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     recent: [],
     stoppedAt: null,
     exitReason: null,
+    exec: config.exec,
+    forward: config.forward?.url ?? null,
   });
   status.flush();
 
@@ -169,7 +171,14 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         log.debug(`${tag} command finished in ${formatDuration(r.durationMs)}`, meta);
       } else {
         errors.push(`command: ${r.error}`);
-        const lastLines = (t: string) => t.trim().split("\n").slice(-3).map((l) => `  │ ${safeText(l, 300)}`).join("\n");
+        const lastLines = (t: string) =>
+          t
+            .trim()
+            .split("\n")
+            .filter((l) => l.trim())
+            .slice(-3)
+            .map((l) => `  │ ${safeText(l, 300)}`)
+            .join("\n");
         const tail = lastLines(r.stderrTail) || lastLines(r.stdoutTail);
         log.warn(`${tag} command failed (attempt ${job.attempts}/${config.maxAttempts}): ${r.error}${tail ? `\n${tail}` : ""}`, meta);
       }

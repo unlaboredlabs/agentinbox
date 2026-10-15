@@ -50,7 +50,10 @@ export async function printStatus(profileName: string): Promise<void> {
   out(`${pc.bold("Agent")}     ${safeText(profile.agentName)} ${pc.gray(`(${profile.agentId})`)}`);
   out(`${pc.bold("Daemon")}    ${profile.url}`);
   out(`${pc.bold("Consumer")}  ${st?.consumer ?? profile.consumer}`);
-  const targets = [profile.exec ? `exec ${safeText(profile.exec, 120)}` : null, profile.forward ? `forward ${profile.forward.url}` : null].filter(Boolean);
+  // What the last run used (flags included), else what the profile has saved.
+  const exec = st && st.exec !== undefined ? st.exec : profile.exec;
+  const forward = st && st.forward !== undefined ? st.forward : profile.forward?.url;
+  const targets = [exec ? `exec ${safeText(exec, 120)}` : null, forward ? `forward ${forward}` : null].filter(Boolean);
   out(`${pc.bold("Runs")}      ${targets.length ? targets.join(" · ") : pc.gray("nothing saved (pass --exec/--forward with --save)")}`);
 
   let svc = "not installed";
@@ -64,7 +67,8 @@ export async function printStatus(profileName: string): Promise<void> {
     out(`${pc.bold("Key")}       ${pc.green("valid")} · ${self.grants.length ? self.grants.map((g) => `${g.accountEmail} (${g.capabilities.join(", ")}; ${g.sendMode})`).join(", ") : pc.yellow("no mailbox grants")}`);
   } catch (err) {
     const revoked = err instanceof ApiError && (err.status === 401 || err.status === 403);
-    out(`${pc.bold("Key")}       ${revoked ? pc.red(`rejected: ${err.message}`) : pc.yellow(`unchecked: ${err instanceof Error ? err.message : String(err)}`)}`);
+    const why = err instanceof ApiError && err.status === 0 ? (err.cause as string) : err instanceof Error ? err.message : String(err);
+    out(`${pc.bold("Key")}       ${revoked ? pc.red(`rejected: ${(err as Error).message}`) : pc.yellow(`not checked (${why})`)}`);
   }
 
   if (!st) {

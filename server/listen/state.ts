@@ -73,6 +73,9 @@ export interface ListenStatus {
   recent: RecentEvent[];
   stoppedAt: string | null;
   exitReason: string | null;
+  /** What the (last) run executed, flags included. */
+  exec?: string | null;
+  forward?: string | null;
 }
 
 export function readStatus(profile: string): ListenStatus | null {
