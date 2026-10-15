@@ -74,8 +74,8 @@ Google only redirects back to `https://…` addresses or `localhost`. For any ot
 
 - [ ] Run `node -v` and confirm it prints `v22.13.0` or higher.
 - [ ] Start agentinbox:
-  - Laptop: `npx agentinbox`
-  - Server: `npx agentinbox --no-open --host 127.0.0.1`. Drop `--host` if agents on other machines need to reach it directly.
+  - Laptop: `npx agentinbox-cli`
+  - Server: `npx agentinbox-cli --no-open --host 127.0.0.1`. Drop `--host` if agents on other machines need to reach it directly.
 - [ ] You should see roughly this:
   ```
   agentinbox v0.x · data in /home/you/.agentinbox
@@ -88,11 +88,11 @@ Google only redirects back to `https://…` addresses or `localhost`. For any ot
 - [ ] Open the `http://localhost:8425/setup?token=…` link in your laptop browser.
   - Lost the link? It's stored in `~/.agentinbox/setup-token`, and restarting agentinbox prints it again.
 - [ ] On **Welcome to agentinbox**, set an **Admin password**, enter it again under **Confirm password**, and submit. Save it in your password manager.
-  - Forgot it later? Run `npx agentinbox reset-password`. It prints a fresh setup link.
+  - Forgot it later? Run `npx agentinbox-cli reset-password`. It prints a fresh setup link.
 - [ ] You land in the console. Open **Get started** in the sidebar. It shows seven steps: Public URL → Google Cloud project → Consent screen → OAuth client → Gmail accounts → Real-time delivery (optional) → First agent.
 - [ ] **Step "Confirm the public URL":** enter the URL you chose in 1a, e.g. `http://localhost:8425`, and confirm it. **(verify)** the exact field and button labels; the wizard route wasn't in the snapshot I read.
 
-Leave agentinbox running in the foreground for now. Once everything works, `npx agentinbox service install` turns it into a background service (systemd or launchd) using the same data directory. Stop the foreground copy first.
+Leave agentinbox running in the foreground for now. Once everything works, `npx agentinbox-cli service install` turns it into a background service (systemd or launchd) using the same data directory. Stop the foreground copy first.
 
 ---
 
@@ -334,7 +334,7 @@ After that, run provisioning. You can then restore the policy: agentinbox doesn'
 - [ ] In Claude Code, run `/mcp` or `claude mcp list` and confirm `agentinbox` shows as connected.
 - [ ] Install the skill on the agent's machine:
   ```sh
-  npx agentinbox skill install --url http://localhost:8425
+  npx agentinbox-cli skill install --url http://localhost:8425
   ```
   Use your Public URL. This writes `~/.claude/skills/agentinbox/SKILL.md`. For Codex, use `--target codex`. The skill is also served at `<Public URL>/skill.md`.
 
@@ -354,7 +354,7 @@ After that, run provisioning. You can then restore the policy: agentinbox doesn'
   3. Click the test-send button. The delivery log shows a 2xx response.
   4. Send yourself another email. A real delivery appears on webhook.site.
   - Private and LAN addresses are blocked unless you add them under **Settings → Webhook allowlist**.
-- [ ] Restart agentinbox with Ctrl-C and `npx agentinbox`. Accounts stay **Active** and no setup link is printed.
+- [ ] Restart agentinbox with Ctrl-C and `npx agentinbox-cli`. Accounts stay **Active** and no setup link is printed.
 - [ ] **External apps:** look at **Gmail accounts** again after 8+ days. Still **Active** means the app is really In production. *Needs reauth* around day 7 means it's still in Testing (see §9).
 
 ---
