@@ -5,6 +5,7 @@ import { type Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ApiError } from "../shared/types.ts";
+import { agentApiRoutes } from "./agentapi/index.ts";
 import { accountsApi } from "./api/accounts.ts";
 import { agentsApi } from "./api/agents.ts";
 import { approvalsApi } from "./api/approvals.ts";
@@ -14,6 +15,7 @@ import { eventsApi } from "./api/events.ts";
 import { googleApi } from "./api/google.ts";
 import { oauthRoutes } from "./api/oauth.ts";
 import { overviewApi } from "./api/overview.ts";
+import { pairingsApi } from "./api/pairings.ts";
 import { settingsApi } from "./api/settings.ts";
 import { setupApi, setupPublicApi } from "./api/setup.ts";
 import { healthRoutes, systemApi } from "./api/system.ts";
@@ -37,7 +39,7 @@ export interface AppOptions {
 export const DEFAULT_WEB_DIR = resolve(import.meta.dirname, "..", "dist", "web");
 
 /** Paths the console's index.html fallback must never answer. */
-const SERVER_PREFIXES = ["/api", "/mcp", "/oauth", "/skill.md", "/health"];
+const SERVER_PREFIXES = ["/api", "/agent", "/mcp", "/oauth", "/skill.md", "/health"];
 const isServerPath = (path: string) => SERVER_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
 
 export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> {
@@ -75,10 +77,12 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   });
   app.route("/", oauthRoutes(ctx));
   app.route("/", mcpRoutes(ctx));
+  // Bearer/public JSON: outside the /api cookie session and CSRF guard.
+  app.route("/", agentApiRoutes(ctx));
 
   // ── Admin console API ──
   app.use("/api/*", requireAdmin(ctx));
-  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi]) {
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
     app.route("/api", api(ctx));
   }
 

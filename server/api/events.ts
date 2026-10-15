@@ -11,7 +11,7 @@ const HEARTBEAT_MS = 20_000;
 const MAX_PENDING_WRITES = 1000;
 
 /** Bus channel → stream message kind. */
-const CHANNELS = ["event", "delivery", "approval", "audit", "account"] as const satisfies (keyof BusEvents & ConsoleStreamMessage["kind"])[];
+const CHANNELS = ["event", "delivery", "approval", "audit", "account", "pairing"] as const satisfies (keyof BusEvents & ConsoleStreamMessage["kind"])[];
 
 /** Paths are relative to /api. */
 export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPendingWrites?: number } = {}) {

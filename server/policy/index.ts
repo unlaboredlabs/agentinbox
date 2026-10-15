@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { Agent, AgentWithKey, CreateAgentInput, Grant, GrantInput } from "../../shared/types.ts";
+import { listenersOf } from "../agentapi/listeners.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
+import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { bool, json, now } from "../db/index.ts";
@@ -57,7 +59,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     lastUsedAt: r.last_used_at,
     createdAt: r.created_at,
     grants: grantsOf(r.id),
-    listeners: [], // PLACEHOLDER: filled from listener_cursors by the listen work area
+    listeners: listenersOf(db, r.id),
   });
 
   const row = (id: string) => db.get<AgentRow>("SELECT * FROM agents WHERE id = ?", id);
@@ -105,6 +107,9 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     maxSendsPerHour: g.maxSendsPerHour,
     maxSendsPerDay: g.maxSendsPerDay,
   });
+
+  /** Live listener streams re-check access on this (after the change is committed). */
+  const changed = (agentId: string, reason: BusEvents["agent"][0]["reason"]) => ctx.bus.emit("agent", { agentId, reason });
 
   return {
     authenticate(apiKey: string): AgentPrincipal | null {
@@ -179,6 +184,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       }
       if (sets.length) db.run(`UPDATE agents SET ${sets.join(", ")} WHERE id = ?`, ...params, id);
       ctx.audit.record({ ...ADMIN_ACTOR, action: "agent.update", target: id, outcome: "ok", detail: { fields: Object.keys(fields) } });
+      changed(id, "updated");
       return toAgent(requireRow(id));
     },
 
@@ -187,6 +193,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       const apiKey = newApiKey();
       db.run("UPDATE agents SET key_prefix = ?, key_hash = ? WHERE id = ?", apiKey.slice(0, 8), sha256(apiKey), id);
       ctx.audit.record({ ...ADMIN_ACTOR, action: "agent.rotate_key", target: id, outcome: "ok" });
+      changed(id, "key_rotated");
       return { agent: toAgent(requireRow(id)), apiKey };
     },
 
@@ -194,6 +201,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       const r = requireRow(id);
       db.run("DELETE FROM agents WHERE id = ?", id);
       ctx.audit.record({ ...ADMIN_ACTOR, action: "agent.delete", target: id, outcome: "ok", detail: { name: r.name } });
+      changed(id, "deleted");
     },
 
     upsertGrant(agentId, accountId, input) {
@@ -205,6 +213,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       const g = parseGrantInput(raw);
       const grant = writeGrant(agentId, g);
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.upsert", accountId, target: agentId, outcome: "ok", detail: grantSummary(g) });
+      changed(agentId, "grant_changed");
       return grant;
     },
 
@@ -213,6 +222,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       const { changes } = db.run("DELETE FROM grants WHERE agent_id = ? AND account_id = ?", agentId, accountId);
       if (!changes) throw notFound("Grant");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.delete", accountId, target: agentId, outcome: "ok" });
+      changed(agentId, "grant_changed");
     },
 
     grant(agentId, accountId) {
