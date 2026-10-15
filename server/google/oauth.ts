@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Account, ConnectAccountResponse } from "../../shared/types.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { AppContext } from "../context.ts";
@@ -37,7 +37,7 @@ export function oauthErrorHint(code: string, redirectUri?: string): { message: s
         message: "You clicked Cancel (or denied access) on Google's screen, so nothing was connected.",
         hint:
           "Nothing needs fixing in Google Cloud. Start the connection again and click Continue on each Google screen " +
-          "(on \"Google hasn't verified this app\": Advanced → Go to agentinbox), keeping the Gmail permission ticked.",
+          "(on \"Google hasn't verified this app\": Advanced → Go to <your app name> (unsafe)), keeping the Gmail permission ticked.",
       };
     case "org_internal":
       return {
@@ -135,27 +135,31 @@ export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; 
  * says "Already connected" instead of failing. Lookups need the same code too, and only ever report:
  * the state itself is gone from oauth_states, so it can't be used again. In memory; a restart forgets.
  */
-const completed = new WeakMap<AppContext, Map<string, { codeHash: string; accountId: string; at: number }>>();
-const COMPLETED_TTL_MS = 24 * 60 * 60_000;
-const COMPLETED_MAX = 200;
-const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+const completed = new WeakMap<AppContext, Map<string, { codeHash: Buffer; accountId: string; at: number }>>();
+export const COMPLETED_TTL_MS = 60 * 60_000;
+export const COMPLETED_MAX = 200;
+const digest = (s: string) => createHash("sha256").update(s).digest();
 
-function rememberCompleted(ctx: AppContext, state: string, code: string, accountId: string): void {
+/** Records a state + code that connected `accountId` (exported for tests). Oldest entries go first past COMPLETED_MAX. */
+export function rememberCompleted(ctx: AppContext, state: string, code: string, accountId: string): void {
   let m = completed.get(ctx);
   if (!m) completed.set(ctx, (m = new Map()));
   const cutoff = Date.now() - COMPLETED_TTL_MS;
   for (const [k, v] of m) if (v.at < cutoff || m.size >= COMPLETED_MAX) m.delete(k);
-  m.set(state, { codeHash: sha256(code), accountId, at: Date.now() });
+  m.set(state, { codeHash: digest(code), accountId, at: Date.now() });
 }
 
 /** The account a finished state + code connected, if it's recent and the account is still here. */
-function completedAccount(ctx: AppContext, state: string, code: string): AccountRow | null {
+export function completedAccount(ctx: AppContext, state: string, code: string): AccountRow | null {
   const hit = state && code ? completed.get(ctx)?.get(state) : undefined;
-  if (!hit || hit.at < Date.now() - COMPLETED_TTL_MS || hit.codeHash !== sha256(code)) return null;
+  if (!hit || hit.at < Date.now() - COMPLETED_TTL_MS || !timingSafeEqual(hit.codeHash, digest(code))) return null;
   return getRow(ctx, hit.accountId) ?? null;
 }
 
-/** Thrown for a reload of a callback that already connected `email`: a result page, not a failure. */
+/**
+ * Thrown for a reload of a callback that already connected `email`: a result page, not a failure.
+ * The message names the account; the unauthenticated callback page shows it only to a signed-in admin.
+ */
 export class AlreadyConnectedError extends HttpError {
   constructor(readonly email: string) {
     super(409, "oauth_already_connected", `Already connected: ${email}.`, "This sign-in was already completed. Nothing else to do: go back to the console.");
@@ -331,7 +335,9 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
       // What happened to the account they did sign in as.
       const other = keptForOther
         ? ` ${email} is also connected here, so agentinbox saved that new sign-in for ${email}; nothing else changed.`
-        : ` agentinbox didn't keep the sign-in for ${email}.`;
+        : existing
+          ? ` ${email} is also connected here and wasn't changed.`
+          : ` agentinbox didn't keep the sign-in for ${email}.`;
       if (!target) {
         throw new HttpError(
           400,

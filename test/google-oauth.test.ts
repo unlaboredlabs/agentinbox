@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import type { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../server/api/util.ts";
 import type { Account, ConnectAccountResponse } from "../shared/types.ts";
 import { accountsApi } from "../server/api/accounts.ts";
 import { googleApi } from "../server/api/google.ts";
 import { callbackPage, OAUTH_CALLBACK_SCRIPT, OAUTH_CALLBACK_SCRIPT_HASH, oauthRoutes } from "../server/api/oauth.ts";
 import type { AppContext } from "../server/context.ts";
-import { AlreadyConnectedError } from "../server/google/oauth.ts";
+import { adminAuth } from "../server/auth/index.ts";
+import { AlreadyConnectedError, COMPLETED_MAX, COMPLETED_TTL_MS, completedAccount, rememberCompleted } from "../server/google/oauth.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../server/google/types.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { connectFakeAccount, FAKE_CLIENT, type FakeGoogle, recordingEvents, startFakeGoogle } from "./fake-google.ts";
@@ -68,6 +69,7 @@ describe("OAuth client config", () => {
       redirectUri: `http://localhost:${ctx.config.port}/oauth/callback`,
       callbackMode: "direct",
       secretHint: FAKE_CLIENT.clientSecret.slice(-4),
+      redirectUriConfirmed: true,
       warnings: [],
       check: { clientId: "ok", redirectUri: "ok", secret: "ok", warnings: [] },
     });
@@ -241,6 +243,17 @@ describe("connect", () => {
     expect(ctx.accounts.get(a.id)!.status).toBe("needs_reauth");
   });
 
+  it("says the other connected account wasn't changed when Google sent no refresh token", async () => {
+    const a = await connectFakeAccount(ctx, fake, "amy@example.com");
+    await connectFakeAccount(ctx, fake, "bob@example.com");
+    const landed = await consentRedirect("bob@example.com", { noRefreshToken: true }, a.id);
+    await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toThrow(
+      "You were reconnecting amy@example.com, but signed in to Google as bob@example.com, so amy@example.com is still not reconnected. " +
+        "bob@example.com is also connected here and wasn't changed.",
+    );
+    expect(fake.revoked).toEqual([]);
+  });
+
   it("revokes per user like Google: removing one account doesn't touch others", async () => {
     const a = await connectFakeAccount(ctx, fake, "one@example.com");
     const b = await connectFakeAccount(ctx, fake, "two@example.com");
@@ -280,29 +293,79 @@ describe("connect", () => {
   it("reloading the callback page after success says Already connected and changes nothing", async () => {
     const loc = await consentRedirect("rita@example.com");
     const routes = oauthRoutes(ctx);
-    expect((await routes.request(`${loc.pathname}${loc.search}`)).status).toBe(200);
+    const path = `${loc.pathname}${loc.search}`;
+    expect((await routes.request(path)).status).toBe(200);
     const events: string[] = [];
     ctx.bus.on("account", (a) => events.push(a.email));
     const before = tokenCalls();
+    const resultOf = (html: string) =>
+      JSON.parse(/<script type="application\/json" id="oauth-result">([^<]*)<\/script>/.exec(html)![1]!) as Record<string, unknown>;
 
-    const res = await routes.request(`${loc.pathname}${loc.search}`);
+    // Without a console session (a URL from history or a proxy log): done, but no email.
+    let res = await routes.request(path);
     expect(res.status).toBe(200);
-    const html = await res.text();
-    expect(html).toContain("<h1>Already connected: rita@example.com</h1>");
+    let html = await res.text();
+    expect(html).toContain("<h1>This sign-in was already completed</h1>");
+    expect(html).not.toContain("rita@example.com");
     expect(html).toContain("Back to the console");
+    expect(resultOf(html)).toMatchObject({ ok: true, already: true, email: null });
+
+    // The admin's own browser (signed in to the console): names the account.
+    const cookie = `aib_session=${adminAuth(ctx).sessions.create()}`;
+    html = await (await routes.request(path, { headers: { cookie } })).text();
+    expect(html).toContain("<h1>Already connected: rita@example.com</h1>");
     expect(html).not.toContain("Couldn&#39;t connect");
-    const data = JSON.parse(/<script type="application\/json" id="oauth-result">([^<]*)<\/script>/.exec(html)![1]!) as Record<string, unknown>;
-    expect(data).toMatchObject({ ok: true, already: true, email: "rita@example.com" });
+    expect(resultOf(html)).toMatchObject({ ok: true, already: true, email: "rita@example.com" });
     // The script returns before posting anything to the console for a reload.
     expect(OAUTH_CALLBACK_SCRIPT.indexOf("if (r.already)")).toBeLessThan(OAUTH_CALLBACK_SCRIPT.indexOf("postMessage"));
+
+    // The right state with a wrong or missing code is just a used link, whoever asks.
+    for (const code of ["wrong-code", null]) {
+      const u = new URL(loc);
+      if (code) u.searchParams.set("code", code);
+      else u.searchParams.delete("code");
+      const page = await (await routes.request(`${u.pathname}${u.search}`, { headers: { cookie } })).text();
+      expect(page).not.toContain("rita@example.com");
+      expect(page).not.toContain("Already connected");
+    }
+
     expect(tokenCalls()).toBe(before);
     expect(events).toEqual([]);
     expect(ctx.audit.list({ action: "account.connect" }).items).toHaveLength(1);
 
     // Once the account is removed, the old address is just a used link.
     await ctx.accounts.remove(ctx.accounts.list()[0]!.id);
-    const gone = await (await routes.request(`${loc.pathname}${loc.search}`)).text();
+    const gone = await (await routes.request(path, { headers: { cookie } })).text();
     expect(gone).toContain("expired or was already used");
+  });
+
+  it("forgets finished sign-ins after an hour, and keeps at most COMPLETED_MAX", async () => {
+    const acct = await connectFakeAccount(ctx, fake, "ttl@example.com");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      rememberCompleted(ctx, "state-ttl", "code-ttl", acct.id);
+      expect(completedAccount(ctx, "state-ttl", "code-ttl")?.email).toBe("ttl@example.com");
+      expect(completedAccount(ctx, "state-ttl", "code-other")).toBeNull();
+      expect(completedAccount(ctx, "state-ttl", "")).toBeNull();
+      vi.setSystemTime(Date.now() + COMPLETED_TTL_MS + 1);
+      expect(completedAccount(ctx, "state-ttl", "code-ttl")).toBeNull();
+
+      rememberCompleted(ctx, "state-0", "code-0", acct.id);
+      for (let i = 1; i <= COMPLETED_MAX; i++) rememberCompleted(ctx, `state-${i}`, `code-${i}`, acct.id);
+      expect(completedAccount(ctx, "state-0", "code-0")).toBeNull(); // the oldest went first
+      expect(completedAccount(ctx, "state-1", "code-1")).not.toBeNull();
+      expect(completedAccount(ctx, `state-${COMPLETED_MAX}`, `code-${COMPLETED_MAX}`)).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("escapes Google's error_description on the callback page", async () => {
+    const res = await oauthRoutes(ctx).request(`/oauth/callback?error=access_denied&error_description=${encodeURIComponent("<script>alert(1)</script>")}&state=x`);
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert(1)");
   });
 
   it("uses one static, hashable script on every callback page", async () => {

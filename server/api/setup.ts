@@ -16,7 +16,7 @@ import {
 import { deleteSetupToken, readSetupToken } from "../auth/setup-token.ts";
 import { anyAgentVerified } from "../agentapi/listeners.ts";
 import type { AppContext } from "../context.ts";
-import { cliCommand } from "../instance.ts";
+import { cliCommand, resetPasswordCommand } from "../instance.ts";
 import { hashPasswordAsync, safeEqual } from "../crypto.ts";
 import { badRequest, conflict, HttpError } from "../util/errors.ts";
 import { readBody, router } from "./util.ts";
@@ -30,10 +30,18 @@ const ClaimBody = z.object({
 
 const VerifyBody = z.object({ token: TokenField });
 
-/** How to get a working setup link again (the token file is only readable on the server). */
-const lostLinkHint = () =>
-  `On the server, run \`${cliCommand("reset-password")}\`: it prints the setup link again (nothing is reset while the instance isn't set up yet). ` +
-  "Restarting agentinbox prints it too.";
+/**
+ * How to get a working setup link again (the token file is only readable on the server). Unauthenticated
+ * callers see this, so it never names the data directory: only that a custom one needs --data.
+ */
+const lostLinkHint = (dataDir: string) => {
+  const custom = resetPasswordCommand(dataDir) !== cliCommand("reset-password");
+  return (
+    `On the server, run \`${cliCommand("reset-password")}${custom ? " --data <dir>" : ""}\`` +
+    `${custom ? " (with the data directory agentinbox uses)" : ""}: it prints the setup link again (nothing is reset while the instance isn't set up yet). ` +
+    "If you started agentinbox in a terminal, restarting it prints the link too."
+  );
+};
 
 const ALREADY_CLAIMED = () => conflict("This instance is already set up", "Sign in with the admin password instead.");
 
@@ -79,7 +87,7 @@ export function setupPublicApi(ctx: AppContext) {
   async function verifyToken(c: Context, ip: string, token: string): Promise<Response | null> {
     if (isClaimed(ctx)) throw ALREADY_CLAIMED();
     const expected = readSetupToken(ctx.config.dataDir);
-    if (!expected) throw new HttpError(403, "setup_token_expired", "This setup link is no longer valid", lostLinkHint());
+    if (!expected) throw new HttpError(403, "setup_token_expired", "This setup link is no longer valid", lostLinkHint(ctx.config.dataDir));
     const check = await checkSecret(ctx, ip, `claim:${token}`, () => safeEqual(token, expected), { global: false });
     if (check.ok) return null;
     const rejected = rejection(c, check);
@@ -89,7 +97,7 @@ export function setupPublicApi(ctx: AppContext) {
       403,
       "invalid_token",
       "This setup token isn't valid",
-      `Copy the whole setup link from the terminal (an older link stops working after \`reset-password\`). Lost it? ${lostLinkHint()}`,
+      `Copy the whole setup link from the terminal (an older link stops working after \`reset-password\`). Lost it? ${lostLinkHint(ctx.config.dataDir)}`,
     );
   }
 }

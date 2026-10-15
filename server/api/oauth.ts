@@ -3,6 +3,7 @@ import type { AppContext } from "../context.ts";
 import { registerInlineScript } from "../csp.ts";
 import { HttpError } from "../util/errors.ts";
 import { asHttpError } from "../google/http.ts";
+import { hasSession } from "../auth/index.ts";
 import { AlreadyConnectedError } from "../google/oauth.ts";
 import { router } from "./util.ts";
 
@@ -149,13 +150,15 @@ export function oauthRoutes(ctx: AppContext) {
       );
     } catch (err) {
       if (err instanceof AlreadyConnectedError) {
+        // A used callback URL can sit in browser history or proxy logs: name the account only to a signed-in admin.
+        const email = hasSession(c, ctx) ? err.email : null;
         return c.html(
           callbackPage({
             ok: true,
             already: true,
-            email: err.email,
-            title: `Already connected: ${err.email}`,
-            message: "This sign-in was completed earlier, so there's nothing more to do here. You can close this window.",
+            email,
+            title: email ? `Already connected: ${email}` : "This sign-in was already completed",
+            message: "There's nothing more to do here. You can close this window.",
             targetOrigin,
           }),
         );

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { queries } from "@/lib/queries";
 import { GoogleErrorHelp } from "./google-error-help";
 
@@ -40,7 +40,8 @@ export function PasteCallback({
   compact,
 }: {
   res: ConnectAccountResponse;
-  onConnected: (a: Account) => void;
+  /** Called with the connected account's email. */
+  onConnected: (email: string) => void;
   /** Only the paste field (the fallback in pop-up mode, where sign-in was already opened). */
   compact?: boolean;
 }) {
@@ -58,9 +59,11 @@ export function PasteCallback({
     setPending(true);
     setError(undefined);
     try {
-      onConnected(await api<Account>("/api/accounts/connect/complete", { body: { url: value.trim() } }));
+      onConnected((await api<Account>("/api/accounts/connect/complete", { body: { url: value.trim() } })).email);
     } catch (err) {
-      setError(err);
+      // Pasted after the pop-up (or an earlier paste) already finished it: that's the success it looks like.
+      if (err instanceof ApiError && err.code === "oauth_already_connected") onConnected(/^Already connected: (.+?)\.?$/.exec(err.message)?.[1] ?? "Your account");
+      else setError(err);
     } finally {
       setPending(false);
     }

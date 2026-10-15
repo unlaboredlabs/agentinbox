@@ -74,6 +74,7 @@ describe("client JSON import", () => {
       redirectUri: redirectUri(),
       callbackMode: "direct",
       secretHint: FAKE_CLIENT.clientSecret.slice(-4),
+      redirectUriConfirmed: true,
       warnings: [],
       check: { clientId: "ok", redirectUri: "ok", secret: "ok", warnings: [] },
       registeredRedirectUris: [redirectUri()],

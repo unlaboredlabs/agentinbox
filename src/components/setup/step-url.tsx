@@ -136,13 +136,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
           <p className="text-sm">
             Saved: agentinbox is now at <code className="font-mono">{settings.publicUrl}</code>.
           </p>
-          {redirectProblem ? (
-            <RedirectNotice />
-          ) : (
-            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
-              <CheckCircle2Icon className="size-4 text-success" /> The OAuth client already has the new redirect URI.
-            </p>
-          )}
+          <RedirectNotice showStatus />
         </div>
       ) : (
         <>

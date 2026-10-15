@@ -61,11 +61,18 @@ describe("setup claim", () => {
     expect(res.status).toBe(204);
     expect(h.setupToken()).toBe(token); // checking doesn't consume it
 
+    // A mutating /api request: the CSRF header is required like everywhere else.
+    res = await h.request("/api/setup/verify-token", { method: "POST", json: { token } });
+    expect(res.status).toBe(403);
+    expect((await json(res)).error.code).toBe("csrf");
+
     res = await verify(`${token}x`);
     expect(res.status).toBe(403);
     const body = await json(res);
     expect(body.error.code).toBe("invalid_token");
-    expect(body.error.hint).toMatch(/reset-password/);
+    // A custom data directory needs --data, but an unauthenticated caller never learns the path.
+    expect(body.error.hint).toMatch(/reset-password --data <dir>/);
+    expect(body.error.hint).not.toContain(h.ctx.config.dataDir);
 
     // Five distinct wrong tokens lock the address out, for the claim as well.
     for (let i = 1; i < 5; i++) await verify(`wrong-${i}`);

@@ -315,7 +315,7 @@ export function ConnectAccountHost() {
                   {!phase.popup
                     ? "Open it with the button below."
                     : phase.closed
-                      ? "Open it again with the button below, or paste the address it ended on. If you finished signing in, this updates in a moment."
+                      ? "Open it again with the button below. If you finished signing in, this updates in a moment."
                       : "Finish signing in in the pop-up window. This updates on its own when you're done."}
                 </p>
               </div>
@@ -326,13 +326,13 @@ export function ConnectAccountHost() {
               </p>
             )}
             <Disclosure summary="Sign-in ended on an error or a page that can't be reached? Paste its address">
-              <PasteCallback res={phase.res} onConnected={(a) => finish(a.email)} compact />
+              <PasteCallback res={phase.res} onConnected={finish} compact />
             </Disclosure>
             <GoogleErrorHelp />
           </div>
         )}
 
-        {phase?.kind === "waiting" && phase.res.callbackMode === "paste" && <PasteCallback res={phase.res} onConnected={(a) => finish(a.email)} />}
+        {phase?.kind === "waiting" && phase.res.callbackMode === "paste" && <PasteCallback res={phase.res} onConnected={finish} />}
 
         <DialogFooter>
           {phase?.kind === "not-configured" && (
@@ -363,7 +363,7 @@ export function ConnectAccountHost() {
               </Button>
               <Button variant={!phase.popup || phase.closed ? "default" : "outline"} asChild>
                 <a href={phase.res.authUrl} target="agentinbox-oauth" rel="opener">
-                  <ExternalLinkIcon /> {!phase.popup ? "Open Google sign-in" : phase.closed ? "Open it again" : "Open sign-in again"}
+                  <ExternalLinkIcon /> {!phase.popup ? "Open Google sign-in" : "Open Google sign-in again"}
                 </a>
               </Button>
             </>

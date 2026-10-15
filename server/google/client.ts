@@ -42,7 +42,25 @@ export function clientView(ctx: Ctx): GoogleClientView {
     redirectUri,
     callbackMode: mode,
     secretHint: c?.clientSecretEnc ? (c.secretHint ?? secretTail(ctx, c.clientSecretEnc)) : null,
+    redirectUriConfirmed: redirectConfirmed(ctx, redirectUri),
   };
+}
+
+/** Evidence that `uri` is registered on the saved client (see GoogleClientView.redirectUriConfirmed). */
+function redirectConfirmed(ctx: Ctx, uri: string): boolean {
+  const c = ctx.settings.getState("google.client");
+  if (!c?.clientId) return false;
+  return c.verifiedRedirectUri === uri || (c.check?.redirectUriTested === uri && c.check.redirectUri === "ok") || !!c.importedRedirectUris?.includes(uri);
+}
+
+/**
+ * Before the public URL changes: a client saved before savedRedirectUri existed gets the redirect URI
+ * in effect now, so the change is noticed (redirect_uri_changed).
+ */
+export function recordRedirectBeforeChange(ctx: Ctx): void {
+  const c = ctx.settings.getState("google.client");
+  if (!c?.clientId || c.savedRedirectUri) return;
+  ctx.settings.setState("google.client", { ...c, savedRedirectUri: callbackMode(ctx).redirectUri });
 }
 
 /** Last 4 characters of a stored secret (for clients saved before secretHint was recorded). */
@@ -205,7 +223,7 @@ export function redirectWarning(ctx: Ctx): SetupWarning | null {
         'Until the new one is added to the client, Google refuses to connect accounts ("Error 400: redirect_uri_mismatch").',
       hint:
         `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, click Add URI, enter ${uri} exactly ` +
-        "(no trailing slash) and save. Then run the client check (or save the client again): this warning clears once it passes.",
+        "(no trailing slash) and save. Then click \"I've added it, check now\" (or save the client again): this warning clears once Google confirms it.",
       url: clientsUrl(c.projectId),
     };
   }

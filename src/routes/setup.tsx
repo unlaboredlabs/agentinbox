@@ -11,8 +11,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { api, ApiError, describeError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { NPX } from "@/lib/cli";
+import { claimView, EMPTY_TOKEN, type TokenCheck, tokenFromInput } from "@/lib/setup-token";
 import { keys, queries } from "@/lib/queries";
 
 export const Route = createFileRoute("/setup")({
@@ -28,8 +29,6 @@ export const Route = createFileRoute("/setup")({
 
 const verifyRequest = (token: string) => api("/api/setup/verify-token", { body: { token } });
 
-type TokenCheck = { status: "idle" } | { status: "checking" } | { status: "ok" } | { status: "error"; error: unknown };
-
 /** First run: prove you own the server (setup token from the CLI), then choose the admin password. */
 function ClaimPage() {
   const linkToken = Route.useSearch().token;
@@ -44,6 +43,11 @@ function ClaimPage() {
   const [pending, setPending] = useState(false);
   const tokenRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
+  const signInRef = useRef<HTMLAnchorElement>(null);
+
+  // A whole pasted setup link works as well as the bare token.
+  const cleanToken = tokenFromInput(token);
+  const view = claimView(check, !!linkToken && cleanToken === linkToken);
 
   const verify = async (value: string): Promise<boolean> => {
     setCheck({ status: "checking" });
@@ -70,16 +74,12 @@ function ClaimPage() {
     };
   }, [linkToken]);
 
-  const verified = check.status === "ok";
-  const tokenError = check.status === "error" ? check.error : undefined;
-  // Someone set it up meanwhile (another tab, another person): the sign-in page is next.
-  const claimedElsewhere = tokenError instanceof ApiError && tokenError.status === 409;
-  const showTokenField = !verified && check.status !== "checking";
-
+  // Focus follows the step: the password once verified, the token field after an error, Sign in when claimed.
   useEffect(() => {
-    if (verified) passwordRef.current?.focus();
-    else if (check.status === "error") tokenRef.current?.focus();
-  }, [verified, check.status]);
+    if (view.phase === "verified") passwordRef.current?.focus();
+    else if (view.phase === "claimed") signInRef.current?.focus();
+    else if (view.tokenError) tokenRef.current?.focus();
+  }, [view.phase, view.tokenError]);
 
   const tooShort = password.length < MIN_PASSWORD;
   const mismatch = confirmPw.length > 0 && confirmPw !== password;
@@ -87,9 +87,12 @@ function ClaimPage() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!verified) {
-      if (token.trim() && check.status !== "checking") await verify(token.trim());
-      else setCheck({ status: "error", error: new Error("Paste the setup token, or open the setup link from the terminal.") });
+    if (view.phase !== "verified") {
+      if (check.status === "checking") return;
+      if (cleanToken) {
+        setToken(cleanToken);
+        await verify(cleanToken);
+      } else setCheck({ status: "error", error: EMPTY_TOKEN });
       return;
     }
     setTouched(true);
@@ -97,7 +100,7 @@ function ClaimPage() {
     setPending(true);
     setError(undefined);
     try {
-      await api("/api/setup/claim", { body: { token: token.trim(), password } });
+      await api("/api/setup/claim", { body: { token: cleanToken, password } });
       qc.setQueryData(keys.setupStatus, { claimed: true, authenticated: true });
       await navigate({ to: "/get-started" });
     } catch (err) {
@@ -109,6 +112,8 @@ function ClaimPage() {
     }
   }
 
+  const code = (s: string) => <code className="font-mono text-foreground">{s}</code>;
+
   return (
     <AuthShell
       title="Welcome to agentinbox"
@@ -118,35 +123,33 @@ function ClaimPage() {
         <CardContent>
           <form onSubmit={submit} noValidate>
             <FieldGroup>
-              {check.status === "checking" && (
-                <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status">
-                  <Spinner className="size-4" />
-                  <span>Checking the setup {linkToken && token === linkToken ? "link" : "token"}…</span>
-                </div>
-              )}
-              {verified && (
-                <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status">
-                  <CheckCircle2Icon className="size-4 shrink-0 text-success" />
-                  <span>{linkToken && token === linkToken ? "Setup link verified." : "Setup token verified."}</span>
-                </div>
-              )}
-              {showTokenField && claimedElsewhere && (
+              {/* One live region for the token check, so screen readers hear each change. */}
+              <div
+                role="status"
+                aria-live="polite"
+                className={view.status && view.phase !== "claimed" ? "flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm" : "sr-only"}
+              >
+                {view.phase === "checking" && <Spinner className="size-4" />}
+                {view.phase === "verified" && <CheckCircle2Icon className="size-4 shrink-0 text-success" />}
+                <span>{view.status}</span>
+              </div>
+              {view.phase === "claimed" && (
                 <Alert>
                   <InfoIcon />
                   <AlertTitle>This instance is already set up</AlertTitle>
                   <AlertDescription>
                     <p>
-                      <Link to="/login" className="font-medium underline underline-offset-4">
+                      <Link to="/login" ref={signInRef} className="font-medium underline underline-offset-4">
                         Sign in
                       </Link>{" "}
-                      with its admin password. Forgot it? Run <code className="font-mono text-foreground">{NPX} reset-password</code> on the server.
+                      with its admin password. Forgot it? Run {code(`${NPX} reset-password`)} on the server.
                     </p>
                   </AlertDescription>
                 </Alert>
               )}
-              {showTokenField && !claimedElsewhere && (
-                <Field data-invalid={!!tokenError}>
-                  <FieldLabel htmlFor="token">Setup token</FieldLabel>
+              {view.phase === "enter-token" && (
+                <Field data-invalid={!!view.tokenError}>
+                  <FieldLabel htmlFor="token">Setup link or token</FieldLabel>
                   <Input
                     id="token"
                     ref={tokenRef}
@@ -159,35 +162,23 @@ function ClaimPage() {
                       setToken(e.target.value);
                       if (check.status === "error") setCheck({ status: "idle" });
                     }}
-                    aria-invalid={!!tokenError}
-                    aria-describedby="token-help"
+                    aria-invalid={!!view.tokenError}
+                    aria-describedby={view.tokenError ? "token-error token-help" : "token-help"}
                   />
-                  {tokenError !== undefined && (
-                    <FieldError>
-                      {tokenError instanceof ApiError && tokenError.code === "invalid_token"
-                        ? linkToken && token === linkToken
-                          ? "This setup link isn't valid. It may be incomplete (copy the whole link) or from before a reset-password."
-                          : "That setup token isn't valid. Copy the whole token (or the whole setup link) from the terminal."
-                        : describeError(tokenError).message}
-                    </FieldError>
-                  )}
+                  {view.tokenError && <FieldError id="token-error">{view.tokenError}</FieldError>}
                   <FieldDescription id="token-help" className="space-y-1.5">
                     <span className="flex items-start gap-1.5">
                       <TerminalIcon className="mt-0.5 size-3.5 shrink-0" />
-                      <span>
-                        Open the setup link that <code className="font-mono text-foreground">{NPX}</code> printed, or paste its token (the part after{" "}
-                        <code className="font-mono text-foreground">?token=</code>) here.
-                      </span>
+                      <span>Open the setup link that {code(NPX)} printed, or paste the link (or just its token) here.</span>
                     </span>
                     <span className="block">
-                      Lost the link? On the server, run <code className="font-mono text-foreground">{NPX} reset-password</code>: it prints the link
-                      again (before setup it doesn't change anything). Restarting <code className="font-mono text-foreground">{NPX}</code> prints it
-                      too.
+                      Lost the link? On the server, run {code(`${NPX} reset-password`)} (add {code("--data <dir>")} if you used one): it prints the
+                      link again, and before setup it doesn't change anything. If you started it in a terminal, restarting {code(NPX)} prints it too.
                     </span>
                   </FieldDescription>
                 </Field>
               )}
-              {verified && (
+              {view.phase === "verified" && (
                 <>
                   <Field data-invalid={touched && tooShort}>
                     <FieldLabel htmlFor="password">Admin password</FieldLabel>
@@ -215,10 +206,10 @@ function ClaimPage() {
                 </>
               )}
               {error !== undefined && <ErrorAlert error={error} />}
-              {!claimedElsewhere && (
-                <Button type="submit" disabled={pending || check.status === "checking" || (verified && touched && !valid)}>
-                  {(pending || check.status === "checking") && <Spinner />}
-                  {verified ? "Create admin password" : "Continue"}
+              {view.phase !== "claimed" && (
+                <Button type="submit" disabled={pending || view.phase === "checking" || (view.phase === "verified" && touched && !valid)}>
+                  {(pending || view.phase === "checking") && <Spinner />}
+                  {view.submitLabel}
                 </Button>
               )}
             </FieldGroup>

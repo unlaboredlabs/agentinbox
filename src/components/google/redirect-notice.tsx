@@ -1,6 +1,7 @@
 import type { GoogleClientCheck, SetupWarning } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircleIcon, RefreshCwIcon } from "lucide-react";
+import { AlertCircleIcon, CheckCircle2Icon, RefreshCwIcon } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { CopyField, ExternalLink } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
 import { keys, queries } from "@/lib/queries";
+import { cn } from "@/lib/utils";
 
 export const clientsUrl = (projectId: string | null | undefined) =>
   `https://console.cloud.google.com/auth/clients${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
@@ -26,19 +28,46 @@ export function useRedirectProblem(): SetupWarning | null {
   return state.data?.warnings?.find((w) => REDIRECT_CODES.has(w.code)) ?? null;
 }
 
-/** "Add this redirect URI to your OAuth client": shown in step 4, step 1 after a change, and Settings. */
-export function RedirectNotice({ className }: { className?: string }) {
+/**
+ * "Add this redirect URI to your OAuth client": shown in step 4, step 1 after a change, and Settings.
+ * After "check now" passes it stays as a confirmation line (focused, so focus doesn't fall to the page).
+ * `showStatus`: with no problem, also say whether the client is known to have the URI (step 1 after a change).
+ */
+export function RedirectNotice({ className, showStatus }: { className?: string; showStatus?: boolean }) {
   const problem = useRedirectProblem();
   const client = useQuery(queries.googleClient());
   const qc = useQueryClient();
+  const confirmedRef = useRef<HTMLParagraphElement>(null);
   // Ask Google now: a passing check clears the warning on the server.
   const recheck = useApiMutation({
     mutationFn: () => api<GoogleClientCheck>("/api/google/client/check", { method: "POST" }),
     invalidate: [keys.setupState],
     errorTitle: "Couldn't check the OAuth client",
+    success: (c) => (c.redirectUri === "ok" ? "Google confirms the redirect URI is registered" : undefined),
     onSuccess: () => void qc.invalidateQueries({ queryKey: keys.googleClient }),
   });
-  if (!problem || !client.data) return null;
+  const justConfirmed = !problem && recheck.data?.redirectUri === "ok";
+  useEffect(() => {
+    if (justConfirmed) confirmedRef.current?.focus();
+  }, [justConfirmed]);
+  if (!client.data?.clientId) return null;
+  if (!problem) {
+    if (justConfirmed || (showStatus && client.data.redirectUriConfirmed)) {
+      return (
+        <p ref={confirmedRef} tabIndex={-1} role="status" className={cn("flex items-center gap-1.5 text-sm text-muted-foreground outline-none", className)}>
+          <CheckCircle2Icon className="size-4 shrink-0 text-success" />
+          {justConfirmed ? "Google confirms the OAuth client has this redirect URI." : "The OAuth client already has the new redirect URI."}
+        </p>
+      );
+    }
+    if (!showStatus) return null;
+    return (
+      <div className={cn("space-y-1.5 text-sm", className)}>
+        <p>Make sure your OAuth client lists the new redirect URI (Google Auth Platform → Clients → your client → Authorized redirect URIs):</p>
+        <CopyField value={client.data.redirectUri} label="Copy redirect URI" />
+      </div>
+    );
+  }
   const changed = problem.code === "redirect_uri_changed";
   const result = recheck.data?.redirectUri;
   return (

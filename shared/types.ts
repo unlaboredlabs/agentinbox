@@ -286,6 +286,11 @@ export interface GoogleClientView {
   callbackMode: "direct" | "paste";
   /** Last 4 characters of the saved secret (to recognize which one is saved), or null without a secret. */
   secretHint: string | null;
+  /**
+   * There is evidence `redirectUri` is registered on the saved client: an account connected through it,
+   * a client check found it, or the imported client JSON lists it. False without a client.
+   */
+  redirectUriConfirmed: boolean;
 }
 
 // ───────────────────────────── Accounts ─────────────────────────────

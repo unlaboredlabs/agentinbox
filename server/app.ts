@@ -42,7 +42,7 @@ export const DEFAULT_WEB_DIR = resolve(import.meta.dirname, "..", "dist", "web")
 
 const API_BODY_LIMIT = 1024 * 1024;
 const AUTH_BODY_LIMIT = 16 * 1024;
-const AUTH_PATHS = ["/api/setup/claim", "/api/auth/login", "/api/auth/password"];
+const AUTH_PATHS = ["/api/setup/claim", "/api/setup/verify-token", "/api/auth/login", "/api/auth/password"];
 const MCP_BODY_LIMIT = 4 * 1024 * 1024;
 const AGENT_BODY_LIMIT = 64 * 1024;
 

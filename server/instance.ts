@@ -30,6 +30,12 @@ export function serviceInstallCommand(config: Pick<Config, "dataDir" | "host" | 
 
 const quoteArg = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
+/** `reset-password`, with `--data <dir>` when the data directory isn't the default one. */
+export function resetPasswordCommand(dataDir: string): string {
+  const custom = resolve(dataDir) !== resolve(join(homedir(), ".agentinbox"));
+  return cliCommand(custom ? `reset-password --data ${quoteArg(dataDir)}` : "reset-password");
+}
+
 // ───────────── Single instance per data directory ─────────────
 
 export interface InstanceInfo {
@@ -154,7 +160,7 @@ export function acquireInstanceLock(config: Pick<Config, "dataDir" | "host" | "p
                 `Use that one, stop it (\`${cliCommand("service uninstall")}\` keeps your data), or use another --data directory.`
             : `agentinbox is already running with the data directory ${dataDir} ${where}. ` +
                 `Stop it first, or use another --data directory. If no such process exists, delete ${file}.` +
-                (existsSync(join(dataDir, "setup-token")) ? ` Lost its setup link? \`${cliCommand("reset-password")}\` prints it again.` : ""),
+                (existsSync(join(dataDir, "setup-token")) ? ` Lost its setup link? \`${resetPasswordCommand(dataDir)}\` prints it again.` : ""),
         );
       }
       rmSync(file, { force: true });
