@@ -77,6 +77,7 @@ export function sweepPairings(ctx: AppContext): number {
 
 export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
   const app = new Hono<AgentApiEnv>();
+  agentApi(ctx); // resets stale listener connection counts at startup
   const state = () => agentApi(ctx);
   const ipOf = (c: Parameters<typeof clientIp>[0]) => clientIp(c, ctx.config.trustProxy);
   const denied = (action: string, reason: string, detail: Record<string, unknown>) =>
