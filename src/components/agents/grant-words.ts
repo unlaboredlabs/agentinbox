@@ -1,4 +1,4 @@
-import type { Capability, SendMode } from "@shared/types";
+import type { Capability, SendMode } from "../../../shared/types.ts";
 
 const join = (xs: string[]) => (xs.length < 2 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 

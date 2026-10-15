@@ -116,6 +116,18 @@ export function PairingOffAlert() {
   );
 }
 
+/**
+ * `connect` saves a second agent only with --profile <name>, and setup-mcp / listen act on the
+ * default profile unless given the same flag.
+ */
+export function ProfileHint() {
+  return (
+    <>
+      Connected it with <code className="font-mono text-foreground">--profile &lt;name&gt;</code>? Add the same flag to these commands.
+    </>
+  );
+}
+
 /** `listen`: try it in the foreground first, then install it as a service (the order `connect` prints). */
 export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentTool }) {
   const label = toolName(tool);
@@ -139,6 +151,9 @@ export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentToo
         </p>
         <Command code={c.listenService} label="service install command" />
         {tool === "other" && <p className="text-xs text-muted-foreground">Replace /path/to/handle-email.sh with your script. {RECIPES.other.note}</p>}
+      </li>
+      <li className="text-xs text-muted-foreground">
+        <ProfileHint />
       </li>
     </ol>
   );

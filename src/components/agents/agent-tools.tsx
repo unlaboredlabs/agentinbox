@@ -8,7 +8,7 @@ import { connectCommands } from "@/lib/cli";
 import { useAgentOrigin, useMcpActivity } from "./agent-status";
 import { Command } from "./command";
 import { ConnectSnippets } from "./connect-snippets";
-import { ToolTabs, toolName, usePublicUrl } from "./connect-agent-guide";
+import { ProfileHint, ToolTabs, toolName, usePublicUrl } from "./connect-agent-guide";
 import { TestConnection } from "./test-connection";
 
 /** "Not called yet" / "Last tool call 2 minutes ago": whether the agent's own tool reaches agentinbox. */
@@ -68,9 +68,9 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
           <ToolTabs value={tool} onChange={setTool} />
           {tool === "other" ? (
             <p className="text-sm text-muted-foreground">
-              Point your agent's MCP client at <code className="font-mono text-foreground">{publicUrl}/mcp</code> with the header{" "}
+              Point your agent's MCP client at <code className="font-mono break-all text-foreground">{publicUrl}/mcp</code> with the header{" "}
               <code className="font-mono text-foreground">Authorization: Bearer &lt;key&gt;</code>. The key is the "apiKey" field in{" "}
-              <code className="font-mono text-foreground">~/.config/agentinbox/profiles/default.json</code> on that machine.
+              <code className="font-mono break-all text-foreground">~/.config/agentinbox/profiles/default.json</code> on that machine.
             </p>
           ) : (
             <>
@@ -85,6 +85,9 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
                   <span className="font-mono text-foreground">agentinbox</span>.
                 </p>
               )}
+              <p className="text-xs text-muted-foreground">
+                <ProfileHint />
+              </p>
             </>
           )}
           <p className="text-sm text-muted-foreground">Teach it the rules with the agentinbox skill:</p>

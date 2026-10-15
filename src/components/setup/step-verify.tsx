@@ -6,9 +6,11 @@ import { CheckCircle2Icon, CircleIcon, MailIcon, PartyPopperIcon, SendIcon } fro
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { useAgentOrigin, useMcpActivity } from "@/components/agents/agent-status";
 import { Command } from "@/components/agents/command";
-import { toolName, usePublicUrl } from "@/components/agents/connect-agent-guide";
+import { ProfileHint, toolName, usePublicUrl } from "@/components/agents/connect-agent-guide";
 import { grantInWords } from "@/components/agents/grant-words";
 import { CopyButton, ErrorAlert, TimeAgo } from "@/components/common";
+import { Visible } from "@/components/hidden-chars";
+import { useNow } from "@/hooks/use-now";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,6 +20,7 @@ import { connectCommands, LISTEN_TEST_EXEC, NPX, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { updateDraft } from "./progress";
+import { activeTest, TEST_SUBJECT, type VerifyTest, verifyChecks } from "./verify-checks";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
 
@@ -28,7 +31,7 @@ interface VerifyState {
   agentId?: string;
   /** "I'll use MCP only": no listener expected. */
   skipListen?: boolean;
-  test?: TestEmailResult & { accountId: string };
+  test?: VerifyTest;
 }
 
 const KEY = `agentinbox.verify:${typeof window === "undefined" ? "" : window.location.host}`;
@@ -73,9 +76,6 @@ function useLatch(on: boolean) {
 
 // ───────────── Step ─────────────
 
-/** Read-type tools: the agent reading the test email over MCP. */
-const READ_TOOLS = new Set(["search_threads", "get_thread", "get_message", "list_events", "wait_for_events"]);
-const TEST_SUBJECT = "agentinbox test: your setup works";
 
 export function StepVerify({ index, onBack, onNext }: StepProps) {
   // Listener state and lastUsedAt aren't on the console stream: poll while this step is open.
@@ -125,7 +125,7 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
               </Select>
             </div>
           )}
-          <Checklist key={agent.id} agent={agent} state={state} />
+          <Checklist key={agent.id} agent={agent} state={state} severalAgents={list.length > 1} />
         </>
       )}
     </StepCard>
@@ -184,7 +184,7 @@ function Item({
         {state === "done" ? (
           <CheckCircle2Icon className="size-5 text-success" />
         ) : state === "current" ? (
-          <Spinner className="size-5 text-chart-1" />
+          <Spinner className="size-5 text-chart-1" aria-hidden />
         ) : (
           <CircleIcon className={cn("size-5", state === "skipped" ? "text-muted-foreground/40" : "text-muted-foreground")} />
         )}
@@ -211,7 +211,7 @@ function Prompt({ text, label }: { text: string; label: string }) {
   );
 }
 
-function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
+function Checklist({ agent, state, severalAgents }: { agent: Agent; state: VerifyState; severalAgents: boolean }) {
   const origin = useAgentOrigin(agent);
   const { publicUrl } = usePublicUrl();
   const tool: AgentTool = origin.tool ?? "other";
@@ -219,7 +219,8 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
   const Label = label[0]!.toUpperCase() + label.slice(1);
   const c = connectCommands(publicUrl, tool);
   const mcp = useMcpActivity(agent, { since: agent.createdAt });
-  const test = state.test;
+  const now = useNow(60_000);
+  const test = activeTest(state.test, now);
 
   // Paired agents keep their key in a profile on their machine; only those can run `listen`.
   const canListen = origin.paired;
@@ -231,16 +232,18 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
     enabled: !!test,
     refetchInterval: 5000,
   });
-  const ofTest = (events.data?.items ?? []).filter((e) => test && (e.message?.id === test.messageId || (e.message?.subject === TEST_SUBJECT && e.createdAt >= test.sentAt)));
-  const received = ofTest.find((e) => e.type === "message.received") ?? ofTest[0];
   const listener = agent.listeners.find((l) => l.connected) ?? agent.listeners[0];
 
   const mcpDone = useLatch(!!mcp.seenAt);
   const listenDone = useLatch(agent.listeners.some((l) => l.connected));
-  const sent = !!test;
+  const { sent, received, delivered, resendForListener, readIt } = verifyChecks({
+    test,
+    events: events.data?.items ?? [],
+    listeners: agent.listeners,
+    calls: mcp.calls,
+    skipListen,
+  });
   const receivedDone = !!received;
-  const delivered = !!received && agent.listeners.some((l) => l.ackedSeq >= received.seq);
-  const readIt = !!test && mcp.calls.some((e) => READ_TOOLS.has(e.action) && e.ts >= test.sentAt);
   const complete = mcpDone && (listenDone || skipListen) && sent && receivedDone && (delivered || skipListen);
 
   useEffect(() => {
@@ -253,13 +256,15 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
   const prev = useRef({ mcpDone, listenDone, receivedDone, delivered, readIt });
   useEffect(() => {
     const p = prev.current;
-    const msg =
-      (!p.mcpDone && mcpDone && `${Label} called agentinbox.`) ||
-      (!p.listenDone && listenDone && "The listener is connected.") ||
-      (!p.receivedDone && receivedDone && "The test email arrived.") ||
-      (!p.delivered && delivered && "The listener handled the test email.") ||
-      (!p.readIt && readIt && `${Label} read your mail.`) ||
-      "";
+    const msg = [
+      !p.mcpDone && mcpDone && `${Label} called agentinbox.`,
+      !p.listenDone && listenDone && "The listener is connected.",
+      !p.receivedDone && receivedDone && "The test email arrived.",
+      !p.delivered && delivered && "The listener handled the test email.",
+      !p.readIt && readIt && `${Label} read your mail.`,
+    ]
+      .filter(Boolean)
+      .join(" ");
     prev.current = { mcpDone, listenDone, receivedDone, delivered, readIt };
     if (msg) setAnnouncement(msg);
   }, [mcpDone, listenDone, receivedDone, delivered, readIt, Label]);
@@ -292,8 +297,21 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
       <ol aria-label="Setup checks">
         <Item
           state="done"
-          title={`${agent.name} is approved`}
-          detail={agent.grants.length ? agent.grants.map((g) => grantInWords(g)).join(" · ") : "It has no mailbox access yet: add some on its page."}
+          title={
+            <>
+              <Visible text={agent.name} /> is approved
+            </>
+          }
+          detail={
+            <>
+              {agent.grants.length ? agent.grants.map((g) => grantInWords(g)).join(" · ") : "It has no mailbox access yet: add some on its page."}
+              {severalAgents && origin.paired && (
+                <span className="mt-1 block">
+                  <ProfileHint /> The commands below act on the default profile.
+                </span>
+              )}
+            </>
+          }
         />
 
         <Item
@@ -320,7 +338,17 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
           state={st("listen", listenDone, skipListen)}
           title={
             listenDone
-              ? `Listener connected${listener?.client.hostname ? ` on ${listener.client.hostname}` : ""}`
+              ? (
+                  <>
+                    Listener connected
+                    {listener?.client.hostname && (
+                      <>
+                        {" "}
+                        on <Visible text={listener.client.hostname} />
+                      </>
+                    )}
+                  </>
+                )
               : skipListen
                 ? "No listener: MCP only"
                 : "Start the listener so new mail wakes your agent"
@@ -367,9 +395,9 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
           state={st("send", sent)}
           title={sent ? "Test email sent" : "Send a test email"}
           detail={
-            sent ? (
+            test ? (
               <>
-                From {test.accountId && <AccountEmail id={test.accountId} />} to itself, <TimeAgo date={test.sentAt} />.
+                From <AccountEmail id={test.accountId} /> to itself, <TimeAgo date={test.sentAt} />.
               </>
             ) : (
               <>
@@ -378,7 +406,7 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
             )
           }
         >
-          <SendTest agent={agent} sent={sent} />
+          <SendTest agent={agent} sent={sent} blocked={!listenDone && !skipListen} />
         </Item>
 
         <Item
@@ -413,9 +441,9 @@ function Checklist({ agent, state }: { agent: Agent; state: VerifyState }) {
             delivered
               ? "Its terminal shows a ✓ line for the email."
               : !skipListen && receivedDone
-                ? listenDone
-                  ? "Look for a ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
-                  : "Start the listener above: it picks up the email when it connects."
+                ? resendForListener
+                  ? "The listener wasn't running when this email was sent, so it starts after it. Send another test email now that the listener is running."
+                  : "Look for a ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
                 : undefined
           }
         />
@@ -465,9 +493,9 @@ function McpHelp({
         </>
       ) : paired ? (
         <p>
-          Point your agent's MCP client at <code className="font-mono text-foreground">{publicUrl}/mcp</code> with the header{" "}
+          Point your agent's MCP client at <code className="font-mono break-all text-foreground">{publicUrl}/mcp</code> with the header{" "}
           <code className="font-mono text-foreground">Authorization: Bearer &lt;key&gt;</code>. The key is the "apiKey" field in{" "}
-          <code className="font-mono text-foreground">~/.config/agentinbox/profiles/default.json</code> on the machine where you ran connect.
+          <code className="font-mono break-all text-foreground">~/.config/agentinbox/profiles/default.json</code> on the machine where you ran connect.
         </p>
       ) : (
         <p>
@@ -486,9 +514,10 @@ function McpHelp({
   );
 }
 
-function SendTest({ agent, sent }: { agent: Agent; sent: boolean }) {
+function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** The listener step isn't done or skipped yet. */ blocked: boolean }) {
   const accounts = useQuery(queries.accounts());
-  const all = (accounts.data ?? []).filter((a) => a.status !== "paused");
+  // Paused, needs_reauth and error accounts don't pick up new mail: the test would never arrive.
+  const all = (accounts.data ?? []).filter((a) => a.status === "active");
   // Prefer mailboxes this agent can read: only those events reach it.
   const readable = all.filter((a) => agent.grants.some((g) => g.accountId === a.id && g.capabilities.includes("read")));
   const choices = readable.length ? readable : all;
@@ -504,7 +533,8 @@ function SendTest({ agent, sent }: { agent: Agent; sent: boolean }) {
     setError(null);
     try {
       const res = await api<TestEmailResult>(`/api/accounts/${encodeURIComponent(accountId)}/test-email`, { method: "POST" });
-      writeState({ test: { ...res, accountId } });
+      // Only listeners connected now can be credited with delivering it (see VerifyTest.listenersAtSend).
+      writeState({ test: { ...res, accountId, listenersAtSend: agent.listeners.filter((l) => l.connected).map((l) => l.consumer) } });
     } catch (err) {
       setError(err);
     } finally {
@@ -546,11 +576,12 @@ function SendTest({ agent, sent }: { agent: Agent; sent: boolean }) {
             </Select>
           </>
         )}
-        <Button variant={sent ? "outline" : "default"} onClick={() => void send()} disabled={pending || !accountId}>
+        <Button variant={sent ? "outline" : "default"} onClick={() => void send()} disabled={pending || !accountId || blocked}>
           {pending ? <Spinner /> : sent ? <MailIcon /> : <SendIcon />}
           {sent ? "Send another" : "Send a test email"}
         </Button>
       </div>
+      {blocked && <p className="text-xs text-muted-foreground">Start the listener first, or choose MCP only above.</p>}
       {!readable.length && (
         <p className="text-xs text-warning">This agent can't read any connected account yet, so the email won't reach it. Add access on its page.</p>
       )}
@@ -589,7 +620,7 @@ function SuccessPanel({
             Setup complete
           </h3>
           <p className="text-sm text-muted-foreground">
-            New mail reaches {agent.name}
+            New mail reaches <Visible text={agent.name} />
             {listening ? " the moment it arrives" : " whenever you ask it"}.
           </p>
         </div>

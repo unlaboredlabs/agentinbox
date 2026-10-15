@@ -48,6 +48,13 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
           nextLabel="Check that it works"
           nextDisabled={!hasAgent}
           hint={created ? "Make sure you've saved the key" : !hasAgent ? "Approve a request to continue" : undefined}
+          extra={
+            !hasAgent && (
+              <Button variant="ghost" onClick={onNext}>
+                Skip for now
+              </Button>
+            )
+          }
         />
       }
     >

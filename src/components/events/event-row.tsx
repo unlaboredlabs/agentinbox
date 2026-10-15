@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { CodeBlock, TimeAgo } from "@/components/common";
+import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
 import { fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
 import { EVENT_TYPE_INFO } from "@/lib/labels";
@@ -107,7 +108,13 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
             {delivered.length > 0 && (
               <span className="flex items-center gap-1 text-success">
                 <BellRingIcon className="size-3.5" aria-hidden />
-                {delivered.length === 1 ? `Delivered to ${delivered[0]!.name}` : `Delivered to ${delivered.length} listeners`}
+                {delivered.length === 1 ? (
+                  <>
+                    Delivered to <Visible text={delivered[0]!.name} />
+                  </>
+                ) : (
+                  `Delivered to ${delivered.length} listeners`
+                )}
               </span>
             )}
           </div>
@@ -143,7 +150,7 @@ function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { n
     );
   }
   if (e.labelIds?.length) rows.push([e.type === "label.removed" ? "Removed" : "Added", e.labelIds.join(", ")]);
-  if (delivered.length) rows.push(["Listeners", `Delivered to ${delivered.map((d) => (d.host ? `${d.name} on ${d.host}` : d.name)).join(", ")}`]);
+  if (delivered.length) rows.push(["Listeners", <Visible key="listeners" text={`Delivered to ${delivered.map((d) => (d.host ? `${d.name} on ${d.host}` : d.name)).join(", ")}`} />]);
   return (
     <div className="space-y-3 border-t bg-muted/20 px-4 py-3 sm:pl-15">
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">

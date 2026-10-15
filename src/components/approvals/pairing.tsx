@@ -40,6 +40,7 @@ import { type Choice, ChoiceCards } from "@/components/choice-cards";
 import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useSilencePairingToasts } from "@/components/pairing-notifier";
 
 /** "jxgr xd93" → "JXGR-XD93". Codes are 8 characters from an alphabet without 0/O/1/I/L. */
 export function normalizeCode(raw: string): string {
@@ -421,6 +422,7 @@ function ApproveForm({
   onApproved,
   onCancel,
   onDeny,
+  denying,
   inline,
 }: {
   p: PairingRequest;
@@ -429,6 +431,8 @@ function ApproveForm({
   onCancel?: () => void;
   /** Inline (in the setup wizard): no dialog chrome, and Deny instead of Cancel. */
   onDeny?: () => void;
+  /** The Deny request is in flight. */
+  denying?: boolean;
   inline?: boolean;
 }) {
   const qc = useQueryClient();
@@ -604,8 +608,8 @@ function ApproveForm({
 
       <Footer className={inline ? "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end" : undefined}>
         {onDeny ? (
-          <Button type="button" variant="outline" onClick={onDeny} disabled={busy}>
-            <XIcon /> Deny
+          <Button type="button" variant="outline" onClick={onDeny} disabled={busy || denying}>
+            {denying ? <Spinner /> : <XIcon />} Deny
           </Button>
         ) : (
           <Button type="button" variant="ghost" onClick={onCancel}>
@@ -613,7 +617,7 @@ function ApproveForm({
           </Button>
         )}
         {problem && !gone && <span className="mr-auto self-center text-xs text-muted-foreground">{problem}</span>}
-        <Button type="submit" disabled={busy || gone || !!problem} className={inline ? "h-auto min-h-9 whitespace-normal" : undefined}>
+        <Button type="submit" disabled={busy || denying || gone || !!problem} className={inline ? "h-auto min-h-9 whitespace-normal" : undefined}>
           {busy ? <Spinner /> : <CheckIcon />} Approve and send key to terminal
         </Button>
       </Footer>
@@ -672,6 +676,7 @@ export function PendingPairings({ onApproved, className }: { onApproved?: (agent
   const accounts = useQuery(queries.accounts());
   const now = useNow(5000);
   const [approved, setApproved] = useState<Agent | null>(null);
+  useSilencePairingToasts();
   const pending = (pairings.data ?? []).filter((p) => Date.parse(p.expiresAt) > now);
 
   return (
@@ -718,12 +723,16 @@ export function PendingPairings({ onApproved, className }: { onApproved?: (agent
 
 function PairingInline({ p, accounts, onApproved }: { p: PairingRequest; accounts: Account[]; onApproved: (a: Agent) => void }) {
   const qc = useQueryClient();
+  const [denying, setDenying] = useState(false);
   const deny = async () => {
+    setDenying(true);
     try {
       await api(`/api/pairings/${encodeURIComponent(p.id)}/deny`, { body: {} });
-      void qc.invalidateQueries({ queryKey: keys.pairings });
+      await qc.invalidateQueries({ queryKey: keys.pairings });
     } catch (err) {
       toastError(err, "Couldn't deny the request");
+    } finally {
+      setDenying(false);
     }
   };
   return (
@@ -744,7 +753,7 @@ function PairingInline({ p, accounts, onApproved }: { p: PairingRequest; account
         </div>
       </div>
       <div className="p-4">
-        <ApproveForm p={p} accounts={accounts} inline onApproved={onApproved} onDeny={() => void deny()} />
+        <ApproveForm p={p} accounts={accounts} inline onApproved={onApproved} onDeny={() => void deny()} denying={denying} />
       </div>
     </section>
   );
