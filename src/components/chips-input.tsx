@@ -1,5 +1,5 @@
 import { XIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
@@ -14,6 +14,7 @@ export function ChipsInput({
   placeholder,
   validate,
   className,
+  onPendingChange,
   "aria-describedby": describedBy,
 }: {
   id?: string;
@@ -22,10 +23,21 @@ export function ChipsInput({
   placeholder?: string;
   validate?: (v: string) => string | null;
   className?: string;
+  /** Told whether text is typed but not added yet (or invalid), so forms can refuse to save around it. */
+  onPendingChange?: (pending: boolean) => void;
   "aria-describedby"?: string;
 }) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const pending = !!draft.trim();
+  const notify = useRef(onPendingChange);
+  useEffect(() => {
+    notify.current = onPendingChange;
+  });
+  useEffect(() => {
+    notify.current?.(pending);
+  }, [pending]);
+  useEffect(() => () => notify.current?.(false), []);
 
   const commit = (raw: string) => {
     const parts = raw
@@ -98,7 +110,11 @@ export function ChipsInput({
           }}
         />
       </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error ? (
+        <p className="text-xs text-destructive">{error}</p>
+      ) : (
+        pending && <p className="text-xs text-warning">Press Enter to add “{draft.trim()}”, or clear it.</p>
+      )}
     </div>
   );
 }

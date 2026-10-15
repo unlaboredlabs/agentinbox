@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import type { EventType, MailEvent } from "@shared/types";
 import {
   AlertTriangleIcon,
@@ -14,6 +15,8 @@ import { CodeBlock, TimeAgo } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
 import { EVENT_TYPE_INFO } from "@/lib/labels";
+import { queries } from "@/lib/queries";
+import { prettySystemLabel } from "@/hooks/use-label-names";
 import { cn } from "@/lib/utils";
 
 const ICON: Record<EventType, typeof MailIcon> = {
@@ -56,6 +59,12 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
   const [open, setOpen] = useState(false);
   const m = e.message;
   const info = EVENT_TYPE_INFO[e.type];
+  const isLabel = e.type === "label.added" || e.type === "label.removed";
+  const labels = useQuery({ ...queries.labels(e.accountId), enabled: isLabel && !!e.labelIds?.length });
+  const labelNames = isLabel ? (e.labelIds ?? []).map((id) => {
+    const l = labels.data?.find((x) => x.id === id);
+    return l && l.type === "user" ? l.name : prettySystemLabel(id);
+  }) : [];
   return (
     <li className={cn(fresh && "animate-in duration-500 fade-in slide-in-from-top-1")}>
       <button
@@ -69,6 +78,7 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <Badge variant="outline" className="font-normal">
               {info?.label ?? e.type}
+              {labelNames.length > 0 && <span className="font-medium text-foreground">{labelNames.join(", ")}</span>}
             </Badge>
             <span className="truncate">{e.accountEmail}</span>
             {m?.from && (

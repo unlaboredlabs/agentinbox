@@ -1,9 +1,11 @@
 import type { AgentWithKey } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { BotIcon, PartyPopperIcon } from "lucide-react";
+import { BotIcon, KeyRoundIcon, PartyPopperIcon, PlugZapIcon } from "lucide-react";
 import { useState } from "react";
 import { AgentCreateForm } from "@/components/agents/agent-create-form";
+import { ConnectAgentGuide } from "@/components/agents/connect-agent-guide";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { AgentCreated } from "@/components/agents/agent-created";
 import { TestConnection } from "@/components/agents/test-connection";
 import { Button } from "@/components/ui/button";
@@ -16,6 +18,7 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
   const [created, setCreated] = useState<AgentWithKey>();
   const existing = agents.data ?? [];
   const [creatingAnother, setCreatingAnother] = useState(false);
+  const [how, setHow] = useState<"pair" | "key">("pair");
   const showForm = !created && (existing.length === 0 || creatingAnother);
 
   return (
@@ -25,14 +28,14 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
       description={
         created
           ? "Save its key, add agentinbox to your agent with a snippet, and test the connection."
-          : "An agent is anything that talks MCP: Claude Code, Codex, Cursor, your own app. It gets its own key and only the access you grant. Sending starts as drafts for you to review."
+          : "An agent is anything that talks MCP: Claude Code, Codex, Cursor, Hermes, your own app. It gets its own key and only the access you grant."
       }
       footer={
         <StepFooter
           onBack={onBack}
           onNext={onNext}
-          nextLabel="Finish setup"
-          nextDisabled={showForm && existing.length === 0}
+          nextDisabled={showForm && existing.length === 0 && how === "key"}
+          nextLabel={showForm && existing.length === 0 && how === "pair" ? "Finish, I'll approve it later" : "Finish setup"}
           hint={created ? "Make sure you've saved the key" : undefined}
         />
       }
@@ -43,7 +46,21 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
           <TestConnection agentId={created.agent.id} />
         </>
       ) : showForm ? (
-        <AgentCreateForm defaultName={existing.length ? "" : "My first agent"} onCreated={setCreated} onCancel={creatingAnother ? () => setCreatingAnother(false) : undefined} />
+        <div className="space-y-5">
+          <ToggleGroup type="single" variant="outline" className="flex-wrap" value={how} onValueChange={(v) => v && setHow(v as "pair" | "key")} aria-label="How to add the agent">
+            <ToggleGroupItem value="pair">
+              <PlugZapIcon /> From the agent's terminal (recommended)
+            </ToggleGroupItem>
+            <ToggleGroupItem value="key">
+              <KeyRoundIcon /> Here, and copy a key
+            </ToggleGroupItem>
+          </ToggleGroup>
+          {how === "pair" ? (
+            <ConnectAgentGuide />
+          ) : (
+            <AgentCreateForm defaultName={existing.length ? "" : "My first agent"} onCreated={setCreated} onCancel={creatingAnother ? () => setCreatingAnother(false) : undefined} />
+          )}
+        </div>
       ) : (
         <div className="space-y-4">
           <div className="flex items-start gap-3 rounded-lg border p-4">

@@ -13,6 +13,8 @@ import type {
   MailEvent,
   OverviewStats,
   Page,
+  PairingRequest,
+  PairingStatus,
   SetupState,
   SetupStatus,
   Settings,
@@ -41,6 +43,10 @@ export const keys = {
   approvals: ["approvals"] as const,
   audit: ["audit"] as const,
   overview: ["overview"] as const,
+  pairings: ["pairings"] as const,
+  /** Paged history on /events and /audit: kept out of per-message invalidation (the pages merge live rows themselves and can be paused), refetched on mount and after a reconnect. */
+  eventHistory: ["event-history"] as const,
+  auditLog: ["audit-log"] as const,
 };
 
 export interface EventFilters {
@@ -87,18 +93,25 @@ export const queries = {
       queryFn: () => apiGet<Approval[]>("/api/approvals", { status }),
       refetchInterval: 60_000,
     }),
+  pairings: (status?: PairingStatus) =>
+    queryOptions({
+      queryKey: [...keys.pairings, status ?? "all"],
+      queryFn: () => apiGet<PairingRequest[]>("/api/pairings", { status }),
+      refetchInterval: 30_000,
+    }),
   overview: () => queryOptions({ queryKey: keys.overview, queryFn: () => apiGet<OverviewStats>("/api/overview"), refetchInterval: 60_000 }),
   /** Newest events (first page only), for the overview. */
   recentEvents: () =>
     queryOptions({ queryKey: [...keys.events, "recent"], queryFn: () => apiGet<Page<MailEvent>>("/api/events") }),
-  /** Older events, page by page. Not invalidated by the live stream: new events arrive through it directly. */
+  /** Older events, page by page. Refetched whenever the page mounts and after a stream reconnect. */
   eventHistory: (f: EventFilters) =>
     infiniteQueryOptions({
-      queryKey: ["event-history", f],
+      queryKey: [...keys.eventHistory, f],
       queryFn: ({ pageParam }) => apiGet<Page<MailEvent>>("/api/events", { ...f, cursor: pageParam }),
       initialPageParam: null as string | null,
       getNextPageParam: (last) => last.nextCursor,
       staleTime: Infinity,
+      refetchOnMount: "always",
     }),
   deliveries: (webhookId: string, status?: DeliveryStatus) =>
     infiniteQueryOptions({
@@ -107,14 +120,15 @@ export const queries = {
       initialPageParam: null as string | null,
       getNextPageParam: (last) => last.nextCursor,
     }),
-  /** Audit pages. New entries are announced by the stream rather than refetching every loaded page. */
+  /** Audit pages. Refetched whenever the page mounts and after a stream reconnect; new entries are announced live. */
   audit: (f: AuditFilters) =>
     infiniteQueryOptions({
-      queryKey: ["audit-log", f],
+      queryKey: [...keys.auditLog, f],
       queryFn: ({ pageParam }) => apiGet<Page<AuditEntry>>("/api/audit", { ...f, cursor: pageParam }),
       initialPageParam: null as string | null,
       getNextPageParam: (last) => last.nextCursor,
       staleTime: Infinity,
+      refetchOnMount: "always",
     }),
   /** First audit page only, for an agent's detail page. */
   recentAudit: (agentId: string) =>

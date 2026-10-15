@@ -1,4 +1,5 @@
 import type { Approval } from "@shared/types";
+import { Visible } from "@/components/hidden-chars";
 import { ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 import { TimeAgo } from "@/components/common";
@@ -38,7 +39,7 @@ function HistoryRow({ approval: a }: { approval: Approval }) {
               {a.agentName} via {a.accountEmail}
             </span>
           </div>
-          <div className="truncate text-sm font-medium">{a.subject || "(no subject)"}</div>
+          <div className="truncate text-sm font-medium">{a.subject ? <Visible text={a.subject} /> : "(no subject)"}</div>
           {(a.decisionNote || a.error) && (
             <div className={cn("truncate text-xs", a.error ? "text-critical" : "text-muted-foreground")}>{a.error ?? `Note: ${a.decisionNote}`}</div>
           )}
@@ -53,7 +54,7 @@ function HistoryRow({ approval: a }: { approval: Approval }) {
           {a.reason && (
             <p className="text-sm">
               <span className="text-muted-foreground">Agent's reason: </span>
-              {a.reason}
+              <Visible text={a.reason} />
             </p>
           )}
           {a.decisionNote && (

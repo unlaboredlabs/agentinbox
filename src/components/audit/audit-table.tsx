@@ -12,8 +12,22 @@ export function AuditTable({ entries, accounts, empty }: { entries: AuditEntry[]
     const email = (id: string | null) => (id ? (accounts.find((a) => a.id === id)?.email ?? id) : "—");
     return [
       col.accessor("ts", { header: "Time", cell: (c) => <TimeAgo date={c.getValue()} className="text-xs" />, meta: { className: "w-28" } }),
-      col.display({ id: "actor", header: "Actor", cell: (c) => <Actor entry={c.row.original} />, meta: { className: "max-w-40" } }),
-      col.accessor("action", { header: "Action", cell: (c) => <ActionName action={c.getValue()} /> }),
+      col.display({
+        id: "actor",
+        header: "Actor",
+        cell: (c) => (
+          <div className="min-w-0 space-y-1">
+            <Actor entry={c.row.original} />
+            {/* Small screens: the action and outcome columns fold in here. */}
+            <div className="flex flex-wrap items-center gap-1.5 sm:hidden">
+              <ActionName action={c.row.original.action} />
+              {c.row.original.outcome !== "ok" && <OutcomeBadge outcome={c.row.original.outcome} />}
+            </div>
+          </div>
+        ),
+        meta: { className: "max-w-56" },
+      }),
+      col.accessor("action", { header: "Action", cell: (c) => <ActionName action={c.getValue()} />, meta: { className: "hidden sm:table-cell" } }),
       col.accessor("accountId", {
         header: "Account",
         cell: (c) => <span className="block max-w-48 truncate text-muted-foreground">{email(c.getValue())}</span>,
@@ -21,12 +35,13 @@ export function AuditTable({ entries, accounts, empty }: { entries: AuditEntry[]
       }),
       col.accessor("outcome", {
         header: "Outcome",
+        meta: { className: "hidden sm:table-cell" },
         cell: (c) => (
           <div className="flex flex-wrap items-center gap-1.5">
             <OutcomeBadge outcome={c.getValue()} />
             {c.row.original.outcome !== "ok" && c.row.original.reason && (
               <span className="hidden md:inline">
-                <DenialReason reason={c.row.original.reason} />
+                <DenialReason reason={c.row.original.reason} action={c.row.original.action} />
               </span>
             )}
           </div>
@@ -58,7 +73,7 @@ function AuditDetail({ entry: e, email }: { entry: AuditEntry; email?: string })
       {e.reason && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-muted-foreground">{e.outcome === "denied" ? "Blocked by" : "Reason"}</span>
-          <DenialReason reason={e.reason} />
+          <DenialReason reason={e.reason} action={e.action} />
         </div>
       )}
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">

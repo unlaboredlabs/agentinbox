@@ -1,4 +1,5 @@
 import type { Webhook, WebhookWithSecret } from "@shared/types";
+import { useLabelNames } from "@/hooks/use-label-names";
 import { useQuery } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, BotIcon, KeyRoundIcon, MoreHorizontalIcon, PencilIcon, Trash2Icon } from "lucide-react";
@@ -71,6 +72,7 @@ function WebhookDetail({ webhook: w }: { webhook: Webhook }) {
   const navigate = useNavigate();
   const agents = useQuery(queries.agents());
   const accounts = useQuery(queries.accounts());
+  const labelName = useLabelNames(accounts.data ?? []);
   const [editing, setEditing] = useState(false);
   const [rotated, setRotated] = useState<string>();
   const agent = agents.data?.find((a) => a.id === w.agentId);
@@ -175,7 +177,7 @@ function WebhookDetail({ webhook: w }: { webhook: Webhook }) {
           <CardContent className="space-y-3">
             <CopyField value={w.url} />
             <ul className="list-disc space-y-1 pl-5 text-sm">
-              {describeWebhook(w, accounts.data ?? []).map((line) => (
+              {describeWebhook(w, accounts.data ?? [], labelName).map((line) => (
                 <li key={line}>{line}</li>
               ))}
             </ul>

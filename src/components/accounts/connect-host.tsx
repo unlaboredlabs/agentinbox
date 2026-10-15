@@ -19,6 +19,10 @@ interface ConnectRequest {
   /** Reconnect an existing account (needs_reauth) instead of adding a new one. */
   reauthAccountId?: string;
   email?: string;
+  /** Extra Google access to request incrementally, e.g. ["pubsub"] for provisioning. */
+  scopes?: string[];
+  /** Called once the account is connected (e.g. to retry what needed the extra access). */
+  onDone?: () => void;
 }
 
 type Phase =
@@ -70,7 +74,13 @@ export function ConnectAccountHost() {
   const [req, setReq] = useState<ConnectRequest>({});
   const known = useRef<Set<string>>(new Set());
 
+  const reqRef = useRef<ConnectRequest>({});
+  /** Reconnecting an account that was in needs_reauth: only then does "active again" prove the new sign-in landed. */
+  const reauthFromBroken = useRef(false);
   const finish = (email: string) => {
+    const done = reqRef.current.onDone;
+    reqRef.current = { ...reqRef.current, onDone: undefined };
+    if (done) setTimeout(done, 0);
     setPhase((p) => {
       if (p?.kind === "waiting") p.popup?.close();
       return { kind: "done", email };
@@ -95,6 +105,7 @@ export function ConnectAccountHost() {
 
   const start = async (r: ConnectRequest) => {
     setReq(r);
+    reqRef.current = r;
     const cached = client.data;
     // Paste mode uses a plain link (the user needs a full address bar); otherwise open the pop-up now.
     const popup = cached?.callbackMode === "paste" ? null : openPopup();
@@ -107,9 +118,12 @@ export function ConnectAccountHost() {
     }
     const accounts = qc.getQueryData<Account[]>(keys.accounts) ?? (await qc.fetchQuery(queries.accounts()).catch(() => []));
     known.current = new Set(accounts.map((a) => a.id));
+    // For active, paused or erroring accounts a status change proves nothing (resume, a recovered sync…):
+    // those reconnects finish only on the callback page's own result.
+    reauthFromBroken.current = !!r.reauthAccountId && accounts.some((a) => a.id === r.reauthAccountId && a.status === "needs_reauth");
     try {
       const res = await api<ConnectAccountResponse>("/api/accounts/connect", {
-        body: r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {},
+        body: { ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}), ...(r.scopes?.length ? { scopes: r.scopes } : {}) },
       });
       if (popup && res.callbackMode === "direct") popup.location.href = res.authUrl;
       else popup?.close();
@@ -154,7 +168,7 @@ export function ConnectAccountHost() {
     if (m.kind !== "account" || (phase?.kind !== "waiting" && phase?.kind !== "starting")) return;
     const a = m.data;
     const reauth = req.reauthAccountId;
-    if (reauth ? a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
+    if (reauth ? reauthFromBroken.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
   });
 
   // Notice when the popup goes away. Google's pages can sever window.opener, which also makes
@@ -174,6 +188,12 @@ export function ConnectAccountHost() {
   const checkAgain = async () => {
     const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
     const reauth = req.reauthAccountId;
+    if (reauth && !reauthFromBroken.current) {
+      toast.info("Can't confirm this one from here", {
+        description: "This account was already connected, so there's nothing new to detect. If Google said it worked, close this dialog.",
+      });
+      return;
+    }
     const found = accounts.find((a) => (reauth ? a.id === reauth && a.status === "active" : !known.current.has(a.id)));
     if (found) finish(found.email);
     else toast.info("No new account yet", { description: "Finish signing in with Google, or start again." });
@@ -191,11 +211,15 @@ export function ConnectAccountHost() {
     <Dialog open={!!phase} onOpenChange={(o) => !o && close()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}</DialogTitle>
+          <DialogTitle>
+            {req.scopes?.includes("pubsub") ? `Grant Pub/Sub access${req.email ? ` for ${req.email}` : ""}` : reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}
+          </DialogTitle>
           <DialogDescription>
             {phase?.kind === "waiting" && phase.res.callbackMode === "paste"
               ? "Sign in with Google in a new tab, then paste back the address you land on."
-              : "Sign in with Google and allow agentinbox to manage the mailbox."}
+              : req.scopes?.includes("pubsub")
+                ? `Sign in as ${req.email ?? "the account agentinbox provisions Pub/Sub with"} (another account won't work) and allow Pub/Sub access. It must be an Owner or Pub/Sub Admin of ${client.data?.projectId ?? "the Google Cloud project"}. agentinbox only uses it for its own topic and subscription.`
+                : "Sign in with Google and allow agentinbox to manage the mailbox."}
           </DialogDescription>
         </DialogHeader>
 
@@ -220,8 +244,17 @@ export function ConnectAccountHost() {
         {phase?.kind === "done" && (
           <div className="flex flex-col items-center gap-2 py-6 text-center">
             <CheckCircle2Icon className="size-10 text-success" />
-            <div className="font-medium">{phase.email} is connected</div>
-            <p className="text-sm text-muted-foreground">Mail starts syncing now. Give agents access from the Agents page.</p>
+            {req.scopes?.includes("pubsub") ? (
+              <>
+                <div className="font-medium">Pub/Sub access granted</div>
+                <p className="text-sm text-muted-foreground">Finishing real-time setup with {phase.email}…</p>
+              </>
+            ) : (
+              <>
+                <div className="font-medium">{phase.email} is connected</div>
+                <p className="text-sm text-muted-foreground">Mail starts syncing now. Give agents access from the Agents page.</p>
+              </>
+            )}
           </div>
         )}
 
@@ -275,7 +308,7 @@ export function ConnectAccountHost() {
           )}
           {phase?.kind === "done" && (
             <>
-              {!reauthEmail && (
+              {!reauthEmail && !req.scopes?.length && (
                 <Button variant="outline" onClick={() => connectAccount()}>
                   Connect another
                 </Button>

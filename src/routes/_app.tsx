@@ -4,10 +4,12 @@ import { useEffect } from "react";
 import { ConnectAccountHost } from "@/components/accounts/connect-host";
 import { AppSidebar } from "@/components/app-sidebar";
 import { ConnectionIndicator } from "@/components/connection-indicator";
+import { PairingNotifier } from "@/components/pairing-notifier";
 import { ThemeToggle } from "@/components/theme";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { UNAUTHORIZED_EVENT } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
+import { forgetAllKeys } from "@/lib/revealed-keys";
 import { StreamProvider } from "@/lib/stream";
 
 export const Route = createFileRoute("/_app")({
@@ -28,6 +30,7 @@ function AppLayout() {
 
   useEffect(() => {
     const onUnauthorized = () => {
+      forgetAllKeys();
       qc.setQueryData(keys.setupStatus, { claimed: true, authenticated: false });
       void navigate({ to: "/login", search: { redirect: href } });
     };
@@ -52,6 +55,7 @@ function AppLayout() {
         </SidebarInset>
       </SidebarProvider>
       <ConnectAccountHost />
+      <PairingNotifier />
     </StreamProvider>
   );
 }

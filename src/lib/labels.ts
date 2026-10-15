@@ -105,6 +105,12 @@ export const DENIAL_REASONS: Record<string, string> = {
   no_grant: "The agent has no access to this account",
   disabled: "The agent is disabled",
   account_paused: "The account is paused",
+  account_required: "The agent has several accounts and didn't say which one",
+  needs_reauth: "The account needs to be reconnected",
+  pairing_disabled: "Pairing is turned off in Settings",
+  pending_cap: "Too many pairing requests are already waiting",
+  lockout: "Too many wrong codes or keys from this address",
+  not_found: "The item doesn't exist or is outside the agent's access",
 };
 
 export const KIND_LABEL = { send: "New message", reply: "Reply", forward: "Forward" } as const;

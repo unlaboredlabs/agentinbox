@@ -1,6 +1,9 @@
 import type { Account } from "@shared/types";
-import { AlertTriangleIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { AlertTriangleIcon, BotIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { TimeAgo } from "@/components/common";
+import { queries } from "@/lib/queries";
 import { useNow } from "@/hooks/use-now";
 import { confirm } from "@/components/confirm";
 import { Button } from "@/components/ui/button";
@@ -21,6 +24,9 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
   const now = useNow(60_000);
   const watchLeft = a.watchExpiresAt ? new Date(a.watchExpiresAt).getTime() - now : null;
   const watchSoon = watchLeft !== null && watchLeft < 12 * 3600_000;
+  const agents = useQuery(queries.agents());
+  const users = (agents.data ?? []).filter((ag) => ag.grants.some((g) => g.accountId === a.id));
+  const healthy = a.status === "active";
 
   const askRemove = () =>
     confirm({
@@ -50,7 +56,7 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
             <span>
               Last sync <TimeAgo date={a.lastSyncAt} fallback="never" />
             </span>
-            {showWatch && (
+            {showWatch && healthy && (
               <span className={watchSoon ? "text-warning" : undefined}>
                 Gmail watch {watchLeft === null ? "" : watchLeft < 0 ? "expired " : "renews "}
                 <TimeAgo date={a.watchExpiresAt} fallback="not set" />
@@ -60,9 +66,28 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
               Connected <TimeAgo date={a.createdAt} />
             </span>
           </div>
+          {agents.isSuccess && (
+            <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+              <BotIcon className="size-3.5 shrink-0" />
+              {users.length ? (
+                <span className="truncate">
+                  {users.map((ag, i) => (
+                    <span key={ag.id}>
+                      {i > 0 && ", "}
+                      <Link to="/agents/$agentId" params={{ agentId: ag.id }} className="text-foreground hover:underline">
+                        {ag.name}
+                      </Link>
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span>No agent has access yet</span>
+              )}
+            </div>
+          )}
           {a.lastError && (
-            <p className="mt-1.5 flex items-start gap-1.5 text-xs text-critical">
-              <AlertTriangleIcon className="mt-px size-3.5 shrink-0" />
+            <p className="mt-2 flex max-w-3xl items-start gap-1.5 rounded-md bg-critical/[0.06] px-2.5 py-1.5 text-xs text-foreground/90">
+              <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-critical" />
               <span className="break-words">{a.lastError}</span>
             </p>
           )}

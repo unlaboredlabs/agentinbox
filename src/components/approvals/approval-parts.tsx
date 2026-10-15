@@ -2,6 +2,7 @@ import type { Address, Approval } from "@shared/types";
 import { ChevronDownIcon, PaperclipIcon } from "lucide-react";
 import { useState } from "react";
 import { ToneBadge } from "@/components/common";
+import { Visible } from "@/components/hidden-chars";
 import { Button } from "@/components/ui/button";
 import { useNow } from "@/hooks/use-now";
 import { fmtAddress, fmtBytes, fmtDuration } from "@/lib/format";
@@ -38,7 +39,9 @@ export function Recipients({ approval: a }: { approval: Approval }) {
         .map(([k, list]) => (
           <div key={k} className="contents">
             <dt className="text-muted-foreground">{k}</dt>
-            <dd className="min-w-0 break-words">{list.map(fmtAddress).join(", ")}</dd>
+            <dd className="min-w-0 break-words">
+              <Visible text={list.map(fmtAddress).join(", ")} />
+            </dd>
           </div>
         ))}
     </dl>
@@ -55,7 +58,7 @@ export function BodyPreview({ body, className }: { body: string; className?: str
   return (
     <div className={cn("relative rounded-lg border bg-muted/30", className)}>
       <pre className={cn("overflow-x-auto p-3 font-sans text-sm leading-relaxed whitespace-pre-wrap break-words", !expanded && "max-h-80 overflow-hidden")}>
-        {body || <span className="text-muted-foreground italic">(empty body)</span>}
+        {body ? <Visible text={body} /> : <span className="text-muted-foreground italic">(empty body)</span>}
       </pre>
       {long && (
         <div className={cn("flex justify-center p-2", !expanded && "absolute inset-x-0 bottom-0 rounded-b-lg bg-gradient-to-t from-card via-card/90 to-transparent pt-10")}>
@@ -76,7 +79,9 @@ export function Attachments({ items }: { items: Approval["attachments"] }) {
       {items.map((f, i) => (
         <li key={i} className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs">
           <PaperclipIcon className="size-3.5 text-muted-foreground" />
-          <span className="max-w-48 truncate">{f.filename}</span>
+          <span className="max-w-48 truncate">
+            <Visible text={f.filename} />
+          </span>
           <span className="text-muted-foreground">{fmtBytes(f.size)}</span>
         </li>
       ))}

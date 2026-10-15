@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { KeyRoundIcon } from "lucide-react";
+import { KeyRoundIcon, ShieldAlertIcon } from "lucide-react";
 import { CodeBlock, ExternalLink } from "@/components/common";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { NPX, shellQuote, transportOf } from "@/lib/cli";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { queries } from "@/lib/queries";
 
 export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
@@ -9,8 +11,8 @@ export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
 export function snippets(publicUrl: string, key: string) {
   const mcp = `${publicUrl}/mcp`;
   return {
-    claude: `claude mcp add --transport http agentinbox ${mcp} \\\n  --header "Authorization: Bearer ${key}"`,
-    codexToml: `[mcp_servers.agentinbox]\nurl = "${mcp}"\nbearer_token_env_var = "AGENTINBOX_API_KEY"`,
+    claude: `claude mcp add --transport http agentinbox ${shellQuote(mcp)} \\\n  --header "Authorization: Bearer ${key}"`,
+    codexToml: `[mcp_servers.agentinbox]\nurl = ${JSON.stringify(mcp)}\nbearer_token_env_var = "AGENTINBOX_API_KEY"`,
     codexEnv: `export AGENTINBOX_API_KEY="${key}"`,
     cursor: JSON.stringify({ mcpServers: { agentinbox: { url: mcp, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
     generic: JSON.stringify(
@@ -18,7 +20,8 @@ export function snippets(publicUrl: string, key: string) {
       null,
       2,
     ),
-    skill: `npx agentinbox-cli skill install --url ${publicUrl}`,
+    hermes: `mcp_servers:\n  agentinbox:\n    url: ${JSON.stringify(mcp)}\n    headers:\n      Authorization: "Bearer ${key}"`,
+    skill: `${NPX} skill install --url ${shellQuote(publicUrl)}`,
     mcpUrl: mcp,
     skillUrl: `${publicUrl}/skill.md`,
   };
@@ -35,6 +38,16 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
 
   return (
     <div className="space-y-3">
+      {transportOf(publicUrl) === "insecure" && (
+        <Alert variant="destructive">
+          <ShieldAlertIcon />
+          <AlertTitle>{new URL(publicUrl).host} is plain http</AlertTitle>
+          <AlertDescription>
+            With these settings the agent's key and every email it reads cross the network unencrypted. Use https or Tailscale for the public URL
+            (Settings) before connecting agents on other machines.
+          </AlertDescription>
+        </Alert>
+      )}
       {!apiKey && (
         <p className="flex items-start gap-2 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
           <KeyRoundIcon className="mt-px size-3.5 shrink-0" />
@@ -50,13 +63,14 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
             <TabsTrigger value="claude">Claude Code</TabsTrigger>
             <TabsTrigger value="codex">Codex</TabsTrigger>
             <TabsTrigger value="cursor">Cursor</TabsTrigger>
+            <TabsTrigger value="hermes">Hermes</TabsTrigger>
             <TabsTrigger value="generic">Other MCP</TabsTrigger>
             <TabsTrigger value="skill">Skill</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="claude" className="space-y-2">
           <p className="text-sm text-muted-foreground">Run in a terminal on the machine where Claude Code runs:</p>
-          <CodeBlock code={s.claude} />
+          <CodeBlock code={s.claude} wrap />
         </TabsContent>
         <TabsContent value="codex" className="space-y-2">
           <p className="text-sm text-muted-foreground">
@@ -73,6 +87,12 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
           </p>
           <CodeBlock code={s.cursor} title="~/.cursor/mcp.json" />
         </TabsContent>
+        <TabsContent value="hermes" className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Add to <code className="font-mono text-foreground">~/.hermes/config.yaml</code>, then restart Hermes:
+          </p>
+          <CodeBlock code={s.hermes} title="~/.hermes/config.yaml" />
+        </TabsContent>
         <TabsContent value="generic" className="space-y-2">
           <p className="text-sm text-muted-foreground">
             Any MCP client with Streamable HTTP support: server URL <code className="font-mono text-foreground">{s.mcpUrl}</code> with a bearer token.
@@ -84,7 +104,7 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
             The agentinbox skill teaches agents how to use the tools well: triage, replying in threads, handling approvals and treating email
             content as untrusted data. Install it next to your agent:
           </p>
-          <CodeBlock code={s.skill} />
+          <CodeBlock code={s.skill} wrap />
           <p className="text-sm text-muted-foreground">
             Or read it first: <ExternalLink href={s.skillUrl}>{s.skillUrl}</ExternalLink>
           </p>
