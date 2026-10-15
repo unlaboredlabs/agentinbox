@@ -98,7 +98,7 @@ export function googleApi(ctx: AppContext) {
       ctx.audit.record({
         ...ADMIN_ACTOR,
         action: "pubsub.provision",
-        accountId: ctx.google.pubsubState().principalAccountId,
+        accountId: ctx.google.pubsubState().pendingPrincipalAccountId ?? ctx.google.pubsubState().principalAccountId,
         outcome: "error",
         detail: { error: e instanceof Error ? e.message : String(e), code: e instanceof HttpError ? e.code : undefined },
       });

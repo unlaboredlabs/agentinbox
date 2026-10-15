@@ -859,9 +859,9 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
   on("POST", /^\/token$/, (_req, url, body) => {
     const p = form(body, url);
-    if (p.get("client_id") !== FAKE_CLIENT.clientId || p.get("client_secret") !== FAKE_CLIENT.clientSecret) {
-      throw oauthFail(401, "invalid_client", "The OAuth client was not found.");
-    }
+    // Like Google: same error code for an unknown client and a wrong secret, different descriptions.
+    if (p.get("client_id") !== FAKE_CLIENT.clientId) throw oauthFail(401, "invalid_client", "The OAuth client was not found.");
+    if (p.get("client_secret") !== FAKE_CLIENT.clientSecret) throw oauthFail(401, "invalid_client", "Unauthorized");
     if (p.get("grant_type") === "authorization_code") {
       const c = codes.get(p.get("code") ?? "");
       codes.delete(p.get("code") ?? "");

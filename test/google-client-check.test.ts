@@ -79,6 +79,37 @@ describe("OAuth client check", () => {
     expect(setupCodes()).not.toContain("client_invalid");
   });
 
+  it("reads a client the token endpoint doesn't know as an invalid client, not a wrong secret", async () => {
+    // The consent page's answer was unclear, but the token endpoint says the client doesn't exist.
+    fake.failNext({ path: "/o/oauth2/v2/auth", status: 500 });
+    const saved = await put({ clientId: "123-typo.apps.googleusercontent.com" });
+    expect(saved.body.check).toMatchObject({ clientId: "invalid", secret: "unknown" });
+    expect(saved.body.warnings.map((w) => w.code)).toEqual(["client_invalid"]);
+  });
+
+  it("asks for English pages and treats unauthorized_client as inconclusive for the secret", async () => {
+    const seen: string[] = [];
+    const google = createServer((req, res) => {
+      seen.push(req.url ?? "");
+      if (req.url?.startsWith("/token")) {
+        res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: "unauthorized_client", error_description: "Unauthorized" }));
+      } else res.writeHead(302, { location: "/v3/signin/identifier" }).end();
+    });
+    await new Promise<void>((r) => google.listen(0, "127.0.0.1", r));
+    try {
+      const base = `http://127.0.0.1:${(google.address() as AddressInfo).port}`;
+      await dispose();
+      await setup({ authBase: base, oauthBase: base });
+      ctx.google.setClient({ ...FAKE_CLIENT, appType: "internal" });
+      const res = await check();
+      expect(res.body).toEqual({ clientId: "ok", redirectUri: "ok", secret: "unknown", warnings: [] });
+      const auth = new URL(seen.find((u) => u.startsWith("/o/oauth2/v2/auth"))!, base);
+      expect(auth.searchParams.get("hl")).toBe("en");
+    } finally {
+      google.close();
+    }
+  });
+
   it("flags a wrong secret, naming its last 4 characters", async () => {
     const saved = await put({ clientSecret: "GOCSPX-wrong-WXYZ" });
     expect(saved.body.check).toMatchObject({ clientId: "ok", redirectUri: "ok", secret: "invalid" });

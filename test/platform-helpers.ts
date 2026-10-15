@@ -13,7 +13,7 @@ export const PASSWORD = "correct horse battery";
 
 /** Minimal google fake: only what the platform routes read. */
 export function fakeGoogle(view: { clientId?: string | null; hasSecret?: boolean; projectId?: string | null } = {}): () => GoogleService {
-  const pubsub: PubsubState = { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null, principalAccountId: null, principalEmail: null };
+  const pubsub: PubsubState = { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null, principalAccountId: null, principalEmail: null, pendingPrincipalAccountId: null, pendingPrincipalEmail: null };
   return () =>
     ({
       clientView: () => ({

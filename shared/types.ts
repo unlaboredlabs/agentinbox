@@ -162,13 +162,21 @@ export interface PubsubState {
   /** Last time a Pub/Sub message was pulled (proves the pipeline works end-to-end). */
   lastMessageAt: string | null;
   /**
-   * The connected account whose Google identity provisions and pulls the subscription ("Pub/Sub is set
-   * up with <principalEmail>"). Before provisioning it is the account provisioning would use: the one chosen
-   * with POST /api/google/pubsub/provision {accountId}, else the first active account with the Pub/Sub
-   * scope, else the first active account. null when no active account exists.
+   * The connected account whose Google identity pulls the subscription ("Pub/Sub is set up with
+   * <principalEmail>"): the one the last successful provisioning used. Before any provisioning (or if it
+   * became inactive), the fallback: first active account with the Pub/Sub scope, else first active account.
+   * null when no active account exists.
    */
   principalAccountId: string | null;
   principalEmail: string | null;
+  /**
+   * An account chosen with POST /api/google/pubsub/provision {accountId} whose provisioning hasn't
+   * succeeded yet ("Switching to <pendingPrincipalEmail>…"). Provisioning and the incremental Pub/Sub
+   * consent (POST /api/accounts/connect {scopes:["pubsub"]}) use it; it replaces the principal only once
+   * provisioning (and its watch) succeed, so a failed switch never disturbs a working setup. null when none.
+   */
+  pendingPrincipalAccountId: string | null;
+  pendingPrincipalEmail: string | null;
 }
 
 export interface Settings {
@@ -668,8 +676,8 @@ export interface ApiError {
 //   POST   /api/google/client/import GoogleClientImportInput → GoogleClientImportResult   (runs the check)
 //          400 client_json_invalid | client_json_desktop | client_secret_missing | bad_request (see GoogleClientImportResult)
 //   POST   /api/google/pubsub/provision {accountId?}  → PubsubState   (creates topic + IAM + subscription using the principal account's token;
-//          `accountId` chooses the principal and is saved even if provisioning then fails, so the follow-up
-//          POST /api/accounts/connect {scopes:["pubsub"]} targets it)
+//          `accountId` chooses the principal: saved as pending (PubsubState.pendingPrincipal*), so the follow-up
+//          POST /api/accounts/connect {scopes:["pubsub"]} targets it; it becomes the principal only when provisioning succeeds)
 //          409 pubsub_scope_required (the principal hasn't granted the Pub/Sub scope: run that incremental consent, retry)
 //          409 needs_reauth | 409 account_paused (chosen account unusable) | 404 not_found (unknown accountId)
 //          400 pubsub_permission_denied (principal lacks roles/pubsub.admin or Owner; hint: IAM link + gcloud command)

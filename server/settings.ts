@@ -26,9 +26,11 @@ export interface InternalState {
     check?: { clientId: ClientCheck["clientId"]; redirectUri: ClientCheck["redirectUri"]; secret: ClientCheck["secret"]; redirectUriTested: string; at: string };
   };
   /** Pub/Sub resources and health. `mode` is not stored here: it is Settings.ingestMode. */
-  pubsub: Omit<PubsubState, "mode" | "principalAccountId" | "principalEmail"> & {
-    /** Account whose OAuth token provisions and pulls the subscription (it needs IAM on the project). */
+  pubsub: Omit<PubsubState, "mode" | "principalAccountId" | "principalEmail" | "pendingPrincipalAccountId" | "pendingPrincipalEmail"> & {
+    /** Account whose OAuth token pulls the subscription (it provisioned successfully; needs IAM on the project). */
     principalAccountId: string | null;
+    /** Account chosen to provision with that hasn't succeeded yet (becomes principalAccountId on success). */
+    pendingPrincipalAccountId?: string | null;
   };
   "admin.passwordHash": string;
 }

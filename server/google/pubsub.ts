@@ -32,9 +32,17 @@ export function writePubsub(ctx: AppContext, patch: Partial<StoredPubsub>): Stor
 }
 
 export function pubsubState(ctx: AppContext): PubsubState {
-  const { principalAccountId: _p, ...rest } = readPubsub(ctx);
+  const { principalAccountId: _p, pendingPrincipalAccountId: _q, ...rest } = readPubsub(ctx);
   const principal = pubsubPrincipal(ctx);
-  return { mode: ctx.settings.get().ingestMode, ...rest, principalAccountId: principal?.id ?? null, principalEmail: principal?.email ?? null };
+  const pending = pendingPrincipal(ctx);
+  return {
+    mode: ctx.settings.get().ingestMode,
+    ...rest,
+    principalAccountId: principal?.id ?? null,
+    principalEmail: principal?.email ?? null,
+    pendingPrincipalAccountId: pending?.id ?? null,
+    pendingPrincipalEmail: pending?.email ?? null,
+  };
 }
 
 export interface PubsubProblem {
@@ -66,15 +74,15 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
   }
   const msg = err.message;
   const service = err.details.metadata?.service ?? "";
-  if (hasReason(err, "BILLING_DISABLED", "billingNotEnabled", "UREQ_PROJECT_BILLING_NOT_FOUND") || /billing/i.test(msg)) {
-    return {
-      code: "pubsub_billing",
-      message: `Google requires billing to be enabled on project ${p} to use Cloud Pub/Sub.`,
-      hint:
-        `Link a billing account at https://console.cloud.google.com/billing/linkedaccount${q} (Billing → Link a billing account), wait a minute, then retry. ` +
-        "Gmail notifications stay far inside Pub/Sub's free tier. Or skip Pub/Sub: polling needs no billing.",
-    };
-  }
+  const billing: PubsubProblem = {
+    code: "pubsub_billing",
+    message: `Google requires billing to be enabled on project ${p} to use Cloud Pub/Sub.`,
+    hint:
+      `Link a billing account at https://console.cloud.google.com/billing/linkedaccount${q} (Billing → Link a billing account), wait a minute, then retry. ` +
+      "Gmail notifications stay far inside Pub/Sub's free tier. Or skip Pub/Sub: polling needs no billing.",
+  };
+  // Only Google's reason codes are trusted here; the message text is checked after the permission and API checks.
+  if (hasReason(err, "BILLING_DISABLED", "billingNotEnabled", "UREQ_PROJECT_BILLING_NOT_FOUND")) return billing;
   if (hasReason(err, "SERVICE_DISABLED", "accessNotConfigured") || /has not been used in project|is disabled/i.test(msg)) {
     if (/gmail/i.test(service) || (!service && /gmail/i.test(msg))) {
       return {
@@ -119,6 +127,7 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
       hint: "Check the project ID in the Google step of the setup wizard (the ID, not the name or number), then retry provisioning.",
     };
   }
+  if (/requires billing to be enabled|enable billing/i.test(msg)) return billing;
   if (err.status === 403 || hasReason(err, "PERMISSION_DENIED")) {
     const member = email ? `user:${email}` : "user:<email>";
     return {
@@ -144,9 +153,8 @@ function scopeRequired(email: string, project: string | null): PubsubProblem {
 }
 
 /**
- * The account whose token manages and pulls the subscription: the stored one (chosen explicitly or used
- * by the last provisioning) if active, else the first active account with the Pub/Sub scope, else the
- * first active account.
+ * The account whose token pulls the subscription: the one the last successful provisioning used, if
+ * active, else the first active account with the Pub/Sub scope, else the first active account.
  */
 export function pubsubPrincipal(ctx: AppContext) {
   const stored = readPubsub(ctx).principalAccountId;
@@ -154,6 +162,18 @@ export function pubsubPrincipal(ctx: AppContext) {
   if (row && row.status === "active") return row;
   const candidates = allRows(ctx).filter((r) => r.status === "active");
   return candidates.find((r) => accountScopes(r).includes(PUBSUB_SCOPE)) ?? candidates[0] ?? row ?? null;
+}
+
+/** The account chosen with provision {accountId} that hasn't provisioned successfully yet (if still active). */
+export function pendingPrincipal(ctx: AppContext) {
+  const id = readPubsub(ctx).pendingPrincipalAccountId;
+  const row = id ? getRow(ctx, id) : undefined;
+  return row && row.status === "active" ? row : null;
+}
+
+/** The account provisioning (and its incremental Pub/Sub consent) uses: the pending choice, else the principal. */
+export function provisioningPrincipal(ctx: AppContext) {
+  return pendingPrincipal(ctx) ?? pubsubPrincipal(ctx);
 }
 
 const pubsubCall = <T>(ctx: AppContext, accountId: string, path: string, opts: RequestOptions = {}) =>
@@ -177,9 +197,10 @@ interface IamPolicy {
 
 /**
  * Creates the topic, grants Gmail's push service account publish rights, creates the pull subscription
- * and starts watches, as the principal account. `accountId` chooses the principal; the choice is saved
- * (principalAccountId) before anything else, so a following incremental consent
- * (POST /api/accounts/connect {scopes: ["pubsub"]}) targets it even if this attempt fails.
+ * and starts watches, as the provisioning principal. `accountId` chooses it: the choice is saved as
+ * pending (so a following incremental consent, POST /api/accounts/connect {scopes: ["pubsub"]}, targets
+ * it) and becomes the principal that pulls only once provisioning and its watch succeed, so a failed
+ * attempt never disturbs a working setup.
  */
 export async function provisionPubsub(ctx: AppContext, opts: { accountId?: string } = {}): Promise<PubsubState> {
   const project = projectId(ctx);
@@ -195,12 +216,13 @@ export async function provisionPubsub(ctx: AppContext, opts: { accountId?: strin
     if (chosen.status !== "active") {
       throw new HttpError(409, "account_paused", `${chosen.email} is ${chosen.status === "paused" ? "paused" : "not active"}.`, "Resume it on the Accounts page, or choose another account.");
     }
-    if (readPubsub(ctx).principalAccountId !== chosen.id) {
-      writePubsub(ctx, { principalAccountId: chosen.id });
-      ctx.log.child("google").info("Pub/Sub principal chosen", { principal: chosen.email });
+    const pending = pubsubPrincipal(ctx)?.id === chosen.id ? null : chosen.id;
+    if (readPubsub(ctx).pendingPrincipalAccountId !== pending) {
+      writePubsub(ctx, { pendingPrincipalAccountId: pending });
+      if (pending) ctx.log.child("google").info("Pub/Sub principal chosen (pending provisioning)", { principal: chosen.email });
     }
   }
-  const acct = pubsubPrincipal(ctx);
+  const acct = provisioningPrincipal(ctx);
   if (!acct) {
     throw new HttpError(400, "pubsub_no_account", "Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
   }
@@ -209,7 +231,8 @@ export async function provisionPubsub(ctx: AppContext, opts: { accountId?: strin
   const fail = (err: unknown): never => {
     if (isAbortError(err)) throw err;
     const { code, message, hint } = explainPubsubError(err, project, acct.email);
-    writePubsub(ctx, { lastError: `${message} ${hint}`.trim() });
+    // A failed switch to another account leaves the working principal's health alone.
+    if (acct.id === pubsubPrincipal(ctx)?.id) writePubsub(ctx, { lastError: `${message} ${hint}`.trim() });
     ctx.log.child("google").warn("Pub/Sub provisioning failed", { error: errorMessage(err), principal: acct.email });
     throw new HttpError(code === "needs_reauth" ? 409 : 400, code, message, hint);
   };
@@ -242,11 +265,12 @@ export async function provisionPubsub(ctx: AppContext, opts: { accountId?: strin
     fail(err);
   }
 
-  writePubsub(ctx, { topic, subscription, principalAccountId: acct.id, lastError: null });
+  writePubsub(ctx, { topic, subscription });
   // Start watches before switching modes so a Gmail-side failure (API disabled, publish denied) surfaces here.
   const results = await ensureWatches(ctx, { force: true, topic });
   const own = results.find((r) => r.accountId === acct.id);
   if (own?.error) fail(own.error);
+  writePubsub(ctx, { principalAccountId: acct.id, pendingPrincipalAccountId: null, lastError: null });
   // Always broadcast, so an ingest loop that was polling while unprovisioned switches to pulling.
   ctx.settings.update({ ingestMode: "pubsub" });
   ctx.log.child("google").info("Pub/Sub provisioned", { topic, subscription, principal: acct.email });

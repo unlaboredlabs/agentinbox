@@ -120,5 +120,7 @@ function storedPubsub(ctx: AppContext): PubsubState {
     lastMessageAt: s?.lastMessageAt ?? null,
     principalAccountId: s?.principalAccountId ?? null,
     principalEmail: null,
+    pendingPrincipalAccountId: s?.pendingPrincipalAccountId ?? null,
+    pendingPrincipalEmail: null,
   };
 }

@@ -62,6 +62,8 @@ describe("Pub/Sub provisioning", () => {
       lastMessageAt: null,
       principalAccountId: a.id,
       principalEmail: "ops@example.com",
+      pendingPrincipalAccountId: null,
+      pendingPrincipalEmail: null,
     });
     expect(ctx.settings.get().ingestMode).toBe("pubsub");
     expect(ctx.settings.getState("pubsub")?.principalAccountId).toBe(a.id);

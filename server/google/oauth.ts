@@ -8,7 +8,7 @@ import { newId, randomToken } from "../util/ids.ts";
 import { type AccountRow, accountScopes, getRow, toAccount } from "./accounts.ts";
 import { callbackMode, clientCredentials, markRedirectVerified } from "./client.ts";
 import { buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
-import { pubsubPrincipal } from "./pubsub.ts";
+import { provisioningPrincipal } from "./pubsub.ts";
 import { postToken, refreshExpiry, refreshExpiryKind, type TokenResponse } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
 
@@ -86,7 +86,7 @@ export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; 
   const extra = [...new Set(opts.scopes ?? [])];
   let reauthId = opts.reauthAccountId;
   if (!reauthId && extra.includes("pubsub")) {
-    reauthId = pubsubPrincipal(ctx)?.id;
+    reauthId = provisioningPrincipal(ctx)?.id;
     if (!reauthId) throw badRequest("Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
   }
   const reauth = reauthId ? ctx.accounts.require(reauthId) : null;

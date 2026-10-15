@@ -50,7 +50,13 @@ const SIGN_IN = /\/(v3\/)?signin\/(v2\/)?(identifier|challenge|oauth\/(?!error)[
 
 async function probeAuth(ctx: Ctx, clientId: string, redirectUri: string): Promise<Probe> {
   const start = new URL(
-    buildUrl(ctx.config.google.authBase, "/o/oauth2/v2/auth", { client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "openid" }),
+    buildUrl(ctx.config.google.authBase, "/o/oauth2/v2/auth", {
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid",
+      hl: "en", // English error pages, for the text matching below
+    }),
   );
   const allowed = (u: URL) => u.host === start.host || u.hostname === "google.com" || u.hostname.endsWith(".google.com");
   const redirect = new URL(redirectUri);
@@ -83,7 +89,13 @@ async function probeAuth(ctx: Ctx, clientId: string, redirectUri: string): Promi
   return UNKNOWN;
 }
 
-async function probeSecret(ctx: Ctx, clientId: string, clientSecret: string, redirectUri: string): Promise<GoogleClientCheck["secret"]> {
+interface SecretProbe {
+  secret: GoogleClientCheck["secret"];
+  /** Google said the client itself doesn't exist ("The OAuth client was not found."). */
+  clientNotFound: boolean;
+}
+
+async function probeSecret(ctx: Ctx, clientId: string, clientSecret: string, redirectUri: string): Promise<SecretProbe> {
   const res = await fetch(buildUrl(ctx.config.google.oauthBase, "/token"), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
@@ -96,11 +108,17 @@ async function probeSecret(ctx: Ctx, clientId: string, clientSecret: string, red
     }).toString(),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+  const body = (await res.json().catch(() => null)) as { error?: unknown; error_description?: unknown } | null;
   const error = typeof body?.error === "string" ? body.error : null;
-  if (error === "invalid_client" || error === "unauthorized_client") return "invalid";
-  if (error === "invalid_grant") return "ok";
-  return "unknown";
+  const description = typeof body?.error_description === "string" ? body.error_description : "";
+  if (error === "invalid_client") {
+    // A missing client and a wrong secret share the error code; only the description tells them apart.
+    if (/client was not found/i.test(description)) return { secret: "unknown", clientNotFound: true };
+    return { secret: "invalid", clientNotFound: false };
+  }
+  // invalid_grant: the credentials passed and only our dummy code was refused. Anything else (including
+  // unauthorized_client, which is about the client's configuration) says nothing certain about the secret.
+  return { secret: error === "invalid_grant" ? "ok" : "unknown", clientNotFound: false };
 }
 
 /** Runs both probes, stores the result for setup warnings, and returns it. Never throws for Google's answers. */
@@ -114,13 +132,16 @@ export async function checkClient(ctx: Ctx): Promise<GoogleClientCheck> {
       log.debug("OAuth client check (consent URL) inconclusive", { error: errorMessage(err) });
       return UNKNOWN;
     }),
-    probeSecret(ctx, clientId, clientSecret, redirectUri).catch((err: unknown) => {
+    probeSecret(ctx, clientId, clientSecret, redirectUri).catch((err: unknown): SecretProbe => {
       log.debug("OAuth client check (token endpoint) inconclusive", { error: errorMessage(err) });
-      return "unknown" as const;
+      return { secret: "unknown", clientNotFound: false };
     }),
   ]);
   // An unknown client ID makes the token endpoint say invalid_client too: that says nothing about the secret.
-  const result = { ...auth, secret: auth.clientId === "invalid" && secret === "invalid" ? ("unknown" as const) : secret };
+  const clientInvalid = auth.clientId === "invalid" || secret.clientNotFound;
+  const result: Omit<GoogleClientCheck, "warnings"> = clientInvalid
+    ? { clientId: "invalid", redirectUri: auth.redirectUri, secret: "unknown" }
+    : { ...auth, secret: secret.secret };
   const current = ctx.settings.getState("google.client");
   // Store only if the client wasn't changed while we were asking Google.
   if (current && saved && current.clientId === saved.clientId && current.clientSecretEnc === saved.clientSecretEnc) {

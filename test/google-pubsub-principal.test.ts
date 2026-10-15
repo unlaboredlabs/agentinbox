@@ -68,24 +68,60 @@ describe("Pub/Sub principal", () => {
     // Can't be mistaken for the missing-scope case by text.
     expect(CONSOLE_SCOPE_RE.test(`${denied.body.error.message} ${denied.body.error.hint}`)).toBe(false);
 
-    // "Use a different account": the choice is saved even though the owner still needs the scope.
+    // "Use a different account": the choice is saved as pending even though the owner still needs the scope.
     const scope = await provision({ accountId: owner.id });
     expect(scope.status).toBe(409);
     expect(scope.body.error.code).toBe("pubsub_scope_required");
     expect(scope.body.error.message).toContain("owner@example.com");
     expect(CONSOLE_SCOPE_RE.test(scope.body.error.message)).toBe(true);
-    expect(ctx.google.pubsubState()).toMatchObject({ principalAccountId: owner.id, principalEmail: "owner@example.com" });
+    expect(ctx.google.pubsubState()).toMatchObject({
+      principalAccountId: ops.id,
+      pendingPrincipalAccountId: owner.id,
+      pendingPrincipalEmail: "owner@example.com",
+    });
 
     await grantPubsubScope("owner@example.com");
     const ok = await provision({ accountId: owner.id });
     expect(ok.status).toBe(200);
-    expect(ok.body).toMatchObject({ mode: "pubsub", principalAccountId: owner.id, principalEmail: "owner@example.com", lastError: null });
+    expect(ok.body).toMatchObject({
+      mode: "pubsub",
+      principalAccountId: owner.id,
+      principalEmail: "owner@example.com",
+      pendingPrincipalAccountId: null,
+      pendingPrincipalEmail: null,
+      lastError: null,
+    });
     // Both mailboxes are watched on the topic the owner created.
     expect(fake.watch("ops@example.com")?.topic).toBe(ok.body.topic);
     expect(fake.watch("owner@example.com")?.topic).toBe(ok.body.topic);
     // Later provisioning without a body keeps the chosen principal.
     expect((await provision()).body.principalEmail).toBe("owner@example.com");
     expect(ctx.audit.list({ action: "pubsub.provision" }).items[0]).toMatchObject({ outcome: "ok", accountId: owner.id });
+  });
+
+  it("keeps a working principal pulling while a switch to another account fails", async () => {
+    const a = await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
+    expect((await provision()).body.principalAccountId).toBe(a.id);
+    fake.addAccount("b@example.com", { projectAccess: false });
+    const b = await connectFakeAccount(ctx, fake, "b@example.com");
+
+    // B has neither the scope nor IAM: both attempts fail, A stays the principal.
+    expect((await provision({ accountId: b.id })).body.error.code).toBe("pubsub_scope_required");
+    await grantPubsubScope("b@example.com");
+    const denied = await provision({ accountId: b.id });
+    expect(denied.body.error.code).toBe("pubsub_permission_denied");
+    expect(ctx.google.pubsubState()).toMatchObject({ principalAccountId: a.id, pendingPrincipalAccountId: b.id, lastError: null });
+
+    // A still pulls: a delivered message reaches the subscription and is pulled with A's token.
+    fake.deliver("a@example.com", { from: "x@y.test", subject: "still flowing", text: "hi" });
+    const { pullPubsub } = await import("../server/google/pubsub.ts");
+    let pulled = 0;
+    for (let i = 0; i < 10 && !pulled; i++) pulled = (await pullPubsub(ctx, { returnImmediately: true })).length;
+    expect(pulled).toBeGreaterThan(0);
+    expect(ctx.google.pubsubState().principalAccountId).toBe(a.id);
+
+    // Choosing A again drops the pending switch.
+    expect((await provision({ accountId: a.id })).body).toMatchObject({ principalAccountId: a.id, pendingPrincipalAccountId: null });
   });
 
   it("validates the chosen account", async () => {
@@ -99,6 +135,12 @@ describe("Pub/Sub principal", () => {
     ctx.accounts.setStatus(b.id, "needs_reauth", "x");
     expect((await provision({ accountId: b.id })).body.error.code).toBe("needs_reauth");
     expect(ctx.google.pubsubState().principalAccountId).toBe(a.id);
+  });
+
+  it("doesn't call a permission problem a billing problem because of its wording", async () => {
+    await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
+    fake.failNext({ method: "PUT", path: "/topics/", status: 403, message: "Permission denied on billing account settings for the topic." });
+    expect((await provision()).body.error.code).toBe("pubsub_permission_denied");
   });
 
   it("explains a billing requirement", async () => {
