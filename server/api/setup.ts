@@ -41,7 +41,7 @@ export function setupPublicApi(ctx: AppContext) {
       if (!expected) {
         throw new HttpError(403, "invalid_token", "The setup link has expired", `Restart agentinbox or run \`${cliCommand("reset-password")}\` for a new link.`);
       }
-      const check = await checkSecret(ctx, ip, `claim:${body.token}`, () => safeEqual(body.token, expected));
+      const check = await checkSecret(ctx, ip, `claim:${body.token}`, () => safeEqual(body.token, expected), { global: false });
       if (!check.ok) {
         if (check.lockedMinutes) return lockedOut(c, check.lockedMinutes);
         ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "denied", reason: check.nowBanned ? "lockout" : "invalid_token", detail: { ip } });

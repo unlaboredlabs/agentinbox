@@ -197,9 +197,9 @@ guardrail that blocked them.
 
 **The console** is protected by an admin password (set through the one-time setup link), HttpOnly session cookies
 that expire after 30 days of inactivity (90 at most), a CSRF header on every change, request size limits, a strict
-Content Security Policy, and a 15-minute lockout after five wrong passwords from one address (or 30 attempts, with an
-instance-wide cap on top). It never allows being framed. The data directory and database are readable only by their
-owner.
+Content Security Policy, and a 15-minute lockout after five wrong passwords (or 30 attempts) from one address. When
+failures pile up across many addresses, every sign-in attempt is slowed down instead. It never allows being framed.
+The data directory and database are readable only by their owner.
 
 Recommendations: split agents that read untrusted mail from agents that can send; prefer `draft_only` or `approval`;
 use allowlists for anything that sends directly.
@@ -216,9 +216,9 @@ Installs a background service that starts at boot: systemd on Linux (a user serv
 service when run as root) and launchd on macOS. The service runs its own copy of agentinbox from the data directory,
 so it never depends on the npx cache; a failed install leaves the running service as it was. Re-run `service install`
 to update; `service status` and `service uninstall` do what you'd expect, and uninstalling keeps your data. Pass the same
-`--port`, `--host` and `--data` options each time. `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY` and `AGENTINBOX_LOG_LEVEL` are
-taken from your shell and remembered in `<data>/service.env`, so later installs keep them (set one to an empty value to
-remove it).
+`--port`, `--host` and `--data` options each time. `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS` and
+`AGENTINBOX_LOG_LEVEL` are taken from your shell and remembered in `<data>/service.env`, so later installs keep them
+(set one to an empty value to remove it).
 
 Only one agentinbox runs per data directory; a second one refuses to start.
 

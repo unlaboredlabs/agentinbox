@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { AppEnv } from "../api/util.ts";
 import type { CoreContext } from "../context.ts";
 import { HttpError } from "../util/errors.ts";
-import { LoginLimiter } from "./lockout.ts";
+import { GLOBAL_SLOWDOWN_MS, LoginLimiter } from "./lockout.ts";
 import { SESSION_TTL_MS, SessionStore } from "./sessions.ts";
 import { ensureSetupToken, regenerateSetupToken } from "./setup-token.ts";
 
@@ -153,18 +153,37 @@ export function lockedOut(c: Context, minutes: number): Response {
 
 export type CheckResult = { ok: true } | { ok: false; lockedMinutes: number; nowBanned: boolean };
 
+export interface CheckOptions {
+  /**
+   * Count toward (and be slowed down by) the instance-wide failure budget. Off for the setup claim:
+   * it's only open while unclaimed and needs the token.
+   */
+  global?: boolean;
+  /** Test hook: how long to wait while over the global budget. */
+  slowdownMs?: number;
+}
+
 /**
  * Verifies a secret under the failed-login limiter. Locked-out clients and secrets this client
- * already failed with are rejected without running `verify` (scrypt).
+ * already failed with are rejected without running `verify` (scrypt). While the instance-wide
+ * budget is exhausted, each attempt waits a little first (asynchronously); it is never refused.
  */
-export async function checkSecret(ctx: AuthCore, ip: string, secret: string, verify: () => boolean | Promise<boolean>): Promise<CheckResult> {
+export async function checkSecret(
+  ctx: AuthCore,
+  ip: string,
+  secret: string,
+  verify: () => boolean | Promise<boolean>,
+  opts: CheckOptions = {},
+): Promise<CheckResult> {
   const { limiter } = adminAuth(ctx);
+  const global = opts.global !== false;
   const locked = limiter.bannedMinutes(ip);
   if (locked) return { ok: false, lockedMinutes: locked, nowBanned: false };
+  if (global && limiter.overGlobalBudget()) await new Promise((r) => setTimeout(r, opts.slowdownMs ?? GLOBAL_SLOWDOWN_MS));
   if (!limiter.knownBad(ip, secret) && (await verify())) {
     limiter.clear(ip);
     return { ok: true };
   }
-  const nowBanned = limiter.fail(ip, secret);
+  const nowBanned = limiter.fail(ip, secret, { global });
   return { ok: false, lockedMinutes: 0, nowBanned };
 }

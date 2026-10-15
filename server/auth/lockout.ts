@@ -5,8 +5,10 @@ import { sha256 } from "../crypto.ts";
 export const MAX_FAILURES = 5;
 /** Raw failed attempts per client within the window (repeats of the same wrong secret included). */
 export const MAX_ATTEMPTS = 30;
-/** Distinct wrong secrets across all clients within the window before sign-in pauses for everyone. */
+/** Distinct wrong secrets across all clients within the window before every attempt is slowed down. */
 export const GLOBAL_MAX_FAILURES = 100;
+/** Delay per attempt while the global budget is exceeded. */
+export const GLOBAL_SLOWDOWN_MS = 2000;
 export const WINDOW_MS = 15 * 60_000;
 export const BAN_MS = 15 * 60_000;
 /** Tracked clients; the least recently seen is dropped beyond this. */
@@ -23,8 +25,9 @@ interface Entry {
  * Failed sign-in limiter. Per client (IPv4 address or IPv6 /64): 5 distinct wrong secrets or 30
  * attempts within 15 minutes ban it for 15 minutes. A secret already known to be wrong is
  * rejected without hashing (`knownBad`) and counts only as an attempt, so a client retrying a stale
- * password can't spend every attempt, and can't make the server hash it again either. A global
- * budget of distinct failures caps distributed guessing.
+ * password can't spend every attempt, and can't make the server hash it again either. Past a global
+ * budget of distinct failures, every attempt is slowed down (never refused, so many clients can't
+ * lock the owner out).
  */
 export class LoginLimiter {
   private readonly entries = new Map<string, Entry>();
@@ -36,11 +39,13 @@ export class LoginLimiter {
   bannedMinutes(ip: string): number {
     const t = this.clock();
     const entry = this.entries.get(clientKey(ip));
-    let until = entry && entry.bannedUntil > t ? entry.bannedUntil : 0;
-    if (this.global.failures >= GLOBAL_MAX_FAILURES && t - this.global.since < WINDOW_MS) {
-      until = Math.max(until, this.global.since + WINDOW_MS);
-    }
+    const until = entry && entry.bannedUntil > t ? entry.bannedUntil : 0;
     return until > t ? Math.ceil((until - t) / 60_000) : 0;
+  }
+
+  /** The global failure budget is exhausted: slow every attempt down. */
+  overGlobalBudget(): boolean {
+    return this.global.failures >= GLOBAL_MAX_FAILURES && this.clock() - this.global.since < WINDOW_MS;
   }
 
   /** The client already failed with exactly this secret in the current window. */
@@ -49,16 +54,18 @@ export class LoginLimiter {
     return !!entry?.tried.has(sha256(secret));
   }
 
-  /** Records a failure; returns true when it started a ban for this client. */
-  fail(ip: string, secret: string): boolean {
+  /** Records a failure; returns true when it started a ban for this client. `global: false` keeps it out of the global budget. */
+  fail(ip: string, secret: string, opts: { global?: boolean } = {}): boolean {
     const t = this.clock();
     const key = clientKey(ip);
     const entry = this.current(key, t) ?? { tried: new Set<string>(), attempts: 0, since: t, bannedUntil: 0 };
     const hash = sha256(secret);
     if (!entry.tried.has(hash)) {
       entry.tried.add(hash);
-      if (t - this.global.since >= WINDOW_MS) this.global = { failures: 0, since: t };
-      this.global.failures++;
+      if (opts.global !== false) {
+        if (t - this.global.since >= WINDOW_MS) this.global = { failures: 0, since: t };
+        this.global.failures++;
+      }
     }
     entry.attempts++;
     const banned = entry.tried.size >= MAX_FAILURES || entry.attempts >= MAX_ATTEMPTS;

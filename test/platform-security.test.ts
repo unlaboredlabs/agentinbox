@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { adminAuth, checkSecret } from "../server/auth/index.ts";
 import { BAN_MS, clientKey, GLOBAL_MAX_FAILURES, LoginLimiter, MAX_ATTEMPTS, MAX_ENTRIES } from "../server/auth/lockout.ts";
 import { SESSION_MAX_AGE_MS, SESSION_TTL_MS, SessionStore } from "../server/auth/sessions.ts";
-import { acquireInstanceLock, assertMasterKeyUsable, lockPath } from "../server/instance.ts";
+import { acquireInstanceLock, assertMasterKeyUsable, bootId, lockPath, processStartTime, runningInstance } from "../server/instance.ts";
 import { startServer } from "../server/server.ts";
 import { testConfig } from "./helpers.ts";
 import { CSRF, fakeGoogle, fakeIngest, type Harness, harness, json, PASSWORD } from "./platform-helpers.ts";
@@ -98,13 +98,30 @@ describe("M2: client identity", () => {
     expect(limiter.bannedMinutes("2001:db8:1:2:ffff::9")).toBe(15);
   });
 
-  it("caps distributed guessing with a global budget", () => {
+  it("slows everyone down past the global budget, but never refuses", async () => {
     let t = 0;
     const limiter = new LoginLimiter(() => t);
-    for (let i = 0; i < GLOBAL_MAX_FAILURES; i++) limiter.fail(`10.${i >> 8}.${i & 255}.1`, `p${i}`);
-    expect(limiter.bannedMinutes("192.0.2.200")).toBe(15);
-    t += BAN_MS + 1;
+    for (let i = 0; i < GLOBAL_MAX_FAILURES - 1; i++) limiter.fail(`10.${i >> 8}.${i & 255}.1`, `p${i}`);
+    expect(limiter.overGlobalBudget()).toBe(false);
+    // Claim failures don't count.
+    limiter.fail("10.9.9.9", "claim:x", { global: false });
+    expect(limiter.overGlobalBudget()).toBe(false);
+    limiter.fail("10.9.9.10", "last");
+    expect(limiter.overGlobalBudget()).toBe(true);
     expect(limiter.bannedMinutes("192.0.2.200")).toBe(0);
+    t += BAN_MS + 1;
+    expect(limiter.overGlobalBudget()).toBe(false);
+
+    h = harness();
+    const { limiter: real } = adminAuth(h.ctx);
+    for (let i = 0; i < GLOBAL_MAX_FAILURES; i++) real.fail(`10.${i >> 8}.${i & 255}.1`, `p${i}`);
+    let started = performance.now();
+    const ok = await checkSecret(h.ctx, "192.0.2.200", "right", () => true, { slowdownMs: 150 });
+    expect(ok.ok).toBe(true);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    started = performance.now();
+    await checkSecret(h.ctx, "192.0.2.201", "token", () => false, { global: false, slowdownMs: 150 });
+    expect(performance.now() - started).toBeLessThan(140);
   });
 
   it("bounds its memory", () => {
@@ -179,6 +196,44 @@ describe("instance lock", () => {
       expect(existsSync(lockPath(config.dataDir))).toBe(false);
       const lock = acquireInstanceLock(config);
       lock.release();
+    } finally {
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("instance lock: pid reuse", () => {
+  const lockWith = (dataDir: string, info: Record<string, unknown>) =>
+    writeFileSync(lockPath(dataDir), JSON.stringify({ host: "0.0.0.0", port: 1, startedAt: "", ...info }));
+
+  it("treats a lock naming our own pid as stale unless we hold it (containers are always pid 1)", () => {
+    const config = testConfig();
+    try {
+      lockWith(config.dataDir, { pid: process.pid });
+      expect(runningInstance(config.dataDir)).toBeNull();
+      const lock = acquireInstanceLock(config);
+      expect(runningInstance(config.dataDir)?.pid).toBe(process.pid);
+      expect(() => acquireInstanceLock(config)).toThrow(/already running/);
+      lock.release();
+    } finally {
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a live foreign pid from another boot or with another start time as stale", () => {
+    const config = testConfig();
+    const pid = process.ppid;
+    try {
+      lockWith(config.dataDir, { pid, bootId: "00000000-0000-0000-0000-000000000000" });
+      if (bootId()) expect(runningInstance(config.dataDir)).toBeNull();
+      lockWith(config.dataDir, { pid, bootId: bootId(), processStart: "1" });
+      if (processStartTime(pid)) expect(runningInstance(config.dataDir)).toBeNull();
+      // The same process, same boot, same start time: really running.
+      lockWith(config.dataDir, { pid, bootId: bootId(), processStart: processStartTime(pid) });
+      expect(runningInstance(config.dataDir)?.pid).toBe(pid);
+      expect(() => acquireInstanceLock(config)).toThrow(/already running/);
+      lockWith(config.dataDir, { pid, bootId: "00000000-0000-0000-0000-000000000000" });
+      if (bootId()) acquireInstanceLock(config).release();
     } finally {
       rmSync(config.dataDir, { recursive: true, force: true });
     }
