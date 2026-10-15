@@ -233,7 +233,8 @@ Tailscale Funnel) and:
 - set `TRUST_PROXY=1`, so lockouts apply per client and cookies are marked `Secure`. The client address is taken from
   the right end of `X-Forwarded-For`; with more than one proxy in front, set `TRUST_PROXY_HOPS` to their number.
   Forwarding headers are believed only from a proxy on the same host (loopback); if the proxy runs on another machine,
-  list its address in `TRUST_PROXY_FROM` (for example `TRUST_PROXY_FROM=10.0.0.5` or a CIDR like `10.0.0.0/24`)
+  list its address in `TRUST_PROXY_FROM` (for example `TRUST_PROXY_FROM=10.0.0.5` or a CIDR like `10.0.0.0/24`; `/0` is refused). The proxy must append to (or overwrite)
+  `X-Forwarded-For`; a tunnel or proxy that passes the header through unchanged lets clients choose their own address
 - set **Settings → Public URL** to the https address, so MCP snippets, the skill and the OAuth redirect use it
 
 `GET /health` (or `/api/health`) needs no auth and suits uptime monitors: `200` when healthy, `503` when degraded, for

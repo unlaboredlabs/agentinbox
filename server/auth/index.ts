@@ -103,13 +103,33 @@ function socketAddress(c: Context): string | null {
  * right, since proxies append the address they saw and entries further left are client-controlled.
  * TRUST_PROXY_HOPS (default 1) is the number of proxies in front of agentinbox.
  */
+/** Some proxies (Azure, IIS) append ":port" to X-Forwarded-For entries. */
+function stripPort(entry: string): string {
+  const v6 = /^\[([^\]]+)\](?::\d+)?$/.exec(entry);
+  if (v6) return v6[1]!;
+  const v4 = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(entry);
+  return v4 ? v4[1]! : entry;
+}
+
+let warnedUntrustedProxy = false;
+
+/** Upgrades from the old private-range rule silently lost proxy trust; say so once. */
+function warnUntrustedProxy(peer: string): void {
+  if (warnedUntrustedProxy) return;
+  warnedUntrustedProxy = true;
+  process.stderr.write(
+    `agentinbox: ignoring X-Forwarded-For from ${peer}: TRUST_PROXY only trusts loopback proxies unless TRUST_PROXY_FROM lists them (e.g. TRUST_PROXY_FROM=${peer}).\n`,
+  );
+}
+
 export function clientIp(c: Context, trustProxy: boolean): string {
   const peer = socketAddress(c);
+  if (trustProxy && peer && !isTrustedProxy(peer) && c.req.header("x-forwarded-for")) warnUntrustedProxy(peer);
   if (trustProxy && peer && isTrustedProxy(peer)) {
     const hops = Math.max(1, Number.parseInt(process.env.TRUST_PROXY_HOPS ?? "1", 10) || 1);
     const chain = (c.req.header("x-forwarded-for") ?? "")
       .split(",")
-      .map((s) => s.trim())
+      .map((s) => stripPort(s.trim()))
       .filter(Boolean);
     const forwarded = chain[chain.length - hops];
     if (forwarded && isIP(forwarded)) return forwarded;

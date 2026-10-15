@@ -136,7 +136,8 @@ export function mergeServiceEnv(previous: Record<string, string>, current: NodeJ
   const out: Record<string, string> = {};
   for (const key of SERVICE_ENV_KEYS) {
     const value = key in current ? current[key] : previous[key];
-    if (value) out[key] = value;
+    // A single comma-separated token, so systemd's EnvironmentFile parsing can't split it.
+    if (value) out[key] = key === "TRUST_PROXY_FROM" ? value.split(/[\s,]+/).filter(Boolean).join(",") : value;
   }
   return out;
 }

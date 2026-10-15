@@ -37,9 +37,14 @@ interface Range {
   bits: number;
 }
 
-/** Parses "10.0.0.5", "10.0.0.0/8", "fd00::/8", "::ffff:10.0.0.0/104"; null when invalid. */
+/**
+ * Parses "10.0.0.5", "10.0.0.0/8", "fd00::/8", "::ffff:10.0.0.0/104"; null when invalid. A /0
+ * (trust everyone) is refused: it would let any client pick its own address.
+ */
 export function parseRange(entry: string): Range | null {
-  const [ip = "", prefix] = entry.trim().split("/");
+  const parts = entry.trim().split("/");
+  if (parts.length > 2) return null;
+  const [ip = "", prefix] = parts;
   const addr = parseAddress(ip);
   if (!addr) return null;
   let bits = addr.v6 ? 128 : 32;
@@ -48,7 +53,7 @@ export function parseRange(entry: string): Range | null {
     bits = Number(prefix);
     // A mapped IPv4 range written in IPv6 form: drop the 96-bit ::ffff: prefix.
     if (!addr.v6 && ip.includes(":")) bits -= 96;
-    if (bits < 0 || bits > (addr.v6 ? 128 : 32)) return null;
+    if (bits <= 0 || bits > (addr.v6 ? 128 : 32)) return null;
   }
   const width = BigInt(addr.v6 ? 128 : 32);
   const mask = bits === 0 ? 0n : ((1n << BigInt(bits)) - 1n) << (width - BigInt(bits));

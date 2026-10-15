@@ -168,6 +168,19 @@ describe("M2: client identity", () => {
     }
   });
 
+  it("marks the session cookie Secure from X-Forwarded-Proto only behind a trusted proxy", async () => {
+    h = harness();
+    await h.claim();
+    h.ctx.config.trustProxy = true;
+    const cookieFrom = async (peer: string) => {
+      const res = await h!.request("/api/auth/login", { method: "POST", headers: { ...CSRF, "x-forwarded-proto": "https" }, json: { password: PASSWORD }, peer });
+      expect(res.status).toBe(204);
+      return res.headers.get("set-cookie") ?? "";
+    };
+    expect(await cookieFrom("192.168.1.60")).not.toMatch(/;\s*Secure/i);
+    expect(await cookieFrom("127.0.0.1")).toMatch(/;\s*Secure/i);
+  });
+
   it("matches proxy addresses and ranges", () => {
     expect(isTrustedProxy("127.0.0.1", "")).toBe(true);
     expect(isTrustedProxy("127.8.9.10", "")).toBe(true);
@@ -192,7 +205,7 @@ describe("M2: client identity", () => {
     expect(isTrustedProxy("not-an-ip", list)).toBe(false);
     expect(parseRange("10.0.0.0/33")).toBeNull();
     expect(parseRange("nope")).toBeNull();
-    expect(parseRange("0.0.0.0/0")).not.toBeNull();
+    expect(parseRange("10.0.0.0/32")).not.toBeNull();
   });
 
   it("honors TRUST_PROXY_HOPS", async () => {
