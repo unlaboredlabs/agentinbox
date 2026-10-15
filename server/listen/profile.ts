@@ -1,0 +1,91 @@
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { z } from "zod";
+import type { AgentTool, ListenerConfig } from "../../shared/agent-api.ts";
+import { EVENT_TYPES } from "../../shared/types.ts";
+import { webhookFilterSchema } from "../webhooks/filter.ts";
+import { isTooOpen, writePrivateFile } from "./fsutil.ts";
+import { DEFAULT_PROFILE, profilePath, profilesDir, validProfileName } from "./paths.ts";
+
+/**
+ * A profile file: the shared ListenerConfig plus a few agent-side extras. Holds the agent's API key,
+ * so it is always 0600 inside a 0700 directory, and nothing ever prints it.
+ */
+export interface Profile extends ListenerConfig {
+  tool?: AgentTool;
+  mcpUrl?: string;
+  skillUrl?: string;
+  /** Forward-mode signing secret while no forward URL is saved (see forwardSecret()). */
+  forwardSecret?: string;
+  createdAt?: string;
+}
+
+const TOOLS = ["claude-code", "codex", "cursor", "hermes", "other"] as const;
+
+const profileSchema = z
+  .object({
+    url: z.string().refine((u) => URL.canParse(u), "url must be a full URL"),
+    apiKey: z.string().min(8),
+    agentId: z.string().min(1),
+    agentName: z.string(),
+    consumer: z.string().min(1).max(100),
+    insecure: z.boolean().optional(),
+    types: z.array(z.enum(EVENT_TYPES)).optional(),
+    filter: webhookFilterSchema.optional(),
+    includeBody: z.boolean().optional(),
+    exec: z.string().min(1).optional(),
+    forward: z.object({ url: z.string(), secret: z.string().startsWith("whsec_") }).optional(),
+    concurrency: z.number().int().min(1).max(32).optional(),
+    timeoutSeconds: z.number().int().min(1).max(86_400).optional(),
+    maxAttempts: z.number().int().min(1).max(100).optional(),
+    tool: z.enum(TOOLS).optional(),
+    mcpUrl: z.string().optional(),
+    skillUrl: z.string().optional(),
+    forwardSecret: z.string().startsWith("whsec_").optional(),
+    createdAt: z.string().optional(),
+  })
+  .loose();
+
+export const profileExists = (name: string) => existsSync(profilePath(validProfileName(name)));
+
+export function listProfiles(): string[] {
+  if (!existsSync(profilesDir())) return [];
+  return readdirSync(profilesDir())
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => f.slice(0, -5))
+    .sort();
+}
+
+export function loadProfile(name: string = DEFAULT_PROFILE): Profile {
+  const n = validProfileName(name);
+  const path = profilePath(n);
+  if (!existsSync(path)) {
+    const others = listProfiles();
+    const hint = others.length ? ` Known profiles: ${others.join(", ")} (pick one with --profile).` : " Run `npx agentinbox connect <daemon-url>` first.";
+    throw new Error(`No agentinbox profile "${n}" (${path}).${hint}`);
+  }
+  // Someone loosened the permissions: tighten them rather than keep a readable key around.
+  if (isTooOpen(path)) chmodSync(path, 0o600);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`Profile ${path} is not valid JSON (${(err as Error).message}). Fix it or run \`agentinbox connect\` again.`);
+  }
+  const parsed = profileSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`Profile ${path} is invalid: ${issue?.path.join(".") || "file"}: ${issue?.message}`);
+  }
+  return parsed.data as Profile;
+}
+
+export function saveProfile(name: string, profile: Profile): string {
+  const path = profilePath(validProfileName(name));
+  const clean = Object.fromEntries(Object.entries(profile).filter(([, v]) => v !== undefined));
+  writePrivateFile(path, JSON.stringify(clean, null, 2) + "\n");
+  return path;
+}
+
+export function deleteProfile(name: string): void {
+  rmSync(profilePath(validProfileName(name)), { force: true });
+}
