@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { startServer } from "../server/server.ts";
-import { fakeGoogle, fakeIngest, json } from "./platform-helpers.ts";
+import { type BannerEnv, bannerLines, startServer, tunnelCommand } from "../server/server.ts";
+import { fakeGoogle, fakeIngest, harness, json } from "./platform-helpers.ts";
 import { testConfig } from "./helpers.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -43,6 +43,119 @@ describe("startServer", () => {
   });
 });
 
+describe("startup banner", () => {
+  const desktop: BannerEnv = { env: { DISPLAY: ":0" }, platform: "linux", addresses: [], hostname: "box", username: "ada" };
+  // oxlint-disable-next-line no-control-regex
+  const text = (lines: string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+
+  async function withHarness(fn: (h: ReturnType<typeof harness>) => Promise<void> | void) {
+    const h = harness();
+    h.ctx.config.port = 8425;
+    try {
+      await fn(h);
+    } finally {
+      await h.dispose();
+    }
+  }
+
+  it("first run on a desktop: one setup link, how to keep it running, no tunnel", () =>
+    withHarness((h) => {
+      const out = text(bannerLines(h.ctx, { mcp: true }, desktop));
+      expect(out).toContain("agentinbox is running.");
+      expect(out).toContain("Open this link to finish setup (the console walks you through Google and your first agent):");
+      expect(out).toContain(`http://127.0.0.1:8425/setup?token=${h.setupToken()}`);
+      expect(out).toContain("Keep this terminal open; Ctrl-C stops it.");
+      expect(out).toMatch(new RegExp(`service install --data \\S*${h.ctx.config.dataDir.split("/").pop()} --host 127\\.0\\.0\\.1$`, "m"));
+      expect(out).not.toContain("ssh -L");
+      expect(out).not.toContain("Heads up");
+    }));
+
+  it("first run over SSH on a public server: tunnel command and a one-line exposure warning", () =>
+    withHarness((h) => {
+      h.ctx.config.host = "0.0.0.0";
+      const env: BannerEnv = {
+        env: { SSH_CONNECTION: "203.0.113.9 50022 198.51.100.7 22" },
+        platform: "linux",
+        addresses: ["192.168.1.5", "198.51.100.7"],
+        hostname: "box",
+        username: "ada",
+      };
+      const out = text(bannerLines(h.ctx, { mcp: true }, env));
+      const token = h.setupToken()!;
+      expect(out).toContain(`http://localhost:8425/setup?token=${token}`);
+      expect(out).toContain(`http://192.168.1.5:8425/setup?token=${token}`);
+      expect(out).toContain("ssh -L 8425:localhost:8425 ada@198.51.100.7 (your usual ssh host or alias works)");
+      expect(out).toContain("then open the link above in its browser");
+      const warning = out.split("\n").filter((l) => l.includes("Heads up"));
+      expect(warning).toHaveLength(1);
+      expect(warning[0]).toContain("198.51.100.7:8425");
+      expect(warning[0]).not.toContain("192.168.1.5");
+      expect(warning[0]).toContain("--host 127.0.0.1");
+    }));
+
+  it("tunnel: -p for a non-standard SSH port, a placeholder for private server IPs, Tailscale allowed", () =>
+    withHarness((h) => {
+      const tunnel = (conn: string, extra: Partial<BannerEnv> = {}) =>
+        tunnelCommand(h.ctx.config, { ...desktop, env: { SSH_CONNECTION: conn }, ...extra });
+      expect(tunnel("203.0.113.9 50022 198.51.100.7 2222")).toBe("ssh -p 2222 -L 8425:localhost:8425 ada@198.51.100.7");
+      for (const ip of ["10.1.2.3", "172.20.0.5", "192.168.1.5", "169.254.1.1", "127.0.0.1", "fd12::1", "fe80::1", "::1"]) {
+        expect(tunnel(`203.0.113.9 50022 ${ip} 22`)).toBe("ssh -L 8425:localhost:8425 <the host you ssh to>");
+      }
+      expect(tunnel("100.101.102.1 50022 100.91.67.127 22")).toBe("ssh -L 8425:localhost:8425 ada@100.91.67.127");
+      expect(tunnel("203.0.113.9 50022 2001:db8::7 22", { username: "" })).toBe("ssh -L 8425:localhost:8425 2001:db8::7");
+      // SSH_TTY alone (no SSH_CONNECTION): still a tunnel hint, with the placeholder.
+      expect(tunnelCommand(h.ctx.config, { ...desktop, env: { SSH_TTY: "/dev/pts/1" } })).toBe("ssh -L 8425:localhost:8425 <the host you ssh to>");
+    }));
+
+  it("tunnel over sudo names the invoking user, not root", () =>
+    withHarness((h) => {
+      // The default banner env is read from the process.
+      const keys = ["SUDO_USER", "USER", "SSH_CONNECTION"] as const;
+      const saved = keys.map((k) => process.env[k]);
+      Object.assign(process.env, { SUDO_USER: "ada", USER: "root", SSH_CONNECTION: "203.0.113.9 50022 198.51.100.7 22" });
+      try {
+        expect(text(bannerLines(h.ctx, { mcp: true }))).toContain("ssh -L 8425:localhost:8425 ada@198.51.100.7");
+      } finally {
+        keys.forEach((k, i) => (saved[i] === undefined ? delete process.env[k] : (process.env[k] = saved[i])));
+      }
+    }));
+
+  it("headless without SSH (a container, a console): no tunnel, open the link elsewhere", () =>
+    withHarness((h) => {
+      const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: {} }));
+      expect(out).not.toContain("ssh -L");
+      expect(out).toContain("Open the link from a machine with a browser");
+    }));
+
+  it("over SSH with a non-loopback bind address, the laptop-side link is spelled out", () =>
+    withHarness((h) => {
+      h.ctx.config.host = "10.0.0.4";
+      const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: { SSH_CONNECTION: "203.0.113.9 1 198.51.100.7 22" } }));
+      expect(out).toContain("ssh -L 8425:10.0.0.4:8425 ada@198.51.100.7");
+      expect(out).toContain(`then open http://localhost:8425/setup?token=${h.setupToken()}`);
+    }));
+
+  it("once claimed: console URL and the MCP endpoint, no setup link or tunnel", () =>
+    withHarness(async (h) => {
+      await h.claim();
+      const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: { SSH_CONNECTION: "1.2.3.4 1 5.6.7.8 22" } }));
+      expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425/);
+      expect(out).toContain("Agents connect to http://localhost:8425/mcp");
+      expect(out).not.toContain("setup?token");
+      expect(out).not.toContain("ssh -L");
+      expect(out).toContain("Ctrl-C stops it");
+    }));
+
+  it("as a service: never prints the setup token, points at reset-password", () =>
+    withHarness((h) => {
+      h.ctx.config.service = true;
+      const out = text(bannerLines(h.ctx, { mcp: true }, desktop));
+      expect(out).not.toContain(h.setupToken()!);
+      expect(out).toContain("reset-password --data");
+      expect(out).not.toContain("Ctrl-C");
+    }));
+});
+
 describe("cli", () => {
   it("prints the version and the skill, and installs it into a directory", () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { version: string };
@@ -56,6 +169,15 @@ describe("cli", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("groups commands for a newcomer and shows examples", () => {
+    const help = cli("--help");
+    expect(help).toContain("open the link it prints");
+    expect(help).toMatch(/Run agentinbox:\n\s+start/);
+    expect(help).toMatch(/On an agent's machine:[\s\S]*connect[\s\S]*listen/);
+    expect(help).toContain("npx agentinbox-cli connect https://mail.example.com");
+    expect(help).toContain("docs/reference.md");
   });
 
   it("fails without a stack trace on bad input", () => {
