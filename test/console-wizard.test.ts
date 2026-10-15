@@ -9,7 +9,7 @@ import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
 import { listenerHandled } from "../src/components/agents/listener-handled.ts";
-import { allStepsDone, type SetupDraft, STEP_META, startsVerify, type StepId, type StepStatus, stepStatuses } from "../src/components/setup/steps.ts";
+import { allStepsDone, type SetupDraft, STEP_META, startsVerify, type StepId, type StepStatus, stepStatuses, wizardStep } from "../src/components/setup/steps.ts";
 import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
 import { fmtAgo } from "../src/lib/format.ts";
@@ -350,6 +350,24 @@ describe("fmtAgo", () => {
     expect(fmtAgo(later(-180), now)).toBe("3 minutes ago");
     expect(fmtAgo(later(30), now)).toBe("in 30 seconds");
     expect(fmtAgo(null, now)).toBe("—");
+  });
+});
+
+describe("wizardStep: which step /get-started shows", () => {
+  it("shows ?step= as given and never pins it", () => {
+    expect(wizardStep("pubsub", { loaded: true, firstTodo: "consent" })).toEqual({ shown: "pubsub", pin: null });
+  });
+
+  it("without ?step=, shows the first unfinished step and pins it once progress has loaded", () => {
+    expect(wizardStep(undefined, { loaded: false, firstTodo: undefined })).toEqual({ shown: "verify", pin: null });
+    expect(wizardStep(undefined, { loaded: true, firstTodo: "consent" })).toEqual({ shown: "consent", pin: "consent" });
+    expect(wizardStep(undefined, { loaded: true, firstTodo: undefined })).toEqual({ shown: "verify", pin: "verify" });
+  });
+
+  it("keeps the pinned step after its requirements are met (ticking \"In production\" doesn't jump to step 4)", () => {
+    const { pin } = wizardStep(undefined, { loaded: true, firstTodo: "consent" });
+    // The page writes the pin into the URL; consent being done now moves firstTodo, not the user.
+    expect(wizardStep(pin!, { loaded: true, firstTodo: "client" })).toEqual({ shown: "consent", pin: null });
   });
 });
 
