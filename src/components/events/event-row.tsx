@@ -24,7 +24,7 @@ import { CALENDAR_RESPONSE_LABEL, EVENT_TYPE_INFO } from "@/lib/labels";
 import { queries } from "@/lib/queries";
 import { prettySystemLabel } from "@/hooks/use-label-names";
 import { cn } from "@/lib/utils";
-import { calendarEventLines, grantSees, httpsUrl } from "./calendar-event";
+import { calendarEventLines, grantSees, httpsUrl, organizedHere } from "./calendar-event";
 
 const ICON: Record<EventType, typeof MailIcon> = {
   "message.received": MailIcon,
@@ -181,7 +181,7 @@ function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { n
       ["Thread", <code key="thread" className="font-mono break-all">{m.threadId}</code>],
     );
   }
-  if (e.calendarEvent) rows.push(...calendarRows(e.calendarEvent));
+  if (e.calendarEvent) rows.push(...calendarRows(e.calendarEvent, e.accountEmail));
   if (e.labelIds?.length) rows.push([e.type === "label.removed" ? "Removed" : "Added", e.labelIds.join(", ")]);
   if (delivered.length) rows.push(["Listeners", <Visible key="listeners" text={`Delivered to ${delivered.map((d) => agentOnHost(d.name, d.host)).join(", ")}`} />]);
   return (
@@ -203,7 +203,7 @@ function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { n
 }
 
 /** The calendar event's metadata. Links are clickable only when https (they can come from the organizer). */
-function calendarRows(c: CalendarEventSummary): [string, React.ReactNode][] {
+function calendarRows(c: CalendarEventSummary, accountEmail: string): [string, React.ReactNode][] {
   const link = httpsUrl(c.htmlLink);
   const call = httpsUrl(c.conferenceUrl);
   const shown = c.attendees.map((a) => `${fmtAddress(a)}${a.organizer ? " (organizer)" : ""}: ${CALENDAR_RESPONSE_LABEL[a.responseStatus]}`);
@@ -213,7 +213,7 @@ function calendarRows(c: CalendarEventSummary): [string, React.ReactNode][] {
     ["Scheduled", `${fmtEventWhen(c)}${c.timeZone ? ` (${c.timeZone})` : ""}${c.recurring || c.recurringEventId ? ", repeats" : ""}`],
   ];
   if (c.location) rows.push(["Where", <Visible key="where" text={c.location} />]);
-  rows.push(["Organizer", c.organizerSelf ? "This account" : <Visible key="org" text={fmtAddress(c.organizer)} />]);
+  rows.push(["Organizer", organizedHere(c, accountEmail) ? "This account" : <Visible key="org" text={fmtAddress(c.organizer)} />]);
   if (shown.length) rows.push(["Guests", <Visible key="guests" text={shown.join(", ")} />]);
   if (c.selfResponse) rows.push(["Your answer", CALENDAR_RESPONSE_LABEL[c.selfResponse]]);
   if (c.conferenceUrl) rows.push(["Video call", call ? <ExternalLink key="call" href={call} className="break-all">{call}</ExternalLink> : <code key="call" className="font-mono break-all">{c.conferenceUrl}</code>]);

@@ -331,6 +331,16 @@ describe("calendar event rows", () => {
     expect(calendarEventLines(event("message.received"))).toBeNull();
   });
 
+  it("says 'you organize' for the account's own events, including a secondary calendar named as organizer", () => {
+    const lines = (patch: Partial<CalendarEventSummary>) => calendarEventLines(event("calendar.event_created", { calendarEvent: summary(patch) }), FMT)!.organizer;
+    const ROTA = "rota@group.calendar.google.com";
+    expect(lines({ calendarId: ROTA, organizer: { name: "Support rota", email: ROTA }, organizerSelf: true })).toBe("you organize");
+    expect(lines({ calendarId: ROTA, organizer: { name: "Support rota", email: ROTA }, organizerSelf: false })).toBe("you organize");
+    expect(lines({ organizer: { name: null, email: "OPS@acme.dev" }, organizerSelf: false })).toBe("you organize");
+    expect(lines({ organizer: { name: "Dana Lee", email: "dana@vendor.com" }, organizerSelf: false })).toBe("organized by Dana Lee");
+    expect(lines({ organizer: null, organizerSelf: false })).toBeNull();
+  });
+
   it("says when the earlier version wasn't seen", () => {
     expect(changesInWords({ changes: null })).toBe("Changed (agentinbox hadn't seen the earlier version)");
     expect(changesInWords({ changes: ["summary", "attendees", "responses"] })).toBe("Changed: title, guests and answers");

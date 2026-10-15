@@ -1,7 +1,7 @@
 // Pure (relative imports only, no React): event visibility and the words of a calendar event row. Unit
 // tests load it.
 
-import { type CalendarEventChange, type EventType, type Grant, isCalendarEventType, type MailEvent } from "../../../shared/types.ts";
+import { type CalendarEventChange, type CalendarEventSummary, type EventType, type Grant, isCalendarEventType, type MailEvent } from "../../../shared/types.ts";
 import { fmtAddressShort, fmtEventWhen } from "../../lib/format.ts";
 import { CALENDAR_CHANGE_LABEL, CALENDAR_RESPONSE_LABEL } from "../../lib/labels.ts";
 
@@ -58,11 +58,20 @@ export function changesInWords(detail: MailEvent["detail"]): string {
   return words.length ? `Changed: ${join(words)}` : "Changed";
 }
 
+/**
+ * The account organizes the event: Google's organizerSelf, or an organizer that is the account itself or the
+ * event's own calendar (on a secondary calendar Google names the calendar as organizer).
+ */
+export function organizedHere(c: Pick<CalendarEventSummary, "organizerSelf" | "organizer" | "calendarId">, accountEmail: string): boolean {
+  const email = c.organizer?.email.toLowerCase();
+  return c.organizerSelf || email === accountEmail.toLowerCase() || email === c.calendarId.toLowerCase();
+}
+
 /** The row text of a calendar.* event; null for other events. */
 export function calendarEventLines(e: MailEvent, fmt: { timeZone?: string; locale?: string; now?: number } = {}): CalendarEventLines | null {
   const c = e.calendarEvent;
   if (!c || !isCalendarEventType(e.type)) return null;
-  const organizer = c.organizerSelf ? "you organize" : c.organizer ? `organized by ${fmtAddressShort(c.organizer)}` : null;
+  const organizer = organizedHere(c, e.accountEmail) ? "you organize" : c.organizer ? `organized by ${fmtAddressShort(c.organizer)}` : null;
   let note: string | null = c.location;
   if (e.type === "calendar.event_updated") note = changesInWords(e.detail);
   else if (e.type === "calendar.event_cancelled") note = e.detail?.wasOrganizer ? "Cancelled (the account organized it)" : "Cancelled";
