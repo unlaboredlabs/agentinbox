@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { api, toastError } from "@/lib/api";
 import { keys } from "@/lib/queries";
 
@@ -22,6 +23,7 @@ interface FormValues {
   retentionDays: string;
   approvalTtlHours: string;
   webhookAllowlist: string[];
+  pairingEnabled: boolean;
 }
 
 const toForm = (s: Settings): FormValues => ({
@@ -32,6 +34,7 @@ const toForm = (s: Settings): FormValues => ({
   retentionDays: String(s.retentionDays),
   approvalTtlHours: String(s.approvalTtlHours),
   webhookAllowlist: s.webhookAllowlist,
+  pairingEnabled: s.pairingEnabled,
 });
 
 const fromForm = (v: FormValues): Settings => ({
@@ -42,6 +45,7 @@ const fromForm = (v: FormValues): Settings => ({
   retentionDays: Number(v.retentionDays),
   approvalTtlHours: Number(v.approvalTtlHours),
   webhookAllowlist: v.webhookAllowlist,
+  pairingEnabled: v.pairingEnabled,
 });
 
 // Mirrors the server's validation (server/settings.ts) so mistakes show before saving.
@@ -224,6 +228,33 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
               )}
             </form.Field>
           </FieldGroup>
+        </CardContent>
+      </Card>
+
+      <Card id="pairing" className="scroll-mt-20">
+        <CardHeader>
+          <CardTitle>Agent pairing</CardTitle>
+          <CardDescription>
+            Lets an agent ask for access from its own terminal with <code className="font-mono text-xs">npx agentinbox-cli connect</code>, instead of you
+            copying an API key.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form.Field name="pairingEnabled">
+            {(field) => (
+              <Field orientation="horizontal" className="items-start">
+                <Switch id={field.name} checked={field.state.value} onCheckedChange={(v) => field.handleChange(v)} className="mt-0.5" />
+                <div className="space-y-1">
+                  <FieldLabel htmlFor={field.name}>Accept pairing requests</FieldLabel>
+                  <FieldDescription>
+                    {field.state.value
+                      ? "Requests wait under Approvals → Agent access. Nothing gets access until you approve the matching code and choose its permissions; the key goes straight to the agent's terminal."
+                      : "Off: connect is refused. You can still create agents under Agents and paste their key yourself."}
+                  </FieldDescription>
+                </div>
+              </Field>
+            )}
+          </form.Field>
         </CardContent>
       </Card>
 

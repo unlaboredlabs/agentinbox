@@ -13,6 +13,8 @@ import type {
   MailEvent,
   OverviewStats,
   Page,
+  PairingRequest,
+  PairingStatus,
   SetupState,
   SetupStatus,
   Settings,
@@ -41,6 +43,7 @@ export const keys = {
   approvals: ["approvals"] as const,
   audit: ["audit"] as const,
   overview: ["overview"] as const,
+  pairings: ["pairings"] as const,
 };
 
 export interface EventFilters {
@@ -86,6 +89,12 @@ export const queries = {
       queryKey: [...keys.approvals, status ?? "all"],
       queryFn: () => apiGet<Approval[]>("/api/approvals", { status }),
       refetchInterval: 60_000,
+    }),
+  pairings: (status?: PairingStatus) =>
+    queryOptions({
+      queryKey: [...keys.pairings, status ?? "all"],
+      queryFn: () => apiGet<PairingRequest[]>("/api/pairings", { status }),
+      refetchInterval: 30_000,
     }),
   overview: () => queryOptions({ queryKey: keys.overview, queryFn: () => apiGet<OverviewStats>("/api/overview"), refetchInterval: 60_000 }),
   /** Newest events (first page only), for the overview. */
