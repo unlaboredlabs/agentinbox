@@ -12,6 +12,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api, ApiError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { useStreamListener } from "@/lib/stream";
+import { answerApplies, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
 import { PasteCallback } from "./paste-callback";
 import { GoogleErrorHelp } from "./google-error-help";
 
@@ -68,7 +69,7 @@ export function ConnectAccountHost() {
   const client = useQuery(queries.googleClient());
   const [phase, setPhase] = useState<Phase | null>(null);
   const phaseRef = useRef<Phase | null>(null);
-  const [checkNote, setCheckNote] = useState<string | null>(null);
+  const [checkNote, setCheckNote] = useState<CheckNote | null>(null);
   const inWizard = useRouterState({ select: (st) => st.location.pathname === "/get-started" });
   const navigate = useNavigate();
   const primaryRef = useRef<HTMLButtonElement>(null);
@@ -176,22 +177,30 @@ export function ConnectAccountHost() {
    * localhost vs 127.0.0.1), BroadcastChannel is same-origin, and a reconnect of an account that was
    * already working changes nothing the account list would show.
    */
-  const askServer = async (): Promise<ConnectAttempt["status"] | null> => {
+  const inflight = useRef<{ state: string; answer: Promise<AttemptStatus> } | null>(null);
+  const askServer = (): Promise<AttemptStatus> => {
     const p = phaseRef.current;
-    if (p?.kind !== "waiting") return null;
+    if (p?.kind !== "waiting") return Promise.resolve(null);
     const state = p.res.state;
-    let r: ConnectAttempt;
-    try {
-      r = await api<ConnectAttempt>("/api/accounts/connect/status", { body: { state } });
-    } catch {
-      return null;
-    }
-    // Ignore an answer for an attempt this dialog has since left (closed, retried, finished).
-    const now = phaseRef.current;
-    if (now?.kind !== "waiting" || now.res.state !== state) return null;
-    if (r.status === "connected") finishRef.current(r.email);
-    else if (r.status === "failed") setPhase({ kind: "error", error: new ApiError(400, r.code, r.error, r.hint ?? undefined) });
-    return r.status;
+    // One request at a time per attempt: focus, popup close and stream updates often arrive together.
+    if (inflight.current?.state === state) return inflight.current.answer;
+    const answer = (async (): Promise<AttemptStatus> => {
+      let r: ConnectAttempt;
+      try {
+        r = await api<ConnectAttempt>("/api/accounts/connect/status", { body: { state } });
+      } catch {
+        return null;
+      } finally {
+        if (inflight.current?.state === state) inflight.current = null;
+      }
+      // Ignore an answer for an attempt this dialog has since left (closed, retried, finished).
+      if (!answerApplies(phaseRef.current, state)) return r.status;
+      if (r.status === "connected") finishRef.current(r.email);
+      else if (r.status === "failed") setPhase({ kind: "error", error: new ApiError(400, r.code, r.error, r.hint ?? undefined) });
+      return r.status;
+    })();
+    inflight.current = { state, answer };
+    return answer;
   };
   const askRef = useRef(askServer);
   useEffect(() => {
@@ -205,7 +214,7 @@ export function ConnectAccountHost() {
     const reauth = req.reauthAccountId;
     if (reauth ? reauthFromBroken.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)) finish(a.email);
     // A reconnect of a working account (or of an address that's already here) looks like any other update.
-    else void askServer();
+    else if (streamUpdateConcerns(a.id, { reauthAccountId: reauth, known: known.current })) void askServer();
   });
 
   // Coming back to this tab after Google's window is a good moment to look.
@@ -235,28 +244,26 @@ export function ConnectAccountHost() {
   const checkAgain = async () => {
     setCheckNote(null);
     // The server knows how this sign-in ended (connected or failed) whichever origin the callback page posted to.
+    const before = phaseRef.current;
+    if (before?.kind !== "waiting") return;
     const status = await askServer();
-    if (status === "connected" || status === "failed" || phaseRef.current?.kind !== "waiting") return;
-    // Extra access (Pub/Sub): the retry it was asked for is the real check, and it says if the box wasn't ticked.
-    if (req.scopes?.length) {
-      finish(req.email ?? "Your account", false);
-      return;
-    }
-    // The server forgot the attempt (it restarted): fall back to what the account list can show.
-    if (status !== "pending") {
+    if (!answerApplies(phaseRef.current, before.res.state)) return;
+    const reauth = req.reauthAccountId;
+    const step = checkAgainStep(status, { scopes: !!req.scopes?.length, reauth: !!reauth, reauthFromBroken: reauthFromBroken.current });
+    if (step.kind === "stop") return;
+    if (step.kind === "note") return setCheckNote(step.note);
+    if (step.kind === "finish-unconfirmed") return finish(req.email ?? "Your account", false);
+    // The server forgot the attempt (it expired, or agentinbox restarted): the account list may still show it.
+    const state = before.res.state;
+    try {
       const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
-      const reauth = req.reauthAccountId;
-      const found = accounts.find((a) => (reauth ? reauthFromBroken.current && a.id === reauth && a.status === "active" : !known.current.has(a.id)));
-      if (found) {
-        finish(found.email);
-        return;
-      }
+      if (!answerApplies(phaseRef.current, state)) return;
+      const found = listMatch(accounts, { reauthAccountId: reauth, reauthFromBroken: reauthFromBroken.current, known: known.current });
+      if (found) finish(found.email);
+      else setCheckNote("expired");
+    } catch {
+      if (answerApplies(phaseRef.current, state)) setCheckNote("unreachable");
     }
-    setCheckNote(
-      req.reauthAccountId
-        ? "Google hasn't sent you back yet. Finish signing in with Google, or use the paste option below if the window ended on an error page."
-        : "No new account yet. Finish signing in with Google, or use the paste option below if the window ended on an error page.",
-    );
   };
 
   const close = () => {
@@ -373,7 +380,7 @@ export function ConnectAccountHost() {
             </div>
             {checkNote && (
               <p className="text-sm text-muted-foreground" role="status">
-                {checkNote}
+                {CHECK_NOTES[checkNote]}
               </p>
             )}
             <Disclosure summary="Sign-in ended on an error or a page that can't be reached? Paste its address">
@@ -412,11 +419,18 @@ export function ConnectAccountHost() {
               <Button variant="ghost" onClick={checkAgain}>
                 I'm done, check again
               </Button>
-              <Button variant={!phase.popup || phase.closed ? "default" : "outline"} asChild>
-                <a href={phase.res.authUrl} target="agentinbox-oauth" rel="opener">
-                  <ExternalLinkIcon /> {!phase.popup ? "Open Google sign-in" : "Open Google sign-in again"}
-                </a>
-              </Button>
+              {checkNote === "expired" ? (
+                // This attempt's link is likely dead: start a fresh one (new state) instead of reopening it.
+                <Button onClick={retry}>
+                  <ExternalLinkIcon /> Open Google sign-in again
+                </Button>
+              ) : (
+                <Button variant={!phase.popup || phase.closed ? "default" : "outline"} asChild>
+                  <a href={phase.res.authUrl} target="agentinbox-oauth" rel="opener">
+                    <ExternalLinkIcon /> {!phase.popup ? "Open Google sign-in" : "Open Google sign-in again"}
+                  </a>
+                </Button>
+              )}
             </>
           )}
           {phase?.kind === "done" && (

@@ -162,7 +162,8 @@ export function publicUrlError(v: string): string | undefined {
 export function loopbackTwin(browserOrigin: string, publicUrl: string): string | null {
   const b = analyzeUrl(browserOrigin);
   const p = analyzeUrl(publicUrl);
-  if (!b || !p || b.host !== "loopback" || p.host !== "loopback") return null;
+  // Only where Google returns straight to the saved address (localhost, 127.0.0.1, [::1] on http/https).
+  if (!b || !p || b.host !== "loopback" || p.host !== "loopback" || p.google !== "direct") return null;
   if (b.url.origin === p.url.origin || b.url.protocol !== p.url.protocol || b.url.port !== p.url.port) return null;
   return p.url.origin;
 }

@@ -299,7 +299,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
         {announcement}
       </p>
 
-      {complete && <SuccessPanel agent={agent} label={label} tool={tool} listening={!skipListen} readIt={readIt} headingRef={doneRef} serviceCmd={c.listenService} />}
+      {complete && <SuccessPanel agent={agent} label={label} tool={tool} listening={!skipListen} readIt={readIt} headingRef={doneRef} serviceCmd={c.listenService} accountId={test?.accountId} />}
 
       <ol aria-label="Setup checks">
         <Item
@@ -618,6 +618,7 @@ function SuccessPanel({
   readIt,
   headingRef,
   serviceCmd,
+  accountId,
 }: {
   agent: Agent;
   label: string;
@@ -626,6 +627,8 @@ function SuccessPanel({
   readIt: boolean;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
   serviceCmd: string;
+  /** The mailbox the test email went through: real-time also needs its Gmail watch. */
+  accountId?: string;
 }) {
   const system = useQuery(queries.system());
   return (
@@ -641,7 +644,7 @@ function SuccessPanel({
             {listening ? (
               <>
                 {" "}
-                <ArrivalSpeed />
+                <ArrivalSpeed of="arriving" neutral="when it arrives" accountId={accountId} />
               </>
             ) : (
               " whenever you ask it"

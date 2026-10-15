@@ -1,27 +1,52 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { intervalInWords, isRealtime } from "@/lib/delivery";
+import { type DeliveryMode, deliveryMode, intervalInWords } from "@/lib/delivery";
 import { queries } from "@/lib/queries";
 
-/** Whether new mail reaches agentinbox within seconds (Pub/Sub working), and the poll interval otherwise. */
-export function useDeliverySpeed(): { realtime: boolean; interval: number } {
+export type DeliverySpeed = { ready: false } | { ready: true; mode: DeliveryMode; interval: number };
+
+/**
+ * How quickly new mail reaches agentinbox (see deliveryMode). With `accountId`, also requires that
+ * account's Gmail watch for real-time. `ready` is false until every query has data: show neutral copy.
+ */
+export function useDeliverySpeed(accountId?: string): DeliverySpeed {
   const state = useQuery(queries.setupState());
   const settings = useQuery(queries.settings());
   const system = useQuery(queries.system());
-  return { realtime: isRealtime(state.data?.pubsub, system.data?.ingest), interval: settings.data?.pollIntervalSeconds ?? 30 };
+  const accounts = useQuery({ ...queries.accounts(), enabled: !!accountId });
+  if (!state.data || !settings.data || !system.data || (accountId && !accounts.data)) return { ready: false };
+  const account = accountId ? (accounts.data?.find((a) => a.id === accountId) ?? null) : undefined;
+  return { ready: true, mode: deliveryMode(state.data.pubsub, system.data.ingest, account), interval: settings.data.pollIntervalSeconds };
 }
 
-/** "within seconds of arriving" / "within about 30 seconds of arriving (turn on real-time delivery in Settings …)". */
-export function ArrivalSpeed({ noun = "arriving" }: { noun?: string }) {
-  const { realtime, interval } = useDeliverySpeed();
-  if (realtime) return <>within seconds of {noun}</>;
+const settingsLink = (text: string) => (
+  <Link to="/settings" hash="pubsub" className="font-medium text-foreground underline underline-offset-4">
+    {text}
+  </Link>
+);
+
+/**
+ * "within seconds of arriving" / "within about 30 seconds of arriving (turn on real-time delivery in Settings to
+ * get it within seconds)". `of` names what the time counts from (omit for just "within …"); `neutral` is
+ * shown until the state is loaded (no flash of the wrong claim); `it` is the pronoun in the Settings hint.
+ */
+export function ArrivalSpeed({ of, neutral, it = "it", accountId }: { of?: string; neutral: React.ReactNode; it?: string; accountId?: string }) {
+  const speed = useDeliverySpeed(accountId);
+  if (!speed.ready) return <>{neutral}</>;
+  const from = of ? ` of ${of}` : "";
+  if (speed.mode === "realtime") return <>within seconds{from}</>;
   return (
     <>
-      within about {intervalInWords(interval)} of {noun} (turn on{" "}
-      <Link to="/settings" hash="pubsub" className="font-medium text-foreground underline underline-offset-4">
-        real-time delivery in Settings
-      </Link>{" "}
-      to get it within seconds)
+      within about {intervalInWords(speed.interval)}
+      {from} (
+      {speed.mode === "poll" ? (
+        <>turn on {settingsLink("real-time delivery in Settings")} to get {it} within seconds</>
+      ) : speed.mode === "unfinished" ? (
+        <>finish setting up {settingsLink("real-time delivery in Settings")} to get {it} within seconds</>
+      ) : (
+        <>real-time delivery isn't working right now, see {settingsLink("Settings")}</>
+      )}
+      )
     </>
   );
 }

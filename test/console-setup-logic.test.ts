@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { callbackMode } from "../server/google/client.ts";
 import { checkTransport } from "../server/listen/transport.ts";
 import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
-import { intervalInWords, isRealtime } from "../src/lib/delivery.ts";
+import { answerApplies, CHECK_NOTES, checkAgainStep, listMatch, streamUpdateConcerns } from "../src/components/accounts/connect-attempt.ts";
+import { deliveryMode, intervalInWords } from "../src/lib/delivery.ts";
 import { analyzeUrl, localConsoleUrl, loopbackTwin, urlVerdict } from "../src/lib/public-url.ts";
 import { tunnelCommand } from "../src/lib/tunnel.ts";
 import { wrapParts } from "../src/lib/wrap.ts";
@@ -213,18 +214,104 @@ describe("soft wrap points", () => {
 });
 
 describe("delivery speed claims", () => {
-  it("says within seconds only while Pub/Sub is provisioned and pulling", () => {
-    expect(isRealtime({ mode: "pubsub", subscription: "projects/p/subscriptions/s" }, { lastError: null })).toBe(true);
-    expect(isRealtime({ mode: "poll", subscription: "projects/p/subscriptions/s" }, { lastError: null })).toBe(false);
-    expect(isRealtime({ mode: "pubsub", subscription: null }, { lastError: null })).toBe(false);
-    expect(isRealtime({ mode: "pubsub", subscription: "projects/p/subscriptions/s" }, { lastError: "Pub/Sub pull failed" })).toBe(false);
-    expect(isRealtime(undefined, undefined)).toBe(false);
+  const SUB = "projects/p/subscriptions/s";
+  const NOW = Date.parse("2026-10-15T10:00:00.000Z");
+  const watching = { status: "active" as const, lastError: null, watchExpiresAt: "2026-10-20T10:00:00.000Z" };
+
+  it("says within seconds only while Pub/Sub is provisioned, pulling and (for an account) watching", () => {
+    const ok = { lastError: null };
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok)).toBe("realtime");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, watching, NOW)).toBe("realtime");
+    expect(deliveryMode({ mode: "poll", subscription: SUB }, ok)).toBe("poll");
+    expect(deliveryMode({ mode: "pubsub", subscription: null }, ok)).toBe("unfinished");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, { lastError: "Pub/Sub pull failed" })).toBe("broken");
+    // The account the claim is about: no watch, an expired one, an error, or not active.
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, watchExpiresAt: null }, NOW)).toBe("broken");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, watchExpiresAt: "2026-10-15T09:00:00.000Z" }, NOW)).toBe("broken");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, lastError: "watch failed" }, NOW)).toBe("broken");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, { ...watching, status: "paused" }, NOW)).toBe("broken");
+    expect(deliveryMode({ mode: "pubsub", subscription: SUB }, ok, null, NOW)).toBe("broken");
   });
 
   it("puts the poll interval in words", () => {
+    expect(intervalInWords(5)).toBe("5 seconds");
     expect(intervalInWords(30)).toBe("30 seconds");
-    expect(intervalInWords(60)).toBe("60 seconds");
+    expect(intervalInWords(90)).toBe("90 seconds");
+    expect(intervalInWords(119)).toBe("119 seconds");
     expect(intervalInWords(120)).toBe("2 minutes");
-    expect(intervalInWords(90)).toBe("2 minutes");
+    expect(intervalInWords(300)).toBe("5 minutes");
+    expect(intervalInWords(3600)).toBe("an hour");
+  });
+});
+
+describe("connect dialog: one sign-in attempt", () => {
+  const add = { scopes: false, reauth: false, reauthFromBroken: false };
+  const reconnectWorking = { scopes: false, reauth: true, reauthFromBroken: false };
+  const reconnectBroken = { scopes: false, reauth: true, reauthFromBroken: true };
+  const pubsub = { scopes: true, reauth: false, reauthFromBroken: false };
+  const pubsubReauth = { scopes: true, reauth: true, reauthFromBroken: false };
+
+  it("stops once the server reported the outcome (the answer already moved the dialog on)", () => {
+    for (const c of [add, reconnectWorking, reconnectBroken, pubsub, pubsubReauth]) {
+      expect(checkAgainStep("connected", c)).toEqual({ kind: "stop" });
+      expect(checkAgainStep("failed", c)).toEqual({ kind: "stop" });
+    }
+  });
+
+  it("keeps waiting while the sign-in is pending, Pub/Sub grants included", () => {
+    expect(checkAgainStep("pending", add)).toEqual({ kind: "note", note: "pending" });
+    expect(checkAgainStep("pending", pubsub)).toEqual({ kind: "note", note: "pending" });
+    expect(checkAgainStep("pending", reconnectWorking)).toEqual({ kind: "note", note: "pending-reauth" });
+    expect(checkAgainStep("pending", reconnectBroken)).toEqual({ kind: "note", note: "pending-reauth" });
+    expect(checkAgainStep("pending", pubsubReauth)).toEqual({ kind: "note", note: "pending-reauth" });
+  });
+
+  it("says agentinbox is unreachable when the status request fails, whatever the flow", () => {
+    for (const c of [add, reconnectWorking, reconnectBroken, pubsub, pubsubReauth]) expect(checkAgainStep(null, c)).toEqual({ kind: "note", note: "unreachable" });
+  });
+
+  it("falls back by flow when the server doesn't know the attempt", () => {
+    // Pub/Sub grant: the provisioning retry is the real check.
+    expect(checkAgainStep("unknown", pubsub)).toEqual({ kind: "finish-unconfirmed" });
+    expect(checkAgainStep("unknown", pubsubReauth)).toEqual({ kind: "finish-unconfirmed" });
+    // A working account: the list can't show a reconnect.
+    expect(checkAgainStep("unknown", reconnectWorking)).toEqual({ kind: "note", note: "already-connected" });
+    // A new account or a needs_reauth repair: the list can.
+    expect(checkAgainStep("unknown", add)).toEqual({ kind: "check-list" });
+    expect(checkAgainStep("unknown", reconnectBroken)).toEqual({ kind: "check-list" });
+    expect(CHECK_NOTES.expired).toMatch(/expired/);
+    expect(CHECK_NOTES["already-connected"]).toMatch(/already connected/);
+  });
+
+  it("finds what the attempt produced in the account list", () => {
+    const known = new Set(["acc_old"]);
+    const list = [
+      { id: "acc_old", status: "active", email: "old@x.test" },
+      { id: "acc_new", status: "active", email: "new@x.test" },
+    ];
+    expect(listMatch(list, { reauthFromBroken: false, known })?.id).toBe("acc_new");
+    expect(listMatch(list.slice(0, 1), { reauthFromBroken: false, known })).toBeUndefined();
+    expect(listMatch(list, { reauthAccountId: "acc_old", reauthFromBroken: true, known })?.id).toBe("acc_old");
+    expect(listMatch([{ id: "acc_old", status: "needs_reauth" }], { reauthAccountId: "acc_old", reauthFromBroken: true, known })).toBeUndefined();
+    // A working account being active proves nothing.
+    expect(listMatch(list, { reauthAccountId: "acc_old", reauthFromBroken: false, known })).toBeUndefined();
+  });
+
+  it("asks the server only about the target account or new ones", () => {
+    const known = new Set(["acc_a", "acc_b"]);
+    expect(streamUpdateConcerns("acc_a", { reauthAccountId: "acc_a", known })).toBe(true);
+    expect(streamUpdateConcerns("acc_b", { reauthAccountId: "acc_a", known })).toBe(false);
+    expect(streamUpdateConcerns("acc_c", { reauthAccountId: "acc_a", known })).toBe(true);
+    // Adding an account: signing in as an address that's already here reconnects it, so any update counts.
+    expect(streamUpdateConcerns("acc_b", { known })).toBe(true);
+  });
+
+  it("ignores answers for an attempt the dialog has left", () => {
+    const waiting = (state: string) => ({ kind: "waiting", res: { state } });
+    expect(answerApplies(waiting("s1"), "s1")).toBe(true);
+    expect(answerApplies(waiting("s2"), "s1")).toBe(false); // retried: a new state
+    expect(answerApplies({ kind: "done" }, "s1")).toBe(false);
+    expect(answerApplies({ kind: "starting" }, "s1")).toBe(false);
+    expect(answerApplies(null, "s1")).toBe(false);
   });
 });

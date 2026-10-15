@@ -30,7 +30,7 @@ export function AgentListeners({ agent }: { agent: Agent }) {
           <BellRingIcon className="size-4 text-muted-foreground" /> Listeners
         </CardTitle>
         <CardDescription>
-          A listener keeps an outbound connection open from the agent's machine and wakes the agent <ArrivalSpeed noun="new mail arriving" />. No
+          A listener keeps an outbound connection open from the agent's machine and wakes the agent <ArrivalSpeed of="new mail arriving" neutral="when new mail arrives" />. No
           open ports or public URL needed on that machine.
         </CardDescription>
       </CardHeader>
