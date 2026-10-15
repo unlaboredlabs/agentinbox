@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebhookPayload } from "../../shared/types.ts";
-import { commandInput, eventEnv } from "./event.ts";
+import { batchEnv, commandInput, eventEnv, UNTRUSTED_NOTICE } from "./event.ts";
 
 export interface CommandResult {
   ok: boolean;
@@ -33,10 +33,17 @@ class Tail {
  * The child's environment: ours minus anything agentinbox-specific (service flags, a master key that
  * happened to be exported…), plus the safe event ids and the event file path.
  */
-export function childEnv(payload: WebhookPayload, eventFile: string): NodeJS.ProcessEnv {
+export function childEnv(input: WebhookPayload | WebhookPayload[], eventFile: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("AGENTINBOX_")) env[k] = v;
-  return { ...env, ...eventEnv(payload), AGENTINBOX_EVENT_FILE: eventFile };
+  const ids = Array.isArray(input) ? batchEnv(input) : { ...eventEnv(input), AGENTINBOX_EVENT_COUNT: "1" };
+  return { ...env, ...ids, AGENTINBOX_EVENT_FILE: eventFile };
+}
+
+/** stdin for one event ({ notice, event }) or a --batch ({ notice, events: […] }, even for a batch of one). */
+export function commandStdin(input: WebhookPayload | WebhookPayload[]): string {
+  const body = Array.isArray(input) ? { notice: UNTRUSTED_NOTICE, events: input.map((p) => commandInput(p).event) } : commandInput(input);
+  return JSON.stringify(body, null, 2) + "\n";
 }
 
 /** Running commands, so a forced exit (second Ctrl-C) can still kill their process groups and remove temp files. */
@@ -72,14 +79,14 @@ function killGroup(pid: number | undefined, signal: NodeJS.Signals): void {
 }
 
 /**
- * Runs the configured command for one event. The command string is fixed configuration and goes to
- * `/bin/sh -c` verbatim; it is never built from event data. The event reaches the command only as
- * JSON on stdin, as a 0600 file named by AGENTINBOX_EVENT_FILE, and as a few validated ids in env.
- * On timeout the whole process group gets SIGTERM, then SIGKILL after a grace period.
+ * Runs the configured command for one event, or for a batch (an array). The command string is fixed
+ * configuration and goes to `/bin/sh -c` verbatim; it is never built from event data. The events reach
+ * the command only as JSON on stdin, as a 0600 file named by AGENTINBOX_EVENT_FILE, and as a few
+ * validated ids in env. On timeout the whole process group gets SIGTERM, then SIGKILL after a grace period.
  */
-export function runCommand(command: string, payload: WebhookPayload, opts: { timeoutMs: number; cwd?: string; signal?: AbortSignal }): Promise<CommandResult> {
+export function runCommand(command: string, payload: WebhookPayload | WebhookPayload[], opts: { timeoutMs: number; cwd?: string; signal?: AbortSignal }): Promise<CommandResult> {
   const started = performance.now();
-  const input = JSON.stringify(commandInput(payload), null, 2) + "\n";
+  const input = commandStdin(payload);
   // mkdtemp creates the directory 0700; the file inside is 0600 on top.
   const dir = mkdtempSync(join(tmpdir(), "agentinbox-event-"));
   const eventFile = join(dir, "event.json");

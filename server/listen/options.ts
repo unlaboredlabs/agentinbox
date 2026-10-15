@@ -9,11 +9,14 @@ import { workDir } from "./paths.ts";
 import type { Profile } from "./profile.ts";
 import { parseRecipeTool, recipe } from "./recipes.ts";
 
-/** `listen` flags. Each group overrides the profile as a unit: targets (--exec/--forward), --types, and the filter (--from/--to/--label/--subject). */
+/**
+ * `listen` flags. Each group overrides the profile as a unit: targets (--recipe/--exec/--forward), --types,
+ * the filter (--from/--to/--label/--subject), the exclusions (--not-from/--not-label) and the category skip.
+ */
 export interface ListenFlags {
   profile?: string;
   exec?: string;
-  /** A built-in recipe (claude-code, codex, cursor, hermes): its command becomes the exec, so no `$(…)` is needed. */
+  /** A built-in recipe (claude-code, codex, cursor, hermes, hermes-oneshot): its command becomes the exec (hermes: the forward), so no `$(…)` is needed. */
   recipe?: string;
   forward?: string;
   types?: string;
@@ -21,6 +24,16 @@ export interface ListenFlags {
   to?: string[];
   label?: string[];
   subject?: string;
+  /** Exclusions (their own group): senders and labels to skip. */
+  notFrom?: string[];
+  notLabel?: string[];
+  /** Gmail categories: skip none (`--all-categories`), or take one back from the default skip (`--include-category`). */
+  allCategories?: boolean;
+  includeCategory?: string[];
+  /** Back to the default category skip (promotions, social, forums). */
+  defaultCategories?: boolean;
+  /** Collect events for this long (e.g. "60s") and run --exec once for the batch; "0" turns it off. */
+  batch?: string;
   includeBody?: boolean;
   concurrency?: number;
   timeout?: number;
@@ -46,6 +59,12 @@ export interface EffectiveConfig {
   /** Neither --types nor the profile named types: `types` is DEFAULT_LISTEN_TYPES. */
   typesDefaulted: boolean;
   filter: WebhookFilter | undefined;
+  /** Listener-side exclusions (never sent to the daemon). */
+  exclude: Exclusions;
+  /** Gmail category label ids whose messages are skipped (default: promotions, social, forums). */
+  skipCategories: string[];
+  /** --batch window in seconds; 0 = one run per event. */
+  batchSeconds: number;
   includeBody: boolean;
   concurrency: number;
   timeoutSeconds: number;
@@ -58,6 +77,39 @@ export interface EffectiveConfig {
 }
 
 export const DEFAULTS = { concurrency: 2, timeoutSeconds: 300, maxAttempts: 5 } as const;
+
+/** Senders and labels a listener skips. Applied on this machine only, to events that carry a message. */
+export interface Exclusions {
+  from?: string[];
+  labelIds?: string[];
+}
+
+/** Gmail's bulk tabs, skipped by default: one paid agent run per newsletter or social ping is rarely wanted. */
+export const CATEGORIES = { promotions: "CATEGORY_PROMOTIONS", social: "CATEGORY_SOCIAL", forums: "CATEGORY_FORUMS", updates: "CATEGORY_UPDATES", primary: "CATEGORY_PERSONAL" } as const;
+export const DEFAULT_SKIP_CATEGORIES: readonly string[] = [CATEGORIES.promotions, CATEGORIES.social, CATEGORIES.forums];
+const categoryName = (id: string) => Object.entries(CATEGORIES).find(([, v]) => v === id)?.[0] ?? id;
+
+/** Most events one batched run gets; a bigger burst becomes several runs. */
+export const MAX_BATCH = 20;
+const MAX_BATCH_SECONDS = 3600;
+
+/** "60s", "2m", "1h", "500ms" or plain seconds ("90"). "0" means no batching. */
+export function parseDuration(value: string, name = "--batch"): number {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(value);
+  if (!m) throw new Error(`${name} takes a duration such as 30s, 2m or 0 (off), not "${value}".`);
+  const unit = (m[2] ?? "s").toLowerCase();
+  const seconds = Number(m[1]) * ({ ms: 0.001, s: 1, m: 60, h: 3600 } as Record<string, number>)[unit]!;
+  if (seconds !== 0 && (seconds < 1 || seconds > MAX_BATCH_SECONDS)) throw new Error(`${name} must be 0 (off) or between 1s and 1h.`);
+  return Math.round(seconds);
+}
+
+function categoryId(value: string): string {
+  const v = value.trim();
+  const byName = (CATEGORIES as Record<string, string>)[v.toLowerCase()];
+  if (byName) return byName;
+  if (Object.values(CATEGORIES).includes(v.toUpperCase() as never)) return v.toUpperCase();
+  throw new Error(`Unknown Gmail category "${value}". Choose from: ${Object.keys(CATEGORIES).join(", ")}.`);
+}
 
 /**
  * Event types a listener gets when neither --types nor the profile names any: new mail only. Each
@@ -131,6 +183,31 @@ function filterFromFlags(f: ListenFlags): WebhookFilter | undefined {
   return filter;
 }
 
+const exclusionsSchema = webhookFilterSchema.pick({ from: true, labelIds: true });
+
+function exclusionsFromFlags(f: ListenFlags): Exclusions | undefined {
+  if (f.notFrom === undefined && f.notLabel === undefined) return undefined;
+  const { from, labelIds } = normalizeFilter({ from: f.notFrom, labelIds: f.notLabel });
+  const parsed = exclusionsSchema.safeParse({ from, labelIds });
+  if (!parsed.success) throw new Error(`Invalid exclusion: ${parsed.error.issues[0]?.message}`);
+  return { ...(from ? { from } : {}), ...(labelIds ? { labelIds } : {}) };
+}
+
+/** The categories skipped after --all-categories / --include-category, or undefined when neither was given. */
+function skipFromFlags(f: ListenFlags): string[] | undefined {
+  const given = [f.allCategories && "--all-categories", f.includeCategory?.length && "--include-category", f.defaultCategories && "--default-categories"].filter(Boolean);
+  if (given.length > 1) throw new Error(`${given.join(" and ")} can't be combined: each sets which Gmail categories are skipped.`);
+  if (f.defaultCategories) return [...DEFAULT_SKIP_CATEGORIES];
+  if (f.allCategories) return [];
+  if (!f.includeCategory?.length) return undefined;
+  const back = new Set(f.includeCategory.map(categoryId));
+  const notSkipped = [...back].filter((c) => !DEFAULT_SKIP_CATEGORIES.includes(c));
+  if (notSkipped.length) {
+    throw new Error(`--include-category ${notSkipped.map(categoryName).join(", ")}: that category isn't skipped (only ${DEFAULT_SKIP_CATEGORIES.map(categoryName).join(", ")} are). To skip it, use --not-label ${notSkipped[0]}.`);
+  }
+  return DEFAULT_SKIP_CATEGORIES.filter((c) => !back.has(c));
+}
+
 const positiveInt = (v: number | undefined, name: string, max: number) => {
   if (v === undefined) return undefined;
   if (!Number.isInteger(v) || v < 1 || v > max) throw new Error(`${name} must be a whole number from 1 to ${max}.`);
@@ -138,14 +215,20 @@ const positiveInt = (v: number | undefined, name: string, max: number) => {
 };
 
 /**
- * `--recipe <tool>` is shorthand for `--exec "<that tool's recipe>"` (for this profile's paths), and is
- * saved the same way. It exists so nobody has to write `--exec "$(npx … --print-recipe …)"`: inside
- * `$(…)` npx's "Ok to proceed?" install prompt is captured and silently becomes part of the command.
+ * `--recipe <name>` is shorthand for `--exec "<that recipe's command>"` (for this profile's paths), or for
+ * `--forward <Hermes gateway route>` with `hermes`, and is saved the same way. It exists so nobody has to
+ * write `--exec "$(npx … --print-recipe …)"`: inside `$(…)` npx's "Ok to proceed?" install prompt is
+ * captured and silently becomes part of the command.
  */
 export function withRecipe(profileName: string, flags: ListenFlags): ListenFlags {
   if (flags.recipe === undefined) return flags;
-  if (flags.exec !== undefined) throw new Error("--recipe and --exec can't be combined: --recipe <tool> already sets the command (see it with --print-recipe <tool>).");
-  return { ...flags, recipe: undefined, exec: recipe(parseRecipeTool(flags.recipe), profileName).exec };
+  if (flags.exec !== undefined) throw new Error("--recipe and --exec can't be combined: --recipe <name> already sets the command (see it with --print-recipe <name>).");
+  const r = recipe(parseRecipeTool(flags.recipe), profileName);
+  if (r.forward) {
+    if (flags.forward !== undefined) throw new Error(`--recipe ${r.name} already forwards to ${r.forward}; for another port, pass only --forward <url>.`);
+    return { ...flags, recipe: undefined, forward: r.forward };
+  }
+  return { ...flags, recipe: undefined, exec: r.exec };
 }
 
 /**
@@ -181,6 +264,9 @@ export function resolveListen(profileName: string, profile: Profile, given: List
   const typesDefaulted = flags.types === undefined && !profile.types?.length;
   const types = flags.types !== undefined ? parseTypes(flags.types) : typesDefaulted ? [...DEFAULT_LISTEN_TYPES] : profile.types!;
   const filter = filterFromFlags(flags) ?? profile.filter;
+  const exclude = exclusionsFromFlags(flags) ?? profile.exclude ?? {};
+  const skipCategories = skipFromFlags(flags) ?? profile.skipCategories ?? [...DEFAULT_SKIP_CATEGORIES];
+  const batchSeconds = flags.batch !== undefined ? parseDuration(flags.batch) : (profile.batchSeconds ?? 0);
   const includeBody = flags.includeBody ?? profile.includeBody ?? false;
   const concurrency = positiveInt(flags.concurrency, "--concurrency", 32) ?? profile.concurrency ?? DEFAULTS.concurrency;
   const timeoutSeconds = positiveInt(flags.timeout, "--timeout", 86_400) ?? profile.timeoutSeconds ?? DEFAULTS.timeoutSeconds;
@@ -200,6 +286,11 @@ export function resolveListen(profileName: string, profile: Profile, given: List
     }
     if (flags.types !== undefined) next.types = types;
     if (filterFromFlags(flags)) next.filter = filter;
+    if (exclusionsFromFlags(flags)) next.exclude = Object.keys(exclude).length ? exclude : undefined;
+    const skip = skipFromFlags(flags);
+    // Saved only when it differs from the default, so the profile follows the default if it changes.
+    if (skip) next.skipCategories = skip.length === DEFAULT_SKIP_CATEGORIES.length ? undefined : skip;
+    if (flags.batch !== undefined) next.batchSeconds = batchSeconds || undefined;
     if (flags.includeBody !== undefined) next.includeBody = includeBody;
     if (flags.concurrency !== undefined) next.concurrency = concurrency;
     if (flags.timeout !== undefined) next.timeoutSeconds = timeoutSeconds;
@@ -209,7 +300,7 @@ export function resolveListen(profileName: string, profile: Profile, given: List
     if (flags.cwd !== undefined) next.cwd = chosenCwd;
   }
 
-  return { config: { exec, forward, types, typesDefaulted, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
+  return { config: { exec, forward, types, typesDefaulted, filter, exclude, skipCategories, batchSeconds, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
 }
 
 /** Notes about the event types for the listener's log: the default in use, or types that overlap. */
@@ -229,7 +320,7 @@ export function typesNotes(c: Pick<EffectiveConfig, "types" | "typesDefaulted">)
 }
 
 /** One-line description of the filter for the console. */
-export function describeFilter(c: Pick<EffectiveConfig, "types" | "filter">): string {
+export function describeFilter(c: Pick<EffectiveConfig, "types" | "filter"> & Partial<Pick<EffectiveConfig, "exclude" | "skipCategories">>): string {
   const parts: string[] = [];
   if (c.types?.length) parts.push(c.types.length === EVENT_TYPES.length ? "all event types" : `types ${c.types.join(", ")}`);
   const f = c.filter ?? {};
@@ -238,5 +329,16 @@ export function describeFilter(c: Pick<EffectiveConfig, "types" | "filter">): st
   if (f.labelIds?.length) parts.push(`label ${f.labelIds.join(" | ")}`);
   if (f.subject) parts.push(`subject /${f.subject}/i`);
   if (f.hasAttachments !== undefined) parts.push(f.hasAttachments ? "with attachments" : "without attachments");
+  if (c.exclude?.from?.length) parts.push(`not from ${c.exclude.from.join(" | ")}`);
+  if (c.exclude?.labelIds?.length) parts.push(`not label ${c.exclude.labelIds.join(" | ")}`);
+  const skipped = effectiveSkip(c);
+  if (skipped.length) parts.push(`skipping Gmail ${skipped.map(categoryName).join(", ")}`);
+  else if (c.skipCategories) parts.push("all Gmail categories");
   return parts.length ? parts.join(" · ") : "all events your grants can see";
+}
+
+/** Categories actually skipped: one named with --label is wanted, so it isn't skipped. */
+export function effectiveSkip(c: { filter?: WebhookFilter; skipCategories?: readonly string[] }): string[] {
+  const wanted = new Set(c.filter?.labelIds ?? []);
+  return (c.skipCategories ?? []).filter((id) => !wanted.has(id));
 }

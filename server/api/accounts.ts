@@ -1,13 +1,18 @@
 import { z } from "zod";
-import type { Account } from "../../shared/types.ts";
+import { type Account, EXTRA_SCOPE_NAMES } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { asHttpError } from "../google/http.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
 const ConnectInput = z.object({
   reauthAccountId: z.string().min(1).optional(),
-  /** ["pubsub"]: incremental consent for Pub/Sub on the provisioning account (default: the account provisioning uses). */
-  scopes: z.array(z.enum(["pubsub"])).optional(),
+  /**
+   * Incremental consent: ["pubsub"] for Pub/Sub on the provisioning account (default: the account
+   * provisioning uses), ["calendar"] for Google Calendar (with reauthAccountId: "Add Calendar to <email>").
+   */
+  scopes: z.array(z.enum(EXTRA_SCOPE_NAMES)).optional(),
+  /** Leave Google Calendar out of this consent (a Workspace admin blocks it). */
+  mailOnly: z.boolean().optional(),
 });
 const AttemptInput = z.object({ state: z.string().min(1).max(200) });
 const CompleteInput = z.object({ url: z.string().trim().min(1, "Paste the URL you landed on after approving access") });
@@ -20,7 +25,7 @@ const google = async <T>(fn: () => Promise<T>): Promise<T> => {
   }
 };
 
-/** /accounts: list, connect (direct + paste), resync, pause/resume, remove, labels, test email. */
+/** /accounts: list, connect (direct + paste), resync, pause/resume, remove, labels, calendars, test email. */
 export function accountsApi(ctx: AppContext) {
   const r = router();
   const audited = (action: string, a: Account) =>
@@ -29,8 +34,8 @@ export function accountsApi(ctx: AppContext) {
   r.get("/accounts", (c) => c.json(ctx.accounts.list()));
 
   r.post("/accounts/connect", async (c) => {
-    const { reauthAccountId, scopes } = await readBody(c, ConnectInput);
-    return c.json(ctx.google.startConnect({ reauthAccountId, scopes }));
+    const { reauthAccountId, scopes, mailOnly } = await readBody(c, ConnectInput);
+    return c.json(ctx.google.startConnect({ reauthAccountId, scopes, mailOnly }));
   });
 
   r.post("/accounts/connect/complete", async (c) => {
@@ -71,6 +76,11 @@ export function accountsApi(ctx: AppContext) {
   r.get("/accounts/:id/labels", async (c) => {
     const id = ctx.accounts.require(c.req.param("id")).id;
     return c.json(await google(() => ctx.google.labels(id)));
+  });
+
+  r.get("/accounts/:id/calendars", async (c) => {
+    const id = ctx.accounts.require(c.req.param("id")).id;
+    return c.json(await google(() => ctx.calendar.calendars(id)));
   });
 
   // Audited inside google.sendTestEmail (ok and error).

@@ -272,7 +272,10 @@ describe("connectCommands matches what `connect` prints", () => {
     // Both name the CLI's built-in recipe: exactly the command connect prints, and connect shows what it runs.
     expect(c.listenTry).toBe(`${NPX} listen --save --recipe ${tool}`);
     expect(cli).toContain(c.listenTry);
-    expect(cli).toContain(`It runs: ${recipe(tool).exec}`);
+    expect(cli).toContain(`It runs: ${recipe(tool).runs}`);
+    // Hermes forwards to its gateway: both show the same route command first.
+    if (tool === "hermes") expect(cli).toContain(c.hermesRoute);
+    else expect(c.hermesRoute).toBeNull();
     // connect prints the bare service install (after --save); the console repeats --recipe so it also works alone.
     expect(cli).toContain(`${NPX} listen service install`);
     expect(c.listenService).toBe(`${NPX} listen service install --recipe ${tool}`);

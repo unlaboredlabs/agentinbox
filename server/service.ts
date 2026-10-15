@@ -366,13 +366,16 @@ function portInUse(host: string, port: number): Promise<boolean> {
   });
 }
 
-/** The service manager's main pid for the agentinbox service; null when it isn't running or can't be asked. */
-export function serviceMainPid(ops: ServiceOps): number | null {
+/**
+ * The service manager's main pid for a service (default: the agentinbox daemon; the listener passes its
+ * own label and unit); null when it isn't running or can't be asked.
+ */
+export function serviceMainPid(ops: ServiceOps, id: { launchd: string; systemd: string } = { launchd: LAUNCHD_LABEL, systemd: SERVICE_NAME }): number | null {
   try {
     const out =
       ops.platform === "darwin"
-        ? (/^\s*pid = (\d+)/m.exec(ops.capture("launchctl", ["print", `${launchdTarget(ops)}/${LAUNCHD_LABEL}`]))?.[1] ?? "")
-        : ops.capture("systemctl", [...(ops.root ? [] : ["--user"]), "show", "-p", "MainPID", "--value", SERVICE_NAME]).trim();
+        ? (/^\s*pid = (\d+)/m.exec(ops.capture("launchctl", ["print", `${launchdTarget(ops)}/${id.launchd}`]))?.[1] ?? "")
+        : ops.capture("systemctl", [...(ops.root ? [] : ["--user"]), "show", "-p", "MainPID", "--value", id.systemd]).trim();
     const pid = Number(out);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {

@@ -8,6 +8,7 @@ import type {
   Attachment,
   ConnectAccountResponse,
   ConnectAttempt,
+  ExtraScopeName,
   GmailLabel,
   GoogleClientCheck,
   GoogleClientConfig,
@@ -265,10 +266,12 @@ export interface GoogleService extends Lifecycle {
 
   // Connecting accounts (PKCE, access_type=offline, prompt=consent)
   /**
-   * Accounts are connected with gmail.modify (+ openid email profile). `scopes: ["pubsub"]` adds the
-   * Pub/Sub scope incrementally for the provisioning account (defaults to the account provisioning uses).
+   * Accounts are connected with gmail.modify (+ openid email profile), plus CALENDAR_SCOPES while Calendar
+   * is part of the install. `scopes: ["pubsub"]` adds the Pub/Sub scope incrementally for the provisioning
+   * account (defaults to the account provisioning uses); `scopes: ["calendar"]` adds Calendar (with
+   * `reauthAccountId`: "Add Calendar to <email>"). `mailOnly` leaves Calendar out (for admins who block it).
    */
-  startConnect(opts?: { reauthAccountId?: string; scopes?: "pubsub"[] }): ConnectAccountResponse;
+  startConnect(opts?: { reauthAccountId?: string; scopes?: ExtraScopeName[]; mailOnly?: boolean }): ConnectAccountResponse;
   /** Exchanges the code, stores the encrypted refresh token, upserts the account and calls ingest.onAccountConnected. */
   completeConnect(code: string, state: string): Promise<Account>;
   /** Paste mode: the full URL the user landed on after consent. */

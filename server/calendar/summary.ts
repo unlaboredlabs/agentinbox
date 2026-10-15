@@ -1,5 +1,5 @@
 // Raw Google event → CalendarEventSummary, shared by sync (A), agent tools (B, C) and approvals.
-// Implemented in the contract; owned by workstream A afterwards.
+// Owned by workstream A.
 
 import type { CalendarAttendee, CalendarEventSummary } from "../../shared/types.ts";
 import type { CalendarEventRaw, CalendarAttendeeRaw } from "../google/calendar.ts";
@@ -26,14 +26,33 @@ function attendee(a: CalendarAttendeeRaw): CalendarAttendee | null {
 /** The account's own attendee entry (Google marks it `self` on the copy in the account's calendar). */
 export const selfAttendee = (e: CalendarEventRaw): CalendarAttendeeRaw | undefined => e.attendees?.find((a) => a.self);
 
+/** Hosts Google serves event pages (htmlLink) from. */
+const GOOGLE_EVENT_HOSTS = ["calendar.google.com", "www.google.com"];
+
+/**
+ * An https URL (optionally on one of `hosts`), else null. The organizer controls conferenceData, so a
+ * "video link" can be anything: javascript:, http: or a look-alike host for htmlLink are dropped.
+ */
+function safeUrl(s: string | undefined, hosts?: string[]): string | null {
+  if (!s || s.length > 2048) return null;
+  try {
+    const u = new URL(s);
+    if (u.protocol !== "https:" || u.username || u.password) return null;
+    return !hosts || hosts.includes(u.hostname) ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function conferenceUrl(e: CalendarEventRaw): string | null {
   const video = e.conferenceData?.entryPoints?.find((p) => p.entryPointType === "video" && p.uri);
-  return video?.uri ?? e.hangoutLink ?? null;
+  return safeUrl(video?.uri) ?? safeUrl(e.hangoutLink);
 }
 
 /**
- * Normalizes a raw event. Free text (summary, location, names) is cleaned to single lines: invites are an
- * injection vector, and these fields reach agents and webhooks as-is. The description is never included.
+ * Normalizes a raw event. Free text (summary, location, names) is cleaned to single lines (cleanLine, which
+ * also escapes the untrusted-content delimiters): invites are an injection vector, and these fields reach
+ * agents and webhooks as-is. Links are kept only when they are https (safeUrl). The description is never included.
  * Works on the minimal shape of a cancelled event from incremental sync (only `id`, `status`).
  */
 export function summarizeEvent(e: CalendarEventRaw, calendarId: string): CalendarEventSummary {
@@ -58,7 +77,7 @@ export function summarizeEvent(e: CalendarEventRaw, calendarId: string): Calenda
     attendeeCount: all.length,
     selfResponse: selfAttendee(e)?.responseStatus ?? null,
     conferenceUrl: conferenceUrl(e),
-    htmlLink: e.htmlLink ?? null,
+    htmlLink: safeUrl(e.htmlLink, GOOGLE_EVENT_HOSTS),
     eventType: e.eventType ?? "default",
     created: e.created ?? null,
     updated: e.updated ?? null,
