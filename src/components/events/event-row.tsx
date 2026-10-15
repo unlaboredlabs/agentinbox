@@ -141,7 +141,17 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
             {cal ? cal.title : headline(e)}
           </div>
           {m?.snippet && <div className="line-clamp-1 text-xs text-muted-foreground">{m.snippet}</div>}
-          {cal && <div className="line-clamp-1 text-xs text-muted-foreground">{[cal.when, cal.note].filter(Boolean).join(" · ")}</div>}
+          {cal && (
+            <div className="flex flex-wrap gap-x-1.5 text-xs text-muted-foreground">
+              <span>{cal.when}</span>
+              {cal.note && (
+                <span className="min-w-0 truncate">
+                  <span aria-hidden>· </span>
+                  <Visible text={cal.note} />
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1 pt-0.5 text-xs text-muted-foreground">
           <TimeAgo date={e.createdAt} />
