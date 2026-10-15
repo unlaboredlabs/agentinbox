@@ -5,6 +5,8 @@ import type {
   ApprovalStatus,
   AuditEntry,
   AuditOutcome,
+  CalendarInfo,
+  CalendarSetupState,
   Delivery,
   DeliveryStatus,
   EventType,
@@ -35,6 +37,8 @@ export const keys = {
   googleClient: ["google-client"] as const,
   accounts: ["accounts"] as const,
   labels: (accountId: string) => ["labels", accountId] as const,
+  calendarSetup: ["calendar-setup"] as const,
+  accountCalendars: (accountId: string) => ["account-calendars", accountId] as const,
   agents: ["agents"] as const,
   agent: (id: string) => ["agents", id] as const,
   webhooks: ["webhooks"] as const,
@@ -79,6 +83,19 @@ export const queries = {
       queryKey: keys.labels(accountId),
       queryFn: () => apiGet<GmailLabel[]>(`/api/accounts/${encodeURIComponent(accountId)}/labels`),
       staleTime: 5 * 60_000,
+    }),
+  /** The install's "Add Google Calendar" state (API, scopes, per-account status). */
+  calendarSetup: () => queryOptions({ queryKey: keys.calendarSetup, queryFn: () => apiGet<CalendarSetupState>("/api/google/calendar") }),
+  /**
+   * The account's calendar list (live from Google), for the grant editor's calendar scope. Fails with 409
+   * calendar_not_granted / calendar_api_disabled / needs_reauth while the account can't read it: no retry.
+   */
+  accountCalendars: (accountId: string) =>
+    queryOptions({
+      queryKey: keys.accountCalendars(accountId),
+      queryFn: () => apiGet<CalendarInfo[]>(`/api/accounts/${encodeURIComponent(accountId)}/calendars`),
+      staleTime: 5 * 60_000,
+      retry: false,
     }),
   agents: () => queryOptions({ queryKey: keys.agents, queryFn: () => apiGet<Agent[]>("/api/agents") }),
   agent: (id: string) => queryOptions({ queryKey: keys.agent(id), queryFn: () => apiGet<Agent>(`/api/agents/${encodeURIComponent(id)}`) }),
