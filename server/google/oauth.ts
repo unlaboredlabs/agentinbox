@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Account, ApiError as ApiErrorBody, ConnectAccountResponse, ConnectAttempt, ExtraScopeName } from "../../shared/types.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
-import { calendarEnabled, probeCalendar } from "../calendar/setup.ts";
+import { calendarEnabled, CONNECT_PROBE_WAIT_MS, probeCalendar } from "../calendar/setup.ts";
 import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
 import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
@@ -11,7 +11,7 @@ import { callbackMode, clientCredentials, markRedirectVerified } from "./client.
 import { asHttpError, buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
 import { provisioningPrincipal } from "./pubsub.ts";
 import { postToken, refreshExpiry, refreshExpiryKind, type TokenResponse } from "./tokens.ts";
-import { CALENDAR_SCOPES, describeScopes, EXTRA_SCOPE_SETS, GMAIL_SCOPE, MAIL_SCOPES, missingScopes, PUBSUB_SCOPE } from "./scopes.ts";
+import { CALENDAR_SCOPES, describeScopes, EXTRA_SCOPE_SETS, GMAIL_SCOPE, hasScopes, MAIL_SCOPES, missingScopes, PUBSUB_SCOPE } from "./scopes.ts";
 import { GoogleApiError } from "./types.ts";
 
 export { GMAIL_SCOPE, PUBSUB_SCOPE };
@@ -51,7 +51,7 @@ export function oauthErrorHint(code: string, redirectUri?: string, opts: { calen
         return {
           message: "Your Google Workspace admin blocks this app, or blocks Google Calendar access for apps they haven't approved, so Google rejected the whole sign-in.",
           hint:
-            "Connect without Calendar: turn Google Calendar off for agentinbox (Accounts → Google Calendar → Turn off), then connect again: mail needs only Gmail access. " +
+            "Connect again with mail only (the connect dialog offers it), or turn Calendar off in Settings → Google Calendar → Turn off: mail needs only Gmail access. " +
             "To use Calendar later, ask the admin to trust the OAuth client ID in Admin console → Security → API controls → App access control.",
         };
       }
@@ -115,12 +115,20 @@ const oauthError = (ctx: AppContext, code: string, description?: string | null, 
  * Starts a consent flow. `scopes: ["pubsub"]` adds the Pub/Sub scope for the provisioning account
  * (without `reauthAccountId` it targets the account provisioning would use). `scopes: ["calendar"]` adds
  * CALENDAR_SCOPES; with `reauthAccountId` that is "Add Calendar to <email>" (see calendarAttempts). While
- * Calendar is part of this install (calendarEnabled), every connect and reconnect asks for it anyway.
- * Extra scopes are incremental (include_granted_scopes): Google asks only for what isn't granted yet.
+ * Calendar is part of this install (calendarEnabled), every connect and reconnect asks for it too, and a
+ * reconnect asks again for calendar scopes the account had. `mailOnly` asks for neither: when a Workspace
+ * admin blocks Calendar, Google rejects any consent that includes it, so mail must be reconnectable
+ * without it. Extra scopes are incremental (include_granted_scopes): Google asks only for what isn't
+ * granted yet, and keeps what it still grants.
  */
-export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; scopes?: ExtraScopeName[] } = {}): ConnectAccountResponse {
+export function startConnect(
+  ctx: AppContext,
+  opts: { reauthAccountId?: string; scopes?: ExtraScopeName[]; mailOnly?: boolean } = {},
+): ConnectAccountResponse {
   const { clientId } = clientCredentials(ctx);
   const extra = new Set(opts.scopes ?? []);
+  if (opts.mailOnly && extra.has("calendar")) throw badRequest("A mail-only connection can't add Google Calendar.", "Leave out either mailOnly or scopes [\"calendar\"].");
+  const calendarWanted = !opts.mailOnly && calendarEnabled(ctx);
   let reauthId = opts.reauthAccountId;
   if (!reauthId && extra.has("pubsub")) {
     reauthId = provisioningPrincipal(ctx)?.id;
@@ -132,9 +140,9 @@ export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; 
   // and the Pub/Sub principal would otherwise come back without Pub/Sub access.
   const had = reauthId ? accountScopes(getRow(ctx, reauthId)!) : [];
   for (const [name, set] of Object.entries(EXTRA_SCOPE_SETS) as [ExtraScopeName, readonly string[]][]) {
-    if (set.some((s) => had.includes(s))) extra.add(name);
+    if (set.some((s) => had.includes(s)) && (name !== "calendar" || calendarWanted)) extra.add(name);
   }
-  if (calendarEnabled(ctx)) extra.add("calendar");
+  if (calendarWanted) extra.add("calendar");
   const scopes = [...new Set([...BASE_SCOPES, ...[...extra].flatMap((x) => EXTRA_SCOPE_SETS[x])])];
   const { mode, redirectUri } = callbackMode(ctx);
   const state = randomToken(32);
@@ -194,6 +202,15 @@ function takeCalendarAttempt(ctx: AppContext, state: string): CalendarAttempt | 
   return hit && hit.at >= Date.now() - STATE_TTL_MS ? hit : null;
 }
 
+/** An admin blocked an explicit "Add Calendar to <email>": the account is as it was. */
+const calendarBlocked = (ctx: AppContext, email: string) =>
+  new HttpError(
+    400,
+    "oauth_admin_policy_enforced",
+    `Your Google Workspace admin doesn't allow agentinbox to use Google Calendar, so nothing changed for ${email}: its mail is unaffected.`,
+    `Ask your admin to trust the app: Admin console → Security → API controls → App access control → trust the OAuth client ID ${clientCredentials(ctx).clientId}. Then click Add Calendar for ${email} again.`,
+  );
+
 const calendarCancelled = (email: string) =>
   new HttpError(
     400,
@@ -214,6 +231,13 @@ const calendarNotGranted = (email: string, missing: string[]) => {
     `Click Add Calendar for ${email} again and tick every Calendar permission on Google's screen. Agents can't use ${email}'s calendar until all of them are granted.`,
   );
 };
+
+/** What a Google error on the redirect or the token endpoint means for this consent. */
+function consentError(ctx: AppContext, code: string, description: string | null, redirectUri: string | undefined, calendar: CalendarAttempt | null): HttpError {
+  if (calendar?.addingTo && code === "access_denied") return calendarCancelled(calendar.addingTo);
+  if (calendar?.addingTo && code === "admin_policy_enforced") return calendarBlocked(ctx, calendar.addingTo);
+  return oauthError(ctx, code, description, redirectUri, !!calendar);
+}
 
 /**
  * Connections that completed, by state, so reloading the callback page (or pasting its address again)
@@ -452,7 +476,7 @@ async function exchange(ctx: AppContext, st: StateRow, code: string, state: stri
     });
   } catch (err) {
     if (err instanceof GoogleApiError && err.reason) {
-      throw oauthError(ctx, err.reason, err.message !== err.reason ? err.message : null, st.redirect_uri, !!calendar);
+      throw consentError(ctx, err.reason, err.message !== err.reason ? err.message : null, st.redirect_uri, calendar);
     }
     throw err;
   }
@@ -473,19 +497,23 @@ async function exchange(ctx: AppContext, st: StateRow, code: string, state: stri
   const profile = await fetchProfile(ctx, tokens.access_token);
   const email = profile.emailAddress;
   const existing = byEmail(ctx, email);
-  const scopes = granted.length ? granted : BASE_SCOPES;
+  // A response without `scope` says nothing about what changed: keep what was recorded, plus Gmail (the
+  // profile call above just worked). Base scopes only for a new account (Google names identity scopes differently).
+  const recorded = existing ? accountScopes(existing) : [];
+  const scopes = granted.length ? granted : recorded.length ? [...new Set([...recorded, GMAIL_SCOPE])] : BASE_SCOPES;
   if (st.reauth_account_id) {
     const target = getRow(ctx, st.reauth_account_id);
     if (!target || target.email.toLowerCase() !== email.toLowerCase()) {
       // Keep the tokens if they belong to another connected account; never revoke them (that would break it).
       const keptForOther = !!existing && !!tokens.refresh_token;
+      const addsCalendar = !!existing && !hasScopes(accountScopes(existing), CALENDAR_SCOPES) && hasScopes(scopes, CALENDAR_SCOPES);
       if (existing && tokens.refresh_token) {
         storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims);
         await afterConnect(ctx, existing.id, email);
       } else await discardTokens(ctx, tokens, email);
       // What happened to the account they did sign in as.
       const other = keptForOther
-        ? ` ${email} is also connected here, so agentinbox saved that new sign-in for ${email}; nothing else changed.`
+        ? ` ${email} is also connected here, so agentinbox saved that new sign-in for ${email}${addsCalendar ? ", which adds Google Calendar to it" : "; nothing else changed"}.`
         : existing
           ? ` ${email} is also connected here and wasn't changed.`
           : ` agentinbox didn't keep the sign-in for ${email}.`;
@@ -500,8 +528,10 @@ async function exchange(ctx: AppContext, st: StateRow, code: string, state: stri
       throw new HttpError(
         400,
         "oauth_wrong_account",
-        `You were reconnecting ${target.email}, but signed in to Google as ${email}, so ${target.email} is still not reconnected.${other}`,
-        `Reconnect ${target.email} again and pick ${target.email} in Google's account chooser (choose "Use another account" if it isn't listed). ` +
+        calendar?.addingTo
+          ? `You were adding Google Calendar to ${target.email}, but signed in to Google as ${email}, so nothing changed for ${target.email}: its mail keeps working.${other}`
+          : `You were reconnecting ${target.email}, but signed in to Google as ${email}, so ${target.email} is still not reconnected.${other}`,
+        `${calendar?.addingTo ? `Click Add Calendar for ${target.email}` : `Reconnect ${target.email}`} again and pick ${target.email} in Google's account chooser (choose "Use another account" if it isn't listed). ` +
           `If Google skips the chooser, sign out of ${email} at accounts.google.com in this browser first, or use a private window.`,
       );
     }
@@ -552,7 +582,7 @@ async function exchange(ctx: AppContext, st: StateRow, code: string, state: stri
   ctx.log.child("google").info(existing ? "Account reconnected" : "Account connected", { email });
   // Adding Calendar with Calendar unticked: the tokens above are still good (include_granted_scopes keeps
   // Gmail and Pub/Sub), so they are kept, but the step the user took didn't do what they wanted.
-  const unticked = calendar?.addingTo ? missingScopes(scopes, CALENDAR_SCOPES) : [];
+  const unticked = calendar?.addingTo && granted.length ? missingScopes(scopes, CALENDAR_SCOPES) : [];
   if (!unticked.length) rememberCompleted(ctx, state, code, id);
   const account = await afterConnect(ctx, id, email);
   if (unticked.length) {
@@ -573,7 +603,7 @@ async function afterConnect(ctx: AppContext, id: string, email: string): Promise
     ctx.log.child("google").warn("Post-connect setup failed", { email, error: errorMessage(err) });
     ctx.db.run("UPDATE accounts SET last_error = ? WHERE id = ?", `Connected, but initial sync setup failed: ${errorMessage(err)}`, id);
   }
-  await probeCalendar(ctx, id);
+  await probeCalendar(ctx, id, { waitMs: CONNECT_PROBE_WAIT_MS });
   const account = toAccount(getRow(ctx, id)!);
   ctx.bus.emit("account", account);
   return account;
@@ -593,10 +623,7 @@ export async function completeConnectFromUrl(ctx: AppContext, raw: string): Prom
     const state = q.get("state");
     const pending = state && ctx.db.run("DELETE FROM oauth_states WHERE state = ?", state).changes ? state : null;
     const calendar = pending ? takeCalendarAttempt(ctx, pending) : null;
-    const err =
-      error === "access_denied" && calendar?.addingTo
-        ? calendarCancelled(calendar.addingTo)
-        : oauthError(ctx, error, q.get("error_description"), undefined, !!calendar);
+    const err = consentError(ctx, error, q.get("error_description"), undefined, calendar);
     if (pending) rememberFailed(ctx, pending, err);
     throw err;
   }

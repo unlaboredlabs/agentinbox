@@ -11,6 +11,8 @@ const ConnectInput = z.object({
    * provisioning uses), ["calendar"] for Google Calendar (with reauthAccountId: "Add Calendar to <email>").
    */
   scopes: z.array(z.enum(EXTRA_SCOPE_NAMES)).optional(),
+  /** Leave Google Calendar out of this consent (a Workspace admin blocks it). */
+  mailOnly: z.boolean().optional(),
 });
 const AttemptInput = z.object({ state: z.string().min(1).max(200) });
 const CompleteInput = z.object({ url: z.string().trim().min(1, "Paste the URL you landed on after approving access") });
@@ -32,8 +34,8 @@ export function accountsApi(ctx: AppContext) {
   r.get("/accounts", (c) => c.json(ctx.accounts.list()));
 
   r.post("/accounts/connect", async (c) => {
-    const { reauthAccountId, scopes } = await readBody(c, ConnectInput);
-    return c.json(ctx.google.startConnect({ reauthAccountId, scopes }));
+    const { reauthAccountId, scopes, mailOnly } = await readBody(c, ConnectInput);
+    return c.json(ctx.google.startConnect({ reauthAccountId, scopes, mailOnly }));
   });
 
   r.post("/accounts/connect/complete", async (c) => {

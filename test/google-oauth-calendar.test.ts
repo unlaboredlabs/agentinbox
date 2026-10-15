@@ -72,10 +72,31 @@ describe("which scopes a consent asks for", () => {
     expect(cal.calls).toEqual([]);
   });
 
-  it("a reconnect asks again for calendar scopes the account had, even with Calendar turned off", async () => {
+  it("a reconnect asks again for calendar scopes the account had only while Calendar is on and not mail-only", async () => {
+    const { account } = await connectFakeAccount(ctx, fake, ME, { pubsub: true }).then((a) => ({ account: a }));
+    const reauthAccountId = account.id;
+    expect(scopesOf(reauthAccountId)).toEqual(expect.arrayContaining([...CALENDAR_SCOPES, PUBSUB_SCOPE]));
+    expect(requested({ reauthAccountId }).scopes).toEqual(expect.arrayContaining([...CALENDAR_SCOPES, PUBSUB_SCOPE]));
+    // An admin blocks Calendar: a mail-only reconnect leaves it out (Pub/Sub stays).
+    const mailOnly = requested({ reauthAccountId, mailOnly: true }).scopes;
+    expect(mailOnly).toEqual([GMAIL_SCOPE, "openid", "email", "profile", PUBSUB_SCOPE]);
+    // So does any reconnect once Calendar is turned off; include_granted_scopes keeps what Google still grants.
+    ctx.calendar.updateSetup({ enabled: false });
+    expect(requested({ reauthAccountId }).scopes).toEqual([GMAIL_SCOPE, "openid", "email", "profile", PUBSUB_SCOPE]);
+    expect(requested({ reauthAccountId }).incremental).toBe("true");
+    expect(() => ctx.google.startConnect({ reauthAccountId, mailOnly: true, scopes: ["calendar"] })).toThrow(/mail-only connection can't add Google Calendar/);
+  });
+
+  it("a mail-only reconnect works through the API and keeps mail when Calendar is blocked", async () => {
     const { account } = await consent(ctx, fake, ME);
-    preCalendarInstall();
-    expect(requested({ reauthAccountId: account!.id }).scopes).toEqual(expect.arrayContaining([...CALENDAR_SCOPES]));
+    const res = await accountsApi(ctx).request("/accounts/connect", { method: "POST", body: JSON.stringify({ reauthAccountId: account!.id, mailOnly: true }) });
+    const url = new URL(((await res.json()) as { authUrl: string }).authUrl);
+    expect(url.searchParams.get("scope")).not.toContain("calendar");
+    // The admin's block: Google grants only mail now.
+    fake.consentAs(ME, { scopes: MAIL_ONLY });
+    const location = (await fetch(url, { redirect: "manual" })).headers.get("location")!;
+    const reconnected = await ctx.google.completeConnectFromUrl(location);
+    expect(reconnected.status).toBe("active");
   });
 
   it("accepts scopes [\"calendar\"] on POST /accounts/connect and rejects unknown names", async () => {
@@ -148,6 +169,51 @@ describe("Add Calendar to an existing account", () => {
     const after = getRow(ctx, id)!;
     for (const k of ["refresh_token_enc", "access_token_enc", "scopes", "status", "history_id", "calendar_status"] as const) expect(after[k]).toBe(before[k]);
   });
+
+  it("says nothing changed and asks for the admin when a Workspace admin blocks Calendar", async () => {
+    const before = getRow(ctx, id)!;
+    const { state } = ctx.google.startConnect({ reauthAccountId: id, scopes: ["calendar"] });
+    const err = (await ctx.google.completeConnectFromUrl(`?error=admin_policy_enforced&state=${state}`).catch((e: unknown) => e)) as HttpError;
+    expect(err).toMatchObject({
+      code: "oauth_admin_policy_enforced",
+      message: `Your Google Workspace admin doesn't allow agentinbox to use Google Calendar, so nothing changed for ${ME}: its mail is unaffected.`,
+    });
+    expect(err.hint).toContain(`trust the OAuth client ID ${FAKE_CLIENT.clientId}`);
+    expect(ctx.google.connectAttempt(state)).toMatchObject({ status: "failed", code: "oauth_admin_policy_enforced", error: err.message });
+    expect(getRow(ctx, id)!.refresh_token_enc).toBe(before.refresh_token_enc);
+  });
+
+  it("picking another connected account says Calendar wasn't added and what happened to the other one", async () => {
+    const other = await connectFakeAccount(ctx, fake, "other@example.com");
+    const { error } = await consent(ctx, fake, "other@example.com", { reauthAccountId: id, scopes: ["calendar"] });
+    expect(error).toMatchObject({ code: "oauth_wrong_account" });
+    expect(error!.message).toBe(
+      `You were adding Google Calendar to ${ME}, but signed in to Google as other@example.com, so nothing changed for ${ME}: its mail keeps working. ` +
+        "other@example.com is also connected here, so agentinbox saved that new sign-in for other@example.com, which adds Google Calendar to it.",
+    );
+    expect((error as HttpError).hint).toMatch(/^Click Add Calendar for me@example.com again and pick me@example.com/);
+    expect(ctx.accounts.get(other.id)!.calendar?.status).toBe("active");
+    expect(ctx.accounts.get(id)!.calendar).toBeNull();
+    // Without new scopes for the other account the old words still hold.
+    const again = await consent(ctx, fake, "other@example.com", { reauthAccountId: id, scopes: ["calendar"] });
+    expect(again.error!.message).toMatch(/saved that new sign-in for other@example.com; nothing else changed\.$/);
+  });
+
+  it("a code exchange without `scope` keeps the recorded scopes and skips the unticked check", async () => {
+    const before = scopesOf(id);
+    const real = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const res = await real(input, init);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (!String(input).endsWith("/token") || !body.includes("grant_type=authorization_code")) return res;
+      const { scope: _, ...rest } = (await res.json()) as Record<string, unknown>;
+      return new Response(JSON.stringify(rest), { status: res.status, headers: { "content-type": "application/json" } });
+    });
+    const { account, error } = await consent(ctx, fake, ME, { reauthAccountId: id, scopes: ["calendar"] });
+    expect(error).toBeUndefined();
+    expect(account!.status).toBe("active");
+    expect(scopesOf(id)).toEqual(before);
+  });
 });
 
 describe("Workspace admins blocking Calendar", () => {
@@ -164,7 +230,7 @@ describe("Workspace admins blocking Calendar", () => {
     const { err, stored } = await blocked();
     expect(err.code).toBe("oauth_admin_policy_enforced");
     expect(err.message).toMatch(/blocks Google Calendar access/);
-    expect(err.hint).toMatch(/Connect without Calendar: turn Google Calendar off/);
+    expect(err.hint).toMatch(/^Connect again with mail only \(the connect dialog offers it\), or turn Calendar off in Settings → Google Calendar → Turn off/);
     // The stored attempt keeps the calendar explanation (fixed text, never the URL's).
     expect(stored).toMatchObject({ status: "failed", code: "oauth_admin_policy_enforced", hint: err.hint });
     expect(storedFailure(err).hint).toBe(err.hint);

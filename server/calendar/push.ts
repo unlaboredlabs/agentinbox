@@ -9,6 +9,7 @@ import { sha256 } from "../crypto.ts";
 import { now } from "../db/index.ts";
 import { accountScopes, getRow } from "../google/accounts.ts";
 import { CALENDAR_SCOPES, hasScopes } from "../google/scopes.ts";
+import { GoogleApiError } from "../google/types.ts";
 import { errorMessage } from "../util/errors.ts";
 import { randomToken } from "../util/ids.ts";
 import { isBlockedAddress, type LookupFn } from "../webhooks/ssrf.ts";
@@ -76,6 +77,19 @@ interface ChannelRow {
   channel_verified_at: string | null;
 }
 
+/**
+ * events.watch refused the address itself (not https, no valid certificate, a host Google won't call).
+ * Anything else (5xx, 429, network, one account's scopes) is retried on the next reconcile.
+ */
+export function addressRejected(err: unknown): boolean {
+  if (!(err instanceof GoogleApiError) || err.status !== 400) return false;
+  const reasons = [err.reason, ...(err.details.reasons ?? [])].filter(Boolean) as string[];
+  return reasons.some((r) => r.startsWith("push.webhookUrl")) || /webhook|callback|certificate|https/i.test(err.message);
+}
+
+/** Compared against when the channel is unknown, so both answers take the same time. */
+const DUMMY_HASH = sha256("no such channel");
+
 const sameHash = (a: string, b: string) => {
   const x = Buffer.from(a, "hex");
   const y = Buffer.from(b, "hex");
@@ -111,13 +125,24 @@ async function stopChannel(ctx: AppContext, accountId: string, id: string, resou
   }
 }
 
-/** Stops every channel of an account (before it is removed: channels.stop needs its token). */
-export async function stopAccountChannels(ctx: AppContext, accountId: string): Promise<void> {
+async function stopChannelsNow(ctx: AppContext, accountId: string): Promise<void> {
   for (const row of channelRows(ctx, accountId)) {
     if (!row.channel_id) continue;
     await stopChannel(ctx, accountId, row.channel_id, row.channel_resource_id);
     clearChannel(ctx, row, row.channel_id);
   }
+}
+
+/** The running push service per context, so account removal can go through its queue. */
+const services = new WeakMap<AppContext, { stopAccount(accountId: string): Promise<void> }>();
+
+/**
+ * Stops every channel of an account before it is removed (channels.stop needs its token). Runs in the
+ * push queue after any channel creation in flight, and keeps new ones from being created for it.
+ */
+export async function stopAccountChannels(ctx: AppContext, accountId: string): Promise<void> {
+  const push = services.get(ctx);
+  return push ? push.stopAccount(accountId) : stopChannelsNow(ctx, accountId);
 }
 
 export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): CalendarPush {
@@ -133,6 +158,8 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
   const pending = new Map<string, { accountId: string; calendarId: string; tokenHash: string; verified: boolean }>();
   /** The address Google couldn't reach: no new channels for it until publicUrl changes or a restart. */
   let unreachable: string | null = null;
+  /** Accounts being removed: no new channels for them. */
+  const removing = new Set<string>();
   let running: Promise<void> = Promise.resolve();
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
@@ -179,9 +206,10 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
       }
       return true;
     } catch (err) {
-      // Google refuses addresses it can't use (no valid certificate, unreachable): stay on polling.
+      // Google refuses addresses it can't use (no valid certificate, not https): stay on polling. Other
+      // failures are retried on the next reconcile; polling covers the meantime.
       log.warn("Couldn't create a Calendar push channel; changes arrive by polling", { calendarId: row.calendar_id, error: errorMessage(err) });
-      unreachable = address;
+      if (addressRejected(err)) unreachable = address;
       return false;
     } finally {
       pending.delete(id);
@@ -194,7 +222,7 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
     for (const row of channelRows(ctx, accountId)) {
       if (stopped) return;
       const acct = getRow(ctx, row.account_id);
-      const usable = !!acct && acct.status === "active" && hasScopes(accountScopes(acct), CALENDAR_SCOPES);
+      const usable = !!acct && acct.status === "active" && !removing.has(acct.id) && hasScopes(accountScopes(acct), CALENDAR_SCOPES);
       const want = usable && !!address && unreachable !== address;
       const id = row.channel_id;
       if (id) {
@@ -221,11 +249,18 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
   }
 
   /** Serialized: overlapping reconciles would create two channels for one calendar. */
-  function reconcile(accountId?: string): Promise<void> {
-    const run = running.then(() => (stopped ? undefined : reconcileOnce(accountId)));
-    running = run.catch((err) => log.error("Calendar push reconcile failed", { error: errorMessage(err) }));
+  function enqueue(fn: () => Promise<void>): Promise<void> {
+    running = running.then(fn).catch((err) => log.error("Calendar push reconcile failed", { error: errorMessage(err) }));
     return running;
   }
+  const reconcile = (accountId?: string) => enqueue(() => (stopped ? Promise.resolve() : reconcileOnce(accountId)));
+
+  const service = {
+    stopAccount(accountId: string): Promise<void> {
+      removing.add(accountId);
+      return enqueue(() => stopChannelsNow(ctx, accountId));
+    },
+  };
 
   let lastUrl = ctx.settings.publicUrl();
   const onSettings = () => {
@@ -247,7 +282,8 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
       const early = row ? undefined : pending.get(id);
       const stored = row?.channel_token_hash ?? early?.tokenHash;
       // Unknown channel and wrong token answer alike: 404 tells Google to stop, and reveals nothing to others.
-      if (!stored || !token || !sameHash(sha256(token), stored)) return 404;
+      const match = sameHash(sha256(token), stored ?? DUMMY_HASH);
+      if (!stored || !token || !match) return 404;
       if (row?.channel_resource_id && headers.get("x-goog-resource-id") !== row.channel_resource_id) return 404;
       if (early) {
         early.verified = true;
@@ -262,6 +298,7 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
     },
 
     start() {
+      services.set(ctx, service);
       ctx.bus.on("settings", onSettings);
       timer = setInterval(() => void reconcile(), RECONCILE_EVERY_MS);
       timer.unref?.();
@@ -270,6 +307,7 @@ export function createCalendarPush(ctx: AppContext, opts: PushOptions = {}): Cal
 
     async stop() {
       stopped = true;
+      if (services.get(ctx) === service) services.delete(ctx);
       ctx.bus.off("settings", onSettings);
       clearInterval(timer);
       for (const t of timeouts) clearTimeout(t);

@@ -537,3 +537,46 @@ Rules:
    tool call; changing the default later is one line in B.
 2. **60 s polling latency for invitations on tailnet installs.** Decided 60 s (≈1,440 cheap calls per
    calendar per day, well inside quota). The setting goes down to 15 s.
+
+## Review amendments (PR #37)
+
+The tier-L reviews of this contract changed the following. Where these amendments differ from the sections above,
+they take precedence. Each workstream implements its own items.
+
+- **B: attendee checks don't depend on notify.** Whenever a write is visible to others, `checked` is every non-self,
+  non-room attendee after the change, plus the organizer when that isn't the account. `notify` only drives `emailed`
+  and the send caps.
+  - An RSVP with a comment requires the organizer to pass allowTo.
+  - `checked` is stored in CalendarApprovalDetail and re-checked at approval time.
+- **B: a null calendarScope means the calendars in the account's list,** not any id Google would open. Free/busy for any
+  address stays allowed.
+- **B: creates are idempotent.** The Google event id is chosen when the write is queued (and in direct mode) and
+  stored in `eventId`. A 409 duplicate on retry counts as applied.
+- **B: `replyOnly` constrains invites.** With replyOnly on, adding new attendees is denied or sent to approval; B
+  documents which.
+- **B: approvals and grant ids.**
+  - Malformed calendar approval payloads fail permanently.
+  - The shared "agent deleted or disabled" check stays common to all approvals.
+  - `calendarScope` rejects "primary" and lowercases email-shaped ids.
+  - `calendar.read` alone shows `account.auth_failed` but not `sync.gap`.
+- **A: invitations.** For an unknown upcoming event, `isInvitation(raw)` is checked before the created-time test, so
+  being added to an existing meeting fires `invitation_received`.
+- **A: link safety.** Summaries keep conference and html links only when they are https, with Google's host for
+  htmlLink. Free text is cleaned before events are emitted.
+- **A: ownership.** A owns `server/calendar/index.ts` and `types.ts`, and exposes a hook for D's push reconcile when
+  the synced calendar set changes.
+- **D: token refresh race.** A refresh only writes back tokens and scopes if the refresh token it used is still
+  current. A missing `scope` in the response means "unchanged".
+- **D and E: admin-blocked Calendar.** `admin_policy_enforced` on a first connect maps to "connect without Calendar",
+  and the wizard offers that choice.
+- **C/F/G: `calendar.read` gets calendar events,** not only mail `read`.
+  - C: feed tools (list_events, wait_for_events, ack_events) are registered for read OR calendar.read.
+  - F: `grantSees` in event-row.tsx.
+  - G: `server/agentapi/listeners.ts` (stream gating, newestGrantedSeq/newestVisibleSeq).
+- **G owns `server/webhooks/payload.ts`.** `scopeBodyCheck` re-checks the calendar scope for calendar events.
+- **G: listener stdin.** It cleans `calendarEvent` and wraps calendar text with the organizer (not `from=undefined`).
+  The `calendar_content` delimiter is defused. Recipe prompts and UNTRUSTED_NOTICE mention calendar invites.
+- **F: presets and rendering.**
+  - Grant presets (`src/lib/grants.ts`) keep the calendar fields.
+  - Links render only when they are https.
+  - The calendar approval card shows the full description, the location and who gets emailed.

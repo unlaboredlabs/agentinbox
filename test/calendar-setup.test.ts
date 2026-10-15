@@ -6,6 +6,8 @@ import type { AppEnv } from "../server/api/util.ts";
 import type { AppContext } from "../server/context.ts";
 import { now } from "../server/db/index.ts";
 import { getRow } from "../server/google/accounts.ts";
+import { noteCalendarApi, probeCalendar } from "../server/calendar/setup.ts";
+import { GoogleApiError } from "../server/google/types.ts";
 import { CALENDAR_SCOPES } from "../server/google/scopes.ts";
 import { HttpError } from "../server/util/errors.ts";
 import type { CalendarSetupState, SetupWarning } from "../shared/types.ts";
@@ -205,6 +207,67 @@ describe("Calendar API turned off in the project", () => {
   });
 });
 
+describe("API state across accounts", () => {
+  const disabledError = (activationUrl: string) =>
+    new GoogleApiError(403, "Google Calendar API has not been used in project 1", "SERVICE_DISABLED", { reasons: ["SERVICE_DISABLED"], metadata: { activationUrl } });
+
+  it("an account left marked api_disabled doesn't keep the install disabled once the API is seen working", async () => {
+    const a = (await consent(ctx, fake, OPS)).account!;
+    const b = (await consent(ctx, fake, WYNN)).account!;
+    ctx.policy.createAgent({ name: "Hermes", grants: [grantInput(b.id, { capabilities: ["calendar.read"] })] });
+    noteCalendarApi(ctx, "disabled", disabledError(ACTIVATION_URL));
+    ctx.db.run("UPDATE accounts SET calendar_status = 'api_disabled', calendar_error = 'off'");
+    expect(calendarWarnings().map((w) => [w.code, w.severity])).toEqual([["calendar_api_disabled", "error"]]);
+    // Sync (A) on the other account sees the API working.
+    noteCalendarApi(ctx, "enabled");
+    expect(ctx.calendar.setupState()).toMatchObject({ api: "enabled", step: "done" });
+    expect(ctx.accounts.get(a.id)!.calendar?.status).toBe("active");
+    expect(ctx.accounts.get(b.id)!.calendar?.status).toBe("active");
+    expect(calendarWarnings()).toEqual([]);
+  });
+
+  it("prefers the newest install-wide observation over a stale account row", async () => {
+    const a = (await consent(ctx, fake, OPS)).account!;
+    ctx.db.run("UPDATE accounts SET calendar_status = 'api_disabled' WHERE id = ?", a.id);
+    ctx.settings.setState("calendar.setup", { enabled: true, api: { state: "enabled", at: now() } });
+    expect(ctx.calendar.setupState().api).toBe("enabled");
+  });
+
+  it("stores Google's activationUrl only when it is a Google Cloud console link, and fills it in later", async () => {
+    await consent(ctx, fake, OPS);
+    const project = "https://console.cloud.google.com/flows/enableapi?apiid=calendar-json.googleapis.com&project=fake-project";
+    for (const bad of ["https://evil.example/enable", "javascript:alert(1)", "http://console.cloud.google.com/x", "https://user@console.cloud.google.com/x"]) {
+      noteCalendarApi(ctx, "disabled", disabledError(bad));
+      expect(ctx.calendar.setupState().enableApiUrl).toBe(project);
+      expect(calendarWarnings()[0]!.url).toBe(project);
+    }
+    expect(ctx.settings.getState("calendar.setup")!.api).toMatchObject({ state: "disabled", activationUrl: null });
+    noteCalendarApi(ctx, "disabled", disabledError(ACTIVATION_URL));
+    expect(ctx.settings.getState("calendar.setup")!.api).toMatchObject({ state: "disabled", activationUrl: ACTIVATION_URL });
+    // A later answer without one keeps it.
+    noteCalendarApi(ctx, "disabled", new GoogleApiError(403, "disabled", "accessNotConfigured"));
+    expect(ctx.calendar.setupState().enableApiUrl).toBe(ACTIVATION_URL);
+  });
+
+  it("a working calendar list clears only api_disabled, never sync's own error", async () => {
+    const a = (await consent(ctx, fake, OPS)).account!;
+    ctx.db.run("UPDATE accounts SET calendar_status = 'error', calendar_error = 'Calendar sync failed: HTTP 500' WHERE id = ?", a.id);
+    await ctx.calendar.calendars(a.id);
+    expect(ctx.accounts.get(a.id)!.calendar).toMatchObject({ status: "error", error: "Calendar sync failed: HTTP 500" });
+  });
+
+  it("a connect waits for a slow probe only briefly; the answer is recorded when it comes", async () => {
+    const a = (await consent(ctx, fake, OPS)).account!;
+    cal.delayMs = 200;
+    cal.disableApi(true);
+    const t = Date.now();
+    await probeCalendar(ctx, a.id, { waitMs: 30 });
+    expect(Date.now() - t).toBeLessThan(150);
+    expect(ctx.accounts.get(a.id)!.calendar?.status).toBe("active");
+    await waitFor(() => ctx.accounts.get(a.id)!.calendar?.status === "api_disabled");
+  });
+});
+
 describe("GET /accounts/:id/calendars", () => {
   it("lists the account's calendars, primary first, names cleaned, synced from calendar_sync", async () => {
     const { account } = await consent(ctx, fake, OPS);
@@ -255,7 +318,7 @@ describe("setup warnings", () => {
     const ws: SetupWarning[] = calendarWarnings();
     expect(ws.map((w) => [w.code, w.severity, w.accountId])).toEqual([
       ["calendar_sync_failing", "error", b.id],
-      ["calendar_scope_missing", "warning", a.id],
+      ["calendar_scope_missing", "info", a.id],
     ]);
     expect(ws[0]!.message).toBe(`Google Calendar sync for ${WYNN} is failing: Google returned HTTP 500`);
     expect(ws[1]!.message).toBe(`Google Calendar isn't added to ${OPS} yet, so agents can't use its calendar. Its mail is unaffected.`);

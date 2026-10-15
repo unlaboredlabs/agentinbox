@@ -9,6 +9,7 @@
  *   cal.scopeInsufficient(1);         // the next call gets 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT whatever accounts.scopes says
  *   cal.channels / cal.stopped        // events.watch / channels.stop calls
  *   cal.onWatch = (ch) => …           // runs before events.watch returns (Google's "sync" can beat the response)
+ *   cal.delayMs = 200                 // every call waits this long first (a slow Calendar API)
  */
 import type { AppContext } from "../server/context.ts";
 import { accountScopes, getRow } from "../server/google/accounts.ts";
@@ -75,10 +76,11 @@ export function fakeCalendar(ctx: AppContext) {
   const stopped: { id: string; resourceId: string }[] = [];
   const calls: { accountId: string; method: string }[] = [];
 
-  const hooks: { onWatch: ((ch: FakeChannel) => void) | null } = { onWatch: null };
+  const hooks: { onWatch: ((ch: FakeChannel) => void) | null; delayMs: number } = { onWatch: null, delayMs: 0 };
 
   const auth = async (accountId: string, method: string) => {
     calls.push({ accountId, method });
+    if (hooks.delayMs) await new Promise((r) => setTimeout(r, hooks.delayMs));
     await googleRuntime(ctx).tokens.accessToken(accountId);
     const row = getRow(ctx, accountId)!;
     if (insufficient > 0 || !CALENDAR_SCOPES.every((s) => accountScopes(row).includes(s))) {
@@ -126,6 +128,12 @@ export function fakeCalendar(ctx: AppContext) {
     },
     set onWatch(fn: ((ch: FakeChannel) => void) | null) {
       hooks.onWatch = fn;
+    },
+    get delayMs() {
+      return hooks.delayMs;
+    },
+    set delayMs(ms: number) {
+      hooks.delayMs = ms;
     },
     channels,
     stopped,
