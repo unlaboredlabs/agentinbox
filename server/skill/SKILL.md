@@ -43,12 +43,18 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    ```
 
 2. Tell the user, quoting the code exactly as printed: "Please approve code `K7QM-2XPD` in the agentinbox console:
-   <link>". They choose which mailboxes you get and what you may do. New grants are **draft-only** by default: sends
-   and replies become Gmail drafts for them to review.
+   <link>". If the log shows two links, give both: the first uses the address you connected to, the second the
+   console's public URL; one of them opens in their browser. They choose which mailboxes you get and what you may do.
+   The console starts at **Read only** (search and read mail, get events; no drafting or sending). If they give you
+   send access, sends are **draft-only** unless they pick otherwise: they become Gmail drafts for them to send, or with
+   "Send with my approval" each send waits in the console's Approvals.
 3. Check the log again (`cat "$LOG"`) until it ends with `exit=…`. `exit=0` means approved; 2 denied, 3 expired
    (start over), 4 already used. The API key is written to `~/.config/agentinbox/profiles/default.json` (mode 0600).
    **Never print, read or paste the key**: `--setup-mcp` registered the MCP server in your tool without it. Start a
    new session (or reload MCP, e.g. `/reload-mcp` in Hermes) so the tools appear.
+   Then tell the user what you were actually granted, in the words the log prints under "Access granted" (for example
+   "ops@acme.dev: read, draft, send; sends need your approval in the console"). Don't assume a default; check it
+   again any time with `npx -y agentinbox-cli listen status` (the `Access` line) or the `list_accounts` tool.
 4. To be woken when mail arrives, install the listener (ask the user first: it's a background service on their
    machine). It keeps an outbound connection to agentinbox (no open ports), starts with mail that arrives from now on,
    and runs your command once per event with the event as JSON on stdin, in a private working directory:
@@ -57,6 +63,10 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    npx -y agentinbox-cli listen service install --exec "$(npx -y agentinbox-cli listen --print-recipe <tool>)"
    npx -y agentinbox-cli listen status
    ```
+
+   To check it works end to end, ask the user to send a test email from the console's "Check that it works" step;
+   `listen status` then shows it under recent events. Mail that was already stored before the listener started is not
+   replayed; `npx -y agentinbox-cli listen --backfill` runs it through the same command once (ask the user first).
 
    `--print-recipe` prints the ready-made command for your tool with this machine's paths. The trigger is an email
    anyone can send, so each recipe limits what the woken agent can do as far as that CLI allows:

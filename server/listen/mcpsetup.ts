@@ -175,8 +175,8 @@ function setupCodex(t: McpSetupTarget, profileFile: string, opts: McpSetupOption
   const without = removeTomlServer(current, t.name);
   if (without === null) return { ok: false, message: `${file} defines mcp_servers inline; not rewriting it automatically.`, manual };
   const verify = [`codex mcp list   (shows "${t.name}")`];
-  const replaces = without !== current.replace(/\n{3,}/g, "\n\n") ? `replace [mcp_servers.${t.name}]` : `add [mcp_servers.${t.name}]`;
-  const changes = [backupLine(file), `${replaces} in ${file} (other tables are kept) and set the file to 0600, since it will hold the key:`, ...indent(codexBlock({ ...t, key: KEY_SHOWN }))];
+  const replaces = without !== current.replace(/\n{3,}/g, "\n\n") ? `replace [mcp_servers.${t.name}] in` : `add [mcp_servers.${t.name}] to`;
+  const changes = [backupLine(file), `${replaces} ${file} (other tables are kept) and set the file to 0600, since it will hold the key:`, ...indent(codexBlock({ ...t, key: KEY_SHOWN }))];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Codex: nothing was changed. setup-mcp would:`, changes, verify };
   const backup = backupFile(file);
   const base = without.replace(/\s*$/, "");
@@ -211,7 +211,7 @@ function setupCursor(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
   const entry = (key: string) => ({ url: t.url, headers: { Authorization: `Bearer ${key}` } });
   const changes = [
     backupLine(file),
-    `${t.name in servers ? "replace" : "add"} "mcpServers.${t.name}" in ${file} (other servers are kept) and set the file to 0600, since it will hold the key:`,
+    `${t.name in servers ? "replace" : "add"} "mcpServers.${t.name}" ${t.name in servers ? "in" : "to"} ${file} (other servers are kept) and set the file to 0600, since it will hold the key:`,
     ...indent(`"${t.name}": ${JSON.stringify(entry(KEY_SHOWN), null, 2)}`),
   ];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Cursor: nothing was changed. setup-mcp would:`, changes, verify };

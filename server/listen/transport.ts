@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import pc from "picocolors";
+import { NPX } from "./version.ts";
 
 /**
  * Transport rule for `connect` and `listen`: the API key travels in every request, so plain http is
@@ -99,7 +100,7 @@ export async function checkTransport(rawUrl: string, opts: { insecure?: boolean;
       `  Options:\n` +
       `  - SSH tunnel (works with any server you can ssh to): in another terminal run\n` +
       `      ssh -N -L ${port}:localhost:${port} <user>@${bare(url.hostname)}\n` +
-      `    then use http://localhost:${port}${base} instead.\n` +
+      `    then use http://localhost:${port}${base} as the daemon URL, e.g. ${NPX} connect http://localhost:${port}${base}\n` +
       `  - https:// (a reverse proxy, or \`tailscale serve --bg ${port}\` on the daemon's machine for https://<name>.ts.net).\n` +
       `  - A Tailscale address: 100.64.0.0/10, fd7a:115c:a1e0::/48, or a *.ts.net name that resolves to one.\n` +
       `  To accept the risk anyway (e.g. an isolated lab network), add --insecure.`,
