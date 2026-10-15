@@ -19,10 +19,19 @@ export const bearer = (header: string | undefined): string | null => {
  * limited: 5 distinct wrong keys from one client (IPv4 address or IPv6 /64) → 429 for 15 minutes.
  * Keys carry 160 bits of entropy, so the lockout bounds noise rather than guarding a guessable secret.
  */
+function disabledAgentKey(ctx: AppContext, key: string): boolean {
+  if (!key.startsWith("aib_") || key.length > 200) return false;
+  return !!ctx.db.get("SELECT 1 FROM agents WHERE key_hash = ? AND disabled = 1", sha256(key));
+}
+
 export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): MiddlewareHandler<AgentApiEnv> {
   return async (c, next) => {
     const key = bearer(c.req.header("authorization"));
     const principal = key ? ctx.policy.authenticate(key) : null;
+    if (!principal && key && disabledAgentKey(ctx, key)) {
+      // A real key of a disabled agent: no access, but tell the listener so it can wait for re-enable.
+      return c.json({ error: { code: "agent_disabled", message: "This agent is disabled", hint: "An admin can enable it in the agentinbox console under Agents." } }, 403);
+    }
     if (!principal) {
       const limiter = limiterOf();
       const ip = clientIp(c, ctx.config.trustProxy);

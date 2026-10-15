@@ -13,7 +13,7 @@ import type { AppContext } from "../context.ts";
 import { HttpError, notFound } from "../util/errors.ts";
 import { type AgentApiEnv, agentAuth } from "./auth.ts";
 import { agentRequestGuard } from "./guard.ts";
-import { ackListener, parseConsumer } from "./listeners.ts";
+import { ackListener, newestVisibleSeq, parseConsumer } from "./listeners.ts";
 import { createPairingService, type PairingOptions, type PairingService, pairingStartSchema, pollSchema } from "./pairing.ts";
 import { OncePer, RateLimiter, tooManyRequests } from "./ratelimit.ts";
 import { streamEvents } from "./stream.ts";
@@ -186,6 +186,7 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
       })),
       mcpUrl: `${base}/mcp`,
       skillUrl: `${base}/skill.md`,
+      headSeq: newestVisibleSeq(ctx, agent.id),
     };
     return c.json(self);
   });

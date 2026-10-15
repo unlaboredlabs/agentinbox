@@ -4,7 +4,7 @@ import type { AppContext } from "../context.ts";
 import { EVENT_SELECT, type EventRow, toStoredEvent } from "../events/repo.ts";
 import { badRequest, HttpError } from "../util/errors.ts";
 
-const CONSUMER_RE = /^[\w.:@-]{1,64}$/;
+const CONSUMER_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
 /** Why a live stream must end, or null while the key, agent and a read grant are all still valid. */
 export type RevokeReason = "agent_deleted" | "agent_disabled" | "key_rotated" | "no_read_grant";
@@ -31,7 +31,7 @@ export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
 
 export function parseConsumer(raw: unknown): string {
   const consumer = raw === undefined || raw === "" ? "default" : String(raw);
-  if (!CONSUMER_RE.test(consumer)) throw badRequest("consumer must be 1-64 letters, digits or . _ - : @");
+  if (!CONSUMER_RE.test(consumer)) throw badRequest("consumer must be 1-100 letters, digits, dots, underscores or dashes");
   return consumer;
 }
 

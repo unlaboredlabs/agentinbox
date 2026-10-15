@@ -109,6 +109,8 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
   const includeBody = ["1", "true"].includes(c.req.query("include_body") ?? "");
   const after = parseSeq(c.req.query("after"), "after", true);
   const lastEventId = parseSeq(c.req.header("last-event-id"), "Last-Event-ID", false);
+  const start = c.req.query("start");
+  if (start !== undefined && start !== "now" && start !== "beginning") throw badRequest("start must be now or beginning");
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const problem = accessProblem(ctx.db, agentId, keyHash);
   if (problem) throw new HttpError(403, problem, ...OPEN_REFUSALS[problem]);
@@ -128,19 +130,23 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
       agentId,
       consumer,
     );
+  // A new consumer starts at the head (only new mail), unless it asks for start=beginning; an
+  // existing one resumes from its cursor.
+  const newest = newestVisibleSeq(ctx, agentId);
+  const isNew = !db.get("SELECT 1 FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, consumer);
   const t = new Date().toISOString();
   db.run(
-    `INSERT INTO listener_cursors (agent_id, consumer, acked_seq, client, connected, last_seen_at, updated_at) VALUES (?, ?, 0, ?, 1, ?, ?)
+    `INSERT INTO listener_cursors (agent_id, consumer, acked_seq, client, connected, last_seen_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)
      ON CONFLICT(agent_id, consumer) DO UPDATE SET client = excluded.client, connected = connected + 1, last_seen_at = excluded.last_seen_at`,
     agentId,
     consumer,
+    isNew && start !== "beginning" ? newest : 0,
     json.str(clientInfo(c)),
     t,
     t,
   );
   opts.open.set(agentId, (opts.open.get(agentId) ?? 0) + 1);
   // Client-supplied positions can't point past what this agent can see (that would skip future events).
-  const newest = newestVisibleSeq(ctx, agentId);
   let cursor = Math.max(Math.min(after, newest), Math.min(lastEventId, newest), ackedSeq(db, agentId, consumer));
 
   c.header("X-Accel-Buffering", "no");

@@ -20,6 +20,8 @@ const STALE: Record<ConsoleStreamMessage["kind"], readonly (readonly string[])[]
   approval: [keys.approvals, keys.overview],
   audit: [keys.audit, keys.agents, keys.overview],
   account: [keys.accounts, keys.setupState, keys.overview],
+  // Approving a pairing creates an agent.
+  pairing: [keys.agents, keys.overview],
 };
 const ALL_STALE = [...new Set(Object.values(STALE).flat())];
 

@@ -6,15 +6,23 @@
 //   POST /agent/v1/pairings/poll             { deviceCode }    → PairingPoll           (public; ≥ `interval` s apart)
 //   GET  /agent/v1/me                        → AgentSelf                                (bearer aib_ key)
 //   GET  /agent/v1/events/stream             → text/event-stream                        (bearer aib_ key)
-//        ?consumer=<name>&after=<seq>&types=a,b&include_body=1
+//        ?consumer=<name>&after=<seq>&types=a,b&include_body=1&start=now|beginning
 //        Each event:  `id: <seq>` `event: mail` `data: <WebhookPayload JSON>`; `: ping` comments every 15 s;
 //        `event: revoked` `data: {"reason": …}` then close when the key, agent or grant stops being valid.
-//        Resumes after max(after, Last-Event-ID, the consumer's acked cursor).
+//        Resumes after max(after, Last-Event-ID, the consumer's acked cursor). A consumer seen for the
+//        first time starts at the head (newest event the agent can see: only new mail), or at 0 with
+//        `start=beginning` (honored only for a new consumer). Consumer names: 1-100 of [A-Za-z0-9._-].
 //   POST /agent/v1/events/ack                { consumer, seq } → { ackedSeq }          (bearer aib_ key)
 //
 // Requests must not carry Origin or Sec-Fetch-* headers (browsers are refused), POST bodies must be
 // `Content-Type: application/json`, and the Host must be one this daemon answers to (DNS-rebinding guard).
 // `after`, Last-Event-ID and acks are capped at the newest event the agent can see.
+//
+// Access errors on /me and the stream (and the matching `revoked` reasons):
+//   reversible (keep the key, retry later):  403 agent_disabled, 403 no_read_grant (stream only)
+//   permanent (pair again):                  401 unauthorized (unknown or rotated key; revoked reasons
+//                                            key_rotated and agent_deleted)
+//
 // Pairing (approved design): the CLI starts a pairing and shows `userCode` + `verificationUrl`; a human
 // approves that exact code in the console (choosing the grant, draft_only by default). Only then is
 // the API key generated; it is handed to the polling CLI exactly once and written to a 0600 file.
@@ -75,6 +83,8 @@ export interface AgentSelf {
   grants: { accountId: string; accountEmail: string; capabilities: Capability[]; labelScope: string[] | null; sendMode: SendMode }[];
   mcpUrl: string;
   skillUrl: string;
+  /** Newest event seq this agent can see: where a new consumer starts ("from now on"). */
+  headSeq: number;
 }
 
 /** Listener config file (written by `connect`, read by `listen`; mode 0600). */

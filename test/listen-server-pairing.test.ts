@@ -317,11 +317,29 @@ describe("browser and DNS-rebinding guard", () => {
     const { hostAllowed } = await import("../server/agentapi/guard.ts");
     const s = await setup();
     s.h.ctx.settings.update({ publicUrl: "https://mail.example.com" });
-    expect(hostAllowed(s.h.ctx, "mail.example.com")).toBe(true);
-    expect(hostAllowed(s.h.ctx, "evil.example")).toBe(false);
-    expect(hostAllowed(s.h.ctx, "203.0.113.9")).toBe(false);
+    expect(await hostAllowed(s.h.ctx, "mail.example.com")).toBe(true);
+    expect(await hostAllowed(s.h.ctx, "evil.example")).toBe(false);
+    expect(await hostAllowed(s.h.ctx, "203.0.113.9")).toBe(false);
     const lan = Object.values(networkInterfaces()).flat().find((a) => a && !a.internal);
-    if (lan) expect(hostAllowed(s.h.ctx, lan.address.toLowerCase())).toBe(true);
+    if (lan) expect(await hostAllowed(s.h.ctx, lan.address.toLowerCase())).toBe(true);
+  });
+
+  it("accepts this machine's Tailscale name, or a *.ts.net name resolving only to local addresses", async () => {
+    const { hostAllowed } = await import("../server/agentapi/guard.ts");
+    const s = await setup();
+    const addrs: Record<string, string[]> = {
+      "box.tail1234.ts.net": ["127.0.0.1"],
+      "other.tail1234.ts.net": ["100.101.102.103"],
+      "mixed.tail1234.ts.net": ["127.0.0.1", "100.101.102.103"],
+      "evil.example": ["127.0.0.1"],
+    };
+    const deps = (name: string | null) => ({ tailscaleName: async () => name, resolve: async (h: string) => addrs[h] ?? [] });
+    expect(await hostAllowed(s.h.ctx, "me.tail1234.ts.net", deps("me.tail1234.ts.net"))).toBe(true);
+    expect(await hostAllowed(s.h.ctx, "box.tail1234.ts.net", deps(null))).toBe(true);
+    expect(await hostAllowed(s.h.ctx, "other.tail1234.ts.net", deps(null))).toBe(false);
+    expect(await hostAllowed(s.h.ctx, "mixed.tail1234.ts.net", deps(null))).toBe(false);
+    // Only Tailscale names get the resolve check: a rebinding domain pointing here stays refused.
+    expect(await hostAllowed(s.h.ctx, "evil.example", deps(null))).toBe(false);
   });
 });
 

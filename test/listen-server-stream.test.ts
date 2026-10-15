@@ -42,7 +42,9 @@ async function setup(opts: AgentApiOptions = {}, mail: () => MailService = fakeM
   addAccount(ctx, "acc_b", "other@acme.com");
   const { agent, apiKey } = ctx.policy.createAgent({ name: "Hermes", grants: [readGrant("acc_a")] });
 
+  /** New consumers default to the head; these tests want the backlog unless they say otherwise. */
   const open = async (query = "", headers: Record<string, string> = {}, key = apiKey) => {
+    if (!query.includes("start=")) query += `${query ? "&" : "?"}start=beginning`;
     const res = await fetch(`${url}/agent/v1/events/stream${query}`, { headers: { authorization: `Bearer ${key}`, ...headers } });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/event-stream/);
@@ -236,6 +238,7 @@ describe("agent API auth", () => {
       grants: [{ accountId: "acc_a", accountEmail: "me@acme.com", capabilities: ["read", "draft"], labelScope: null, sendMode: "draft_only" }],
       mcpUrl: `${base}/mcp`,
       skillUrl: `${base}/skill.md`,
+      headSeq: 0,
     });
     for (const headers of [{}, { authorization: "Bearer aib_wrong" }]) {
       const res = await fetch(`${s.url}/agent/v1/events/stream`, { headers });
@@ -396,5 +399,68 @@ describe("stream hardening", () => {
     s.ctx.policy.updateAgent(s.agent.id, { disabled: true });
     expect(await waitFor(() => s.ctx.bus.listenerCount("agent") === agentBaseline, 2000)).toBe(true);
     void res2.body?.cancel().catch(() => {});
+  });
+});
+
+describe("consumer start and reversible refusals", () => {
+  it("starts a new consumer at the head unless it asks for the beginning; existing ones resume", async () => {
+    const s = await setup();
+    const old = ["m1", "m2", "m3"].map((id) => emitMessage(s.ctx, "acc_a", id));
+    emitMessage(s.ctx, "acc_b", "b1"); // invisible: the head is the newest visible event
+    const me = await (await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${s.apiKey}` } })).json();
+    expect((me as { headSeq: number }).headSeq).toBe(old[2]);
+
+    let fresh = await s.open("?consumer=fresh&start=now");
+    const live = emitMessage(s.ctx, "acc_a", "m4");
+    await fresh.until(() => fresh.mail().length >= 1);
+    expect(seqs(fresh)).toEqual([live]);
+    expect(s.ctx.policy.getAgent(s.agent.id)!.listeners.find((l) => l.consumer === "fresh")!.ackedSeq).toBe(old[2]);
+    fresh.cancel();
+
+    // Default (no start) is the head too.
+    const dflt = await fetch(`${s.url}/agent/v1/events/stream?consumer=dflt`, { headers: { authorization: `Bearer ${s.apiKey}` } });
+    const reader = new SseReader(dflt);
+    readers.push(reader);
+    const next = emitMessage(s.ctx, "acc_a", "m5");
+    await reader.until(() => reader.mail().length >= 1);
+    expect(seqs(reader)).toEqual([next]);
+
+    const all = await s.open("?consumer=history&start=beginning");
+    await all.until(() => all.mail().length >= 5);
+    expect(seqs(all)).toEqual([...old, live, next]);
+    all.cancel();
+
+    // An existing consumer resumes from its cursor; start=beginning no longer applies.
+    expect(await (await s.ack("history", old[0]!)).json()).toEqual({ ackedSeq: old[0] });
+    fresh = await s.open("?consumer=history&start=beginning");
+    await fresh.until(() => fresh.mail().length >= 4);
+    expect(seqs(fresh)).toEqual([old[1], old[2], live, next]);
+    expect((await fetch(`${s.url}/agent/v1/events/stream?start=later`, { headers: { authorization: `Bearer ${s.apiKey}` } })).status).toBe(400);
+  });
+
+  it("accepts consumer names up to 100 characters", async () => {
+    const s = await setup();
+    expect((await s.ack("a".repeat(100), 0)).status).toBe(200);
+    expect((await s.ack("host-name.example_profile", 0)).status).toBe(200);
+    expect((await s.ack("a".repeat(101), 0)).status).toBe(400);
+    expect((await s.ack("with space", 0)).status).toBe(400);
+  });
+
+  it("answers a disabled agent's key with 403 agent_disabled (reversible), unknown keys with 401", async () => {
+    const s = await setup();
+    s.ctx.policy.updateAgent(s.agent.id, { disabled: true });
+    for (const path of ["/agent/v1/me", "/agent/v1/events/stream"]) {
+      const res = await fetch(`${s.url}${path}`, { headers: { authorization: `Bearer ${s.apiKey}` } });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe("agent_disabled");
+    }
+    s.ctx.policy.updateAgent(s.agent.id, { disabled: false });
+    s.ctx.policy.deleteGrant(s.agent.id, "acc_a");
+    const noGrant = await fetch(`${s.url}/agent/v1/events/stream`, { headers: { authorization: `Bearer ${s.apiKey}` } });
+    expect(noGrant.status).toBe(403);
+    expect(((await noGrant.json()) as { error: { code: string } }).error.code).toBe("no_read_grant");
+    const { apiKey: rotated } = s.ctx.policy.rotateKey(s.agent.id);
+    expect((await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${s.apiKey}` } })).status).toBe(401);
+    expect((await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${rotated}` } })).status).toBe(200);
   });
 });
