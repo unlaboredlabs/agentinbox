@@ -66,7 +66,13 @@ describe("grants in plain words", () => {
     expect(describeGrant({ ...g(["read", "send"], "direct"), allowTo: ["*@acme.dev"], replyOnly: true, maxSendsPerHour: 5, maxSendsPerDay: null })).toBe(
       "ops@acme.dev: read, send; sends go out directly to allowed recipients; only to *@acme.dev; replies in existing threads only; at most 5/hour",
     );
-    expect(describeGrants([])[0]).toMatch(/no mailbox access yet/);
+    expect(describeGrants([])[0]).toMatch(/no mailbox or calendar access yet/);
+    expect(describeGrant(g(["calendar.read"], "draft_only"))).toBe("ops@acme.dev: calendar.read");
+    expect(describeGrant(g(["read", "calendar.read"], "draft_only"))).toBe("ops@acme.dev: read, calendar.read; mail read only (can't draft or send)");
+    expect(describeGrant({ ...g(["read", "calendar.read", "calendar.write"], "draft_only"), calendarScope: ["team@group.calendar.google.com"] })).toBe(
+      "ops@acme.dev: read, calendar.read, calendar.write; mail read only (can't draft or send); calendar changes need your approval in the console; only calendar team@group.calendar.google.com",
+    );
+    expect(describeGrant({ ...g(["read", "calendar.write"], "draft_only"), calendarWriteMode: "direct" })).toBe("ops@acme.dev: read, calendar.write; mail read only (can't draft or send); calendar changes apply directly");
   });
 });
 
@@ -85,7 +91,7 @@ describe("connect", () => {
     api.grants = [];
     api.pollScript = [approved()];
     await runConnect(api.url, {}, { pollIntervalMs: 10 });
-    expect(plain()).toContain("no mailbox access yet");
+    expect(plain()).toContain("no mailbox or calendar access yet");
   });
 
   it("uses the address the CLI connected to for the approve link when the public URL differs", async () => {

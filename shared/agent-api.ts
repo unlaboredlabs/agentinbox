@@ -93,6 +93,10 @@ export interface AgentSelf {
     replyOnly?: boolean;
     maxSendsPerHour?: number | null;
     maxSendsPerDay?: number | null;
+    /** Calendar ids the grant covers, null = every calendar (absent from older daemons). */
+    calendarScope?: string[] | null;
+    /** How calendar.write changes execute (absent from older daemons). */
+    calendarWriteMode?: CalendarWriteMode;
   }[];
   /**
    * This agent's listener consumers (absent from older daemons). `startSeq`: where the cursor started
