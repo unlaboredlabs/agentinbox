@@ -105,7 +105,7 @@ export type VerifyResult = { ok: true } | { ok: false; reason: string };
 /**
  * Verifies `webhook-id`, `webhook-timestamp` and `webhook-signature` per the Standard Webhooks spec:
  * HMAC-SHA256 over "{id}.{timestamp}.{body}" keyed with base64-decode(secret minus "whsec_"),
- * signature list "v1,<base64> v1,<base64>…", timestamp within the tolerance.
+ * signature list "v1,<base64> v1,<base64>…" (exact padded standard base64), timestamp within the tolerance.
  */
 export function verifyStandardWebhook(secret: string, hook: Pick<ReceivedHook, "headers" | "body">, toleranceSeconds = 300): VerifyResult {
   const h = (name: string) => {
@@ -119,14 +119,23 @@ export function verifyStandardWebhook(secret: string, hook: Pick<ReceivedHook, "
   if (!/^\d+$/.test(ts)) return { ok: false, reason: `bad timestamp ${ts}` };
   const skew = Math.abs(Date.now() / 1000 - Number(ts));
   if (skew > toleranceSeconds) return { ok: false, reason: `timestamp outside tolerance (${Math.round(skew)} s)` };
-  if (!secret.startsWith("whsec_")) return { ok: false, reason: "secret is not whsec_…" };
-  const key = Buffer.from(secret.slice("whsec_".length), "base64");
-  const expected = createHmac("sha256", key).update(`${id}.${ts}.${hook.body}`).digest();
+  // Strict: the secret and the signature must be canonical, padded standard base64. Node's base64
+  // decoder also accepts base64url, missing padding and trailing junk, so compare the exact string.
+  const STD_B64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  const rawSecret = secret.startsWith("whsec_") ? secret.slice("whsec_".length) : null;
+  if (!rawSecret || !STD_B64.test(rawSecret)) return { ok: false, reason: "secret is not whsec_<base64>" };
+  const key = Buffer.from(rawSecret, "base64");
+  const expected = Buffer.from(createHmac("sha256", key).update(`${id}.${ts}.${hook.body}`).digest("base64"), "ascii");
   for (const part of sigs.split(" ")) {
-    const [version, b64] = part.split(",", 2);
-    if (version !== "v1" || !b64) continue;
-    const got = Buffer.from(b64, "base64");
+    const comma = part.indexOf(",");
+    if (comma < 0 || part.slice(0, comma) !== "v1") continue;
+    const got = Buffer.from(part.slice(comma + 1), "ascii");
     if (got.length === expected.length && timingSafeEqual(got, expected)) return { ok: true };
   }
   return { ok: false, reason: "no matching v1 signature" };
+}
+
+/** The same hook with its webhook-signature header replaced (for negative cases). */
+export function withSignature(hook: Pick<ReceivedHook, "headers" | "body">, signature: string): Pick<ReceivedHook, "headers" | "body"> {
+  return { body: hook.body, headers: { ...hook.headers, "webhook-signature": signature } };
 }

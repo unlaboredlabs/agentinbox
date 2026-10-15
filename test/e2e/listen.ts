@@ -3,9 +3,10 @@
 // feat/listen-server. Types are local so this file compiles on main before those PRs land.
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { GrantInput, WebhookPayload } from "../../shared/types.ts";
 import { REPO_ROOT } from "./features.ts";
 import { resilientFetch } from "./fetch.ts";
@@ -217,14 +218,61 @@ export async function openAgentStream(base: string, apiKey: string, q: StreamQue
 
 // ───────────── CLI (dist/cli.js) ─────────────
 
-let built = false;
-/** Builds dist/cli.js from this checkout (tsdown; ~1 s), once per test process. */
+let builtCli: string | null = null;
+const tempDirs = new Set<string>();
+
+/** A temp dir removed by cleanupListenTemp(). */
+function tempDir(prefix: string, parent = tmpdir()): string {
+  mkdirSync(parent, { recursive: true });
+  const dir = mkdtempSync(join(parent, prefix));
+  tempDirs.add(dir);
+  return dir;
+}
+
+/**
+ * Builds dist/cli.js from this checkout into a private temp dir (tsdown, ~1 s), once per test
+ * process, so concurrent runs in one checkout never race on dist/. The dir sits under
+ * node_modules/.cache so the bundle's external imports resolve from the checkout's node_modules,
+ * with package.json next to it (the CLI reads its version from ../package.json).
+ */
 export function buildCli(): string {
-  if (!built) {
-    execFileSync("pnpm", ["exec", "tsdown", "--config-loader", "native"], { cwd: REPO_ROOT, stdio: "pipe", env: { ...process.env, CI: "1" } });
-    built = true;
-  }
-  return join(REPO_ROOT, "dist", "cli.js");
+  if (builtCli) return builtCli;
+  const root = tempDir("e2e-cli-", join(REPO_ROOT, "node_modules", ".cache", "agentinbox-e2e"));
+  const outDir = join(root, "dist");
+  copyFileSync(join(REPO_ROOT, "package.json"), join(root, "package.json"));
+  const config = join(root, "tsdown.e2e.config.mjs");
+  writeFileSync(
+    config,
+    `import base from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "tsdown.config.mjs")).href)};
+const repo = ${JSON.stringify(REPO_ROOT)};
+// The repo's config with paths made absolute (tsdown resolves relative ones from this config's dir).
+export default {
+  ...base,
+  cwd: repo,
+  entry: Object.fromEntries(Object.entries(base.entry).map(([k, v]) => [k, repo + "/" + v])),
+  outDir: ${JSON.stringify(outDir)},
+  clean: true,
+  copy: [{ from: repo + "/server/skill/SKILL.md", to: ${JSON.stringify(join(outDir, "skill"))} }],
+};
+`,
+  );
+  execFileSync("pnpm", ["exec", "tsdown", "--config", config, "--config-loader", "native"], { cwd: REPO_ROOT, stdio: "pipe", env: { ...process.env, CI: "1" } });
+  builtCli = join(outDir, "cli.js");
+  return builtCli;
+}
+
+const running = new Set<CliProcess>();
+
+/** Kills every CLI process still running (afterEach/afterAll), so a failing test never leaks one. */
+export async function killAllCli(): Promise<void> {
+  await Promise.all([...running].map((p) => p.kill("SIGKILL")));
+}
+
+/** Removes the CLI build, homes and exec dirs (afterAll). */
+export function cleanupListenTemp(): void {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  tempDirs.clear();
+  builtCli = null;
 }
 
 export interface CliHome {
@@ -236,7 +284,7 @@ export interface CliHome {
 
 /** An isolated HOME with XDG config/state/data dirs, so profiles and logs never touch the real ones. */
 export function cliHome(): CliHome {
-  const root = mkdtempSync(join(tmpdir(), "agentinbox-cli-"));
+  const root = tempDir("agentinbox-cli-");
   const configDir = join(root, ".config");
   const stateDir = join(root, ".local", "state");
   const env = { HOME: root, XDG_CONFIG_HOME: configDir, XDG_STATE_HOME: stateDir, XDG_DATA_HOME: join(root, ".local", "share") };
@@ -268,7 +316,7 @@ export function spawnCli(args: string[], home: CliHome, extraEnv: Record<string,
   proc.stderr!.on("data", (c: Buffer) => stderr.push(c.toString("utf8")));
   const exited = new Promise<number | null>((r) => proc.on("exit", (code) => r(code)));
   const output = () => stdout.join("") + stderr.join("");
-  return {
+  const cli: CliProcess = {
     proc,
     stdout,
     stderr,
@@ -280,7 +328,13 @@ export function spawnCli(args: string[], home: CliHome, extraEnv: Record<string,
       return exited;
     },
   };
+  running.add(cli);
+  void exited.then(() => running.delete(cli));
+  return cli;
 }
+
+/** A fresh dir for a command recorder (removed by cleanupListenTemp). */
+export const execDir = () => tempDir("agentinbox-exec-");
 
 // ───────────── Command recorder (the --exec target) ─────────────
 
@@ -289,6 +343,8 @@ export interface RecordedCall {
   argv: string[];
   /** AGENTINBOX_* variables the command saw. */
   env: Record<string, string>;
+  /** $AGENTINBOX_EVENT_FILE as the command saw it (content and permission bits). */
+  eventFile: { content: string; mode: number } | { error: string } | null;
 }
 
 export interface CommandRecorder {
@@ -306,10 +362,15 @@ export function commandRecorder(dir: string): CommandRecorder {
   const script = join(dir, "record.mjs");
   writeFileSync(
     script,
-    `import { readFileSync, writeFileSync } from "node:fs";
+    `import { readFileSync, statSync, writeFileSync } from "node:fs";
 const stdin = readFileSync(0, "utf8");
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("AGENTINBOX_")));
-writeFileSync(${JSON.stringify(calls)} + "/" + process.hrtime.bigint() + "-" + process.pid + ".json", JSON.stringify({ stdin, argv: process.argv.slice(2), env }));
+let eventFile = null;
+try {
+  const f = process.env.AGENTINBOX_EVENT_FILE;
+  if (f) eventFile = { content: readFileSync(f, "utf8"), mode: statSync(f).mode & 0o777 };
+} catch (e) { eventFile = { error: String(e) }; }
+writeFileSync(${JSON.stringify(calls)} + "/" + process.hrtime.bigint() + "-" + process.pid + ".json", JSON.stringify({ stdin, argv: process.argv.slice(2), env, eventFile }));
 `,
   );
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;

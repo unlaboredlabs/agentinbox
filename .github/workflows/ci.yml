@@ -29,6 +29,9 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+        env:
+          # Every E2E area is on main: a feature-detection miss must fail, not skip (test/e2e/features.ts).
+          E2E_REQUIRE: agents,agent-api,listen-client
       - run: pnpm build
       # The bundled CLI must start on every supported Node version.
       - run: node dist/cli.js --version

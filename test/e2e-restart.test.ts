@@ -6,13 +6,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createWebhooksService } from "../server/webhooks/index.ts";
 import type { Account, Approval, Delivery, MailEvent, Page, SetupStatus, WebhookWithSecret } from "../shared/types.ts";
 import { HAS_AGENTS } from "./e2e/features.ts";
+import { feedLastSeq, MCP_TEXT } from "./e2e/mcp.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver } from "./e2e/webhook-receiver.ts";
 import { sleep, waitFor } from "./e2e/wait.ts";
 
-// The real webhooks service with a short retry schedule, so "retry after the receiver is back" takes
-// milliseconds instead of the production 30 s first retry.
-const fastRetries = { webhooks: (ctx: Parameters<typeof createWebhooksService>[0]) => createWebhooksService(ctx, { retryScheduleMs: [400, 400, 400, 400], tickMs: 100 }) };
+// The real webhooks service with a short retry schedule (30 × 400 ms, so ~12 s before "dead" even on a
+// slow runner), so "retry after the receiver is back" takes milliseconds instead of the production 30 s.
+const fastRetries = { webhooks: (ctx: Parameters<typeof createWebhooksService>[0]) => createWebhooksService(ctx, { retryScheduleMs: Array<number>(30).fill(400), tickMs: 100 }) };
 
 let s: Stack;
 let rx: WebhookReceiver;
@@ -64,8 +65,9 @@ describe("restart durability", () => {
 
     await rx.start(); // receiver back
     const done = await waitFor(async () => (await deliveries()).find((d) => d.eventId === ev.id && d.status === "succeeded"), { what: "delivery after the receiver is back", timeout: 15_000 });
-    // The attempt aborted by the shutdown doesn't count; the one against the dead receiver does.
-    expect(done.attempts).toBe(2);
+    // The attempt aborted by the shutdown doesn't count; at least one ran against the dead receiver
+    // (more if the runner was slow to bring it back), then one succeeded.
+    expect(done.attempts).toBeGreaterThanOrEqual(2);
 
     const received = rx.at("/hooks/durable");
     expect(received).toHaveLength(2);
@@ -85,7 +87,7 @@ describe("restart durability", () => {
   it.runIf(HAS_AGENTS)("keeps agent keys and event cursors across a restart", async () => {
     const mcp = await s.agent(apiKey);
     const before = await mcp.ok("list_events", { limit: 100 });
-    const lastSeq = Number(/ack_events with seq=(\d+)/.exec(before)![1]);
+    const lastSeq = feedLastSeq(before);
     await mcp.ok("ack_events", { seq: lastSeq });
     await mcp.close();
 
@@ -93,7 +95,7 @@ describe("restart durability", () => {
     expect(await s.admin.get<SetupStatus>("/api/setup/status")).toEqual({ claimed: true, authenticated: true });
     const again = await s.agent(apiKey);
     try {
-      expect(await again.ok("list_events")).toMatch(new RegExp(`^No new events\\. Cursor: ${lastSeq} \\(acknowledged up to ${lastSeq}\\)`));
+      expect(await again.ok("list_events")).toMatch(MCP_TEXT.emptyFeed(lastSeq, lastSeq));
     } finally {
       await again.close();
     }

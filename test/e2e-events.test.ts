@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Account, Delivery, MailEvent, OverviewStats, Page, Webhook, WebhookInput, WebhookWithSecret } from "../shared/types.ts";
 import { HAS_AGENTS } from "./e2e/features.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
-import { type ReceivedHook, startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver } from "./e2e/webhook-receiver.ts";
+import { type ReceivedHook, startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver, withSignature } from "./e2e/webhook-receiver.ts";
 import { stays, waitFor } from "./e2e/wait.ts";
 
 const MAIL_EVENT_KEYS = ["id", "seq", "type", "accountId", "accountEmail", "message", "labelIds", "detail", "createdAt"];
@@ -51,8 +51,18 @@ async function createHook(path: string, patch: Partial<WebhookInput> = {}): Prom
 function expectSigned(secret: string, hook: ReceivedHook) {
   expect(verifyStandardWebhook(secret, hook)).toEqual({ ok: true });
   expect(hook.headers["content-type"]).toMatch(/^application\/json/);
-  // A tampered body must not verify (sanity check of the independent verifier).
+  // Negative controls for the independent verifier: tampered body, and non-canonical encodings of
+  // the right signature (base64url, unpadded, trailing junk, wrong version) must not verify.
   expect(verifyStandardWebhook(secret, { ...hook, body: hook.body.replace(/}$/, ' }') }).ok).toBe(false);
+  const sig = String(hook.headers["webhook-signature"]).split(" ")[0]!.slice(3);
+  expect(sig).toMatch(/^[A-Za-z0-9+/]{43}=$/);
+  const url = sig.replace(/\+/g, "-").replace(/\//g, "_");
+  for (const bad of [`v1,${url.replace(/=$/, "")}`, `v1,${sig.replace(/=$/, "")}`, `v1,${sig}AA`, `v1,${sig}=`, `v1, ${sig}`, `v2,${sig}`, `v1,${sig},x`]) {
+    expect(verifyStandardWebhook(secret, withSignature(hook, bad)).ok, bad).toBe(false);
+  }
+  if (url !== sig) expect(verifyStandardWebhook(secret, withSignature(hook, `v1,${url}`)).ok).toBe(false);
+  // A list with an unrelated signature first still verifies (rotation overlap).
+  expect(verifyStandardWebhook(secret, withSignature(hook, `v1,${"A".repeat(43)}= v1,${sig}`)).ok).toBe(true);
 }
 
 describe("events in the console", () => {

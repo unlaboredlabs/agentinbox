@@ -2,10 +2,10 @@
 // `agentinbox connect` / `listen` CLI end to end (feat/listen-client). Each part switches on when its
 // code is present (test/e2e/features.ts); contract: shared/agent-api.ts, docs/listen.md.
 
-import { existsSync, mkdtempSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Account, AuditEntry, MailEvent, Page, WebhookPayload } from "../shared/types.ts";
 import { HAS_AGENT_API, HAS_LISTEN_CLIENT } from "./e2e/features.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
@@ -14,10 +14,13 @@ import {
   agentMe,
   approvePairing,
   buildCli,
+  cleanupListenTemp,
   cliHome,
   commandRecorder,
   denyPairing,
+  execDir,
   findPairing,
+  killAllCli,
   openAgentStream,
   pairAgent,
   type PairingRequest,
@@ -26,7 +29,13 @@ import {
   spawnCli,
   startPairing,
 } from "./e2e/listen.ts";
-import { sleep, waitFor } from "./e2e/wait.ts";
+import { sleep, stays, waitFor } from "./e2e/wait.ts";
+
+/**
+ * How fast a revocation must reach a live stream and close it. The server reacts to the change
+ * immediately (bus "agent" event; typically a few ms here); the bound is generous for slow CI.
+ */
+const REVOKE_BOUND_MS = 5000;
 
 let s: Stack;
 let email: string;
@@ -199,7 +208,7 @@ describe.runIf(HAS_AGENT_API)("listener stream (/agent/v1/events/stream)", () =>
     // Not acked past seq1, but Last-Event-ID says ev2 was already seen.
     const withId = await openAgentStream(s.url, apiKey, { consumer: "resume", lastEventId: ev2.seq });
     await waitFor(() => withId.mail().length >= 1, { what: "event after Last-Event-ID" });
-    await sleep(200);
+    await stays(() => withId.mail().length > 1, 300, "a second event after Last-Event-ID");
     expect(withId.mail().map((p) => p.data.id)).toEqual([ev3.id]);
     withId.close();
 
@@ -218,28 +227,28 @@ describe.runIf(HAS_AGENT_API)("listener stream (/agent/v1/events/stream)", () =>
     await eventFor(outOfScope.id);
     await eventFor(inScope.id);
     await stream.next((e) => e.event === "mail");
-    await sleep(300);
+    await stays(() => stream.mail().length > 1, 300, "an out-of-scope event on the stream");
     expect(stream.mail().map((p) => p.data.message?.subject)).toEqual(["Labeled"]);
     stream.close();
 
     const backlog = await openAgentStream(s.url, apiKey, { consumer: "scoped-all", start: "beginning" });
     await backlog.next((e) => e.event === "mail");
-    await sleep(300);
+    await stays(() => backlog.mail().length > 1, 300, "an out-of-scope event in the backlog");
     expect(backlog.mail().every((p) => p.data.accountId === account.id && p.data.message?.subject === "Labeled")).toBe(true);
     backlog.close();
     expect(otherAccount.id).not.toBe(account.id);
   });
 
-  it("revokes a live stream within 1 s when the agent is disabled (403 after) or its key rotated (401 after)", async () => {
+  it("revokes a live stream promptly when the agent is disabled (403 after) or its key rotated (401 after)", async () => {
     const { apiKey, agentId } = await pairAgent(s, "Revokee", [grant(account.id)]);
     const live = await openAgentStream(s.url, apiKey, { consumer: "revoke" });
     let t = Date.now();
     await s.admin.patch(`/api/agents/${agentId}`, { disabled: true });
-    const revoked = await live.next((e) => e.event === "revoked", 1000);
+    const revoked = await live.next((e) => e.event === "revoked", REVOKE_BOUND_MS);
     expect(JSON.parse(revoked.data)).toEqual({ reason: "agent_disabled" });
-    await Promise.race([live.closed, sleep(1000)]);
+    await Promise.race([live.closed, sleep(REVOKE_BOUND_MS)]);
     expect(live.isClosed()).toBe(true);
-    expect(Date.now() - t).toBeLessThan(1500);
+    expect(Date.now() - t).toBeLessThan(REVOKE_BOUND_MS);
     const refused = await openAgentStream(s.url, apiKey, { consumer: "revoke" });
     expect(refused.status).toBe(403);
     expect(refused.error?.error?.code).toBe("agent_disabled");
@@ -250,10 +259,10 @@ describe.runIf(HAS_AGENT_API)("listener stream (/agent/v1/events/stream)", () =>
     expect(live2.status).toBe(200);
     t = Date.now();
     await s.admin.post(`/api/agents/${agentId}/rotate-key`);
-    expect(JSON.parse((await live2.next((e) => e.event === "revoked", 1000)).data)).toEqual({ reason: "key_rotated" });
-    await Promise.race([live2.closed, sleep(1000)]);
+    expect(JSON.parse((await live2.next((e) => e.event === "revoked", REVOKE_BOUND_MS)).data)).toEqual({ reason: "key_rotated" });
+    await Promise.race([live2.closed, sleep(REVOKE_BOUND_MS)]);
     expect(live2.isClosed()).toBe(true);
-    expect(Date.now() - t).toBeLessThan(1500);
+    expect(Date.now() - t).toBeLessThan(REVOKE_BOUND_MS);
     expect((await openAgentStream(s.url, apiKey, { consumer: "revoke" })).status).toBe(401);
     expect((await agentMe(s.url, apiKey)).status).toBe(401);
   });
@@ -263,7 +272,7 @@ describe.runIf(HAS_AGENT_API)("listener stream (/agent/v1/events/stream)", () =>
     const { apiKey } = await pairAgent(s, "Grant loser", [grant(extra.id)]);
     const live = await openAgentStream(s.url, apiKey, { consumer: "grant" });
     await s.admin.del(`/api/accounts/${extra.id}`);
-    expect(JSON.parse((await live.next((e) => e.event === "revoked", 1000)).data)).toEqual({ reason: "no_read_grant" });
+    expect(JSON.parse((await live.next((e) => e.event === "revoked", REVOKE_BOUND_MS)).data)).toEqual({ reason: "no_read_grant" });
     const refused = await openAgentStream(s.url, apiKey, { consumer: "grant" });
     expect(refused.status).toBe(403);
     expect(refused.error?.error?.code).toBe("no_read_grant");
@@ -275,7 +284,12 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     buildCli();
     await setup();
   }, 60_000);
-  afterAll(() => s.close());
+  afterEach(() => killAllCli());
+  afterAll(async () => {
+    await killAllCli();
+    cleanupListenTemp();
+    await s.close();
+  });
 
   it("pairs with connect, runs --exec per event with the event on stdin only, and resumes after a restart", async () => {
     const home = cliHome();
@@ -289,9 +303,15 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     expect(statSync(profile).mode & 0o777).toBe(0o600);
     expect(connect.output()).not.toMatch(/aib_[A-Za-z0-9]{20,}/); // the key is never printed
 
-    const work = mkdtempSync(join(tmpdir(), "agentinbox-exec-"));
-    const rec = commandRecorder(work);
+    const rec = commandRecorder(execDir());
     const canary = rec.canary;
+    // Attacker-controlled text: shell syntax that runs if anything ever hands it to a shell.
+    const evilFor = (path: string) => `$(touch ${path}) \`touch ${path}\` "; touch ${path}; " '$(touch ${path})' \${IFS}`;
+    const evil = evilFor(canary);
+    // Positive control: the same payload interpolated into `sh -c "echo …"` does create the file.
+    const control = join(execDir(), "CONTROL");
+    execFileSync("sh", ["-c", `echo Invoice ${evilFor(control)}`], { stdio: "ignore" });
+    expect(existsSync(control)).toBe(true);
     const listenArgs = ["listen", "--exec", rec.command, "--include-body", "--consumer", "e2e"];
     // A secret-looking AGENTINBOX_* variable in the listener's environment must not reach the command.
     const plant = { AGENTINBOX_PLANTED: "do-not-leak" };
@@ -303,8 +323,7 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
       });
     await connected();
 
-    // An attacker-controlled email: shell syntax in subject, sender name and body.
-    const evil = `$(touch ${canary}) \`touch ${canary}\` "; touch ${canary}; " '$(touch ${canary})' \${IFS}`;
+    // The attacker's email carries it in the subject, the sender name and the body.
     const msg = s.fake.deliver(email, {
       from: `"${evil.replace(/"/g, "'")}" <attacker@evil.test>`,
       subject: `Invoice ${evil}`,
@@ -328,8 +347,9 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     expect(call1.env).toMatchObject({ AGENTINBOX_EVENT_ID: ev.id, AGENTINBOX_EVENT_TYPE: "message.received", AGENTINBOX_EVENT_SEQ: String(ev.seq), AGENTINBOX_MESSAGE_ID: msg.id });
     for (const v of Object.values(call1.env)) expect(v).not.toMatch(/touch|\$\(|`/);
     expect(call1.argv).toEqual([]);
-    await sleep(300);
-    expect(existsSync(canary)).toBe(false);
+    // $AGENTINBOX_EVENT_FILE holds the same JSON as stdin, readable only by the user.
+    expect(call1.eventFile).toEqual({ content: call1.stdin, mode: 0o600 });
+    await stays(() => existsSync(canary), 300, "the canary file");
 
     // Kill the listener once it has acked, deliver while it's down, restart: nothing lost, nothing re-run.
     await waitFor(async () => (await s.admin.get<{ listeners: { consumer: string; ackedSeq: number }[] }>(`/api/agents/${agent.id}`)).listeners.find((l) => l.consumer === "e2e" && l.ackedSeq >= ev.seq), {
@@ -343,7 +363,7 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     listener = spawnCli(listenArgs, home, plant);
     try {
       await waitFor(() => rec.calls().length >= 3, { what: "missed events run after restart", timeout: 10_000 });
-      await sleep(500);
+      await stays(() => rec.calls().length > 3, 500, "a re-run after the listener restart");
       const ids = () => rec.calls().map((c) => (JSON.parse(c.stdin) as { event: WebhookPayload }).event.data.id);
       expect(ids().sort()).toEqual([ev.id, evDown1.id, evDown2.id].sort());
       expect(existsSync(canary)).toBe(false);
@@ -356,7 +376,7 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
       const after = s.fake.deliver(email, { from: "c@else.test", subject: "After daemon restart", text: "3" });
       const evAfter = await eventFor(after.id);
       await waitFor(() => ids().includes(evAfter.id), { what: "event after the daemon restart", timeout: 20_000 });
-      await sleep(300);
+      await stays(() => rec.calls().length > 4, 300, "a re-run after the daemon restart");
       expect(ids().sort()).toEqual([ev.id, evDown1.id, evDown2.id, evAfter.id].sort());
 
       // Revocation stops the listener for good: exit code 78 (the service won't restart it).

@@ -4,10 +4,15 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { PubsubState, PubsubTestResult, Settings, SetupState, SystemInfo } from "../shared/types.ts";
 import { mailbox, type Stack, startStack } from "./e2e/harness.ts";
-import { waitFor } from "./e2e/wait.ts";
+import { sleep, waitFor } from "./e2e/wait.ts";
 
 const TOPIC = "projects/fake-project/topics/agentinbox-gmail";
 const SUBSCRIPTION = "projects/fake-project/subscriptions/agentinbox-gmail-pull";
+
+/** Hourly polling, so only Pub/Sub can deliver within a test's timeouts. */
+const NO_POLLING = { pollIntervalSeconds: 3600 };
+/** Generous for slow CI runners; real time on a healthy runner is ~1 s. */
+const REALTIME_TIMEOUT = 15_000;
 
 let s: Stack | undefined;
 afterEach(async () => {
@@ -19,7 +24,8 @@ describe("pub/sub provisioning", () => {
   it("provisions topic, IAM and subscription, switches ingest to pubsub and delivers mail in real time", async () => {
     s = await startStack();
     const email = mailbox("pubsub");
-    const [account] = await s.bootstrap({ accounts: [email] });
+    // Hourly polling: anything that arrives within the test's timeouts came through Pub/Sub.
+    const [account] = await s.bootstrap({ accounts: [email], settings: NO_POLLING });
 
     // Accounts connect with Gmail scopes only; Pub/Sub access is requested incrementally, on demand.
     const needScope = await s.admin.failure(s.admin.post("/api/google/pubsub/provision"));
@@ -57,12 +63,10 @@ describe("pub/sub provisioning", () => {
     expect(test.ok).toBe(true);
     expect(test.message).toMatch(/Pub\/Sub is working/);
 
-    // Real time: no kicks; in healthy Pub/Sub mode the only polling is the 5-minute safety net, so
-    // delivery within 15 s proves the notification drove the sync (generous for slow CI runners).
-    const started = Date.now();
+    // Real time: no kicks, polling is hourly and the Pub/Sub safety-net sync runs every 5 minutes, so
+    // an event within the (generous, slow-CI-proof) timeout can only come from the notification.
     s.fake.deliver(email, { from: "Rt <rt@else.test>", subject: "Realtime hello", text: "fast" });
-    const ev = await s.waitForEvent((e) => e.message?.subject === "Realtime hello", { kick: false, timeout: 15_000 });
-    expect(Date.now() - started).toBeLessThan(4000);
+    const ev = await s.waitForEvent((e) => e.message?.subject === "Realtime hello", { kick: false, timeout: REALTIME_TIMEOUT });
     expect(ev).toMatchObject({ type: "message.received", accountId: account!.id });
     await waitFor(async () => (await s!.admin.get<SetupState>("/api/setup/state")).pubsub.lastMessageAt, { what: "pubsub.lastMessageAt" });
 
@@ -105,42 +109,47 @@ describe("pub/sub provisioning", () => {
     expect((await s.admin.get<SystemInfo>("/api/system")).ingest).toMatchObject({ mode: "poll", running: true, lastError: null });
 
     // The org admin grants an exception: retrying provisioning reuses the existing topic and succeeds.
+    await s.admin.patch("/api/settings", NO_POLLING);
     s.fake.orgPolicyBlocksIam(false);
     const fixed = await s.provisionPubsub();
     expect(fixed).toMatchObject({ mode: "pubsub", topic: TOPIC, subscription: SUBSCRIPTION, lastError: null });
     expect((await s.admin.get<SetupState>("/api/setup/state")).pubsub.lastError).toBeNull();
     s.fake.deliver(email, { from: "poll@else.test", subject: "Realtime at last", text: "x" });
-    await s.waitForEvent((e) => e.message?.subject === "Realtime at last", { kick: false, timeout: 15_000 });
-  }, 20_000);
+    await s.waitForEvent((e) => e.message?.subject === "Realtime at last", { kick: false, timeout: REALTIME_TIMEOUT });
+  }, 45_000);
 
   it("watches accounts connected after provisioning and stops the watch when an account is removed", async () => {
     s = await startStack();
     const first = mailbox("ps-first");
     const second = mailbox("ps-second");
-    await s.bootstrap({ accounts: [first], pubsub: true });
+    await s.bootstrap({ accounts: [first], pubsub: true, settings: NO_POLLING });
     const acc2 = await s.connectAccount(second);
     expect(s.fake.watch(second)?.topic).toBe(TOPIC);
 
     s.fake.deliver(second, { from: "x@else.test", subject: "Second realtime", text: "x" });
-    await s.waitForEvent((e) => e.message?.subject === "Second realtime", { kick: false, timeout: 15_000 });
+    await s.waitForEvent((e) => e.message?.subject === "Second realtime", { kick: false, timeout: REALTIME_TIMEOUT });
 
     await s.admin.del(`/api/accounts/${acc2.id}`);
     expect(s.fake.watch(second)).toBeNull();
   });
 
-  // Regression (fixed on main): the pull loop used to stay in its exponential backoff after the principal was reconnected.
+  // Regression (fixed on main): the pull loop used to stay in its exponential backoff (2, 4, 8 … 60 s)
+  // after the principal account was reconnected.
   it("resumes real-time ingest promptly after the Pub/Sub principal account is reconnected", async () => {
     s = await startStack();
     const email = mailbox("ps-principal");
-    const [account] = await s.bootstrap({ accounts: [email], pubsub: true });
+    const [account] = await s.bootstrap({ accounts: [email], pubsub: true, settings: NO_POLLING });
     s.fake.failRefresh(email);
     s.kick(account!.id);
     await waitFor(async () => (await s!.admin.get<{ id: string; status: string }[]>("/api/accounts"))[0]!.status === "needs_reauth", { what: "needs_reauth" });
-    await new Promise((r) => setTimeout(r, 3500)); // the pull loop fails meanwhile (no usable principal) and backs off
+    // The pull loop fails meanwhile (no usable principal). After ~7.5 s its backoff has reached 8 s, so
+    // without prompt recovery the next pull is ≥ 6 s away when we reconnect.
+    await sleep(7500);
 
     await s.connectAccount(email, { reauthAccountId: account!.id });
     s.fake.deliver(email, { from: "x@else.test", subject: "Realtime after reauth", text: "x" });
-    // Real time means about a second (one pull), as before the outage; without the fix this takes ≥ 2.5 s.
-    await s.waitForEvent((e) => e.message?.subject === "Realtime after reauth", { kick: false, timeout: 4500 });
-  }, 15_000);
+    // Bound, deliberately: a recovered loop delivers in about one pull (~1 s; generous 5 s for slow CI),
+    // a loop still in backoff takes ≥ 6 s. Polling is hourly, so nothing else can deliver it.
+    await s.waitForEvent((e) => e.message?.subject === "Realtime after reauth", { kick: false, timeout: 5000 });
+  }, 40_000);
 });

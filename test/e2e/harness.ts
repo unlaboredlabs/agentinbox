@@ -12,6 +12,7 @@
 //   await s.close();
 
 import "./env.ts";
+import "./features.ts"; // E2E_REQUIRE check
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
