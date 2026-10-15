@@ -36,7 +36,9 @@ describe("agentinbox CLI (subprocess)", () => {
     expect(await run.exit).toBe(0);
     const out = run.output();
     expect(out).toContain("K7QM-2XPD");
-    expect(out).toContain("hermes chat --oneshot -Q -t mcp-agentinbox --query-file -");
+    // Hermes forwards to its gateway: connect says to create the route first, and where the result goes.
+    expect(out).toContain("npx agentinbox-cli listen hermes --deliver telegram --run");
+    expect(out).toContain("http://127.0.0.1:8644/webhooks/agentinbox");
     expect(out).toContain("npx agentinbox-cli listen --save --recipe hermes");
     expect(out).not.toContain("$(");
     expect(out).toContain("npx agentinbox-cli listen service install");
@@ -63,25 +65,28 @@ describe("agentinbox CLI (subprocess)", () => {
     saveProfile("default", { url: api.url, apiKey: FAKE_KEY, agentId: "agt_1", agentName: "t", consumer: "c" });
     const bad = cli(["listen", "--recipe", "vim"], xdg);
     expect(await bad.exit).toBe(1);
-    expect(bad.output()).toContain('Unknown --recipe "vim". Built-in recipes: claude-code, codex, cursor, hermes.');
+    expect(bad.output()).toContain('Unknown --recipe "vim". Built-in recipes: claude-code, codex, cursor, hermes, hermes-oneshot.');
     const both = cli(["listen", "service", "install", "--recipe", "claude-code", "--exec", "cat"], xdg);
     expect(await both.exit).toBe(1);
     expect(both.output()).toContain("--recipe and --exec can't be combined");
     // Without a target, the service install points at --recipe first.
     const none = cli(["listen", "service", "install"], xdg);
     expect(await none.exit).toBe(1);
-    expect(none.output()).toContain("Nothing for the service to run. Pass --recipe <tool> (claude-code, codex, cursor, hermes)");
+    expect(none.output()).toContain("Nothing for the service to run. Pass --recipe <name> (claude-code, codex, cursor, hermes, hermes-oneshot)");
     expect(api.live.size).toBe(0);
   }, 30_000);
 
   it("--print-recipe validates the profile name before putting it into a command", async () => {
-    const bad = cli(["listen", "--print-recipe", "hermes", "--profile", "x$(touch /tmp/aib-recipe-pwn)"], xdg);
+    const bad = cli(["listen", "--print-recipe", "hermes-oneshot", "--profile", "x$(touch /tmp/aib-recipe-pwn)"], xdg);
     expect(await bad.exit).toBe(1);
     expect(bad.output()).toContain("Invalid profile name");
     expect(bad.output()).not.toContain("hermes chat");
-    const ok = cli(["listen", "--print-recipe", "hermes", "--profile", "work"], xdg);
+    const ok = cli(["listen", "--print-recipe", "hermes-oneshot", "--profile", "work"], xdg);
     expect(await ok.exit).toBe(0);
     expect(ok.output()).toContain("-t mcp-agentinbox-work --query-file -");
+    const fwd = cli(["listen", "--print-recipe", "hermes", "--profile", "work"], xdg);
+    expect(await fwd.exit).toBe(0);
+    expect(fwd.output().trim()).toBe("http://127.0.0.1:8644/webhooks/agentinbox-work");
   }, 30_000);
 
   it("listen exits 78 when access is revoked, so services don't restart-loop", async () => {

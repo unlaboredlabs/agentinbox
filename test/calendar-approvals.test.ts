@@ -312,6 +312,32 @@ describe("re-checks at approval", () => {
     expect((await s.approvals.approve(edit.id)).status).toBe("sent");
   });
 
+  it("an RSVP comment is re-checked against who can see it now", async () => {
+    const s = setup({ allowTo: ["*@acme.com"] });
+    const invite = (patch: object = {}) =>
+      s.cal.put(ME, {
+        id: "inv",
+        summary: "Offsite",
+        organizer: { email: "boss@acme.com" },
+        attendees: [{ email: "boss@acme.com", organizer: true }, { email: ME, self: true, responseStatus: "needsAction" }],
+        start: { dateTime: AT.start },
+        end: { dateTime: AT.end },
+        ...patch,
+      });
+    invite();
+    const added = await s.queue("respond_to_invitation", (c) => c.respond(ME, undefined, "inv", "accepted", { comment: "Q3 numbers" }));
+    const hidden = await s.queue("respond_to_invitation", (c) => c.respond(ME, undefined, "inv", "accepted", { comment: "Q3 numbers" }));
+    const bare = await s.queue("respond_to_invitation", (c) => c.respond(ME, undefined, "inv", "accepted", {}));
+    // The organizer invites an outsider after the answer was queued.
+    invite({ attendees: [{ email: "boss@acme.com", organizer: true }, { email: "eve@evil.com" }, { email: ME, self: true, responseStatus: "needsAction" }] });
+    expect(await s.approvals.approve(added.id)).toMatchObject({ status: "failed", error: "The comment would now be shown to eve@evil.com, whom the agent may no longer contact." });
+    invite({ guestsCanSeeOtherGuests: false });
+    expect(await s.approvals.approve(hidden.id)).toMatchObject({ status: "failed", error: expect.stringMatching(/^The organizer now hides the guest list/) });
+    // A bare answer carries no text: still fine.
+    expect((await s.approvals.approve(bare.id)).status).toBe("sent");
+    expect(s.cal.writes).toHaveLength(1);
+  });
+
   it("a disabled or deleted agent blocks it (the check shared with mail)", async () => {
     const s = setup();
     const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT }, {}));

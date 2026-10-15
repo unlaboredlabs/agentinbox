@@ -25,9 +25,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
 import type { Account, Agent, AgentWithKey, Approval, GrantInput, PairingRequest, Webhook, WebhookWithSecret } from "../../shared/types.ts";
 import { readSetupToken } from "../../server/auth/setup-token.ts";
+import { CALENDAR_SCOPES } from "../../server/google/scopes.ts";
 import { loadConfig } from "../../server/config.ts";
 import { startServer } from "../../server/server.ts";
 import { GMAIL_SCOPE, startFakeGoogle } from "../../test/fake-google.ts";
+import { seedCalendar } from "./calendar.ts";
 import { authHeader, type DemoMail, OPS_MAIL, PERSONAL_MAIL } from "./mail.ts";
 import { DEMO_CLIENT, startClientProxy } from "./proxy.ts";
 
@@ -148,8 +150,9 @@ await api("PATCH", "/api/settings", { publicUrl, pollIntervalSeconds: 30, webhoo
 await api("PUT", "/api/google/client", { ...DEMO_CLIENT, projectId: "acme-agentinbox", appType: "internal" });
 log("claimed, Google client configured");
 
-async function connect(email: string): Promise<Account> {
-  fake.consentAs(email);
+/** `scopes` overrides what the user grants on the consent screen (e.g. adds Calendar). */
+async function connect(email: string, scopes?: string[]): Promise<Account> {
+  fake.consentAs(email, { scopes });
   const { authUrl } = await api<{ authUrl: string }>("POST", "/api/accounts/connect", {});
   const res = await fetch(authUrl, { redirect: "manual" });
   const location = res.headers.get("location");
@@ -157,7 +160,8 @@ async function connect(email: string): Promise<Account> {
   return api<Account>("POST", "/api/accounts/connect/complete", { url: location });
 }
 
-const ops = await connect(OPS);
+// The ops account has Google Calendar; the personal one is mail-only (it never added Calendar).
+const ops = await connect(OPS, [GMAIL_SCOPE, "openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", ...CALENDAR_SCOPES]);
 const personal = await connect(PERSONAL);
 // Pub/Sub access is requested incrementally, like the console's "Grant Pub/Sub access" button.
 {
@@ -238,6 +242,11 @@ const billing = await api<AgentWithKey>("POST", "/api/agents", {
       maxSendsPerDay: 20,
     }),
   ],
+});
+await api<AgentWithKey>("POST", "/api/agents", {
+  name: "Scheduling assistant",
+  description: "Watches the ops calendar, answers vendor invitations and books follow-ups. Calendar changes need approval.",
+  grants: [grant(ops.id, { capabilities: ["calendar.read", "calendar.write"], calendarWriteMode: "approval", allowTo: ["*@acme.dev", "*@northwind.io"] })],
 });
 const digest = await api<AgentWithKey>("POST", "/api/agents", {
   name: "Weekly digest (old)",
@@ -438,6 +447,9 @@ for (const [email, m] of [...PERSONAL_MAIL.map((m) => [PERSONAL, m] as const), .
   await waitFor(`ingest of "${m.subject}"`, () => eventCount() >= planned.size, 8000);
 }
 log(`ingested ${eventCount()} message events`);
+
+await seedCalendar(fake, ctx, OPS, ops.id);
+log("calendars seeded");
 
 // The personal account's refresh token stops working (password change, revoked access…).
 fake.failRefresh(PERSONAL);
