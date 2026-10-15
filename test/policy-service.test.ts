@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { GmailLabel } from "../shared/types.ts";
 import { sha256 } from "../server/crypto.ts";
-import { disallowedRecipients, labelSearchTerm, querySyntaxError, scopedQuery, threadLabels } from "../server/policy/enforce.ts";
+import { parseGrantInput } from "../server/policy/grants.ts";
+import { matchesGlob } from "../server/util/glob.ts";
+import { disallowedRecipients, labelSearchTerm, querySyntaxError, scopedSearch, threadLabels } from "../server/policy/enforce.ts";
 import { grantInput, mailTestContext } from "./mail-fakes.ts";
 
 let dispose: (() => Promise<void>) | undefined;
@@ -127,6 +129,29 @@ describe("grants", () => {
   });
 });
 
+describe("grant defaults, ordering and glob folding", () => {
+  it("defaults sendMode to draft_only", () => {
+    const { sendMode: _omit, ...rest } = grantInput("acc_a");
+    expect(parseGrantInput(rest).sendMode).toBe("draft_only");
+  });
+
+  it("lists grants and agents in insertion order", () => {
+    const { ctx } = setup();
+    const { agent } = ctx.policy.createAgent({ name: "a", grants: [grantInput("acc_b"), grantInput("acc_a")] });
+    for (let i = 0; i < 5; i++) ctx.policy.createAgent({ name: `n${i}` });
+    expect(ctx.policy.grants(agent.id).map((g) => g.accountId)).toEqual(["acc_b", "acc_a"]);
+    expect(ctx.policy.listAgents().map((a) => a.name)).toEqual(["a", "n0", "n1", "n2", "n3", "n4"]);
+  });
+
+  it("folds case in ASCII only", () => {
+    const kelvin = String.fromCodePoint(0x212a);
+    expect(matchesGlob(`${kelvin}im@partner.com`, "kim@partner.com")).toBe(false);
+    expect(matchesGlob(`${kelvin}im@partner.com`, "*@partner.com")).toBe(true);
+    expect(matchesGlob("Kim@PARTNER.com", "kim@partner.com")).toBe(true);
+    expect(matchesGlob(`kim@${String.fromCodePoint(0xff50)}artner.com`, "kim@partner.com")).toBe(true);
+  });
+});
+
 describe("canSeeEvent", () => {
   it("requires read, honours thread-level label scope and passes account events", () => {
     const { ctx } = setup();
@@ -157,19 +182,21 @@ describe("query scoping", () => {
     { id: "Label_3", name: 'Odd "quoted"', type: "user" },
   ];
 
-  it("maps labels to search terms", () => {
+  it("maps labels to Gmail's search form", () => {
     expect(labelSearchTerm(labels[0]!)).toBe("in:inbox");
     expect(labelSearchTerm(labels[1]!)).toBe("category:updates");
-    expect(labelSearchTerm(labels[2]!)).toBe("label:Support");
-    expect(labelSearchTerm(labels[3]!)).toBe('label:"Clients/Big Co"');
-    expect(labelSearchTerm(labels[4]!)).toBe('label:"Odd quoted"');
+    expect(labelSearchTerm(labels[2]!)).toBe("label:support");
+    expect(labelSearchTerm(labels[3]!)).toBe("label:clients-big-co");
+    expect(labelSearchTerm(labels[4]!)).toBe("label:odd--quoted-");
   });
 
-  it("ANDs the scope onto the user query", () => {
-    expect(scopedQuery("from:bob", null, labels)).toBe("from:bob");
-    expect(scopedQuery("from:bob OR from:eve", ["Label_1"], labels)).toBe("(from:bob OR from:eve) label:Support");
-    expect(scopedQuery("", ["Label_1", "INBOX"], labels)).toBe("(label:Support OR in:inbox)");
-    expect(scopedQuery("x", ["Label_gone"], labels)).toBeNull();
+  it("uses the exact labelIds filter for one scope label and ORs label terms for several", () => {
+    expect(scopedSearch("from:bob", null, labels)).toEqual({ q: "from:bob" });
+    expect(scopedSearch("from:bob", ["Label_1"], labels)).toEqual({ q: "from:bob", labelIds: ["Label_1"] });
+    expect(scopedSearch("from:bob OR from:eve", ["Label_1", "Label_2"], labels)).toEqual({ q: "(from:bob OR from:eve) (label:support OR label:clients-big-co)" });
+    expect(scopedSearch("", ["Label_1", "INBOX"], labels)).toEqual({ q: "(label:support OR in:inbox)" });
+    expect(scopedSearch("x", ["Label_gone", "Label_1"], labels)).toEqual({ q: "x", labelIds: ["Label_1"] });
+    expect(scopedSearch("x", ["Label_gone"], labels)).toBeNull();
   });
 
   it("rejects queries that could escape the wrapping group", () => {

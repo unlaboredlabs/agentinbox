@@ -114,12 +114,27 @@ describe("MCP over HTTP", () => {
       ].sort(),
     );
     expect(await names(nothing.apiKey)).toEqual(["list_accounts"]);
+    const fullTools = (await (await mcpClient(http, full.apiKey)).listTools()).tools;
+    expect(fullTools.find((t) => t.name === "send_message")!.annotations).toMatchObject({ destructiveHint: true, openWorldHint: true });
+    expect(fullTools.find((t) => t.name === "get_send_status")!.annotations?.readOnlyHint).toBe(true);
 
     const tools = (await r.listTools()).tools;
     const getThread = tools.find((t) => t.name === "get_thread")!;
     expect(getThread.annotations?.readOnlyHint).toBe(true);
     expect(getThread.description).toMatch(/untrusted/);
     expect(Object.keys(getThread.inputSchema.properties ?? {}).sort()).toEqual(["account", "thread_id"]);
+  });
+
+  it("rejects oversized request bodies with 413", async () => {
+    const { http, ctx } = setup();
+    const { apiKey } = ctx.policy.createAgent({ name: "x" });
+    const res = await http.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { pad: "x".repeat(5 * 1024 * 1024) } }),
+    });
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/too large/);
   });
 
   it("calls tools and audits successes and denials with reasons", async () => {
@@ -131,7 +146,8 @@ describe("MCP over HTTP", () => {
 
     const search = await client.callTool({ name: "search_threads", arguments: { query: "from:alice" } });
     expect(text(search)).toMatch(/No threads found/);
-    expect(gmail.queries).toEqual(["(from:alice) label:Support"]);
+    expect(gmail.queries).toEqual(["from:alice"]);
+    expect(gmail.searchLabelIds).toEqual([["Label_support"]]);
 
     const denied = await client.callTool({ name: "get_thread", arguments: { thread_id: "t1" } });
     expect(denied.isError).toBe(true);

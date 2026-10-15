@@ -56,7 +56,12 @@ export class FakeGmail implements GmailClient {
   readonly drafts = new Map<string, { id: string; raw: string; threadId: string | null }>();
   readonly sent: { raw: string; threadId: string | null; id: string }[] = [];
   readonly queries: (string | undefined)[] = [];
+  readonly searchLabelIds: (string[] | undefined)[] = [];
   labels: GmailLabel[] = [...SYSTEM_LABELS];
+  /** Returned by listThreads, to test pagination. */
+  nextPageToken: string | null = null;
+  /** Errors thrown (once each) by the next sendDraft calls. */
+  sendDraftErrors: Error[] = [];
   private seq = 0;
 
   constructor(readonly accountId: string) {}
@@ -120,11 +125,12 @@ export class FakeGmail implements GmailClient {
     return { messages: [...this.messages.values()].map((m) => ({ id: m.id, threadId: m.threadId })), nextPageToken: null, resultSizeEstimate: this.messages.size };
   }
 
-  /** Ignores the query (records it) so post-filtering is exercised. */
-  async listThreads(p: { q?: string; maxResults?: number }) {
+  /** Ignores the query and label filter (records them) so post-filtering is exercised. */
+  async listThreads(p: { q?: string; labelIds?: string[]; maxResults?: number; pageToken?: string }) {
     this.queries.push(p.q);
+    this.searchLabelIds.push(p.labelIds);
     const ids = [...new Set([...this.messages.values()].map((m) => m.threadId))].slice(0, p.maxResults ?? 100);
-    return { threads: ids.map((id) => ({ id, snippet: "", historyId: "1" })), nextPageToken: null, resultSizeEstimate: ids.length };
+    return { threads: ids.map((id) => ({ id, snippet: "", historyId: "1" })), nextPageToken: this.nextPageToken, resultSizeEstimate: ids.length };
   }
 
   async getMessage(id: string, format = "full") {
@@ -179,10 +185,13 @@ export class FakeGmail implements GmailClient {
   async getDraft(id: string): Promise<GmailDraft> {
     const d = this.drafts.get(id);
     if (!d) throw new GoogleApiError(404, "Draft not found", "notFound");
-    return { id, message: { id: `dm-${id}`, threadId: d.threadId ?? "t" } };
+    // Real drafts.get returns the full message; the body here mirrors the raw so edits change it.
+    return { id, message: { id: `dm-${id}`, threadId: d.threadId ?? "t", payload: { mimeType: "text/plain", headers: [], body: { size: d.raw.length, data: d.raw } } } };
   }
 
   async sendDraft(id: string) {
+    const err = this.sendDraftErrors.shift();
+    if (err) throw err;
     const d = this.drafts.get(id);
     if (!d) throw new GoogleApiError(404, "Draft not found", "notFound");
     this.drafts.delete(id);
@@ -372,7 +381,9 @@ export class FakeEvents {
         .filter((e) => !opts.accountIds || opts.accountIds.includes(e.accountId))
         .filter((e) => ctx.policy.canSeeEvent(agentId, { accountId: e.accountId, type: e.type, threadLabelIds: e.message?.labelIds ?? [] }))
         .slice(0, opts.limit ?? 50);
-      return { events, cursor: events.at(-1)?.seq ?? after, ackedSeq };
+      // `hasMore` is additive in the events contract (feat/events-webhooks); harmless before it lands.
+      const result: FeedResult & { hasMore: boolean } = { events, cursor: events.at(-1)?.seq ?? after, ackedSeq, hasMore: false };
+      return result;
     };
     return {
       ...stubService<EventsService>("events"),

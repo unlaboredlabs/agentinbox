@@ -6,6 +6,7 @@ import { sha256 } from "../crypto.ts";
 import { bool, json, now } from "../db/index.ts";
 import { badRequest, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
+import { Approvals } from "../mail/approvals.ts";
 import { type GrantRow, parseGrantInput, toGrant } from "./grants.ts";
 import type { AgentPrincipal, PolicyService } from "./types.ts";
 
@@ -44,9 +45,11 @@ export const newApiKey = (): string => API_KEY_PREFIX + randomToken(KEY_RANDOM_C
 
 export function createPolicyService(ctx: AppContext): PolicyService {
   const { db } = ctx;
+  // Pending approvals are cancelled whenever the agent loses the right to send them.
+  const approvals = new Approvals(ctx);
 
   const grantsOf = (agentId: string): Grant[] =>
-    db.all<GrantRow>("SELECT * FROM grants WHERE agent_id = ? ORDER BY created_at, id", agentId).map(toGrant);
+    db.all<GrantRow>("SELECT * FROM grants WHERE agent_id = ? ORDER BY created_at, rowid", agentId).map(toGrant);
 
   const toAgent = (r: AgentRow): Agent => ({
     id: r.id,
@@ -118,7 +121,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     },
 
     listAgents() {
-      return db.all<AgentRow>("SELECT * FROM agents ORDER BY created_at, id").map(toAgent);
+      return db.all<AgentRow>("SELECT * FROM agents ORDER BY created_at, rowid").map(toAgent);
     },
 
     getAgent(id) {
@@ -177,6 +180,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
         params.push(fields.disabled ? 1 : 0);
       }
       if (sets.length) db.run(`UPDATE agents SET ${sets.join(", ")} WHERE id = ?`, ...params, id);
+      if (fields.disabled) approvals.cancelForAgent(id, null, "the agent was disabled");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "agent.update", target: id, outcome: "ok", detail: { fields: Object.keys(fields) } });
       return toAgent(requireRow(id));
     },
@@ -191,6 +195,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
 
     deleteAgent(id) {
       const r = requireRow(id);
+      approvals.cancelForAgent(id, null, "the agent was deleted");
       db.run("DELETE FROM agents WHERE id = ?", id);
       ctx.audit.record({ ...ADMIN_ACTOR, action: "agent.delete", target: id, outcome: "ok", detail: { name: r.name } });
     },
@@ -203,6 +208,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       }
       const g = parseGrantInput(raw);
       const grant = writeGrant(agentId, g);
+      if (!g.capabilities.includes("send")) approvals.cancelForAgent(agentId, accountId, "the agent's send permission was removed");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.upsert", accountId, target: agentId, outcome: "ok", detail: grantSummary(g) });
       return grant;
     },
@@ -211,6 +217,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       requireRow(agentId);
       const { changes } = db.run("DELETE FROM grants WHERE agent_id = ? AND account_id = ?", agentId, accountId);
       if (!changes) throw notFound("Grant");
+      approvals.cancelForAgent(agentId, accountId, "the agent's access to this account was removed");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.delete", accountId, target: agentId, outcome: "ok" });
     },
 

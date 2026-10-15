@@ -37,7 +37,8 @@ type Extra = { signal: AbortSignal };
 
 const READ: ToolAnnotations = { readOnlyHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
-const SEND: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+// Sending can't be undone, so send tools are marked destructive.
+const SEND: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
 
 // ───────────── Shared argument schemas ─────────────
 
@@ -134,6 +135,9 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
         if (d.reason === "internal") log.error(`Tool ${name} failed`, { agent: principal.agentId, error: errorMessage(err) });
         record(d.outcome, d.reason);
         return { isError: true, content: [{ type: "text", text: d.message }] };
+      } finally {
+        // A send-cap reservation is released only once its outcome is in the audit log (which the caps count).
+        trace.release?.();
       }
     };
     server.registerTool(
@@ -210,7 +214,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
       },
       async (args, mail) => {
         const r = await mail.searchThreads(args.account, args.query, args.max_results ?? 10, args.page_token);
-        return formatSearch(r.account, args.query, r.threads, r.nextPageToken, r.labels);
+        return formatSearch(r.account, args.query, r.threads, r.nextPageToken, r.labels, r.hidden);
       },
     );
 
@@ -378,7 +382,9 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
   // ───────────── send ─────────────
 
   if (can.has("send")) {
-    const modes = "Depending on the account's settings the message is sent immediately, saved as a draft for a human, or queued for human approval; the result's status says which.";
+    const modes =
+      "Depending on the account's settings the message is sent immediately, saved as a draft for a human, or queued for human approval; the result's status says which. " +
+      "Send limits count messages (not recipients).";
     if (can.sendNew) {
       register(
         "send_message",
@@ -453,7 +459,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
         input: { approval_id: z.string().min(1).describe("The approvalId returned by send_message, reply or forward.") },
         annotations: READ,
       },
-      async (args, mail) => formatApprovalStatus(await mail.sendStatus(args.approval_id)),
+      async (args, mail) => formatApprovalStatus(mail.sendStatus(args.approval_id)),
     );
   }
 

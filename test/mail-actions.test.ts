@@ -86,7 +86,8 @@ describe("reading", () => {
     expect(r.text).toContain("Thread t1 in me@acme.com (2 messages");
     expect(r.text).toContain('<email_content from="alice@client.com" untrusted>\nHi, my order **#42** is late.\n</email_content>');
     expect(r.text).toContain("Labels: INBOX, UNREAD, Support");
-    expect(r.text).toContain("notes.txt (text/plain, 11 B, attachment_id: att-txt)");
+    // Agents see stable part ids, not Gmail's per-fetch attachment ids.
+    expect(r.text).toContain("notes.txt (text/plain, 11 B, attachment_id: 1)");
     expect(s.audits("get_thread")[0]).toMatchObject({ outcome: "ok", accountId: "acc_a", target: "t1", detail: { messages: 2 } });
   });
 
@@ -131,7 +132,9 @@ describe("label scope", () => {
   it("rewrites search queries and post-filters results by thread labels", async () => {
     const s = await setup({ labelScope: ["Label_support"] });
     const r = await s.call("search_threads", { query: "from:alice OR from:noreply" });
-    expect(s.gmail.queries.at(-1)).toBe("(from:alice OR from:noreply) label:Support");
+    // One scope label: Gmail's exact labelIds filter, query untouched.
+    expect(s.gmail.queries.at(-1)).toBe("from:alice OR from:noreply");
+    expect(s.gmail.searchLabelIds.at(-1)).toEqual(["Label_support"]);
     // The fake ignores q and returns both threads; t2 must be filtered out.
     expect(r.text).toContain("thread_id: t1");
     expect(r.text).not.toContain("t2");
@@ -338,7 +341,7 @@ describe("approvals", () => {
     s.gmail.drafts.clear();
     const a = await s.ctx.mail.approve(s.approvalId);
     expect(a.status).toBe("failed");
-    expect(a.error).toMatch(/Draft not found/);
+    expect(a.error).toMatch(/draft no longer exists in Gmail/);
   });
 
   it("expires overdue approvals and deletes their drafts", async () => {

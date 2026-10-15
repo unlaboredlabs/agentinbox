@@ -10,25 +10,38 @@ import type { ParsedMessage } from "../google/types.ts";
 
 // ───────────── Invisible unicode ─────────────
 
-// Zero-width (U+200B–U+200D), word joiner + invisible operators (U+2060–U+2064), BOM (U+FEFF),
-// bidi embeddings/overrides (U+202A–U+202E) and isolates (U+2066–U+2069), tag characters (U+E0000–U+E007F).
-const INVISIBLE = /[\u200B-\u200D\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
-// A ZWJ inside an emoji sequence (👨\u200D👩\u200D👧) is visible as part of the glyph: keep it.
-const EMOJI_ZWJ = /(\p{Extended_Pictographic}\uFE0F?)\u200D(?=\p{Extended_Pictographic})/gu;
-const ZWJ_KEEP = "\u0000ZWJ\u0000";
+// Flagged and stripped: zero-width space/non-joiner/joiner (outside the contexts below), word joiner and
+// invisible operators (U+2060–U+2064), BOM (except a leading one), bidi overrides LRO/RLO (U+202D/E) and
+// tag characters (U+E0000–U+E007F, "ASCII smuggling").
+// Stripped silently: bidi embeddings LRE/RLE, PDF (U+202A–U+202C) and isolates (U+2066–U+2069). They only
+// change visual order, never the logical text an agent reads, and are common in legitimate RTL text.
+// Kept: LRM/RLM (U+200E/F, never matched); ZWNJ/ZWJ between characters of joining scripts (Persian,
+// Indic, …), where they change spelling; ZWJ inside emoji sequences; tag characters forming an emoji
+// flag tag sequence (U+1F3F4 + tag letters/digits + CANCEL TAG).
+const JOINING_SCRIPTS = [
+  "Arabic", "Syriac", "Nko", "Mongolian", "Thaana", "Devanagari", "Bengali", "Gurmukhi", "Gujarati", "Oriya",
+  "Tamil", "Telugu", "Kannada", "Malayalam", "Sinhala", "Myanmar", "Khmer", "Tibetan",
+].map((s) => `\\p{Script_Extensions=${s}}`).join("");
+const PICTO = "\\p{Extended_Pictographic}";
+const KEEP_FLAG = "\\u{1F3F4}[\\u{E0030}-\\u{E0039}\\u{E0061}-\\u{E007A}]{2,7}\\u{E007F}";
+const KEEP_JOINER = `(?<=[${JOINING_SCRIPTS}])[\\u200C\\u200D](?=[${JOINING_SCRIPTS}])`;
+const KEEP_EMOJI_ZWJ = `(?<=${PICTO}(?:\\uFE0F|\\p{Emoji_Modifier})?)\\u200D(?=${PICTO})`;
+const SILENT = "[\\u202A-\\u202C\\u2066-\\u2069]";
+const FLAGGED = "[\\u200B-\\u200D\\u2060-\\u2064\\uFEFF\\u202D\\u202E\\u{E0000}-\\u{E007F}]";
+const INVISIBLE = new RegExp(`(${KEEP_FLAG})|(${KEEP_JOINER})|(${KEEP_EMOJI_ZWJ})|(${SILENT})|${FLAGGED}`, "gu");
 
-/** Removes invisible/smuggling characters. Returns the cleaned text and how many were removed. */
+/** Removes invisible/smuggling characters. `removed` counts only the ones that can hide or disguise text. */
 export function stripInvisible(text: string): { text: string; removed: number } {
   let removed = 0;
-  const out = text
-    .replace(EMOJI_ZWJ, `$1${ZWJ_KEEP}`)
-    .replace(INVISIBLE, () => {
-      removed++;
-      return "";
-    })
-    .replaceAll(ZWJ_KEEP, "\u200D");
+  const out = text.replace(INVISIBLE, (m: string, flag?: string, joiner?: string, zwj?: string, silent?: string, offset?: number) => {
+    if (flag || joiner || zwj) return m;
+    if (!silent && !(m === "\uFEFF" && offset === 0)) removed++;
+    return "";
+  });
   return { text: out, removed };
 }
+
+const visibleText = (s: string | null) => stripInvisible(s ?? "").text.trim();
 
 // ───────────── Minimal DOM typing (linkedom; the server tsconfig has no DOM lib) ─────────────
 
@@ -149,31 +162,80 @@ function backgroundColor(style: Map<string, string>, el: DomElement): string | n
 /** Structural elements that never render as readable text. Removed silently (not "hidden content"). */
 const NON_RENDERED = new Set(["SCRIPT", "STYLE", "HEAD", "TITLE", "META", "LINK", "TEMPLATE", "NOSCRIPT", "OBJECT", "EMBED", "IFRAME", "SVG"]);
 
-function isHiddenByStyle(style: Map<string, string>): boolean {
+/** Hidden in a way no descendant can undo: the element and its subtree are removed. */
+function isRemovedByStyle(style: Map<string, string>): boolean {
   if (style.get("display") === "none") return true;
-  const visibility = style.get("visibility");
-  if (visibility === "hidden" || visibility === "collapse") return true;
   if (isZeroLength(style.get("opacity"))) return true;
-  if (isZeroLength(style.get("font-size"))) return true;
   // Collapsed boxes: max-height:0/height:0 with overflow hidden (a common "preheader" trick).
   const overflow = style.get("overflow");
   if (overflow === "hidden" && (isZeroLength(style.get("max-height")) || isZeroLength(style.get("height")))) return true;
   return false;
 }
 
-const hasText = (n: DomNode) => (n.textContent ?? "").replace(INVISIBLE, "").trim().length > 0;
+/** Effective zero font size. Relative sizes (em, %, ex, ch, smaller/larger, inherit) of a zero size stay zero. */
+function fontSizeZero(value: string | undefined, parentZero: boolean): boolean {
+  if (value === undefined) return parentZero;
+  if (isZeroLength(value)) return true;
+  if (/^(inherit|unset|smaller|larger)$/.test(value) || /^[\d.]+(em|%|ex|ch)$/.test(value)) return parentZero;
+  return false;
+}
+
+/** A background a stylesheet or image could provide, so the inline background colour may not be what's shown. */
+function hasBackgroundImage(style: Map<string, string>, el: DomElement): boolean {
+  const bgImage = style.get("background-image");
+  return (!!bgImage && bgImage !== "none") || /url\(/.test(style.get("background") ?? "") || el.hasAttribute("background");
+}
+
+const hasText = (n: DomNode) => visibleText(n.textContent).length > 0;
 
 function isTrackingPixel(el: DomElement, style: Map<string, string>): boolean {
   const small = (v: string | null | undefined) => v != null && /^\s*[01](?:px)?\s*$/.test(v);
   return (small(el.getAttribute("width")) && small(el.getAttribute("height"))) || (small(style.get("width")) && small(style.get("height")));
 }
 
+/** Rendering context inherited down the tree (inline styles only; stylesheets are not evaluated). */
+interface Inherited {
+  color: string | null;
+  bg: string | null;
+  /** The real background may differ from `bg`: a background image, or a class/id a stylesheet could target. */
+  bgUncertain: boolean;
+  /** `background-clip: text` (gradient text): transparent text colour is still visible. */
+  clipText: boolean;
+  fontZero: boolean;
+  /** visibility:hidden, which a descendant can undo with visibility:visible. */
+  invisible: boolean;
+}
+
 interface CleanState {
   /** Hidden elements/text that carried readable text. */
   removed: number;
+  /** The document had <style> blocks, so class/id selectors may change colours we can't see. */
+  styled: boolean;
 }
 
-function cleanTree(node: DomNode, color: string | null, bg: string | null, state: CleanState): void {
+function textHidden(ctx: Inherited): boolean {
+  if (ctx.invisible || ctx.fontZero) return true;
+  if (ctx.color === "transparent") return !ctx.clipText;
+  return !!ctx.color && !ctx.bgUncertain && ctx.color === ctx.bg;
+}
+
+function childContext(el: DomElement, style: Map<string, string>, parent: Inherited, state: CleanState): Inherited {
+  const tag = el.tagName.toUpperCase();
+  const visibility = style.get("visibility");
+  const ownBg = backgroundColor(style, el);
+  const targetable = state.styled && (el.hasAttribute("class") || el.hasAttribute("id"));
+  const clip = style.get("background-clip") ?? style.get("-webkit-background-clip");
+  return {
+    color: normalizeColor(style.get("color")) ?? (tag === "FONT" ? normalizeColor(el.getAttribute("color")) : null) ?? parent.color,
+    bg: ownBg ?? parent.bg,
+    bgUncertain: (ownBg ? false : parent.bgUncertain) || hasBackgroundImage(style, el) || targetable,
+    clipText: parent.clipText || clip === "text",
+    fontZero: fontSizeZero(style.get("font-size"), parent.fontZero),
+    invisible: visibility === "hidden" || visibility === "collapse" ? true : visibility === "visible" ? false : parent.invisible,
+  };
+}
+
+function cleanTree(node: DomNode, ctx: Inherited, state: CleanState): void {
   for (const child of Array.from(node.childNodes)) {
     if (child.nodeType === COMMENT) {
       const text = (child.textContent ?? "").trim();
@@ -183,7 +245,7 @@ function cleanTree(node: DomNode, color: string | null, bg: string | null, state
       continue;
     }
     if (child.nodeType === TEXT) {
-      if (color && hasText(child) && (color === "transparent" || color === bg)) {
+      if (hasText(child) && textHidden(ctx)) {
         state.removed++;
         child.remove();
       }
@@ -197,17 +259,18 @@ function cleanTree(node: DomNode, color: string | null, bg: string | null, state
       continue;
     }
     const style = parseStyle(el.getAttribute("style"));
-    if (el.hasAttribute("hidden") || isHiddenByStyle(style)) {
+    if (el.hasAttribute("hidden") || isRemovedByStyle(style)) {
       if (hasText(el)) state.removed++;
       el.remove();
       continue;
     }
-    if (tag === "IMG" && isTrackingPixel(el, style)) {
-      el.remove();
+    const inner = childContext(el, style, ctx, state);
+    if (tag === "IMG") {
+      // Images are never dropped for font-size; only when truly invisible or a tracking pixel.
+      if (isTrackingPixel(el, style) || inner.invisible) el.remove();
       continue;
     }
-    const ownColor = normalizeColor(style.get("color")) ?? (tag === "FONT" ? normalizeColor(el.getAttribute("color")) : null);
-    cleanTree(el, ownColor ?? color, backgroundColor(style, el) ?? bg, state);
+    cleanTree(el, inner, state);
   }
 }
 
@@ -308,19 +371,30 @@ function tidyMarkdown(md: string): string {
     .trim();
 }
 
+/**
+ * Rebuilds a well-formed document (linkedom misplaces head content that isn't inside <head>): everything
+ * before <body> goes into <head>, the rest (including stray content after </body>) into <body>.
+ */
+function normalizeDocument(html: string): string {
+  const open = /<body\b([^>]*)>/i.exec(html);
+  if (!open) return `<!DOCTYPE html><html><head></head><body>${html}</body></html>`;
+  const strip = (x: string) => x.replace(/<!DOCTYPE[^>]*>|<\/?(?:html|head|body)\b[^>]*>/gi, "");
+  const head = strip(html.slice(0, open.index));
+  const body = strip(html.slice(open.index + open[0].length));
+  return `<!DOCTYPE html><html><head>${head}</head><body${open[1]}>${body}</body></html>`;
+}
+
 /** Cleans hidden content out of an HTML body and converts it to markdown. */
 export function htmlToMarkdown(html: string): { markdown: string; removed: number } {
-  const source = /<html[\s>]/i.test(html) ? html : `<!DOCTYPE html><html><head></head><body>${html}</body></html>`;
-  const doc = parseHTML(source).document as unknown as DomDocument;
+  const doc = parseHTML(normalizeDocument(html)).document as unknown as DomDocument;
   const root = doc.body ?? doc.documentElement;
-  const state: CleanState = { removed: 0 };
-  // Body-level colours count as the starting context.
-  const bodyStyle = parseStyle(root.getAttribute("style"));
-  const bodyColor = normalizeColor(bodyStyle.get("color")) ?? normalizeColor(root.getAttribute("text"));
-  if (root.hasAttribute("hidden") || isHiddenByStyle(bodyStyle)) {
-    return { markdown: "", removed: hasText(root) ? 1 : 0 };
-  }
-  cleanTree(root, bodyColor, backgroundColor(bodyStyle, root), state);
+  const state: CleanState = { removed: 0, styled: doc.documentElement.querySelector("style") !== null };
+  const rootStyle = parseStyle(root.getAttribute("style"));
+  if (root.hasAttribute("hidden") || isRemovedByStyle(rootStyle)) return { markdown: "", removed: hasText(root) ? 1 : 0 };
+  const base: Inherited = { color: null, bg: null, bgUncertain: false, clipText: false, fontZero: false, invisible: false };
+  const rootCtx = childContext(root, rootStyle, base, state);
+  if (!rootCtx.color) rootCtx.color = normalizeColor(root.getAttribute("text"));
+  cleanTree(root, rootCtx, state);
   const tables = prepareTables(doc, root);
   let md = turndown().turndown(root.innerHTML);
   for (const [key, table] of tables) md = md.replace(key, `\n\n${table}\n\n`);
@@ -336,23 +410,55 @@ export function cleanPlainText(text: string): { text: string; removed: number } 
 
 // ───────────── Signals ─────────────
 
-/** First spf/dkim/dmarc result in Authentication-Results (the topmost header is the receiving server's). */
+/**
+ * SPF/DKIM/DMARC from the topmost Authentication-Results header only, which Gmail adds on receipt
+ * (authserv-id mx.google.com). Lower headers can be supplied by the sender and never fill gaps. Comments
+ * and quoted strings are removed first, and results are read only at the start of each resinfo.
+ */
 export function parseAuthResults(header: string | null): ContentSignals["auth"] {
   if (!header) return null;
-  const first = (mech: string) => new RegExp(`\\b${mech}\\s*=\\s*([a-z]+)`, "i").exec(header)?.[1]?.toLowerCase() ?? null;
-  return { spf: first("spf"), dkim: first("dkim"), dmarc: first("dmarc") };
+  // Unfold continuation lines, then take the first header (several are joined with "\n").
+  const top = header.replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)[0] ?? "";
+  let s = top.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  for (let prev = ""; prev !== s; ) {
+    prev = s;
+    s = s.replace(/\([^()]*\)/g, " ");
+  }
+  const [servId = "", ...resinfo] = s.split(";");
+  if (!/^(?:[a-z0-9-]+\.)*google\.com$/i.test(servId.trim().split(/\s+/)[0] ?? "")) return null;
+  const result = (method: string) => {
+    for (const r of resinfo) {
+      const m = new RegExp(`^\\s*${method}\\s*=\\s*([a-z]+)`, "i").exec(r);
+      if (m) return m[1]!.toLowerCase();
+    }
+    return null;
+  };
+  return { spf: result("spf"), dkim: result("dkim"), dmarc: result("dmarc") };
 }
 
 /** Consumer mailbox domains: senders on the same domain are still other people. */
 const CONSUMER_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
 
+/** Lower-cased address; Gmail addresses ignore dots and +tags in the local part, googlemail.com ≡ gmail.com. */
+function canonicalAddress(email: string): { local: string; domain: string } {
+  const e = email.trim().toLowerCase();
+  const at = e.lastIndexOf("@");
+  let local = e.slice(0, at);
+  let domain = e.slice(at + 1);
+  if (CONSUMER_DOMAINS.has(domain)) {
+    domain = "gmail.com";
+    local = local.replace(/\+.*$/, "").replace(/\./g, "");
+  }
+  return { local, domain };
+}
+
+/** Sender outside the account's organization (subdomains count as inside); for consumer Gmail, anyone but the account itself. */
 export function isExternal(sender: string | null | undefined, accountEmail: string): boolean {
   if (!sender) return false;
-  const s = sender.trim().toLowerCase();
-  const own = accountEmail.trim().toLowerCase();
-  const domain = (e: string) => e.slice(e.lastIndexOf("@") + 1);
-  if (CONSUMER_DOMAINS.has(domain(own))) return s !== own;
-  return domain(s) !== domain(own);
+  const s = canonicalAddress(sender);
+  const own = canonicalAddress(accountEmail);
+  if (own.domain === "gmail.com") return s.local !== own.local || s.domain !== own.domain;
+  return !(s.domain === own.domain || s.domain.endsWith(`.${own.domain}`));
 }
 
 const SUSPICIOUS: RegExp[] = [
@@ -438,18 +544,26 @@ export function buildContent(parsed: ParsedMessage, opts: { accountEmail: string
 
 const escapeAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+/** Neutralizes our delimiter tags inside untrusted text. */
+export const escapeDelimiters = (s: string) => s.replace(/<(\/?)(email_content)/gi, "&lt;$1$2");
+
 /** Wraps untrusted content in the delimiter. Literal delimiter tags inside the content are escaped. */
 export function wrapUntrusted(from: string | null | undefined, body: string): string {
-  const safe = body.replace(/<(\/?)(email_content)/gi, "&lt;$1$2");
-  return `<email_content from="${escapeAttr(from ?? "unknown")}" untrusted>\n${safe}\n</email_content>`;
+  return `<email_content from="${escapeAttr(from ?? "unknown")}" untrusted>\n${escapeDelimiters(body)}\n</email_content>`;
 }
 
-const oneLine = (s: string) => stripInvisible(s).text.replace(/\s+/g, " ").trim();
+/** Untrusted header-ish text (subjects, names, snippets) on one line: cleaned, delimiter-escaped, optionally clipped. */
+export function cleanLine(s: string, max = 0): string {
+  const one = escapeDelimiters(stripInvisible(s).text.replace(/\s+/g, " ").trim());
+  return max && one.length > max ? one.slice(0, max - 1) + "…" : one;
+}
 
 export function formatAddress(a: Address | null | undefined): string {
   if (!a) return "(unknown)";
-  const name = a.name ? oneLine(a.name) : "";
-  return name && name.toLowerCase() !== a.email.toLowerCase() ? `${name} <${a.email}>` : a.email;
+  const name = a.name ? cleanLine(a.name, 100) : "";
+  if (!name || name.toLowerCase() === a.email.toLowerCase()) return a.email;
+  // A display name that looks like an address ("<ceo@acme.com>") must not read as the real sender.
+  return /[<>@"]/.test(name) ? `"${name.replace(/[<>"]/g, "")}" <${a.email}>` : `${name} <${a.email}>`;
 }
 
 export const formatAddresses = (list: Address[]) => list.map(formatAddress).join(", ");
@@ -488,12 +602,12 @@ export function renderMessage(summary: MessageSummary, content: BuiltContent, la
   const lines = [`Message ${summary.id} (thread ${summary.threadId})`, `From: ${formatAddress(summary.from)}`];
   if (summary.to.length) lines.push(`To: ${formatAddresses(summary.to)}`);
   if (summary.cc.length) lines.push(`Cc: ${formatAddresses(summary.cc)}`);
-  lines.push(`Date: ${summary.date}`, `Subject: ${oneLine(summary.subject) || "(no subject)"}`);
+  lines.push(`Date: ${summary.date}`, `Subject: ${cleanLine(summary.subject) || "(no subject)"}`);
   if (summary.labelIds.length) lines.push(`Labels: ${labelNames(summary.labelIds, labels).join(", ")}`);
   if (content.attachments.length) {
     lines.push(
       `Attachments: ${content.attachments
-        .map((a) => `${oneLine(a.filename) || "(unnamed)"} (${a.mimeType}, ${formatSize(a.size)}, attachment_id: ${a.id})`)
+        .map((a) => `${cleanLine(a.filename) || "(unnamed)"} (${a.mimeType}, ${formatSize(a.size)}, attachment_id: ${a.id})`)
         .join("; ")}`,
     );
   }

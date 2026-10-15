@@ -3,7 +3,7 @@
 import type { Account, Approval, GmailLabel, Grant, MailEvent } from "../../shared/types.ts";
 import type { FeedResult } from "../events/types.ts";
 import type { RenderedMessage, SendOutcome, ThreadSummary } from "../mail/agent.ts";
-import { formatAddress, formatAddresses, labelNames, renderMessage } from "../mail/content.ts";
+import { cleanLine, formatAddress, formatAddresses, labelNames, renderMessage } from "../mail/content.ts";
 
 const SEND_MODE_HELP: Record<Grant["sendMode"], string> = {
   direct: "sent immediately",
@@ -11,10 +11,8 @@ const SEND_MODE_HELP: Record<Grant["sendMode"], string> = {
   approval: "queued for human approval before sending",
 };
 
-const clip = (s: string, n: number) => {
-  const one = s.replace(/\s+/g, " ").trim();
-  return one.length > n ? one.slice(0, n - 1) + "…" : one;
-};
+/** Untrusted one-liners (subjects, snippets) go through the same cleaning as bodies. */
+const clip = (s: string, n: number) => cleanLine(s, n);
 
 export function formatAccounts(items: { grant: Grant; account: Account; scopeNames: string[] | null }[]): string {
   if (!items.length) return "You don't have access to any account yet. Ask the operator to grant this agent access in the agentinbox console.";
@@ -38,7 +36,7 @@ export function formatAccounts(items: { grant: Grant; account: Account; scopeNam
 export function formatLabels(account: Account, labels: GmailLabel[], scope: string[] | null): string {
   const sorted = [...labels].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "system" ? -1 : 1));
   const lines = [`Labels in ${account.email}${scope ? " (* = in your label scope)" : ""}:`];
-  for (const l of sorted) lines.push(`- ${l.name}${l.name !== l.id ? ` (id ${l.id})` : ""}${scope?.includes(l.id) ? " *" : ""}`);
+  for (const l of sorted) lines.push(`- ${clip(l.name, 200)}${l.name !== l.id ? ` (id ${l.id})` : ""}${scope?.includes(l.id) ? " *" : ""}`);
   return lines.join("\n");
 }
 
@@ -48,9 +46,14 @@ export function formatSearch(
   threads: ThreadSummary[],
   nextPageToken: string | null,
   labels: GmailLabel[] | null,
+  hidden = 0,
 ): string {
-  if (!threads.length) return `No threads found in ${account.email} for ${query.trim() ? `"${query}"` : "this search"}.`;
-  const lines = [`${threads.length} thread${threads.length === 1 ? "" : "s"} in ${account.email}${query.trim() ? ` for "${query}"` : ""}:`];
+  const more = nextPageToken ? `More results: call again with page_token "${nextPageToken}".` : null;
+  if (!threads.length) {
+    if (more) return `No results you can access on this page${hidden ? ` (${hidden} skipped)` : ""}; more may follow. ${more}`;
+    return `No threads found in ${account.email} for ${query.trim() ? `"${clip(query, 200)}"` : "this search"}.`;
+  }
+  const lines = [`${threads.length} thread${threads.length === 1 ? "" : "s"} in ${account.email}${query.trim() ? ` for "${clip(query, 200)}"` : ""}:`];
   threads.forEach((t, i) => {
     const meta = [
       `thread_id: ${t.id}`,
@@ -64,7 +67,7 @@ export function formatSearch(
     if (t.labelIds.length) lines.push(`   Labels: ${labelNames(t.labelIds, labels).join(", ")}`);
     if (t.snippet) lines.push(`   Snippet: ${clip(t.snippet, 200)}`);
   });
-  if (nextPageToken) lines.push(`More results: call again with page_token "${nextPageToken}".`);
+  if (more) lines.push(more);
   return lines.join("\n");
 }
 
@@ -123,16 +126,18 @@ function formatEvent(e: MailEvent, labels: Map<string, GmailLabel[] | null>): st
   return lines.join("\n");
 }
 
-export function formatFeed(r: FeedResult, labels: Map<string, GmailLabel[] | null>, waited?: number): string {
+export function formatFeed(r: FeedResult & { hasMore?: boolean }, labels: Map<string, GmailLabel[] | null>, waited?: number): string {
+  // `hasMore` is additive in the events contract; undefined means false.
+  const more = r.hasMore ? ` More events may be available; call again with after=${r.cursor}.` : "";
   if (!r.events.length) {
     const quiet = waited ? `No new events in the last ${waited} s.` : "No new events.";
-    return `${quiet} Cursor: ${r.cursor} (acknowledged up to ${r.ackedSeq}).`;
+    return `${quiet} Cursor: ${r.cursor} (acknowledged up to ${r.ackedSeq}).${more}`;
   }
   const last = r.events.at(-1)!.seq;
   return [
     `${r.events.length} event${r.events.length === 1 ? "" : "s"}:`,
     ...r.events.map((e) => formatEvent(e, labels)),
     "",
-    `Next: pass after=${r.cursor} to continue. Once you've handled these, call ack_events with seq=${last}.`,
+    `Next: pass after=${r.cursor} to continue. Once you've handled these, call ack_events with seq=${last}.${more}`,
   ].join("\n");
 }

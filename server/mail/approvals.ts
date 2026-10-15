@@ -1,6 +1,8 @@
 import type { Address, Approval, ApprovalStatus } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
-import { json, now } from "../db/index.ts";
+import { sha256 } from "../crypto.ts";
+import { bool, json, now } from "../db/index.ts";
+import { AccountNeedsReauthError, type GmailMessage, type GmailPart, GoogleApiError } from "../google/types.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { newId } from "../util/ids.ts";
 
@@ -13,6 +15,8 @@ export interface ApprovalPayload {
   threadId: string | null;
   attachments: { filename: string; size: number }[];
   reason: string | null;
+  /** Fingerprint of the Gmail draft when it was queued; a mismatch at approval means it was edited in Gmail. */
+  fingerprint?: string;
 }
 
 interface ApprovalRow {
@@ -35,6 +39,9 @@ interface ApprovalRow {
 
 const SELECT = `SELECT p.*, ag.name AS agent_name, ac.email AS account_email
   FROM approvals p LEFT JOIN agents ag ON ag.id = p.agent_id LEFT JOIN accounts ac ON ac.id = p.account_id`;
+
+/** Approvals left "approved" without a sent message for this long were interrupted (e.g. a crash mid-send). */
+const STUCK_AFTER_MS = 10 * 60_000;
 
 function toApproval(r: ApprovalRow): Approval {
   const p = json.parse<Partial<ApprovalPayload>>(r.payload, {});
@@ -64,6 +71,27 @@ function toApproval(r: ApprovalRow): Approval {
   };
 }
 
+/** Stable digest of a draft's message: its id (changes when edited in Gmail), headers that matter and every part. */
+export function draftFingerprint(msg: GmailMessage): string {
+  const parts: unknown[] = [];
+  const walk = (p: GmailPart | undefined) => {
+    if (!p) return;
+    parts.push([p.mimeType, p.filename ?? "", p.body?.size ?? 0, p.body?.data ?? "", p.body?.attachmentId ? "att" : ""]);
+    for (const c of p.parts ?? []) walk(c);
+  };
+  walk(msg.payload);
+  const keep = new Set(["from", "to", "cc", "bcc", "subject", "reply-to", "in-reply-to", "references"]);
+  const headers = (msg.payload?.headers ?? []).filter((h) => keep.has(h.name.toLowerCase())).map((h) => [h.name.toLowerCase(), h.value]);
+  return sha256(json.str([msg.id, headers, parts]));
+}
+
+/** Worth retrying: rate limits, Google outages, network errors, or an account waiting to be reconnected. */
+function isTransient(err: unknown): boolean {
+  if (err instanceof AccountNeedsReauthError) return true;
+  if (err instanceof GoogleApiError) return err.status === 429 || err.status >= 500;
+  return err instanceof TypeError; // fetch network failure
+}
+
 /** Approval persistence and admin decisions. Agent-side creation goes through `create`. */
 export class Approvals {
   constructor(private readonly ctx: AppContext) {}
@@ -74,9 +102,10 @@ export class Approvals {
   }
 
   list(status?: ApprovalStatus): Approval[] {
+    const order = "ORDER BY p.created_at DESC, p.rowid DESC LIMIT 500";
     const rows = status
-      ? this.ctx.db.all<ApprovalRow>(`${SELECT} WHERE p.status = ? ORDER BY p.created_at DESC LIMIT 500`, status)
-      : this.ctx.db.all<ApprovalRow>(`${SELECT} ORDER BY p.created_at DESC LIMIT 500`);
+      ? this.ctx.db.all<ApprovalRow>(`${SELECT} WHERE p.status = ? ${order}`, status)
+      : this.ctx.db.all<ApprovalRow>(`${SELECT} ${order}`);
     return rows.map(toApproval);
   }
 
@@ -103,17 +132,48 @@ export class Approvals {
     const started = Date.now();
     await this.expireOverdue();
     const current = this.require(id);
+    if (current.status !== "pending") throw this.notPending(current);
+
+    // The human approves a send by this agent under its current grant: both must still allow it.
+    const blocked = this.sendBlockedReason(current.agentId, current.accountId);
+    if (blocked) {
+      this.cancel([current.id], `Cancelled: ${blocked}`);
+      throw conflict(`This request can no longer be sent: ${blocked}.`, "It was cancelled and its draft deleted.");
+    }
+
     // Claim atomically so two clicks can't send twice.
     if (!this.transition(id, "pending", "approved", note)) throw this.notPending(current);
     this.emit(id);
+    const gmail = this.ctx.google.gmail(current.accountId);
     try {
-      const sent = await this.ctx.google.gmail(current.accountId).sendDraft(current.draftId);
-      this.ctx.db.run("UPDATE approvals SET status = 'sent', sent_message_id = ? WHERE id = ?", sent.id, id);
+      const expected = this.payload(id).fingerprint;
+      if (expected) {
+        const draft = await gmail.getDraft(current.draftId);
+        if (draftFingerprint(draft.message) !== expected) {
+          this.fail(id, "The draft was changed in Gmail after the agent queued it, so it was not sent. Review and send it from Gmail, or reject this request.");
+          this.audit("approval.approve", current, "error", started, { error: "draft_changed" });
+          return this.emit(id);
+        }
+      }
+      const sent = await gmail.sendDraft(current.draftId);
+      this.ctx.db.run("UPDATE approvals SET status = 'sent', sent_message_id = ?, error = NULL WHERE id = ?", sent.id, id);
       this.kick(current.accountId);
       this.audit("approval.approve", current, "ok", started, { sentMessageId: sent.id });
     } catch (err) {
-      this.ctx.db.run("UPDATE approvals SET status = 'failed', error = ? WHERE id = ?", errorMessage(err), id);
-      this.audit("approval.approve", current, "error", started, { error: errorMessage(err) });
+      const message = errorMessage(err);
+      if (isTransient(err)) {
+        // Nothing was sent: put it back so the operator can approve again.
+        this.ctx.db.run(
+          "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
+          `Sending failed temporarily (${message}). Approve again to retry.`,
+          id,
+        );
+      } else if (err instanceof GoogleApiError && err.status === 404) {
+        this.fail(id, "The draft no longer exists in Gmail (it may have been sent or deleted there).");
+      } else {
+        this.fail(id, message);
+      }
+      this.audit("approval.approve", current, "error", started, { error: message, transient: isTransient(err) });
     }
     return this.emit(id);
   }
@@ -141,6 +201,70 @@ export class Approvals {
       this.emit(r.id);
     }
     return count;
+  }
+
+  /** Approvals stuck in "approved" (the process died between claiming and sending) go back to pending. */
+  recoverInterrupted(olderThanMs = STUCK_AFTER_MS): number {
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    const rows = this.ctx.db.all<{ id: string }>(
+      "SELECT id FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? ORDER BY rowid",
+      cutoff,
+    );
+    for (const { id } of rows) {
+      this.ctx.db.run(
+        "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
+        "Sending was interrupted before it finished. Approve again to retry (if it was actually sent, the retry fails harmlessly).",
+        id,
+      );
+      this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: id, outcome: "ok" });
+      this.emit(id);
+    }
+    return rows.length;
+  }
+
+  /**
+   * Rejects the agent's pending approvals (optionally for one account) after its access changed, and deletes
+   * their drafts in the background. Synchronous so callers can run it right before deleting the agent.
+   */
+  cancelForAgent(agentId: string, accountId: string | null, why: string): number {
+    const rows = accountId
+      ? this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND agent_id = ? AND account_id = ?", agentId, accountId)
+      : this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
+    return this.cancel(
+      rows.map((r) => r.id),
+      `Cancelled: ${why}`,
+    );
+  }
+
+  private cancel(ids: string[], note: string): number {
+    const drafts: Approval[] = [];
+    for (const id of ids) {
+      if (!this.transition(id, "pending", "rejected", note)) continue;
+      const a = this.emit(id);
+      drafts.push(a);
+      this.ctx.audit.record({ actorType: "system", action: "approval.cancel", accountId: a.accountId, target: id, outcome: "ok", detail: { note } });
+    }
+    if (drafts.length) void Promise.all(drafts.map((a) => this.deleteDraft(a)));
+    return drafts.length;
+  }
+
+  /** Why the agent may no longer send on this account, or null. */
+  private sendBlockedReason(agentId: string, accountId: string): string | null {
+    const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", agentId);
+    if (!agent) return "the agent was deleted";
+    if (bool(agent.disabled)) return "the agent is disabled";
+    const grant = this.ctx.policy.grant(agentId, accountId);
+    if (!grant || !grant.capabilities.includes("send")) return "the agent is no longer allowed to send from this account";
+    return null;
+  }
+
+  private payload(id: string): Partial<ApprovalPayload> {
+    const r = this.ctx.db.get<{ payload: string }>("SELECT payload FROM approvals WHERE id = ?", id);
+    return json.parse<Partial<ApprovalPayload>>(r?.payload, {});
+  }
+
+  private fail(id: string, error: string): void {
+    this.ctx.db.run("UPDATE approvals SET status = 'failed', error = ? WHERE id = ?", error, id);
   }
 
   private require(id: string): Approval {

@@ -19,14 +19,14 @@ export const grantInputSchema = z.object({
     .min(1, "Label scope must list at least one label, or be null for the whole mailbox")
     .transform((ids) => [...new Set(ids)])
     .nullable(),
-  sendMode: z.enum(SEND_MODES),
+  sendMode: z.enum(SEND_MODES).default("draft_only"),
   allowTo: z
     .array(
       z
         .string()
         .trim()
-        .toLowerCase()
-        .regex(ADDRESS_GLOB, 'Recipient rules must look like "alice@example.com", "*@example.com" or "billing@*"'),
+        .transform((g) => g.replace(/[A-Z]/g, (c) => c.toLowerCase()))
+        .pipe(z.string().regex(ADDRESS_GLOB, 'Recipient rules must look like "alice@example.com", "*@example.com" or "billing@*"')),
     )
     .max(200)
     .transform((globs) => [...new Set(globs)]),

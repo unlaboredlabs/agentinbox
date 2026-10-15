@@ -33,6 +33,7 @@ export function createMailService(ctx: AppContext): MailService {
     expireApprovals: () => approvals.expireOverdue(),
 
     start() {
+      approvals.recoverInterrupted();
       void expire();
       timer = setInterval(() => void expire(), EXPIRY_INTERVAL_MS);
       timer.unref();

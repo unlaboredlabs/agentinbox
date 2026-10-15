@@ -4,21 +4,22 @@
 
 import type { Account, Address, Approval, Capability, GmailLabel, Grant, MessageSummary } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
-import type { GmailClient, GmailMessage, GmailThread, ParsedMessage } from "../google/types.ts";
+import type { GmailClient, GmailMessage, GmailPart, GmailThread, ParsedMessage } from "../google/types.ts";
 import { GoogleApiError } from "../google/types.ts";
 import {
   assertRecipientsAllowed,
-  assertWithinSendCaps,
   CAPABILITY_HELP,
   inScope,
   notAccessible,
   querySyntaxError,
-  scopedQuery,
+  reserveSend,
+  scopedSearch,
   threadLabels,
 } from "../policy/enforce.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
 import { PolicyDenied } from "../util/errors.ts";
-import { Approvals, type ApprovalPayload } from "./approvals.ts";
+import { matchesGlob } from "../util/glob.ts";
+import { Approvals, type ApprovalPayload, draftFingerprint } from "./approvals.ts";
 import { type BuiltContent, buildContent, formatAddresses } from "./content.ts";
 
 /** Input problems the agent can fix (wrong arguments, ambiguous account, …). */
@@ -36,6 +37,8 @@ export interface ToolTrace {
   accountId?: string | null;
   target?: string | null;
   detail: Record<string, unknown>;
+  /** Releases a send-cap reservation; the MCP layer calls it after recording the audit entry. */
+  release?: () => void;
 }
 
 export interface Access {
@@ -82,6 +85,10 @@ export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_FORWARD_BYTES = 20 * 1024 * 1024;
 /** System labels agents may not add/remove via modify_labels (trash has its own capability; the rest are Gmail-managed). */
 const PROTECTED_LABELS = new Set(["TRASH", "SPAM", "DRAFT", "SENT", "CHAT"]);
+/** Labels a label-scoped agent may add besides its scope labels (adding others could pull mail out of its scope's reach or into another agent's). */
+const SCOPED_ADDABLE = new Set(["INBOX", "STARRED", "IMPORTANT", "UNREAD"]);
+/** System labels shown to label-scoped agents (they're needed for search and organizing). */
+const SCOPED_VISIBLE_SYSTEM = new Set(["INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "STARRED", "IMPORTANT", "UNREAD"]);
 const EMAIL = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 const SUMMARY_HEADERS = ["From", "To", "Cc", "Subject", "Date"];
 
@@ -100,8 +107,41 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out;
 }
 
+interface AttachmentPart {
+  partId: string;
+  attachmentId: string | null;
+  data: string | null;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
+/** Attachment parts with their stable partId (Gmail's attachmentId changes on every fetch). */
+function attachmentParts(msg: GmailMessage): AttachmentPart[] {
+  const out: AttachmentPart[] = [];
+  const walk = (p: GmailPart | undefined) => {
+    if (!p) return;
+    if (p.filename && p.partId && (p.body?.attachmentId || p.body?.data)) {
+      out.push({
+        partId: p.partId,
+        attachmentId: p.body.attachmentId ?? null,
+        data: p.body.data ?? null,
+        filename: p.filename,
+        mimeType: p.mimeType,
+        size: p.body.size ?? 0,
+      });
+    }
+    for (const c of p.parts ?? []) walk(c);
+  };
+  walk(msg.payload);
+  return out;
+}
+
 const header = (m: GmailMessage | undefined, name: string): string | null =>
   m?.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? null;
+
+const disallowed = (grant: Grant, list: Address[]) =>
+  grant.allowTo.length ? list.filter((x) => !grant.allowTo.some((g) => matchesGlob(x.email, g))) : [];
 
 const domainOf = (email: string) => email.slice(email.lastIndexOf("@") + 1).toLowerCase();
 
@@ -241,7 +281,10 @@ export class AgentMail {
 
   async listLabels(account: string | undefined): Promise<{ account: Account; labels: GmailLabel[]; scope: string[] | null }> {
     const a = this.resolveAny(account, ["read", "organize"]);
-    return { account: a.account, labels: await this.labels(a), scope: a.grant.labelScope };
+    const scope = a.grant.labelScope;
+    const all = await this.labels(a);
+    const labels = scope === null ? all : all.filter((l) => scope.includes(l.id) || SCOPED_VISIBLE_SYSTEM.has(l.id));
+    return { account: a.account, labels, scope };
   }
 
   /** Like resolve, accepting any of several capabilities. */
@@ -263,22 +306,30 @@ export class AgentMail {
     query: string,
     maxResults = 10,
     pageToken?: string,
-  ): Promise<{ account: Account; threads: ThreadSummary[]; nextPageToken: string | null; labels: GmailLabel[] | null }> {
+  ): Promise<{ account: Account; threads: ThreadSummary[]; nextPageToken: string | null; hidden: number; labels: GmailLabel[] | null }> {
     const a = this.resolve(account, "read");
     const syntax = querySyntaxError(query);
     if (syntax) throw new ToolError("invalid_query", `${syntax} Fix the query and try again.`);
     const scope = a.grant.labelScope;
-    const q = scope === null ? query.trim() : scopedQuery(query, scope, await this.labels(a));
+    const search = scopedSearch(query, scope, scope === null ? [] : await this.labels(a));
     this.trace.detail = { queryLength: query.length, scoped: scope !== null };
     const labels = await this.labelsSafe(a);
-    if (q === null) return { account: a.account, threads: [], nextPageToken: null, labels };
-    const res = await a.gmail.listThreads({ q: q || undefined, maxResults, pageToken: pageToken || undefined });
-    const threads = await mapLimit(res.threads, 5, (t) => a.gmail.getThread(t.id, "metadata", SUMMARY_HEADERS).catch(() => null));
-    // Defense in depth: the rewritten query should already exclude these.
+    if (search === null) return { account: a.account, threads: [], nextPageToken: null, hidden: 0, labels };
+    const res = await a.gmail.listThreads({ q: search.q || undefined, labelIds: search.labelIds, maxResults, pageToken: pageToken || undefined });
+    let failed = 0;
+    const threads = await mapLimit(res.threads, 5, (t) =>
+      a.gmail.getThread(t.id, "metadata", SUMMARY_HEADERS).catch(() => {
+        failed++;
+        return null;
+      }),
+    );
+    // Defense in depth: the scoped search should already exclude these.
     const visible = threads.filter((t): t is GmailThread => t !== null && inScope(scope, threadLabels(t)));
+    const hidden = res.threads.length - visible.length;
     this.trace.detail.results = visible.length;
-    if (visible.length < res.threads.length) this.trace.detail.filtered = res.threads.length - visible.length;
-    return { account: a.account, threads: visible.map((t) => this.summarizeThread(t)), nextPageToken: res.nextPageToken, labels };
+    if (hidden) this.trace.detail.filtered = hidden - failed;
+    if (failed) this.trace.detail.failed = failed;
+    return { account: a.account, threads: visible.map((t) => this.summarizeThread(t)), nextPageToken: res.nextPageToken, hidden, labels };
   }
 
   private summarizeThread(t: GmailThread): ThreadSummary {
@@ -299,7 +350,11 @@ export class AgentMail {
 
   private render(a: Access, msg: GmailMessage): RenderedMessage {
     const parsed = this.ctx.google.mime.parse(msg);
-    return { summary: parsed.summary, content: buildContent(parsed, { accountEmail: a.account.email, maxChars: this.maxChars()}) };
+    const content = buildContent(parsed, { accountEmail: a.account.email, maxChars: this.maxChars() });
+    // Show stable part ids to agents; get_attachment maps them back to Gmail's current attachment id.
+    const parts = attachmentParts(msg);
+    content.attachments = content.attachments.map((x) => ({ ...x, id: parts.find((p) => p.attachmentId === x.id)?.partId ?? x.id }));
+    return { summary: parsed.summary, content };
   }
 
   async getThread(account: string | undefined, threadId: string) {
@@ -319,21 +374,33 @@ export class AgentMail {
     return { account: a.account, message: this.render(a, msg), labels: await this.labelsSafe(a), maxChars: this.maxChars() };
   }
 
+  /**
+   * `attachmentId` is the part id shown by get_message/get_thread (or an attachment id Gmail lists for this
+   * message right now). Anything else is not found: unlisted ids are never passed to Gmail.
+   */
   async getAttachment(account: string | undefined, messageId: string, attachmentId: string) {
     const a = this.resolve(account, "read");
     this.trace.target = messageId;
     const msg = await this.loadMessage(a, messageId, "full");
-    const parsed = this.ctx.google.mime.parse(msg);
-    const meta = parsed.attachments.find((x) => x.id === attachmentId) ?? (parsed.attachments.length === 1 ? parsed.attachments[0] : undefined);
-    if (!meta && !parsed.attachments.length) throw new ToolError("not_found", `Message ${messageId} has no attachments.`);
-    const raw = await this.fetchById("Message", messageId, () => a.gmail.getAttachment(messageId, attachmentId));
-    const data = Buffer.from(raw.data, "base64url");
-    this.trace.detail = { size: data.length, mimeType: meta?.mimeType ?? null };
+    const parts = attachmentParts(msg);
+    const part = parts.find((p) => p.partId === attachmentId) ?? parts.find((p) => p.attachmentId === attachmentId);
+    if (!part) {
+      const listed = parts.map((p) => `${p.partId} (${p.filename})`).join(", ");
+      throw new ToolError(
+        "not_found",
+        listed ? `Message ${messageId} has no attachment ${attachmentId}. Its attachments: ${listed}.` : `Message ${messageId} has no attachments.`,
+      );
+    }
+    const raw = part.attachmentId
+      ? (await this.fetchById("Message", messageId, () => a.gmail.getAttachment(messageId, part.attachmentId!))).data
+      : part.data!;
+    const data = Buffer.from(raw, "base64url");
+    this.trace.detail = { size: data.length, mimeType: part.mimeType };
     return {
       account: a.account,
-      from: parsed.summary.from?.email ?? null,
-      filename: meta?.filename || "attachment",
-      mimeType: meta?.mimeType || "application/octet-stream",
+      from: this.ctx.google.mime.summarize(msg).from?.email ?? null,
+      filename: part.filename || "attachment",
+      mimeType: part.mimeType || "application/octet-stream",
       data,
       maxChars: this.maxChars(),
     };
@@ -409,11 +476,14 @@ export class AgentMail {
     const a = this.resolve(account, "send");
     this.trace.target = args.messageId;
     const src = await this.loadMessage(a, args.messageId, "full");
+    // A draft isn't a message anyone sent: replying to one would let an agent pick arbitrary recipients.
+    if (src.labelIds?.includes("DRAFT")) throw new ToolError("draft_source", "That message is a draft; reply to a message that was actually sent or received.");
     const p = this.ctx.google.mime.parse(src);
     const self = a.account.email.toLowerCase();
-    const fromSelf = p.summary.from?.email.toLowerCase() === self;
-    const to = fromSelf ? p.summary.to : p.replyTo.length ? p.replyTo : p.summary.from ? [p.summary.from] : [];
-    const cc = args.replyAll ? [...(fromSelf ? [] : p.summary.to), ...p.summary.cc] : [];
+    // Replying to the account's own sent message continues to its recipients (like Gmail); only for real SENT mail.
+    const ownSent = p.summary.from?.email.toLowerCase() === self && !!src.labelIds?.includes("SENT");
+    const to = ownSent ? p.summary.to : p.replyTo.length ? p.replyTo : p.summary.from ? [p.summary.from] : [];
+    const cc = args.replyAll ? [...(ownSent ? [] : p.summary.to), ...p.summary.cc] : [];
     const seen = new Set([self]);
     const dedupe = (list: Address[]) =>
       list.filter((x) => {
@@ -425,6 +495,17 @@ export class AgentMail {
     const toList = dedupe(to);
     const ccList = dedupe(cc);
     if (!toList.length && !ccList.length) throw new ToolError("no_recipients", "This message has no one to reply to (it only involves this account).");
+    const recipients = [...toList, ...ccList];
+    if (a.grant.replyOnly) await this.assertThreadParticipants(a, src.threadId, recipients);
+    const hint =
+      args.replyAll && !disallowed(a.grant, toList).length
+        ? "Retry with reply_all: false to answer only the sender, or use send_message for the allowed recipients."
+        : undefined;
+    assertRecipientsAllowed(
+      a.grant,
+      recipients.map((x) => x.email),
+      hint,
+    );
     return this.deliver(a, "reply", {
       to: toList.length ? toList : ccList,
       cc: toList.length ? ccList : [],
@@ -436,6 +517,30 @@ export class AgentMail {
       references: p.messageId ? [...p.references.filter((r) => r !== p.messageId), p.messageId] : p.references,
       reason: args.reason ?? null,
     });
+  }
+
+  /**
+   * Reply-only grants may only write to people already in the conversation: every recipient must appear
+   * (From, Reply-To, To or Cc) on a non-draft message of the thread.
+   */
+  private async assertThreadParticipants(a: Access, threadId: string, recipients: Address[]): Promise<void> {
+    const thread = await this.fetchById("Thread", threadId, () =>
+      a.gmail.getThread(threadId, "metadata", ["From", "To", "Cc", "Reply-To", "Subject", "Date"]),
+    );
+    const known = new Set<string>();
+    for (const m of thread.messages ?? []) {
+      if (m.labelIds?.includes("DRAFT")) continue;
+      const s = this.ctx.google.mime.summarize(m);
+      const replyTo = this.ctx.google.mime.parseAddresses(header(m, "Reply-To"));
+      for (const x of [...(s.from ? [s.from] : []), ...replyTo, ...s.to, ...s.cc]) known.add(x.email.toLowerCase());
+    }
+    const outsiders = recipients.filter((x) => !known.has(x.email.toLowerCase())).map((x) => x.email);
+    if (outsiders.length) {
+      throw new PolicyDenied(
+        "reply_only",
+        `Your access to ${a.account.email} only allows replying to people already in this conversation; ${outsiders.join(", ")} ${outsiders.length === 1 ? "is" : "are"} not.`,
+      );
+    }
   }
 
   async forward(
@@ -514,7 +619,8 @@ export class AgentMail {
       a.grant,
       all.map((x) => x.email),
     );
-    assertWithinSendCaps(this.ctx.db, a.grant);
+    // Synchronous check-and-reserve: no await between the cap check and taking the slot.
+    this.trace.release = reserveSend(this.ctx.db, a.grant);
     const attachments = m.attachments ? await m.attachments() : [];
     if (attachments.length) this.trace.detail.attachments = attachments.length;
     const raw = await this.ctx.google.mime.compose({
@@ -546,6 +652,13 @@ export class AgentMail {
       return { status: "draft_created", draftId: draft.id, message: DRAFT_ONLY_MESSAGE };
     }
 
+    let fingerprint: string;
+    try {
+      fingerprint = draftFingerprint((await a.gmail.getDraft(draft.id)).message);
+    } catch (err) {
+      await a.gmail.deleteDraft(draft.id).catch(() => {});
+      throw err;
+    }
     const payload: ApprovalPayload = {
       to: m.to,
       cc: m.cc,
@@ -555,6 +668,7 @@ export class AgentMail {
       threadId: m.threadId,
       attachments: attachments.map((x) => ({ filename: x.filename, size: x.content.length })),
       reason: m.reason,
+      fingerprint,
     };
     const approval = this.approvals.create({ agentId: this.principal.agentId, accountId: a.account.id, kind, draftId: draft.id, payload });
     this.trace.target = approval.id;
@@ -566,28 +680,34 @@ export class AgentMail {
     };
   }
 
-  async sendStatus(approvalId: string): Promise<Approval> {
+  /** Read-only: an overdue pending request is reported as expired (the expiry timer records it). */
+  sendStatus(approvalId: string): Approval {
     this.trace.target = approvalId;
-    let approval = this.approvals.get(approvalId);
+    const approval = this.approvals.get(approvalId);
     if (!approval || approval.agentId !== this.principal.agentId) {
       throw new ToolError("not_found", `No send request ${approvalId} was found for you.`);
     }
     this.trace.accountId = approval.accountId;
-    if (approval.status === "pending" && Date.parse(approval.expiresAt) <= Date.now()) {
-      await this.approvals.expireOverdue();
-      approval = this.approvals.get(approvalId)!;
-    }
+    if (approval.status === "pending" && Date.parse(approval.expiresAt) <= Date.now()) return { ...approval, status: "expired" };
     return approval;
   }
 
   // ───────────── Organize / trash ─────────────
 
-  private async resolveLabelIds(a: Access, names: string[]): Promise<string[]> {
+  private async resolveLabelIds(a: Access, names: string[], mode: "add" | "remove"): Promise<string[]> {
     if (!names.length) return [];
-    const labels = await this.labels(a);
+    const scope = a.grant.labelScope;
+    const all = await this.labels(a);
+    // Scoped agents only see (and may name) their scope labels and common system labels.
+    const labels = scope === null ? all : all.filter((l) => scope.includes(l.id) || SCOPED_VISIBLE_SYSTEM.has(l.id));
     return names.map((n) => {
       const key = n.trim();
       const label = labels.find((l) => l.id === key) ?? labels.find((l) => l.name.toLowerCase() === key.toLowerCase());
+      const addable = () => [...SCOPED_ADDABLE, ...all.filter((l) => scope!.includes(l.id)).map((l) => l.name)].join(", ");
+      if (!label && scope !== null) {
+        // Same answer whether or not the label exists outside the scope.
+        throw new PolicyDenied("label_scope", `"${key}" isn't a label you can use. Labels you can add: ${addable()}.`);
+      }
       if (!label) {
         const sample = labels.filter((l) => l.type === "user").slice(0, 30).map((l) => l.name);
         throw new ToolError("unknown_label", `No label named "${key}". Existing labels include: INBOX, STARRED, IMPORTANT, UNREAD${sample.length ? ", " + sample.join(", ") : ""}.`);
@@ -598,6 +718,9 @@ export class AgentMail {
           label.id === "TRASH" ? "Use the trash tool to move mail to the trash." : `The ${label.id} label can't be changed with modify_labels.`,
         );
       }
+      if (mode === "add" && scope !== null && !scope.includes(label.id) && !SCOPED_ADDABLE.has(label.id)) {
+        throw new PolicyDenied("label_scope", `You can't add the ${label.name} label. Labels you can add: ${addable()}.`);
+      }
       return label.id;
     });
   }
@@ -606,8 +729,8 @@ export class AgentMail {
     const a = this.resolve(account, "organize");
     if (!add.length && !remove.length) throw new ToolError("invalid_arguments", "Pass labels to add and/or remove.");
     const target = await this.resolveTarget(a, t);
-    const addIds = await this.resolveLabelIds(a, add);
-    const removeIds = await this.resolveLabelIds(a, remove);
+    const addIds = await this.resolveLabelIds(a, add, "add");
+    const removeIds = await this.resolveLabelIds(a, remove, "remove");
     this.trace.detail = { kind: target.kind, add: addIds, remove: removeIds };
     const labelIds =
       target.kind === "thread"

@@ -53,13 +53,16 @@ const SYSTEM_TERMS: Record<string, string> = {
   CATEGORY_FORUMS: "category:forums",
 };
 
-/** Gmail search term for a label: `in:inbox` for system labels, `label:"Name"` (quoted when needed) for user labels. */
+/**
+ * Gmail search term for a label: `in:inbox` etc. for system labels; for user labels Gmail's own form,
+ * lower-cased with spaces, slashes and other separators replaced by "-" ("Clients/Big Co" →
+ * `label:clients-big-co`). Collisions can only widen the match; results are post-filtered by label id.
+ */
 export function labelSearchTerm(label: GmailLabel): string {
   const system = SYSTEM_TERMS[label.id];
   if (system) return system;
   if (label.type === "system") return `label:${label.id.toLowerCase()}`;
-  const name = label.name.replace(/"/g, "");
-  return /^[\w/-]+$/u.test(name) ? `label:${name}` : `label:"${name}"`;
+  return `label:${label.name.toLowerCase().replace(/[^\p{L}\p{N}_.-]/gu, "-")}`;
 }
 
 /**
@@ -86,16 +89,19 @@ export function querySyntaxError(q: string): string | null {
 }
 
 /**
- * ANDs the label scope onto a user query: `(<q>) (label:a OR in:inbox)`. Returns null when none of the
- * scope labels exist any more (nothing can match). The caller must still post-filter results.
+ * Gmail search for a scoped grant. One scope label: the exact `labelIds` filter (thread-level, like the
+ * scope). Several: the query is ANDed with `(label:a OR label:b)`; Gmail matches q per message, so a
+ * thread whose scope label and query terms sit on different messages can be missed (never leaked).
+ * Returns null when none of the scope labels exist any more. Callers must still post-filter results.
  */
-export function scopedQuery(q: string, scope: string[] | null, labels: GmailLabel[]): string | null {
+export function scopedSearch(q: string, scope: string[] | null, labels: GmailLabel[]): { q: string; labelIds?: string[] } | null {
   const userQ = q.trim();
-  if (scope === null) return userQ;
-  const terms = scope.map((id) => labels.find((l) => l.id === id)).filter((l) => l !== undefined).map(labelSearchTerm);
-  if (!terms.length) return null;
-  const scopeClause = terms.length === 1 ? terms[0]! : `(${terms.join(" OR ")})`;
-  return userQ ? `(${userQ}) ${scopeClause}` : scopeClause;
+  if (scope === null) return { q: userQ };
+  const present = scope.map((id) => labels.find((l) => l.id === id)).filter((l) => l !== undefined);
+  if (!present.length) return null;
+  if (present.length === 1) return { q: userQ, labelIds: [present[0]!.id] };
+  const clause = `(${present.map(labelSearchTerm).join(" OR ")})`;
+  return { q: userQ ? `(${userQ}) ${clause}` : clause };
 }
 
 // ───────────── Send rules ─────────────
@@ -106,13 +112,13 @@ export function disallowedRecipients(grant: Grant, emails: string[]): string[] {
   return emails.filter((e) => !matchesAnyGlob(e, grant.allowTo));
 }
 
-export function assertRecipientsAllowed(grant: Grant, emails: string[]): void {
+export function assertRecipientsAllowed(grant: Grant, emails: string[], hint?: string): void {
   const bad = disallowedRecipients(grant, emails);
   if (bad.length) {
     throw new PolicyDenied(
       "allow_to",
       `Not allowed to send to ${bad.join(", ")}. This account only lets you send to: ${grant.allowTo.join(", ")}. ` +
-        "Remove those recipients, or ask the operator to extend the allowlist.",
+        (hint ?? "Remove those recipients, or ask the operator to extend the allowlist."),
     );
   }
 }
@@ -131,14 +137,24 @@ export function sendsSince(db: Db, agentId: string, accountId: string, sinceIso:
   return row?.n ?? 0;
 }
 
-export function assertWithinSendCaps(db: Db, grant: Grant, at = Date.now()): void {
+/** Sends in flight (checked but not yet audited), per agent × account. Counted with the audit log. */
+const inFlight = new Map<string, number>();
+
+/**
+ * Checks the grant's send caps and reserves a slot, synchronously, so concurrent calls can't all pass the
+ * check before any of them is recorded. Call the returned release once the outcome is in the audit log
+ * (or the send failed). Caps count messages, not recipients.
+ */
+export function reserveSend(db: Db, grant: Grant, at = Date.now()): () => void {
+  const key = `${grant.agentId}:${grant.accountId}`;
+  const pending = inFlight.get(key) ?? 0;
   const windows = [
     { cap: grant.maxSendsPerHour, ms: 3_600_000, label: "hour" },
     { cap: grant.maxSendsPerDay, ms: 86_400_000, label: "24 hours" },
   ];
   for (const w of windows) {
     if (w.cap === null) continue;
-    const used = sendsSince(db, grant.agentId, grant.accountId, new Date(at - w.ms).toISOString());
+    const used = sendsSince(db, grant.agentId, grant.accountId, new Date(at - w.ms).toISOString()) + pending;
     if (used >= w.cap) {
       throw new PolicyDenied(
         "rate_limit",
@@ -147,4 +163,13 @@ export function assertWithinSendCaps(db: Db, grant: Grant, at = Date.now()): voi
       );
     }
   }
+  inFlight.set(key, pending + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const n = (inFlight.get(key) ?? 1) - 1;
+    if (n > 0) inFlight.set(key, n);
+    else inFlight.delete(key);
+  };
 }
