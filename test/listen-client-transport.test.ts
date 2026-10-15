@@ -86,3 +86,13 @@ describe("transport rule in the commands", () => {
     }
   });
 });
+
+describe("client info header", () => {
+  it("is valid JSON and always a legal (ASCII) header value", async () => {
+    const { clientHeader } = await import("../server/listen/api.ts");
+    const h = clientHeader();
+    expect(h).toMatch(/^[\x20-\x7e]+$/);
+    expect(Object.keys(JSON.parse(h))).toEqual(["hostname", "platform", "version"]);
+    expect(JSON.parse(JSON.stringify({ h: "café" }).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)).h).toBe("café");
+  });
+});

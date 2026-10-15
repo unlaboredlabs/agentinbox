@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXIT, runListener, type RunListenerOptions } from "../server/listen/listen.ts";
@@ -51,6 +52,8 @@ describe("listen stream", () => {
     await waitFor(() => api.live.size === 1, 5000, "stream");
     expect(api.streamRequests[0]).toMatchObject({ consumer: "testhost-default", authorization: `Bearer ${FAKE_KEY}`, lastEventId: null });
     expect(api.streamRequests[0]!.userAgent).toMatch(/^agentinbox\//);
+    // The daemon reads listener client info from this header (server/agentapi/stream.ts).
+    expect(JSON.parse(api.streamRequests[0]!.client!)).toEqual({ hostname: hostname(), platform: process.platform, version: expect.any(String) });
 
     for (const s of [1, 2, 3]) api.publish(makeEvent(s));
     await waitFor(() => handled().length === 3, 5000, "first batch");

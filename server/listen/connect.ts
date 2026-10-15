@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import pc from "picocolors";
 import type { AgentTool, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
 import { CAPABILITIES, type Capability } from "../../shared/types.ts";
-import { ApiError, pollPairing, startPairing } from "./api.ts";
+import { ApiError, clientInfo, pollPairing, startPairing } from "./api.ts";
 import { setupMcp, mcpTarget, type McpSetupResult } from "./mcpsetup.ts";
 import { defaultConsumer, validConsumer } from "./options.ts";
 import { DEFAULT_PROFILE, profilePath, validProfileName } from "./paths.ts";
@@ -10,7 +10,7 @@ import { listProfiles, loadProfile, type Profile, profileExists, saveProfile } f
 import { recipe, shellQuote, TOOL_LABELS, TOOLS } from "./recipes.ts";
 import { checkTransport, insecureBanner, normalizeDaemonUrl } from "./transport.ts";
 import { box, formatDuration, safeText, StatusLine } from "./ui.ts";
-import { NPX, version } from "./version.ts";
+import { NPX } from "./version.ts";
 
 export interface ConnectFlags {
   name?: string;
@@ -103,7 +103,7 @@ export async function runConnect(rawUrl: string, flags: ConnectFlags, opts: Conn
       ...(capabilities ? { capabilities } : {}),
       ...(flags.reason ? { reason: flags.reason } : {}),
     },
-    client: { hostname: hostname(), platform: process.platform, tool, version },
+    client: { ...clientInfo(), tool },
   };
 
   let start: PairingStart;

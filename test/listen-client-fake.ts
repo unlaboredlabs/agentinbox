@@ -17,6 +17,7 @@ export interface StreamRequest {
   lastEventId: string | null;
   authorization: string | null;
   userAgent: string | null;
+  client: string | null;
 }
 
 export function makeEvent(seq: number, patch: { type?: EventType; message?: Partial<MessageSummary> | null; content?: WebhookPayload["data"]["content"] } = {}): WebhookPayload {
@@ -194,6 +195,7 @@ export class FakeAgentApi {
         lastEventId: (req.headers["last-event-id"] as string | undefined) ?? null,
         authorization: req.headers.authorization ?? null,
         userAgent: req.headers["user-agent"] ?? null,
+        client: (req.headers["x-agentinbox-client"] as string | undefined) ?? null,
       });
       if (!this.authed(req)) return this.json(res, 401, { error: { code: "unauthorized", message: this.revoked ?? "invalid API key" } });
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });

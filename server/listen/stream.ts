@@ -1,5 +1,5 @@
 import type { EventType } from "../../shared/types.ts";
-import { apiError, describeFetchError, userAgent } from "./api.ts";
+import { apiError, clientHeader, describeFetchError, userAgent } from "./api.ts";
 import { SseParser, type SseMessage } from "./sse.ts";
 
 export type StreamEnd = { kind: "revoked"; reason: string } | { kind: "fatal"; reason: string } | { kind: "stopped" };
@@ -126,6 +126,7 @@ export class EventStream {
         authorization: `Bearer ${this.o.apiKey}`,
         "cache-control": "no-cache",
         "user-agent": userAgent(),
+        "x-agentinbox-client": clientHeader(),
       };
       const last = this.o.lastEventId();
       if (last > 0) headers["last-event-id"] = String(last);

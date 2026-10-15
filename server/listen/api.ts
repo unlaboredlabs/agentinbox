@@ -5,6 +5,15 @@ import { version } from "./version.ts";
 /** Identifies the client to the daemon (shown on the agent's Listeners list). Never includes the key. */
 export const userAgent = () => `agentinbox/${version} (${process.platform}; ${hostname()})`;
 
+/** What the daemon shows on the agent's Listeners list. Never includes the key. */
+export const clientInfo = () => ({ hostname: hostname(), platform: process.platform, version });
+
+/**
+ * `x-agentinbox-client` header: clientInfo as JSON. Non-ASCII is \u-escaped so the value is always a
+ * legal header (a hostname with an accent must not break the request).
+ */
+export const clientHeader = () => JSON.stringify(clientInfo()).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -37,7 +46,7 @@ export async function apiError(res: Response, what: string): Promise<ApiError> {
 }
 
 async function call<T>(base: string, path: string, init: RequestInit & { key?: string; timeoutMs?: number }, what: string): Promise<T> {
-  const headers: Record<string, string> = { accept: "application/json", "user-agent": userAgent() };
+  const headers: Record<string, string> = { accept: "application/json", "user-agent": userAgent(), "x-agentinbox-client": clientHeader() };
   if (init.body) headers["content-type"] = "application/json";
   if (init.key) headers.authorization = `Bearer ${init.key}`;
   let res: Response;
