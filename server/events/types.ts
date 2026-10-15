@@ -1,0 +1,65 @@
+// Events domain contract. Owned by the events + webhooks work area.
+// Members marked FROZEN are used by other domains: do not rename or change them. Adding members is fine.
+
+import type { EventType, MailEvent, MessageSummary, Page } from "../../shared/types.ts";
+import type { Lifecycle } from "../context.ts";
+
+/** FROZEN. What ingest (and google, for account.auth_failed) hand to events.emit. */
+export interface NewEvent {
+  type: EventType;
+  accountId: string;
+  message?: MessageSummary | null;
+  /**
+   * Union of label ids across the message's whole thread at event time. Label-scoped grants see an
+   * event when any of these is in scope (scope is thread-level). Defaults to message.labelIds.
+   * Stored in events.label_ids.
+   */
+  threadLabelIds?: string[];
+  /** For label.added / label.removed: the labels that changed. */
+  labelIds?: string[];
+  detail?: Record<string, unknown>;
+  /** Unique per logical event, e.g. `${accountId}:${messageId}:message.received`. Pub/Sub is at-least-once. */
+  dedupeKey: string;
+}
+
+/** An event as stored, with the scope labels needed for visibility checks. */
+export interface StoredEvent extends MailEvent {
+  threadLabelIds: string[];
+}
+
+export interface FeedOptions {
+  /** Return events with seq > after. Defaults to the agent's acked cursor. */
+  after?: number;
+  limit?: number;
+  types?: EventType[];
+  accountIds?: string[];
+}
+
+export interface FeedResult {
+  events: MailEvent[];
+  /** Pass as `after` to continue; equals the last returned seq (or `after` when empty). */
+  cursor: number;
+  /** The agent's acknowledged position. */
+  ackedSeq: number;
+}
+
+export interface EventsService extends Lifecycle {
+  /**
+   * FROZEN. Outbox write: inserts the event and its webhook deliveries in one transaction, then emits
+   * bus "event". Returns null when dedupeKey was already seen.
+   */
+  emit(e: NewEvent): MailEvent | null;
+  get(id: string): StoredEvent | null;
+  /** Console listing, newest first. */
+  list(q: { accountId?: string; type?: EventType; cursor?: string | null; limit?: number }): Page<MailEvent>;
+
+  // Agent feed (MCP list_events / wait_for_events / ack_events). Only events the agent may see
+  // (policy.canSeeEvent) are returned. FROZEN.
+  feed(agentId: string, opts?: FeedOptions): FeedResult;
+  /** Long poll: resolves as soon as ≥1 visible event exists after the cursor, or with none at timeout/abort. */
+  wait(agentId: string, opts: FeedOptions & { timeoutMs: number; signal?: AbortSignal }): Promise<FeedResult>;
+  ack(agentId: string, seq: number): { ackedSeq: number };
+
+  /** Deletes events older than `beforeIso`. */
+  prune(beforeIso: string): number;
+}

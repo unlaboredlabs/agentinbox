@@ -47,6 +47,43 @@ export interface HealthResponse {
   setupComplete: boolean;
 }
 
+/** GET /api/setup/status (unauthenticated). Drives the console's first route decision: claim, login or app. */
+export interface SetupStatus {
+  claimed: boolean;
+  /** The request carries a valid admin session. */
+  authenticated: boolean;
+}
+
+/** Live state of the ingest pipeline (Pub/Sub pull loop or history polling). */
+export interface IngestStatus {
+  mode: IngestMode;
+  running: boolean;
+  lastPullAt: string | null;
+  lastError: string | null;
+}
+
+/** GET /api/system: facts about this instance for the settings page and connect snippets. */
+export interface SystemInfo {
+  version: string;
+  nodeVersion: string;
+  dataDir: string;
+  /** Running under `agentinbox service install` (systemd/launchd). */
+  service: boolean;
+  /** URLs this machine is reachable at (localhost first, then LAN addresses). */
+  addresses: string[];
+  publicUrl: string;
+  ingest: IngestStatus;
+}
+
+/** GET /api/system/latest: update notice. */
+export interface UpdateInfo {
+  current: string;
+  latest: string | null;
+  updateAvailable: boolean;
+  /** Shell command that runs (or reinstalls the service with) the latest version using this instance's options. */
+  command: string;
+}
+
 /** Ordered setup checklist; the console's setup wizard and overview both render this. */
 export interface SetupState {
   /** True once an admin password exists. Before that, only /api/setup/claim with the setup token works. */
@@ -130,6 +167,11 @@ export interface GmailLabel {
 }
 
 /** POST /api/accounts/connect → start OAuth. */
+export interface PubsubTestResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface ConnectAccountResponse {
   authUrl: string;
   /** Echoed state; in paste mode the console POSTs the pasted URL to /api/accounts/connect/complete. */
@@ -174,6 +216,13 @@ export interface CreateAgentInput {
   name: string;
   description?: string | null;
   grants?: GrantInput[];
+}
+
+/** POST /api/agents/:id/test: runs MCP initialize + tools/list as the agent, in-process. */
+export interface AgentTestResult {
+  ok: boolean;
+  tools: string[];
+  message: string;
 }
 
 /** Returned once on create and on key rotation. */
@@ -394,7 +443,7 @@ export interface ApiError {
 //
 // Unauthenticated:
 //   GET    /api/health                                → HealthResponse
-//   GET    /api/setup/status                          → { claimed: boolean }
+//   GET    /api/setup/status                          → SetupStatus
 //   POST   /api/setup/claim {token,password}          → 204 + session cookie (only while unclaimed)
 //   POST   /api/auth/login {password}                 → 204 + session cookie (5 failures/IP → 15 min lockout)
 //   POST   /api/auth/logout                           → 204
@@ -402,13 +451,15 @@ export interface ApiError {
 //
 // Authenticated (admin session):
 //   GET    /api/setup/state                           → SetupState
+//   GET    /api/system                                → SystemInfo
+//   GET    /api/system/latest                         → UpdateInfo   (npm registry check, cached 30 min)
 //   GET    /api/settings                              → Settings
 //   PATCH  /api/settings Partial<Settings>            → Settings
 //   POST   /api/auth/password {current,next}          → 204
 //   GET    /api/google/client                         → GoogleClientView
 //   PUT    /api/google/client GoogleClientConfig      → GoogleClientView
 //   POST   /api/google/pubsub/provision               → PubsubState   (creates topic + IAM + subscription using a connected account's token)
-//   POST   /api/google/pubsub/test                    → { ok: boolean; message: string }
+//   POST   /api/google/pubsub/test                    → PubsubTestResult
 //   GET    /api/accounts                              → Account[]
 //   POST   /api/accounts/connect                      → ConnectAccountResponse
 //   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
@@ -424,7 +475,7 @@ export interface ApiError {
 //   DELETE /api/agents/:id                            → 204
 //   PUT    /api/agents/:id/grants/:accountId GrantInput → Grant   (upsert; one grant per agent×account)
 //   DELETE /api/agents/:id/grants/:accountId          → 204
-//   POST   /api/agents/:id/test                       → { ok: boolean; tools: string[]; message: string } (runs MCP initialize+tools/list as the agent)
+//   POST   /api/agents/:id/test                       → AgentTestResult (runs MCP initialize+tools/list as the agent)
 //   GET    /api/webhooks?agentId                      → Webhook[]
 //   POST   /api/webhooks WebhookInput                 → WebhookWithSecret
 //   PATCH  /api/webhooks/:id Partial<WebhookInput>    → Webhook
@@ -434,7 +485,7 @@ export interface ApiError {
 //   GET    /api/deliveries?webhookId&status&cursor    → Page<Delivery>
 //   POST   /api/deliveries/:id/replay                 → Delivery
 //   GET    /api/events?accountId&type&cursor          → Page<MailEvent>
-//   GET    /api/events/stream                         → text/event-stream of {kind:"event"|"delivery"|"approval"|"audit", data}
+//   GET    /api/events/stream                         → text/event-stream of ConsoleStreamMessage (SSE `data:` = JSON)
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval
@@ -444,9 +495,11 @@ export interface ApiError {
 // Agent-facing (bearer = agent API key):
 //   POST/GET/DELETE /mcp                               MCP streamable HTTP (stateless)
 //   GET    /skill.md                                   the agent skill (public, no secrets)
+//   GET    /health                                     HealthResponse (alias of /api/health for uptime monitors; 503 when degraded)
 
 export type ConsoleStreamMessage =
   | { kind: "event"; data: MailEvent }
   | { kind: "delivery"; data: Delivery }
   | { kind: "approval"; data: Approval }
-  | { kind: "audit"; data: AuditEntry };
+  | { kind: "audit"; data: AuditEntry }
+  | { kind: "account"; data: Account };

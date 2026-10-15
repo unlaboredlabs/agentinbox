@@ -12,6 +12,8 @@ export interface Config {
   dev: boolean;
   /** Honor X-Forwarded-For / X-Forwarded-Proto (behind a reverse proxy). */
   trustProxy: boolean;
+  /** Running under `agentinbox service install` (set via AGENTINBOX_SERVICE=1 in the unit/plist). */
+  service: boolean;
   version: string;
   /**
    * Base URLs for Google APIs. Overridable so tests can point at test/fake-google.ts.
@@ -40,6 +42,7 @@ export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
     port: input.port ?? (process.env.PORT ? Number(process.env.PORT) : DEFAULT_PORT),
     dev: input.dev ?? false,
     trustProxy: process.env.TRUST_PROXY === "1",
+    service: process.env.AGENTINBOX_SERVICE === "1",
     version,
     google: {
       oauthBase: process.env.AGENTINBOX_GOOGLE_OAUTH_BASE ?? "https://oauth2.googleapis.com",

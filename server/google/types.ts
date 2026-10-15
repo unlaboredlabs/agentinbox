@@ -1,0 +1,246 @@
+// Google domain contract. Owned by the Google + ingest work area.
+// Members marked FROZEN are used by other domains: do not rename or change them. Adding members is fine.
+
+import type {
+  Account,
+  AccountStatus,
+  Address,
+  Attachment,
+  ConnectAccountResponse,
+  GmailLabel,
+  GoogleClientConfig,
+  GoogleClientView,
+  MessageSummary,
+  PubsubState,
+  PubsubTestResult,
+} from "../../shared/types.ts";
+import type { Lifecycle } from "../context.ts";
+
+// ───────────── Raw Gmail REST shapes (subset of https://developers.google.com/gmail/api/reference/rest) ─────────────
+
+export interface GmailHeader {
+  name: string;
+  value: string;
+}
+
+export interface GmailPart {
+  partId?: string;
+  mimeType: string;
+  filename?: string;
+  headers?: GmailHeader[];
+  /** `data` is base64url; large parts and attachments have `attachmentId` instead. */
+  body: { attachmentId?: string; size: number; data?: string };
+  parts?: GmailPart[];
+}
+
+export interface GmailMessage {
+  id: string;
+  threadId: string;
+  labelIds?: string[];
+  snippet?: string;
+  historyId?: string;
+  /** Epoch milliseconds as a string. */
+  internalDate?: string;
+  sizeEstimate?: number;
+  payload?: GmailPart;
+  /** Only with format=raw: base64url RFC 5322. */
+  raw?: string;
+}
+
+export interface GmailThread {
+  id: string;
+  historyId?: string;
+  snippet?: string;
+  messages?: GmailMessage[];
+}
+
+export interface GmailDraft {
+  id: string;
+  message: GmailMessage;
+}
+
+export interface GmailLabelRaw {
+  id: string;
+  name: string;
+  type: "system" | "user";
+  messagesTotal?: number;
+  messagesUnread?: number;
+  threadsTotal?: number;
+}
+
+type HistoryMessageRef = { message: GmailMessage };
+type HistoryLabelChange = { message: GmailMessage; labelIds: string[] };
+
+export interface GmailHistoryRecord {
+  id: string;
+  messages?: GmailMessage[];
+  messagesAdded?: HistoryMessageRef[];
+  messagesDeleted?: HistoryMessageRef[];
+  labelsAdded?: HistoryLabelChange[];
+  labelsRemoved?: HistoryLabelChange[];
+}
+
+export type GmailFormat = "full" | "metadata" | "minimal" | "raw";
+
+// ───────────── Errors (FROZEN) ─────────────
+
+/** Any non-2xx from a Google API, after retries. */
+export class GoogleApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    /** Google's error `reason`/`status` string when present, e.g. "notFound", "PERMISSION_DENIED". */
+    readonly reason: string | null = null,
+  ) {
+    super(message);
+  }
+
+  get notFound(): boolean {
+    return this.status === 404;
+  }
+}
+
+/**
+ * The account's refresh token was revoked or expired (`invalid_grant`). By the time this is thrown,
+ * the account is already marked `needs_reauth` and `account.auth_failed` was emitted.
+ */
+export class AccountNeedsReauthError extends Error {
+  constructor(
+    readonly accountId: string,
+    readonly email: string,
+  ) {
+    super(`The Gmail account ${email} needs to be reconnected in the agentinbox console.`);
+  }
+}
+
+// ───────────── Gmail client (FROZEN) ─────────────
+
+export interface ListParams {
+  q?: string;
+  labelIds?: string[];
+  maxResults?: number;
+  pageToken?: string;
+  includeSpamTrash?: boolean;
+}
+
+/**
+ * Thin, quota-aware Gmail REST client bound to one account (userId "me"). Refreshes the access token
+ * transparently, retries 429/5xx with backoff, throws GoogleApiError or AccountNeedsReauthError.
+ */
+export interface GmailClient {
+  readonly accountId: string;
+  getProfile(): Promise<{ emailAddress: string; messagesTotal: number; threadsTotal: number; historyId: string }>;
+  listMessages(p: ListParams): Promise<{ messages: { id: string; threadId: string }[]; nextPageToken: string | null; resultSizeEstimate: number }>;
+  listThreads(p: ListParams): Promise<{ threads: { id: string; snippet: string; historyId: string }[]; nextPageToken: string | null; resultSizeEstimate: number }>;
+  getMessage(id: string, format?: GmailFormat, metadataHeaders?: string[]): Promise<GmailMessage>;
+  getThread(id: string, format?: Exclude<GmailFormat, "raw">, metadataHeaders?: string[]): Promise<GmailThread>;
+  /** Returns base64url data. */
+  getAttachment(messageId: string, attachmentId: string): Promise<{ data: string; size: number }>;
+  listLabels(): Promise<GmailLabelRaw[]>;
+  modifyMessage(id: string, add: string[], remove: string[]): Promise<GmailMessage>;
+  modifyThread(id: string, add: string[], remove: string[]): Promise<GmailThread>;
+  trashMessage(id: string): Promise<GmailMessage>;
+  trashThread(id: string): Promise<GmailThread>;
+  /** `raw` is base64url RFC 5322 (see MimeTools.compose). */
+  send(raw: string, threadId?: string | null): Promise<GmailMessage>;
+  createDraft(raw: string, threadId?: string | null): Promise<GmailDraft>;
+  getDraft(draftId: string): Promise<GmailDraft>;
+  sendDraft(draftId: string): Promise<GmailMessage>;
+  deleteDraft(draftId: string): Promise<void>;
+  /** Throws GoogleApiError with status 404 when startHistoryId is too old. */
+  listHistory(p: { startHistoryId: string; pageToken?: string; maxResults?: number; historyTypes?: string[] }): Promise<{
+    history: GmailHistoryRecord[];
+    nextPageToken: string | null;
+    historyId: string;
+  }>;
+  watch(p: { topicName: string; labelIds?: string[]; labelFilterBehavior?: "include" | "exclude" }): Promise<{ historyId: string; expiration: string }>;
+  stopWatch(): Promise<void>;
+}
+
+// ───────────── MIME (FROZEN) ─────────────
+
+export interface ParsedMessage {
+  summary: MessageSummary;
+  /** Lower-cased header name → first value. */
+  headers: Record<string, string>;
+  /** RFC 5322 Message-ID (with angle brackets), for threading replies. */
+  messageId: string | null;
+  inReplyTo: string | null;
+  references: string[];
+  replyTo: Address[];
+  /** Decoded text/plain body (preferring the top-level alternative), or null. */
+  text: string | null;
+  /** Decoded text/html body, or null. Not sanitized: content cleaning is server/mail's job. */
+  html: string | null;
+  attachments: Attachment[];
+  /** Raw Authentication-Results header(s) joined with "\n", or null. */
+  authenticationResults: string | null;
+}
+
+export interface ComposeInput {
+  from: Address;
+  to: Address[];
+  cc?: Address[];
+  bcc?: Address[];
+  replyTo?: Address[];
+  subject: string;
+  text: string;
+  html?: string;
+  /** Threading headers for replies. */
+  inReplyTo?: string | null;
+  references?: string[];
+  attachments?: { filename: string; contentType?: string; content: Buffer }[];
+}
+
+export interface MimeTools {
+  /** Needs a format=full message. */
+  parse(msg: GmailMessage): ParsedMessage;
+  /** Works with format=metadata (From/To/Cc/Subject/Date headers) or full. */
+  summarize(msg: GmailMessage): MessageSummary;
+  /** Builds an RFC 5322 message with nodemailer's MailComposer; returns base64url for send/createDraft. */
+  compose(input: ComposeInput): Promise<string>;
+  /** Parses an address header value ("A <a@x>, b@y") into Address[]. */
+  parseAddresses(value: string | null | undefined): Address[];
+}
+
+// ───────────── Services ─────────────
+
+/** Accounts repository (FROZEN). Token and cursor columns are private to server/google and server/ingest. */
+export interface AccountsService extends Lifecycle {
+  list(): Account[];
+  get(id: string): Account | null;
+  /** Throws HttpError 404. */
+  require(id: string): Account;
+  getByEmail(email: string): Account | null;
+  /** Persists and emits bus "account". */
+  setStatus(id: string, status: AccountStatus, lastError?: string | null): Account;
+  /** Stops the watch, revokes the token (best effort) and deletes the account (grants cascade). */
+  remove(id: string): Promise<void>;
+}
+
+export interface GoogleService extends Lifecycle {
+  // OAuth client
+  clientView(): GoogleClientView;
+  setClient(input: GoogleClientConfig): GoogleClientView;
+  redirectUri(): string;
+
+  // Connecting accounts (PKCE, access_type=offline, prompt=consent)
+  startConnect(opts?: { reauthAccountId?: string }): ConnectAccountResponse;
+  /** Exchanges the code, stores the encrypted refresh token, upserts the account and calls ingest.onAccountConnected. */
+  completeConnect(code: string, state: string): Promise<Account>;
+  /** Paste mode: the full URL the user landed on after consent. */
+  completeConnectFromUrl(url: string): Promise<Account>;
+
+  /** FROZEN. Gmail client for an account (cheap; may be cached). */
+  gmail(accountId: string): GmailClient;
+  /** FROZEN. */
+  readonly mime: MimeTools;
+  /** FROZEN. Labels with ids and names, as shown in the console and to agents. */
+  labels(accountId: string): Promise<GmailLabel[]>;
+  revoke(accountId: string): Promise<void>;
+
+  // Pub/Sub
+  pubsubState(): PubsubState;
+  provisionPubsub(): Promise<PubsubState>;
+  testPubsub(): Promise<PubsubTestResult>;
+}
