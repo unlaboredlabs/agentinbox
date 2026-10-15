@@ -12,7 +12,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api, ApiError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { useStreamListener } from "@/lib/stream";
-import { answerApplies, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
+import { answerApplies, handsBack, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
 import { PasteCallback } from "./paste-callback";
 import { GoogleErrorHelp } from "./google-error-help";
 
@@ -30,8 +30,11 @@ interface ConnectRequest {
   onDone?: (confirmed: boolean) => void;
   /** The caller shows the outcome itself ("Add Google Calendar"): close as soon as Google reports back, instead of a "connected" screen. */
   handBack?: boolean;
-  /** The dialog was closed before the sign-in finished (cancelled, failed, or given up on). */
-  onCancel?: () => void;
+  /**
+   * The dialog closed before the sign-in finished (given up on, or a failure). With handBack, a cancel or
+   * unticked Calendar (handsBack) closes it at once and arrives here as `error`.
+   */
+  onCancel?: (error?: ApiError) => void;
 }
 
 type Phase =
@@ -98,11 +101,23 @@ export function ConnectAccountHost() {
     void qc.invalidateQueries({ queryKey: keys.overview });
   };
   const finishRef = useRef(finish);
+  const fail = (error: ApiError) => {
+    const { handBack, onCancel } = reqRef.current;
+    if (!handBack || !handsBack(error.code)) return setPhase({ kind: "error", error });
+    reqRef.current = { ...reqRef.current, onDone: undefined, onCancel: undefined };
+    if (onCancel) setTimeout(() => onCancel(error), 0);
+    setPhase((p) => {
+      if (p?.kind === "waiting") p.popup?.close();
+      return null;
+    });
+  };
+  const failRef = useRef(fail);
   // Only react to OAuth results while a connect flow is running in this tab.
   const activeRef = useRef(false);
   const redirectOrigin = useRef<string | null>(null);
   useEffect(() => {
     finishRef.current = finish;
+    failRef.current = fail;
     phaseRef.current = phase;
     activeRef.current = phase?.kind === "starting" || phase?.kind === "waiting";
     try {
@@ -164,11 +179,7 @@ export function ConnectAccountHost() {
       // window.postMessage carries an origin (BroadcastChannel is same-origin by construction).
       if (e.origin && e.origin !== window.location.origin && e.origin !== redirectOrigin.current) return;
       if (e.data.ok) finishRef.current(e.data.email ?? "Your account");
-      else
-        setPhase({
-          kind: "error",
-          error: new ApiError(400, e.data.code ?? "oauth_error", e.data.error ?? "Google sign-in failed", e.data.hint ?? undefined),
-        });
+      else failRef.current(new ApiError(400, e.data.code ?? "oauth_error", e.data.error ?? "Google sign-in failed", e.data.hint ?? undefined));
     };
     window.addEventListener("message", onMessage);
     const channel = "BroadcastChannel" in window ? new BroadcastChannel("agentinbox-oauth") : undefined;
@@ -210,7 +221,7 @@ export function ConnectAccountHost() {
       // Ignore an answer for an attempt this dialog has since left (closed, retried, finished).
       if (!answerApplies(phaseRef.current, state)) return r.status;
       if (r.status === "connected") finishRef.current(r.email);
-      else if (r.status === "failed") setPhase({ kind: "error", error: new ApiError(400, r.code, r.error, r.hint ?? undefined) });
+      else if (r.status === "failed") failRef.current(new ApiError(400, r.code, r.error, r.hint ?? undefined));
       return r.status;
     })();
     inflight.current = { state, answer };
@@ -364,7 +375,9 @@ export function ConnectAccountHost() {
                   ? "Sign-in was cancelled"
                   : code === "oauth_wrong_account"
                     ? "Signed in with a different Google account"
-                    : "Couldn't connect the account"
+                    : calendar
+                      ? "Couldn't add Google Calendar"
+                      : "Couldn't connect the account"
               }
             />
             {calendarBlocked && (

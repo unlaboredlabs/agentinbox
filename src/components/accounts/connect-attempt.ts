@@ -66,3 +66,9 @@ export function streamUpdateConcerns(accountId: string, c: { reauthAccountId?: s
 export function answerApplies(phase: { kind: string; res?: { state: string } } | null | undefined, state: string): boolean {
   return phase?.kind === "waiting" && phase.res?.state === state;
 }
+
+/**
+ * Sign-in failures a caller that shows the outcome itself (handBack: "Add Google Calendar") takes over:
+ * nothing is broken, the user cancelled or unticked Calendar, and the account's mail is unaffected.
+ */
+export const handsBack = (code: string): boolean => code === "oauth_calendar_not_granted" || code === "oauth_access_denied";

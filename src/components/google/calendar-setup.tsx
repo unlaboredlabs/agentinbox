@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { AlertCircleIcon, CalendarPlusIcon, CheckCircle2Icon, RotateCwIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { connectAccount } from "@/components/accounts/connect-host";
+import { confirm } from "@/components/confirm";
 import { CodeBlock, ErrorAlert, linkify, QueryError, ToneBadge } from "@/components/common";
 import { CloudLink, Expect, Guide, GuideStep, Path } from "@/components/setup/wizard-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -103,7 +104,8 @@ export function CalendarSetupHost() {
       scopes: ["calendar"],
       handBack: true,
       onDone: (confirmed) => void afterConsent(account, confirmed),
-      onCancel: () => void afterConsent(account, false),
+      // Unticked Calendar: Google answered, and the probe shows what was granted.
+      onCancel: (err) => void afterConsent(account, err?.code === "oauth_calendar_not_granted"),
     });
   };
 
@@ -139,6 +141,13 @@ export function CalendarSetupHost() {
     setPage("accounts");
   };
 
+  // Once Calendar is on, the API was the hold-up: re-probe and go back to the accounts (step 2 stays a click away).
+  const fromApi = async () => {
+    if (!setup.data?.enabled) return setPage("scopes");
+    if (setup.data.api === "disabled") await check();
+    setPage("accounts");
+  };
+
   const s = setup.data;
   const index = CALENDAR_PAGES.indexOf(page);
   const project = state.data?.gcpProjectId ?? null;
@@ -164,12 +173,14 @@ export function CalendarSetupHost() {
                 disabled={!s}
                 aria-current={p === page ? "step" : undefined}
                 className={cn(
-                  "w-full rounded-md border-t-2 px-1 pt-1.5 text-left text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  i <= index ? "border-primary" : "border-border",
+                  "w-full space-y-1.5 rounded-sm text-left text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   p === page && "font-medium text-foreground",
                 )}
               >
-                <span className="tabular">{i + 1}.</span> {PAGE_LABEL[p]}
+                <span aria-hidden className={cn("block h-1 rounded-full", i <= index ? "bg-primary" : "bg-muted")} />
+                <span className="block">
+                  <span className="tabular">{i + 1}.</span> {PAGE_LABEL[p]}
+                </span>
               </button>
             </li>
           ))}
@@ -198,7 +209,7 @@ export function CalendarSetupHost() {
               </Button>
             )}
             {page === "api" && (
-              <Button disabled={!s} onClick={() => setPage("scopes")}>
+              <Button disabled={!s || busy !== null} onClick={() => void fromApi()}>
                 {s?.api === "disabled" ? "It's on now, continue" : "Done, continue"}
               </Button>
             )}
@@ -393,7 +404,24 @@ function AccountsPage({
 
 /** Where Settings shows Calendar: one status line and the button that opens the flow. */
 export function CalendarSetupSummary() {
+  const qc = useQueryClient();
   const setup = useQuery(queries.calendarSetup());
+  // E.g. a Workspace admin blocks Calendar for unconfigured apps, which makes Google refuse whole sign-ins.
+  const turnOff = () =>
+    confirm({
+      title: "Turn off Google Calendar?",
+      confirmLabel: "Turn off",
+      description: (
+        <p>
+          Connecting and reconnecting accounts asks for Gmail only again. Calendar access accounts already granted stays with them. Turn it back on
+          any time with Add Google Calendar.
+        </p>
+      ),
+      onConfirm: async () => {
+        qc.setQueryData(keys.calendarSetup, await patchSetup({ enabled: false }));
+        void qc.invalidateQueries({ queryKey: keys.setupState });
+      },
+    });
   if (setup.isPending) return <Skeleton className="h-10 rounded-lg" />;
   if (setup.isError) return <ErrorAlert error={setup.error} title="Couldn't load the Google Calendar setup" />;
   const s = setup.data;
@@ -408,9 +436,16 @@ export function CalendarSetupSummary() {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <p className="text-sm">{linkify(line)}</p>
-      <Button type="button" variant={s.step === "done" ? "outline" : "default"} onClick={() => openCalendarSetup()}>
-        <CalendarPlusIcon /> {!s.enabled ? "Add Google Calendar" : s.step === "done" ? "Review" : "Continue setup"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        {s.enabled && (
+          <Button type="button" variant="ghost" onClick={turnOff}>
+            Turn off
+          </Button>
+        )}
+        <Button type="button" variant={s.step === "done" ? "outline" : "default"} onClick={() => openCalendarSetup()}>
+          <CalendarPlusIcon /> {!s.enabled ? "Add Google Calendar" : s.step === "done" ? "Review" : "Continue setup"}
+        </Button>
+      </div>
     </div>
   );
 }

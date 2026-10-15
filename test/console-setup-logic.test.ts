@@ -7,7 +7,7 @@ import { callbackMode } from "../server/google/client.ts";
 import { CALENDAR_SCOPES, GMAIL_SCOPE, PUBSUB_SCOPE } from "../server/google/scopes.ts";
 import { checkTransport } from "../server/listen/transport.ts";
 import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem, SCOPES } from "../src/lib/gcp-project.ts";
-import { answerApplies, CHECK_NOTES, checkAgainStep, listMatch, streamUpdateConcerns } from "../src/components/accounts/connect-attempt.ts";
+import { answerApplies, CHECK_NOTES, checkAgainStep, handsBack, listMatch, streamUpdateConcerns } from "../src/components/accounts/connect-attempt.ts";
 import { GMAIL_WATCH_ERROR } from "../shared/types.ts";
 import { deliveryMode, intervalInWords } from "../src/lib/delivery.ts";
 import { analyzeUrl, localConsoleUrl, loopbackTwin, urlVerdict } from "../src/lib/public-url.ts";
@@ -274,6 +274,14 @@ describe("delivery speed claims", () => {
     expect(intervalInWords(120)).toBe("2 minutes");
     expect(intervalInWords(300)).toBe("5 minutes");
     expect(intervalInWords(3600)).toBe("an hour");
+  });
+});
+
+describe("connect dialog: what Add Google Calendar takes over", () => {
+  it("hands back a cancel or unticked Calendar (mail is fine), and keeps real failures in the connect dialog", () => {
+    expect(handsBack("oauth_calendar_not_granted")).toBe(true);
+    expect(handsBack("oauth_access_denied")).toBe(true);
+    for (const code of ["oauth_admin_policy_enforced", "oauth_redirect_uri_mismatch", "oauth_wrong_account", "gmail_api_disabled"]) expect(handsBack(code)).toBe(false);
   });
 });
 
