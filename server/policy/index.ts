@@ -18,7 +18,10 @@ export const API_KEY_PREFIX = "aib_";
 const KEY_RANDOM_CHARS = 32;
 /** `last_used_at` and `last_mcp_at` are written at most this often per agent (the first write is immediate). */
 const LAST_USED_THROTTLE_MS = 60_000;
-/** Account-level events visible to any agent with `read` or `calendar.read` on the account, regardless of scope. */
+/**
+ * Account-level events, visible regardless of label or calendar scope: with `read`, or for
+ * account.auth_failed also with `calendar.read` (sync.gap is about mail only).
+ */
 const ACCOUNT_EVENTS = new Set(["account.auth_failed", "sync.gap"]);
 
 interface AgentRow {
@@ -111,6 +114,15 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       now(),
     );
     return toGrant(db.get<GrantRow>("SELECT * FROM grants WHERE agent_id = ? AND account_id = ?", agentId, g.accountId)!);
+  };
+
+  /** Calendar sync only runs for calendars some grant reads: start it now instead of at the next pass. */
+  const kickCalendar = (accountId: string) => {
+    try {
+      ctx.calendar.kick(accountId);
+    } catch (err) {
+      ctx.log.debug("Calendar kick failed", { error: err instanceof Error ? err.message : String(err) });
+    }
   };
 
   const grantSummary = (g: GrantInput) => ({
@@ -242,6 +254,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
         );
         for (const g of grants) writeGrant(id, g);
       });
+      for (const g of grants) if (g.capabilities.includes("calendar.read")) kickCalendar(g.accountId);
       ctx.audit.record({
         ...ADMIN_ACTOR,
         action: "agent.create",
@@ -300,7 +313,10 @@ export function createPolicyService(ctx: AppContext): PolicyService {
         throw badRequest("The grant's accountId does not match the URL");
       }
       const g = parseGrantInput(raw);
+      const prev = db.get<GrantRow>("SELECT * FROM grants WHERE agent_id = ? AND account_id = ?", agentId, accountId);
+      const hadCalendarRead = !!prev && toGrant(prev).capabilities.includes("calendar.read");
       const grant = writeGrant(agentId, g);
+      if (!hadCalendarRead && g.capabilities.includes("calendar.read")) kickCalendar(accountId);
       if (!g.capabilities.includes("send")) approvals.cancelForAgent(agentId, accountId, "the agent's send permission was removed", "mail");
       if (!g.capabilities.includes("calendar.write")) approvals.cancelForAgent(agentId, accountId, "the agent's calendar.write permission was removed", "calendar");
       ctx.audit.record({ ...ADMIN_ACTOR, action: "grant.upsert", accountId, target: agentId, outcome: "ok", detail: grantSummary(g) });
@@ -332,7 +348,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       );
       if (!r || bool(r.disabled)) return false;
       const g = toGrant(r);
-      if (ACCOUNT_EVENTS.has(ev.type)) return g.capabilities.includes("read") || g.capabilities.includes("calendar.read");
+      if (ACCOUNT_EVENTS.has(ev.type)) return g.capabilities.includes("read") || (ev.type === "account.auth_failed" && g.capabilities.includes("calendar.read"));
       if (isCalendarEventType(ev.type)) {
         const calendarId = ev.calendarEvent?.calendarId;
         return g.capabilities.includes("calendar.read") && !!calendarId && calendarInScope(g, calendarId);

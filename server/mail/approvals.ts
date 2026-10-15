@@ -149,6 +149,9 @@ export class Approvals {
     const blocked = this.sendBlockedReason(current);
     if (blocked) {
       this.cancel([current.id], `${CANCELLED_PREFIX}${blocked}`);
+      if (isCalendarApprovalKind(current.kind)) {
+        throw conflict(`This change can no longer be applied: ${blocked}.`, "It was cancelled; nothing was changed in Google Calendar.");
+      }
       throw conflict(`This request can no longer be sent: ${blocked}.`, "It was cancelled and its draft deleted.");
     }
 
@@ -196,7 +199,8 @@ export class Approvals {
     try {
       const { eventId } = await this.ctx.calendar.applyApproval(current);
       this.ctx.db.run("UPDATE approvals SET status = 'sent', sent_message_id = ?, error = NULL WHERE id = ?", eventId, id);
-      this.audit("approval.approve", current, "ok", started, { eventId });
+      const notified = current.calendar?.notified.length ?? 0;
+      this.audit("approval.approve", current, "ok", started, { calendarId: current.calendar?.calendarId ?? null, eventId, emailed: notified > 0, notified });
     } catch (err) {
       const message = errorMessage(err);
       if (isTransient(err)) {
@@ -291,12 +295,12 @@ export class Approvals {
     return drafts.length;
   }
 
-  /** Why this send is no longer allowed under the agent's current grant, or null. */
+  /** Why this send (or calendar change) is no longer allowed under the agent's current grant, or null. */
   private sendBlockedReason(a: Approval): string | null {
-    if (isCalendarApprovalKind(a.kind)) return this.ctx.calendar.approvalBlockedReason(a);
     const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", a.agentId);
     if (!agent) return "the agent was deleted";
     if (bool(agent.disabled)) return "the agent is disabled";
+    if (isCalendarApprovalKind(a.kind)) return this.ctx.calendar.approvalBlockedReason(a);
     const grant = this.ctx.policy.grant(a.agentId, a.accountId);
     if (!grant || !grant.capabilities.includes("send")) return "the agent is no longer allowed to send from this account";
     if (grant.replyOnly && a.kind !== "reply") return "the agent may now only send replies from this account";
