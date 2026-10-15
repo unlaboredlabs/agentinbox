@@ -4,7 +4,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, InfoIcon, LaptopIcon, NetworkIcon,
 import { useState } from "react";
 import { ChoiceCards } from "@/components/choice-cards";
 import { CodeBlock, ErrorAlert, Wrapped } from "@/components/common";
-import { RedirectNotice, rememberRedirectBeforeChange, useRedirectProblem } from "@/components/google/redirect-notice";
+import { RedirectNotice, useRedirectProblem } from "@/components/google/redirect-notice";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
@@ -92,7 +92,8 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
       updateDraft({ urlConfirmed: true });
       const before = qc.getQueryData<GoogleClientView>(keys.googleClient);
       const after = await qc.fetchQuery({ ...queries.googleClient(), staleTime: 0 });
-      void qc.invalidateQueries({ queryKey: keys.setupState });
+      // The server compares the new redirect URI with the one the client was saved with (redirect_uri_changed).
+      await qc.fetchQuery({ ...queries.setupState(), staleTime: 0 });
       // A saved OAuth client was registered with the old redirect URI: say what to add before moving on.
       if (before?.clientId && before.redirectUri !== after.redirectUri) setChangedRedirect(true);
       else onNext();
@@ -105,7 +106,6 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
       updateDraft({ urlConfirmed: true });
       onNext();
     } else {
-      rememberRedirectBeforeChange(qc.getQueryData<GoogleClientView>(keys.googleClient), draft.clientRedirectUri);
       save.mutate(clean);
     }
   };

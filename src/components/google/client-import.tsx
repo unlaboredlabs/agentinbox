@@ -10,7 +10,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError } from "@/lib/api";
 import { keys } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { rememberClientRedirect } from "./redirect-notice";
 
 /**
  * Drop, choose or paste the client JSON Google offers right after creating an OAuth client
@@ -52,7 +51,6 @@ export function ClientImport({
       const r = await api<GoogleClientImportResult>("/api/google/client/import", { body: { json, ...(appType ? { appType } : {}) } });
       setResult(r);
       setText("");
-      rememberClientRedirect(r);
       qc.setQueryData(keys.googleClient, r);
       for (const k of [keys.googleClient, keys.setupState]) void qc.invalidateQueries({ queryKey: k });
       onImported?.(r);

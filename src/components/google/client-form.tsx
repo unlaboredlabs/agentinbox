@@ -12,7 +12,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
-import { rememberClientRedirect } from "./redirect-notice";
 
 /** Last characters of the saved secret (to recognize which one is saved). */
 export const secretHintOf = (v: GoogleClientView | undefined) => v?.secretHint ?? null;
@@ -66,7 +65,6 @@ export function ClientForm({
     errorTitle: false,
     onSuccess: (v) => {
       setSecret("");
-      rememberClientRedirect(v);
       onSaved?.(v);
     },
   });

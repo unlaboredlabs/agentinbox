@@ -61,6 +61,38 @@ describe("OAuth client check", () => {
     await connectFakeAccount(ctx, fake, "a@example.com");
   });
 
+  it("warns when the redirect URI changed since the client was saved, until a check passes or it is re-saved", async () => {
+    ctx.google.setClient({ ...FAKE_CLIENT, appType: "internal" });
+    const first = ctx.google.redirectUri();
+    expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBe(first);
+    expect(setupCodes()).toEqual([]);
+
+    ctx.settings.update({ publicUrl: "https://mail.example.org" });
+    const [w, ...rest] = ctx.google.setupWarnings();
+    expect(rest).toEqual([]);
+    expect(w).toMatchObject({ code: "redirect_uri_changed", severity: "error", url: `https://console.cloud.google.com/auth/clients?project=${FAKE_CLIENT.projectId}` });
+    expect(w!.message).toContain("https://mail.example.org/oauth/callback");
+    expect(w!.message).toContain(first);
+    expect(w!.hint).toContain("Google Auth Platform → Clients → your client → Authorized redirect URIs");
+    expect(w!.hint).toContain("enter https://mail.example.org/oauth/callback exactly");
+
+    // Google confirms the new one: cleared.
+    expect((await check()).body).toMatchObject({ redirectUri: "ok", warnings: [] });
+    expect(setupCodes()).toEqual([]);
+
+    // Changed again: back until the client is saved again (that records the URI in effect).
+    ctx.settings.update({ publicUrl: "https://mail2.example.org" });
+    expect(setupCodes()).toEqual(["redirect_uri_changed"]);
+    ctx.google.setClient({ clientId: FAKE_CLIENT.clientId, projectId: FAKE_CLIENT.projectId, appType: "internal" });
+    expect(setupCodes()).toEqual([]);
+
+    // Google says it's missing: that, not both.
+    ctx.settings.update({ publicUrl: "https://mail3.example.org" });
+    fake.registeredRedirectUris = ["https://mail2.example.org/oauth/callback"];
+    expect((await check()).body.warnings.map((x) => x.code)).toEqual(["redirect_uri_missing"]);
+    expect(setupCodes()).toEqual(["redirect_uri_missing"]);
+  });
+
   it("needs a saved client", async () => {
     const res = await check();
     expect(res.status).toBe(400);

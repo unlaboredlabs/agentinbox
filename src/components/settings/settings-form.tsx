@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GoogleClientView, IngestMode, Settings, SystemInfo } from "@shared/types";
+import type { IngestMode, Settings, SystemInfo } from "@shared/types";
 import { useForm } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
 import { InfoIcon } from "lucide-react";
@@ -13,8 +13,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { RedirectNotice, rememberRedirectBeforeChange } from "@/components/google/redirect-notice";
-import { readDraft } from "@/components/setup/progress";
+import { RedirectNotice } from "@/components/google/redirect-notice";
 import { UrlVerdict } from "@/components/setup/step-url";
 import { api, toastError } from "@/lib/api";
 import { addressLabel, analyzeUrl, isLoopbackOrigin, publicUrlError } from "@/lib/public-url";
@@ -72,8 +71,6 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         Object.entries(next).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(settings[k as keyof Settings])),
       ) as Partial<Settings>;
       try {
-        // The OAuth client was registered with the current redirect URI: remember it so the new one gets flagged.
-        if (patch.publicUrl !== undefined) rememberRedirectBeforeChange(qc.getQueryData<GoogleClientView>(keys.googleClient), readDraft().clientRedirectUri);
         const saved = await api<Settings>("/api/settings", { method: "PATCH", body: patch });
         qc.setQueryData(keys.settings, saved);
         for (const k of [keys.system, keys.googleClient, keys.setupState]) void qc.invalidateQueries({ queryKey: k });

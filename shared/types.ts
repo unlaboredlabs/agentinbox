@@ -124,6 +124,9 @@ export interface SetupState {
  * - redirect_uri_missing: Google said the redirect URI isn't registered (GoogleClientCheck), or, when the
  *   check couldn't tell, the imported client JSON doesn't list it. Clears on a check or re-import that
  *   finds it, or once an account connects through the current redirect URI. Severity "error".
+ * - redirect_uri_changed: the redirect URI changed (a public URL change) since the OAuth client was saved or
+ *   imported, and nothing has shown the new one is registered yet. Names both URIs. Clears on a client check
+ *   that finds it, a re-save/re-import of the client, or a connection through it. Severity "error".
  * - client_invalid: the last GoogleClientCheck found Google doesn't know the client ID. "error".
  * - client_secret_invalid: the last GoogleClientCheck found Google rejects the secret. "error".
  * - needs_reauth: an account's sign-in was rejected; one per account (accountId set). Severity "error".
@@ -136,6 +139,7 @@ export type SetupWarningCode =
   | "client_secret_invalid"
   | "app_type_mismatch"
   | "redirect_uri_missing"
+  | "redirect_uri_changed"
   | "needs_reauth"
   | "pubsub_failing";
 

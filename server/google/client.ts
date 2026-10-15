@@ -99,6 +99,7 @@ function saveClient(
     projectId,
     appType: input.appType,
     ...(importedRedirectUris ? { importedRedirectUris } : {}),
+    savedRedirectUri: callbackMode(ctx).redirectUri,
     verifiedRedirectUri: same ? (prev?.verifiedRedirectUri ?? null) : null,
     ...(secretHint ? { secretHint } : {}),
   });
@@ -166,9 +167,10 @@ export function importClient(ctx: Ctx, input: GoogleClientImportInput): Omit<Goo
 const clientsUrl = (projectId: string) => `https://console.cloud.google.com/auth/clients${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
 
 /**
- * `redirect_uri_missing`, from the strongest evidence available for the current redirect URI: a
- * successful connection through it (registered), else the last client check (Google's own answer),
- * else the redirect_uris in the last imported JSON.
+ * `redirect_uri_missing` / `redirect_uri_changed`, from the strongest evidence available for the
+ * current redirect URI: a successful connection through it (registered), else the last client check
+ * (Google's own answer), else the redirect_uris in the last imported JSON, else whether the public URL
+ * changed since the client was saved (it was presumably registered with the redirect URI back then).
  */
 export function redirectWarning(ctx: Ctx): SetupWarning | null {
   const c = ctx.settings.getState("google.client");
@@ -191,7 +193,22 @@ export function redirectWarning(ctx: Ctx): SetupWarning | null {
       url: clientsUrl(c.projectId),
     };
   }
-  if (!registered || registered.includes(uri)) return null;
+  if (registered?.includes(uri)) return null;
+  if (!registered) {
+    const saved = c.savedRedirectUri;
+    if (!saved || saved === uri) return null;
+    return {
+      code: "redirect_uri_changed",
+      severity: "error",
+      message:
+        `agentinbox's address changed, so its redirect URI is now ${uri}. Your OAuth client was saved when it was ${saved}, ` +
+        "so Google will refuse to connect accounts until the new one is added.",
+      hint:
+        `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, click Add URI, enter ${uri} exactly ` +
+        "(no trailing slash) and save. Then run the client check (or save the client again): this warning clears once it passes.",
+      url: clientsUrl(c.projectId),
+    };
+  }
   return {
     code: "redirect_uri_missing",
     severity: "error",
