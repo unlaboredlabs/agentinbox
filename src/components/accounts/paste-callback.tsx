@@ -20,7 +20,10 @@ function checkPasted(value: string, state: string): string | null {
     return "That isn't a full address. Copy everything in the address bar, starting with http.";
   }
   const err = url.searchParams.get("error");
-  if (err) return err === "access_denied" ? "Google says access was denied. Start again and click Allow." : `Google returned an error: ${err}`;
+  if (err)
+    return err === "access_denied"
+      ? "This address says you clicked Cancel (or denied access) on Google's screen. Nothing needs fixing: start again and click Continue."
+      : `Google returned an error: ${err}`;
   if (!url.searchParams.get("code")) return "This address has no authorization code. Make sure you copied it after clicking Allow.";
   const s = url.searchParams.get("state");
   if (s && s !== state) return "This address belongs to an older sign-in attempt. Use the newest one.";

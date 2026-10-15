@@ -388,9 +388,11 @@ describe("OAuth error codes", () => {
     expect(data).toMatchObject({
       ok: false,
       email: null,
-      error: "You cancelled on Google's screen.",
+      error: "You clicked Cancel (or denied access) on Google's screen, so nothing was connected.",
       code: "oauth_access_denied",
-      hint: expect.stringContaining("Click Connect again and choose Continue/Allow") as string,
+      hint: expect.stringContaining("Nothing needs fixing in Google Cloud") as string,
     });
+    // Cancelling isn't a setup problem: no advice to add test users or publish the app.
+    expect(String(data.hint)).not.toMatch(/test user|publish/i);
   });
 });

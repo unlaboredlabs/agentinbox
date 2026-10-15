@@ -8,6 +8,7 @@ import { accountsApi } from "../server/api/accounts.ts";
 import { googleApi } from "../server/api/google.ts";
 import { callbackPage, OAUTH_CALLBACK_SCRIPT, OAUTH_CALLBACK_SCRIPT_HASH, oauthRoutes } from "../server/api/oauth.ts";
 import type { AppContext } from "../server/context.ts";
+import { AlreadyConnectedError } from "../server/google/oauth.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../server/google/types.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { connectFakeAccount, FAKE_CLIENT, type FakeGoogle, recordingEvents, startFakeGoogle } from "./fake-google.ts";
@@ -162,14 +163,24 @@ describe("connect", () => {
   it("rejects reused state, denied consent and URLs without a code", async () => {
     const loc = await consentRedirect("carol@example.com");
     await ctx.google.completeConnectFromUrl(loc.toString());
-    await expect(ctx.google.completeConnectFromUrl(loc.toString())).rejects.toThrow(/expired or was already used/);
+    const tokenCallsAfter = tokenCalls();
+    // The same address again (a reload): reported as done, nothing exchanged.
+    const again = await ctx.google.completeConnectFromUrl(loc.toString()).catch((e: unknown) => e);
+    expect(again).toBeInstanceOf(AlreadyConnectedError);
+    expect((again as AlreadyConnectedError).message).toBe("Already connected: carol@example.com.");
+    // The used state with any other code is just used.
+    const forged = new URL(loc);
+    forged.searchParams.set("code", "another-code");
+    await expect(ctx.google.completeConnectFromUrl(forged.toString())).rejects.toThrow(/expired or was already used/);
+    expect(tokenCalls()).toBe(tokenCallsAfter);
 
     const denied = await consentRedirect("carol@example.com", { deny: true });
     const err = await ctx.google.completeConnectFromUrl(denied.toString()).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HttpError);
-    expect((err as HttpError).message).toMatch(/cancelled/);
+    expect((err as HttpError).message).toMatch(/clicked Cancel \(or denied access\)/);
     expect((err as HttpError).code).toBe("oauth_access_denied");
-    expect((err as HttpError).hint).toMatch(/Continue\/Allow/);
+    expect((err as HttpError).hint).toMatch(/Nothing needs fixing in Google Cloud/);
+    expect((err as HttpError).hint).not.toMatch(/test user/i);
 
     await expect(ctx.google.completeConnectFromUrl("http://localhost/oauth/callback")).rejects.toThrow(/doesn't contain an authorization code/);
     const org = await ctx.google.completeConnectFromUrl("http://localhost/oauth/callback?error=org_internal").catch((e: unknown) => e);
@@ -194,9 +205,13 @@ describe("connect", () => {
     const acct = await connectFakeAccount(ctx, fake, "frank@example.com");
     ctx.accounts.setStatus(acct.id, "needs_reauth", "boom");
     const wrong = await consentRedirect("someone-else@example.com", {}, acct.id);
-    await expect(ctx.google.completeConnectFromUrl(wrong.toString())).rejects.toThrow(
-      /signed in as someone-else@example.com, but this reconnect is for frank@example.com/,
+    const err = (await ctx.google.completeConnectFromUrl(wrong.toString()).catch((e: unknown) => e)) as HttpError;
+    expect(err.code).toBe("oauth_wrong_account");
+    expect(err.message).toBe(
+      "You were reconnecting frank@example.com, but signed in to Google as someone-else@example.com, so frank@example.com is still not reconnected. " +
+        "agentinbox didn't keep the sign-in for someone-else@example.com.",
     );
+    expect(err.hint).toMatch(/^Reconnect frank@example.com again and pick frank@example.com in Google's account chooser/);
     expect(ctx.accounts.list()).toHaveLength(1);
     const again = await connectFakeAccount(ctx, fake, "frank@example.com", { reauthAccountId: acct.id });
     expect(again).toMatchObject({ id: acct.id, status: "active", lastError: null });
@@ -213,7 +228,8 @@ describe("connect", () => {
     ctx.bus.on("account", (x) => accountEvents.push({ email: x.email, status: x.status }));
     const landed = await consentRedirect("ben@example.com", {}, a.id);
     await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toThrow(
-      /signed in as ben@example.com, but this reconnect is for anna@example.com\. Its saved sign-in in agentinbox was refreshed/,
+      "You were reconnecting anna@example.com, but signed in to Google as ben@example.com, so anna@example.com is still not reconnected. " +
+        "ben@example.com is also connected here, so agentinbox saved that new sign-in for ben@example.com; nothing else changed.",
     );
     expect(fake.revoked).toEqual([]);
     expect(accountEvents).toContainEqual({ email: "ben@example.com", status: "active" });
@@ -240,7 +256,7 @@ describe("connect", () => {
     await ctx.accounts.remove(a.id);
     const revokedBefore = fake.revoked.length;
     const landed = (await fetch(authUrl, { redirect: "manual" })).headers.get("location")!;
-    await expect(ctx.google.completeConnectFromUrl(landed)).rejects.toThrow(/was removed from agentinbox meanwhile/);
+    await expect(ctx.google.completeConnectFromUrl(landed)).rejects.toThrow(/was removed from agentinbox in the meantime\. agentinbox didn't keep the sign-in for gone@example.com/);
     expect(ctx.accounts.list()).toHaveLength(0);
     // Not connected here, so the fresh grant is revoked rather than left dangling.
     expect(fake.revoked.length).toBe(revokedBefore + 1);
@@ -259,6 +275,34 @@ describe("connect", () => {
     const before = tokenCalls();
     await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toBeInstanceOf(HttpError);
     expect(tokenCalls()).toBe(before + 1);
+  });
+
+  it("reloading the callback page after success says Already connected and changes nothing", async () => {
+    const loc = await consentRedirect("rita@example.com");
+    const routes = oauthRoutes(ctx);
+    expect((await routes.request(`${loc.pathname}${loc.search}`)).status).toBe(200);
+    const events: string[] = [];
+    ctx.bus.on("account", (a) => events.push(a.email));
+    const before = tokenCalls();
+
+    const res = await routes.request(`${loc.pathname}${loc.search}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Already connected: rita@example.com.");
+    expect(html).toContain("Back to the console");
+    expect(html).not.toContain("Couldn&#39;t connect");
+    const data = JSON.parse(/<script type="application\/json" id="oauth-result">([^<]*)<\/script>/.exec(html)![1]!) as Record<string, unknown>;
+    expect(data).toMatchObject({ ok: true, already: true, email: "rita@example.com" });
+    // The script returns before posting anything to the console for a reload.
+    expect(OAUTH_CALLBACK_SCRIPT.indexOf("if (r.already)")).toBeLessThan(OAUTH_CALLBACK_SCRIPT.indexOf("postMessage"));
+    expect(tokenCalls()).toBe(before);
+    expect(events).toEqual([]);
+    expect(ctx.audit.list({ action: "account.connect" }).items).toHaveLength(1);
+
+    // Once the account is removed, the old address is just a used link.
+    await ctx.accounts.remove(ctx.accounts.list()[0]!.id);
+    const gone = await (await routes.request(`${loc.pathname}${loc.search}`)).text();
+    expect(gone).toContain("expired or was already used");
   });
 
   it("uses one static, hashable script on every callback page", async () => {

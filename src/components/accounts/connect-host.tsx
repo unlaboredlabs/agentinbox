@@ -267,7 +267,16 @@ export function ConnectAccountHost() {
 
         {phase?.kind === "error" && (
           <div className="space-y-3">
-            <ErrorAlert error={phase.error} title={code === "oauth_access_denied" ? "Sign-in was cancelled" : "Couldn't connect the account"} />
+            <ErrorAlert
+              error={phase.error}
+              title={
+                code === "oauth_access_denied"
+                  ? "Sign-in was cancelled"
+                  : code === "oauth_wrong_account"
+                    ? "Signed in with a different Google account"
+                    : "Couldn't connect the account"
+              }
+            />
             {code === "oauth_redirect_uri_mismatch" && client.data && (
               <div className="space-y-1.5 text-sm">
                 <p>Add this exact redirect URI to the OAuth client, save, wait a few minutes, then try again:</p>
@@ -300,13 +309,13 @@ export function ConnectAccountHost() {
               {phase.popup && !phase.closed ? <Spinner className="mt-0.5" /> : <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}
               <div className="space-y-1">
                 <div className="font-medium">
-                  {!phase.popup ? "Your browser blocked the sign-in window" : phase.closed ? "Finished in the Google window?" : "Waiting for Google…"}
+                  {!phase.popup ? "Your browser blocked the sign-in window" : phase.closed ? "Closed the Google window?" : "Waiting for Google…"}
                 </div>
                 <p className="text-muted-foreground">
                   {!phase.popup
                     ? "Open it with the button below."
                     : phase.closed
-                      ? "If you allowed access, this updates in a moment. Closed it early or saw an error? Open sign-in again, or paste the window's address below."
+                      ? "Open it again with the button below, or paste the address it ended on. If you finished signing in, this updates in a moment."
                       : "Finish signing in in the pop-up window. This updates on its own when you're done."}
                 </p>
               </div>
@@ -354,7 +363,7 @@ export function ConnectAccountHost() {
               </Button>
               <Button variant={!phase.popup || phase.closed ? "default" : "outline"} asChild>
                 <a href={phase.res.authUrl} target="agentinbox-oauth" rel="opener">
-                  <ExternalLinkIcon /> {!phase.popup ? "Open Google sign-in" : "Open sign-in again"}
+                  <ExternalLinkIcon /> {!phase.popup ? "Open Google sign-in" : phase.closed ? "Open it again" : "Open sign-in again"}
                 </a>
               </Button>
             </>

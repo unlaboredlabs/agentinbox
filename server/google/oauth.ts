@@ -30,10 +30,14 @@ const b64url = (buf: Buffer) => buf.toString("base64").replace(/\+/g, "-").repla
  */
 export function oauthErrorHint(code: string, redirectUri?: string): { message: string; hint: string } {
   switch (code) {
+    // On the redirect this only ever means the user said no: Google shows its own blocking errors
+    // (not a test user, unverified app) on its page and never redirects back with them.
     case "access_denied":
       return {
-        message: "You cancelled on Google's screen.",
-        hint: "Click Connect again and choose Continue/Allow (on \"Google hasn't verified this app\", click Continue), keeping every permission checked.",
+        message: "You clicked Cancel (or denied access) on Google's screen, so nothing was connected.",
+        hint:
+          "Nothing needs fixing in Google Cloud. Start the connection again and click Continue on each Google screen " +
+          "(on \"Google hasn't verified this app\": Advanced → Go to agentinbox), keeping the Gmail permission ticked.",
       };
     case "org_internal":
       return {
@@ -124,6 +128,38 @@ export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; 
     login_hint: reauth?.email,
   });
   return { authUrl, state, callbackMode: mode };
+}
+
+/**
+ * Connections that completed, by state, so reloading the callback page (or pasting its address again)
+ * says "Already connected" instead of failing. Lookups need the same code too, and only ever report:
+ * the state itself is gone from oauth_states, so it can't be used again. In memory; a restart forgets.
+ */
+const completed = new WeakMap<AppContext, Map<string, { codeHash: string; accountId: string; at: number }>>();
+const COMPLETED_TTL_MS = 24 * 60 * 60_000;
+const COMPLETED_MAX = 200;
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+function rememberCompleted(ctx: AppContext, state: string, code: string, accountId: string): void {
+  let m = completed.get(ctx);
+  if (!m) completed.set(ctx, (m = new Map()));
+  const cutoff = Date.now() - COMPLETED_TTL_MS;
+  for (const [k, v] of m) if (v.at < cutoff || m.size >= COMPLETED_MAX) m.delete(k);
+  m.set(state, { codeHash: sha256(code), accountId, at: Date.now() });
+}
+
+/** The account a finished state + code connected, if it's recent and the account is still here. */
+function completedAccount(ctx: AppContext, state: string, code: string): AccountRow | null {
+  const hit = state && code ? completed.get(ctx)?.get(state) : undefined;
+  if (!hit || hit.at < Date.now() - COMPLETED_TTL_MS || hit.codeHash !== sha256(code)) return null;
+  return getRow(ctx, hit.accountId) ?? null;
+}
+
+/** Thrown for a reload of a callback that already connected `email`: a result page, not a failure. */
+export class AlreadyConnectedError extends HttpError {
+  constructor(readonly email: string) {
+    super(409, "oauth_already_connected", `Already connected: ${email}.`, "This sign-in was already completed. Nothing else to do: go back to the console.");
+  }
 }
 
 interface StateRow {
@@ -244,6 +280,8 @@ function storeTokens(
 const expiry = (t: TokenResponse) => new Date(Date.now() + (t.expires_in ?? 3600) * 1000).toISOString();
 
 export async function completeConnect(ctx: AppContext, code: string, state: string): Promise<Account> {
+  const done = completedAccount(ctx, state, code);
+  if (done) throw new AlreadyConnectedError(done.email);
   const st = takeState(ctx, state);
   if (!code) throw new HttpError(400, "oauth_no_code", "Google didn't return an authorization code.", "Start the connection again from the console.");
   const { clientId, clientSecret } = clientCredentials(ctx);
@@ -281,29 +319,33 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
   const email = profile.emailAddress;
   const existing = byEmail(ctx, email);
   const scopes = granted.length ? granted : BASE_SCOPES;
-  const refreshed = existing && tokens.refresh_token ? " Its saved sign-in in agentinbox was refreshed." : "";
-
   if (st.reauth_account_id) {
     const target = getRow(ctx, st.reauth_account_id);
     if (!target || target.email.toLowerCase() !== email.toLowerCase()) {
       // Keep the tokens if they belong to another connected account; never revoke them (that would break it).
+      const keptForOther = !!existing && !!tokens.refresh_token;
       if (existing && tokens.refresh_token) {
         storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims);
         await afterConnect(ctx, existing.id, email);
       } else await discardTokens(ctx, tokens, email);
+      // What happened to the account they did sign in as.
+      const other = keptForOther
+        ? ` ${email} is also connected here, so agentinbox saved that new sign-in for ${email}; nothing else changed.`
+        : ` agentinbox didn't keep the sign-in for ${email}.`;
       if (!target) {
         throw new HttpError(
           400,
           "oauth_account_removed",
-          `The account you were reconnecting was removed from agentinbox meanwhile.${refreshed}`,
-          "Use Connect account to add it again.",
+          `The account you were reconnecting was removed from agentinbox in the meantime.${other}`,
+          "To add it back, use Connect account and sign in with it.",
         );
       }
       throw new HttpError(
         400,
         "oauth_wrong_account",
-        `You signed in as ${email}, but this reconnect is for ${target.email}.${refreshed}`,
-        `Start the reconnect again and choose ${target.email} in Google's account picker.`,
+        `You were reconnecting ${target.email}, but signed in to Google as ${email}, so ${target.email} is still not reconnected.${other}`,
+        `Reconnect ${target.email} again and pick ${target.email} in Google's account chooser (choose "Use another account" if it isn't listed). ` +
+          `If Google skips the chooser, sign out of ${email} at accounts.google.com in this browser first, or use a private window.`,
       );
     }
   }
@@ -351,6 +393,7 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     },
   });
   ctx.log.child("google").info(existing ? "Account reconnected" : "Account connected", { email });
+  rememberCompleted(ctx, state, code, id);
   return afterConnect(ctx, id, email);
 }
 
