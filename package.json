@@ -33,7 +33,7 @@
     "dev": "concurrently -k -n server,web -c blue,magenta \"pnpm dev:server\" \"pnpm dev:web\"",
     "dev:server": "tsx watch server/cli.ts start --dev",
     "dev:web": "vite",
-    "build": "vite build && tsdown",
+    "build": "vite build && tsdown --config-loader native",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.app.json --noEmit",
     "lint": "oxlint",
