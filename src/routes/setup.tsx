@@ -87,7 +87,7 @@ function ClaimPage() {
                   <FieldDescription className="flex items-start gap-1.5">
                     <TerminalIcon className="mt-0.5 size-3.5 shrink-0" />
                     <span>
-                      Open the setup link that <code className="font-mono text-foreground">npx agentinbox</code> printed, or paste its token here.
+                      Open the setup link that <code className="font-mono text-foreground">npx agentinbox-cli</code> printed, or paste its token here.
                     </span>
                   </FieldDescription>
                 </Field>

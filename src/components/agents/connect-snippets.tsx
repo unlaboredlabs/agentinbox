@@ -18,7 +18,7 @@ export function snippets(publicUrl: string, key: string) {
       null,
       2,
     ),
-    skill: `npx agentinbox skill install --url ${publicUrl}`,
+    skill: `npx agentinbox-cli skill install --url ${publicUrl}`,
     mcpUrl: mcp,
     skillUrl: `${publicUrl}/skill.md`,
   };
