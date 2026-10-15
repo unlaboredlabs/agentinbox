@@ -1,0 +1,69 @@
+name: Nightly
+
+# Every push to main publishes `<version>-nightly.<run number>` to npm under the
+# `latest` dist-tag, using npm trusted publishing (OIDC): no npm token is stored
+# anywhere, and npm attaches provenance automatically.
+#
+# The trusted publisher on npmjs.com is registered for unlaboredlabs/agentinbox,
+# workflow `nightly.yml`, no environment. npm matches this file by name: renaming it breaks publishing until the
+# trusted publisher on npmjs.com is recreated with the new filename.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm trusted publishing (OIDC)
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # Never publish from a manual dispatch on a branch other than main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest # trusted publishing needs a GitHub-hosted runner
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false # no dependency cache in release builds
+
+      # Trusted publishing needs npm >= 11.5.1. Node 24 already bundles a newer
+      # npm; this only upgrades if a future runner image ships an older one.
+      - name: Check npm version
+        run: |
+          current="$(npm --version)"
+          echo "npm $current"
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map((n) => parseInt(n, 10));
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$current"; then
+            npm install -g npm@^11.5.1
+            echo "upgraded to npm $(npm --version)"
+          fi
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+      - run: test -f dist/cli.js
+
+      # A unique version per run, so npm accepts it and nightlies sort in order.
+      - name: Publish
+        env:
+          # npm hides OIDC failures below `verbose`; keep them visible in the log.
+          NPM_CONFIG_LOGLEVEL: verbose
+        run: |
+          base="$(node -p 'require("./package.json").version.split("-")[0]')"
+          version="${base}-nightly.${{ github.run_number }}"
+          npm version "$version" --no-git-tag-version
+          npm publish --tag latest --access public
+          echo "Published agentinbox-cli@${version}" >> "$GITHUB_STEP_SUMMARY"
