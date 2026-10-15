@@ -1,6 +1,7 @@
 import type { EventType, WebhookFilter, WebhookPayload } from "../../shared/types.ts";
 import { stripInvisible, wrapUntrusted } from "../mail/content.ts";
 import { matchesFilter } from "../webhooks/filter.ts";
+import { matchesAnyGlob } from "../util/glob.ts";
 
 /** Stated once at the top of every event handed to a local command. */
 export const UNTRUSTED_NOTICE =
@@ -11,14 +12,31 @@ export const UNTRUSTED_NOTICE =
 export interface LocalFilter {
   types?: EventType[];
   filter?: WebhookFilter;
+  exclude?: { from?: string[]; labelIds?: string[] };
+  skipCategories?: readonly string[];
 }
 
-/** The webhook filter model, applied on the agent's machine (same matcher the daemon uses for webhooks). */
-export function matchesLocal(payload: WebhookPayload, f: LocalFilter): boolean {
-  if (f.types?.length && !f.types.includes(payload.type)) return false;
-  if (!f.filter) return true;
-  return matchesFilter(f.filter, { ...payload.data, threadLabelIds: [] });
+/**
+ * Why the listener skips this event, or null to run it. The include filter is the webhook filter model
+ * (same matcher the daemon uses for webhooks); exclusions and the category skip apply only to events
+ * that carry a message, so account events (and any future non-mail event type) pass them.
+ */
+export function skipReason(payload: WebhookPayload, f: LocalFilter): string | null {
+  if (f.types?.length && !f.types.includes(payload.type)) return `type ${payload.type}`;
+  if (f.filter && !matchesFilter(f.filter, { ...payload.data, threadLabelIds: [] })) return "filter";
+  const m = payload.data.message;
+  if (!m) return null;
+  if (f.exclude?.from?.length && m.from && matchesAnyGlob(m.from.email, f.exclude.from)) return `--not-from ${m.from.email}`;
+  const labels = new Set([...(m.labelIds ?? []), ...(payload.data.labelIds ?? [])]);
+  const label = f.exclude?.labelIds?.find((l) => labels.has(l));
+  if (label) return `--not-label ${label}`;
+  const wanted = new Set(f.filter?.labelIds ?? []);
+  const category = f.skipCategories?.find((c) => !wanted.has(c) && m.labelIds?.includes(c));
+  if (category) return `Gmail ${category.replace(/^CATEGORY_/, "").toLowerCase()} (--all-categories to include)`;
+  return null;
 }
+
+export const matchesLocal = (payload: WebhookPayload, f: LocalFilter): boolean => skipReason(payload, f) === null;
 
 /** Untrusted header text (subject, names, filenames, labels): invisible characters removed and our delimiter tag defused. */
 export const cleanField = (text: string): string => stripInvisible(text).text.replace(/<(\/?)(email_content)/gi, "&lt;$1$2");
@@ -82,6 +100,19 @@ export function eventEnv(payload: WebhookPayload): Record<string, string> {
     if (SAFE_ENV.test(s)) env[k] = s;
   }
   return env;
+}
+
+/**
+ * Environment for a --batch run: the count and the event ids (plain `evt_…` tokens), plus the single-event
+ * variables when the batch holds one event.
+ */
+export function batchEnv(payloads: WebhookPayload[]): Record<string, string> {
+  const ids = payloads.map((p) => p.data.id).filter((id) => SAFE_ENV.test(id));
+  return {
+    ...(payloads.length === 1 ? eventEnv(payloads[0]!) : {}),
+    AGENTINBOX_EVENT_COUNT: String(payloads.length),
+    AGENTINBOX_EVENT_IDS: ids.join(","),
+  };
 }
 
 /** Validates the shape we rely on before handing a stream frame to the dispatcher. */

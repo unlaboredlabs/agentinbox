@@ -1,9 +1,10 @@
 import { type Command, InvalidArgumentError } from "commander";
 import { EVENT_TYPES } from "../../shared/types.ts";
 import type { ConnectFlags } from "./connect.ts";
+import type { HermesFlags } from "./hermes.ts";
 import type { ListenFlags } from "./options.ts";
 import { DEFAULT_PROFILE } from "./paths.ts";
-import { RECIPE_TOOLS, recipesHelp, TOOLS } from "./recipes.ts";
+import { RECIPE_NAMES, recipesHelp, TOOLS } from "./recipes.ts";
 import { NPX } from "./version.ts";
 
 /** `agentinbox connect`, `agentinbox setup-mcp` and `agentinbox listen …`, all lazily loaded. */
@@ -26,13 +27,18 @@ const profileOption = (cmd: Command) => cmd.option("--profile <name>", `profile 
 function listenFlags(cmd: Command): Command {
   return profileOption(cmd)
     .option("--exec <command>", "run this command for each event (via /bin/sh; the event arrives on stdin as JSON, never in the command)")
-    .option("--recipe <tool>", `run the built-in command for ${RECIPE_TOOLS.join(", ")} (instead of --exec; see it with --print-recipe)`)
+    .option("--recipe <name>", `use a built-in target: ${RECIPE_NAMES.join(", ")} (hermes forwards to your Hermes gateway; see it with --print-recipe)`)
     .option("--forward <url>", "POST each event to this localhost URL, signed per Standard Webhooks")
     .option("--types <list>", `comma-separated event types, or "all" (default: message.received, new mail only; also ${EVENT_TYPES.filter((t) => t !== "message.received").join(", ")})`)
     .option("--from <glob>", 'only senders matching this glob, e.g. "*@stripe.com" (repeatable)', collect)
     .option("--to <glob>", "only when a to/cc address matches (repeatable)", collect)
     .option("--label <id>", "only messages with this Gmail label id, e.g. INBOX or Label_123 (repeatable)", collect)
     .option("--subject <regex>", "only subjects matching this case-insensitive regular expression")
+    .option("--not-from <glob>", 'skip senders matching this glob, e.g. "*@github.com" (repeatable)', collect)
+    .option("--not-label <id>", "skip messages with this Gmail label id, e.g. CATEGORY_UPDATES (repeatable)", collect)
+    .option("--all-categories", "don't skip Gmail's Promotions, Social and Forums tabs (skipped by default)")
+    .option("--include-category <name>", "take one category back from the default skip: promotions, social or forums (repeatable)", collect)
+    .option("--batch <duration>", `collect events this long (e.g. 60s, 2m) and run --exec once for all of them (up to 20); 0 turns it off`)
     .option("--include-body", "include the cleaned message body in each event")
     .option("--no-include-body", "don't include bodies (overrides a saved setting)")
     .option("--concurrency <n>", "events handled at once (default 2)", int("--concurrency"))
@@ -42,6 +48,27 @@ function listenFlags(cmd: Command): Command {
     .option("--cwd <dir>", "directory --exec commands run in (default: a private dir in the state dir; must be yours and not group/world-writable)")
     .option("--insecure", "allow plain http to a non-loopback, non-Tailscale daemon (loud warning)")
     .option("--save", "save these settings to the profile");
+}
+
+/** `listen hermes --help`. */
+function hermesHelp(): string {
+  return `
+--recipe hermes forwards each event to your running Hermes gateway (http://127.0.0.1:8644/webhooks/agentinbox; for
+another profile the route is agentinbox-<profile>). Hermes verifies the Standard Webhooks signature with the
+listener's secret, runs the triage, and delivers the result where this route says. Mail that isn't important gets
+a [SILENT] reply, which Hermes doesn't deliver.
+
+Without --run this prints the command (the secret is read from the profile when it runs, never shown). With --run
+agentinbox runs hermes itself and hides the secret in hermes' output. hermes takes the secret only as an argument,
+so other users on this machine could see it in \`ps\` for the moment hermes runs.
+
+Needs the gateway's webhook platform (hermes gateway setup, or WEBHOOK_ENABLED=true in ~/.hermes/.env) and a
+running gateway. Check it: curl http://127.0.0.1:8644/health
+
+Examples:
+  ${NPX} listen hermes --deliver telegram --run
+  ${NPX} listen hermes --cron-job email-watch --run
+  ${NPX} listen service install --recipe hermes`;
 }
 
 /** `setup-mcp --help`: exactly what it changes, per tool. */
@@ -133,13 +160,15 @@ Example:
     .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists: use --backfill)")
     .option("--backfill", "run the mail from before this listener started through --exec/--forward once, oldest first, then exit; safe while the listener runs (own cursor)")
     .option("--until <seq>", "with --backfill: replay up to this event number instead of where the listener started", int("--until"))
-    .option("--print-recipe <tool>", `print the command --recipe <tool> runs, for ${RECIPE_TOOLS.join(", ")} (with this machine's paths), and exit`)
+    .option("--print-recipe <tool>", `print the command --recipe <tool> runs, for ${RECIPE_NAMES.join(", ")} (with this machine's paths), and exit`)
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags & { printRecipe?: string }) => {
       if (flags.printRecipe !== undefined) {
-        const { parseTool } = await import("./connect.ts");
-        const { recipe } = await import("./recipes.ts");
-        process.stdout.write(`${recipe(parseTool(flags.printRecipe), flags.profile ?? DEFAULT_PROFILE).exec}\n`);
+        const { parseRecipeTool, recipe } = await import("./recipes.ts");
+        const name = flags.printRecipe.trim().toLowerCase();
+        const r = recipe(name === "other" ? "other" : parseRecipeTool(name), flags.profile ?? DEFAULT_PROFILE);
+        // Exec recipes print the bare command (to edit and pass back with --exec); hermes its forward URL.
+        process.stdout.write(`${r.exec ?? r.forward}\n`);
         return;
       }
       const { runListener } = await import("./listen.ts");
@@ -158,6 +187,23 @@ Example:
       const flags = all<{ profile?: string; rotate?: boolean }>(cmd);
       const { printSecret } = await import("./admin.ts");
       printSecret(flags.profile ?? DEFAULT_PROFILE, flags);
+    });
+
+  profileOption(
+    listen
+      .command("hermes")
+      .description("create the Hermes gateway webhook route that --recipe hermes forwards to (runs `hermes webhook subscribe` with the listener's secret)"),
+  )
+    .option("--deliver <target>", "where Hermes sends its triage: telegram, discord, slack… (a platform connected to your gateway), or log")
+    .option("--deliver-chat-id <id>", "with --deliver: a specific chat instead of the platform's home channel")
+    .option("--cron-job <job>", "instead of --deliver: fire this existing Hermes cron job (id or name; `hermes cron list`); its prompt and delivery apply")
+    .option("--script <file>", "a Hermes filter script under ~/.hermes/scripts (runs before the agent; can drop events at no LLM cost)")
+    .option("--run", "run hermes now (the secret goes straight to hermes: not to your terminal or shell history)")
+    .addHelpText("after", hermesHelp())
+    .action(async (_o: unknown, cmd: Command) => {
+      const flags = all<HermesFlags>(cmd);
+      const { hermesSubscribe } = await import("./hermes.ts");
+      process.exitCode = await hermesSubscribe(flags.profile ?? DEFAULT_PROFILE, flags);
     });
 
   listenFlags(listen.command("dead").description("list events that failed every attempt; --replay runs them again"))

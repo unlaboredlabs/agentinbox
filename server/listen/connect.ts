@@ -400,12 +400,15 @@ function skillCommand(tool: AgentTool, url: string): string {
   }
 }
 
+/** `listen hermes … --run`: creates the Hermes route (the console shows the same command). */
+export const hermesRouteCommand = (profileName: string) => `${NPX} listen hermes${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`} --deliver telegram --run`;
+
 export function printNextSteps(profileName: string, profile: Profile, tool: AgentTool, mcp: McpSetupResult | null): void {
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   const label = tool === "other" ? "your agent" : TOOL_LABELS[tool];
   const r = recipe(tool, profileName);
   // Known tools use --recipe: no `$(…)` for npx's install prompt to hide in, and the command stays the CLI's own.
-  const target = tool === "other" ? `--exec ${shellQuote(r.exec)}` : `--recipe ${tool}`;
+  const target = tool === "other" ? `--exec ${shellQuote(r.exec!)}` : `--recipe ${tool}`;
   out();
   out(pc.bold("Next steps"));
   let n = 1;
@@ -420,17 +423,28 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   }
   out(`  ${n++}. Install the agentinbox skill so ${label} knows the rules:`);
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
+  if (tool === "hermes") {
+    out(`  ${n++}. Create the Hermes gateway route the listener forwards to, saying where Hermes should tell you (once; needs the gateway's webhook platform on):`);
+    out(`       ${pc.cyan(hermesRouteCommand(profileName))}`);
+    out(pc.gray(`     Or --deliver discord|slack|…, --deliver-chat-id <id>, or --cron-job <job> for an existing Hermes cron job. It passes the listener's secret to hermes without showing it.`));
+  }
   out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
   out(`       ${pc.cyan(`${NPX} listen${p} --save ${target}`)}`);
   out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. Change it with --types, e.g. --types thread.reply_received (only replies to threads you sent) or --types all.`));
+  out(pc.gray(`     Gmail's Promotions, Social and Forums tabs are skipped (--all-categories to include them); skip more with --not-from '*@github.com'. --batch 60s runs a burst of mail once.`));
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
-  for (const note of r.notes) out(pc.gray(`     ${note}`));
+  out(pc.gray(`     Where its output goes: ${r.output}`));
+  for (const note of r.notes.filter((x) => tool !== "hermes" || !x.startsWith("Create the Hermes route"))) out(pc.gray(`     ${note}`));
   if (tool !== "other") {
-    out(pc.gray(`     It runs: ${r.exec}`));
-    out(pc.gray(`     To change it: ${NPX} listen${p} --print-recipe ${tool} prints it; pass your edit with --exec '…' instead of --recipe.`));
+    out(pc.gray(`     It runs: ${r.runs}`));
+    if (r.exec) out(pc.gray(`     To change it: ${NPX} listen${p} --print-recipe ${tool} prints it; pass your edit with --exec '…' instead of --recipe.`));
   }
   out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
-  out(`     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by one ${pc.green("✓")} line once ${label} handled it.`);
+  out(
+    `     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by one ${pc.green("✓")} line once ${
+      tool === "hermes" ? "Hermes accepted it (Hermes then triages it and tells you if it matters)" : `${label} handled it`
+    }.`,
+  );
   out(`  ${n++}. Then keep it running in the background (systemd / launchd, starts at login; stop the foreground one first):`);
   out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
   out(`       ${pc.cyan(`${NPX} listen status${p}`)}  ${pc.gray("(connection, cursor, recent events and the access granted)")}`);

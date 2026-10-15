@@ -11,6 +11,16 @@ export interface ForwardResult {
   error: string | null;
   response: string | null;
   durationMs: number;
+  /** 429 Too Many Requests: when to try again (Retry-After, else a minute). */
+  retryAfterMs?: number;
+}
+
+/** Retry-After in seconds or as an HTTP date; a minute when absent (Hermes limits a route per minute). Clamped to 1 s – 10 min. */
+export function retryAfter(header: string | null, now = Date.now()): number {
+  let ms = 60_000;
+  if (header && /^\d+$/.test(header.trim())) ms = Number(header.trim()) * 1000;
+  else if (header && !Number.isNaN(Date.parse(header))) ms = Date.parse(header) - now;
+  return Math.min(Math.max(ms, 1000), 600_000);
 }
 
 /** Forward targets must be on this machine: the point is waking a local process, not relaying mail elsewhere. */
@@ -60,7 +70,8 @@ export async function forwardEvent(url: string, secret: string, payload: Webhook
     });
     const text = (await res.text().catch(() => "")).slice(0, 500) || null;
     const ok = res.status >= 200 && res.status < 300;
-    return { ok, statusCode: res.status, response: text, error: ok ? null : `Receiver responded ${res.status}`, durationMs: elapsed() };
+    const limited = res.status === 429 ? { retryAfterMs: retryAfter(res.headers.get("retry-after")) } : {};
+    return { ok, statusCode: res.status, response: text, error: ok ? null : `Receiver responded ${res.status}${res.status === 429 ? " (too many requests)" : ""}`, durationMs: elapsed(), ...limited };
   } catch (err) {
     const reason = timeout.aborted ? `Timed out after ${Math.round(opts.timeoutMs / 1000)} s` : describeFetchError(err);
     return { ok: false, statusCode: null, response: null, error: reason, durationMs: elapsed() };

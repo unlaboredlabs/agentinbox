@@ -30,16 +30,16 @@ export interface Recipe {
  */
 export const RECIPES: Record<AgentTool, Recipe> = {
   "claude-code": {
-    note: "Claude reads the event from stdin with its built-in tools turned off, only the agentinbox MCP server loaded and project settings ignored.",
+    note: "Claude triages each email with its built-in tools turned off, only the agentinbox MCP server loaded and project settings ignored. Its reply is only logged on that machine: it can't notify you by itself.",
   },
   codex: {
-    note: "Codex runs in a read-only sandbox with its shell tool off. Other MCP servers you configured stay available, so give listener agents draft-only access.",
+    note: "Codex triages each email in a read-only sandbox with its shell tool off. Other MCP servers you configured stay available, so give listener agents draft-only access. Its reply is only logged.",
   },
   cursor: {
-    note: "Cursor's CLI can't be confined by flags: deny other tools in its permissions config (see docs/listen.md) and give listener agents draft-only access.",
+    note: "Cursor's CLI can't be confined by flags: deny other tools in its permissions config (see docs/listen.md) and give listener agents draft-only access. Its reply is only logged.",
   },
   hermes: {
-    note: "Hermes runs one prompt with only the agentinbox toolset enabled.",
+    note: "Each email goes to your running Hermes gateway, which triages it and tells you where the route says (Telegram, Discord…) only when it matters.",
   },
   other: {
     note: "Your command gets the event as JSON on stdin (also in $AGENTINBOX_EVENT_FILE). Exit 0 when done; anything else is retried.",
@@ -99,6 +99,8 @@ export interface ConnectCommands {
   listenTry: string;
   /** Then keep it running in the background (systemd / launchd). */
   listenService: string;
+  /** Hermes only: create the gateway route the listener forwards to (before trying the listener). */
+  hermesRoute: string | null;
   /** Prompt for an agent that sets itself up from the skill. */
   selfSetup: string;
   insecure: boolean;
@@ -142,6 +144,7 @@ export function connectCommands(publicUrl: string, tool: AgentTool, acceptInsecu
     skillInstall: `${NPX} skill install --target ${SKILL_TARGET[tool]} --url ${url}`,
     listenTry: tool === "other" ? `${NPX} listen --exec ${shellQuote(LISTEN_TEST_EXEC)}${flag}` : `${NPX} listen --save ${target}${flag}`,
     listenService: `${NPX} listen service install ${target}${flag}`,
+    hermesRoute: tool === "hermes" ? `${NPX} listen hermes --deliver telegram --run` : null,
     selfSetup: `${fetchSkill} to set yourself up with agentinbox.`,
     insecure,
   };

@@ -20,10 +20,20 @@ afterEach(() => {
   env.restore();
 });
 
-function fakeOps(failOn?: (cmd: string, args: string[]) => boolean): ServiceOps & { calls: string[] } {
+const PID = 4242;
+
+/** systemd fake: the unit reports active with MainPID PID (or `state` when given). */
+function fakeOps(failOn?: (cmd: string, args: string[]) => boolean, state: { active: string; pid: number } = { active: "active", pid: PID }): ServiceOps & { calls: string[] } {
   const calls: string[] = [];
   return {
-    capture: () => "",
+    capture: (cmd, args) => {
+      if (args.includes("MainPID")) return `${state.pid}\n`;
+      if (args.includes("is-active")) {
+        if (state.active !== "active") throw Object.assign(new Error(`Command failed: ${cmd}`), { stdout: `${state.active}\n` });
+        return "active\n";
+      }
+      return "";
+    },
     calls,
     platform: "linux",
     root: false,
@@ -55,8 +65,80 @@ const failingStage = () => {
 };
 const installed = () => readFileSync(join(listenAppDir(), "node_modules/agentinbox-cli/dist/cli.js"), "utf8");
 const unit = (p: string) => join(env.root, "units", `agentinbox-listen-${p}.service`);
-const ok = async () => true;
-const never = async () => false;
+const ok = async () => PID;
+const never = async () => null;
+const node = { path: "/usr/local/bin/node", version: "22.20.0", versioned: false, why: "a stable path that survives fnm/nvm upgrades" };
+
+/**
+ * launchd fake. `bootout` returns at once but the job stays loaded for `lingers` more `print`s (launchd
+ * tears it down asynchronously); `bootstrap` fails with launchd's "5: Input/output error" while a job
+ * with the label is loaded, or always with `bootstrapFails`.
+ */
+function fakeLaunchd(opts: { lingers?: number; bootstrapFails?: boolean; pid?: number } = {}): ServiceOps & { calls: string[]; loaded: boolean } {
+  const calls: string[] = [];
+  let lingering = 0;
+  const fail = (cmd: string, stderr: string) => Object.assign(new Error(`Command failed: ${cmd}`), { stderr });
+  const ops = {
+    ...fakeOps(),
+    platform: "darwin" as const,
+    calls,
+    loaded: true, // an older job with this label is loaded
+    exec(cmd: string, args: string[]) {
+      calls.push(`${cmd} ${args.join(" ")}`);
+      if (args[0] === "bootout") {
+        if (!ops.loaded) throw fail(cmd, "Boot-out failed: 3: No such process");
+        lingering = opts.lingers ?? 0;
+        if (!lingering) ops.loaded = false;
+      }
+    },
+    capture(cmd: string, args: string[]) {
+      calls.push(`${cmd} ${args.join(" ")}`);
+      if (args[0] === "print") {
+        if (lingering > 0 && --lingering === 0) {
+          ops.loaded = false;
+          return "state = running\n\tpid = 1\n"; // the old job, on its way out
+        }
+        if (!ops.loaded) throw fail(cmd, "Could not find service");
+        return `com.unlaboredlabs.agentinbox.listen.default = {\n\tstate = running\n\tpid = ${opts.pid ?? PID}\n}\n`;
+      }
+      if (args[0] === "bootstrap") {
+        if (opts.bootstrapFails || ops.loaded) throw fail(cmd, "Bootstrap failed: 5: Input/output error\n");
+        ops.loaded = true;
+      }
+      return "";
+    },
+  };
+  return ops;
+}
+const plist = () => join(env.root, "units", "com.unlaboredlabs.agentinbox.listen.default.plist");
+
+describe("listen service install (launchd)", () => {
+  it("waits for the old job to unload before bootstrapping, then confirms launchd runs the new listener", async () => {
+    const ops = fakeLaunchd({ lingers: 3 });
+    await installListenService({}, { ops, stage, waitStarted: ok, node, pollMs: 1 });
+    const bootstrap = ops.calls.findIndex((c) => c.startsWith("launchctl bootstrap"));
+    const lastPrintBefore = ops.calls.slice(0, bootstrap).filter((c) => c.startsWith("launchctl print")).length;
+    expect(lastPrintBefore).toBeGreaterThanOrEqual(3); // polled until the old job was gone
+    expect(ops.calls.filter((c) => c.startsWith("launchctl bootstrap"))).toHaveLength(1);
+    expect(readFileSync(plist(), "utf8")).toContain("<string>/usr/local/bin/node</string>");
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain("running as pid 4242");
+  });
+
+  it("a bootstrap that keeps failing is reported (with launchd's reason) and rolled back, never 'Installed'", async () => {
+    const ops = fakeLaunchd({ bootstrapFails: true });
+    await expect(installListenService({}, { ops, stage, waitStarted: ok, node, pollMs: 1 })).rejects.toThrow(
+      /launchctl bootstrap failed: Bootstrap failed: 5: Input\/output error\)\. Rolled back to no service/,
+    );
+    expect(ops.calls.filter((c) => c.startsWith("launchctl bootstrap")).length).toBe(5);
+    expect(existsSync(plist())).toBe(false);
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).not.toContain("Installed");
+  });
+
+  it("a listener that isn't launchd's job (an old one still running) doesn't count as installed", async () => {
+    const ops = fakeLaunchd({ pid: 999 });
+    await expect(installListenService({}, { ops, stage, waitStarted: ok, node, pollMs: 1 })).rejects.toThrow(/isn't the service's process \(launchd state running, pid 999\)/);
+  });
+});
 
 describe("listen service install", () => {
   it("first install that never starts rolls back to no service, no install, original settings", async () => {
@@ -70,7 +152,7 @@ describe("listen service install", () => {
 
   it("a failed re-install (readiness timeout) restores the previous unit, install and settings, and restarts it", async () => {
     const ops = fakeOps();
-    await installListenService({}, { ops, stage, waitStarted: ok });
+    await installListenService({}, { ops, stage, waitStarted: ok, node });
     const before = { unit: readFileSync(unit("default"), "utf8"), app: installed() };
     ops.calls.length = 0;
     await expect(installListenService({ exec: "new-cmd", concurrency: 7 }, { ops, stage, waitStarted: never })).rejects.toThrow(/Rolled back to the previous install/);
@@ -83,7 +165,7 @@ describe("listen service install", () => {
 
   it("a failed npm install changes nothing (settings included)", async () => {
     const ops = fakeOps();
-    await installListenService({}, { ops, stage, waitStarted: ok });
+    await installListenService({}, { ops, stage, waitStarted: ok, node });
     const before = readFileSync(unit("default"), "utf8");
     await expect(installListenService({ exec: "new-cmd" }, { ops, stage: failingStage, waitStarted: ok })).rejects.toThrow(/left as it was/);
     expect(loadProfile().exec).toBe("cat > /dev/null");
@@ -92,9 +174,9 @@ describe("listen service install", () => {
 
   it("restarts the other profiles onto the new install, and keeps the shared install until the last one is removed", async () => {
     const ops = fakeOps();
-    await installListenService({ profile: "work" }, { ops, stage, waitStarted: ok });
+    await installListenService({ profile: "work" }, { ops, stage, waitStarted: ok, node });
     ops.calls.length = 0;
-    await installListenService({}, { ops, stage, waitStarted: ok });
+    await installListenService({}, { ops, stage, waitStarted: ok, node });
     expect(ops.calls).toContain("systemctl --user try-restart agentinbox-listen-work");
     expect(ops.calls).not.toContain("systemctl --user try-restart agentinbox-listen-default");
     expect(installed()).toBe(`// v${version}\n`);
@@ -106,16 +188,34 @@ describe("listen service install", () => {
     expect(existsSync(listenAppDir())).toBe(false);
   });
 
+  it("checks that systemd itself runs the new listener: is-active and MainPID must match the listener that started", async () => {
+    const log = vi.mocked(console.log);
+    await expect(installListenService({}, { ops: fakeOps(undefined, { active: "failed", pid: 0 }), stage, waitStarted: ok, node })).rejects.toThrow(
+      /doesn't report it running \(systemd failed\)[\s\S]*Rolled back/,
+    );
+    // Another listener (not the unit's main process) answering doesn't count either.
+    await expect(installListenService({}, { ops: fakeOps(undefined, { active: "active", pid: 777 }), stage, waitStarted: ok, node })).rejects.toThrow(/pid 4242\) isn't the service's process/);
+    expect(log.mock.calls.flat().join("\n")).not.toContain("Installed");
+    await installListenService({}, { ops: fakeOps(), stage, waitStarted: ok, node });
+    expect(log.mock.calls.flat().join("\n")).toContain("it is running as pid 4242");
+  });
+
+  it("runs the chosen stable node and says which and why", async () => {
+    await installListenService({}, { ops: fakeOps(), stage, waitStarted: ok, node });
+    expect(readFileSync(unit("default"), "utf8")).toContain('ExecStart="/usr/local/bin/node" ');
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain("Node.js:   /usr/local/bin/node (v22.20.0): a stable path that survives fnm/nvm upgrades");
+  });
+
   it("refuses a concurrent install and a directory that holds a daemon's database", async () => {
     const ops = fakeOps();
     mkdirSync(dataDir(), { recursive: true });
     writeFileSync(join(dataDir(), "install.lock"), JSON.stringify({ pid: process.ppid, startedAt: "earlier" }));
-    await expect(installListenService({}, { ops, stage, waitStarted: ok })).rejects.toThrow(/Another listener service install is running/);
+    await expect(installListenService({}, { ops, stage, waitStarted: ok, node })).rejects.toThrow(/Another listener service install is running/);
     writeFileSync(join(dataDir(), "install.lock"), JSON.stringify({ pid: 2 ** 22 + 4242, startedAt: "crashed" }));
-    await installListenService({}, { ops, stage, waitStarted: ok }); // stale lock taken over
+    await installListenService({}, { ops, stage, waitStarted: ok, node }); // stale lock taken over
     expect(existsSync(join(dataDir(), "install.lock"))).toBe(false);
 
     writeFileSync(join(dataDir(), "agentinbox.db"), "");
-    await expect(installListenService({}, { ops, stage, waitStarted: ok })).rejects.toThrow(/holds an agentinbox daemon's data/);
+    await expect(installListenService({}, { ops, stage, waitStarted: ok, node })).rejects.toThrow(/holds an agentinbox daemon's data/);
   });
 });

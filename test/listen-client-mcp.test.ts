@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { helperNode, helperNodeChoice } from "../server/listen/mcpheader.ts";
+import { helperNode, helperNodeChoice, serviceNode } from "../server/listen/mcpheader.ts";
 import { codexBlock, removeTomlServer, setupMcp, upsertYamlServer } from "../server/listen/mcpsetup.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { FAKE_KEY, isolateXdg } from "./listen-client-fake.ts";
@@ -78,6 +78,22 @@ describe("setup-mcp", () => {
     } finally {
       delete process.env.FAIL;
     }
+  });
+
+  it("listener service: the stable node, but only one new enough for agentinbox (22.13+); says which and why", () => {
+    const fnm = "/Users/w/Library/Application Support/fnm/node-versions/v24.1.0/installation/bin/node";
+    const fnmDefault = "/Users/w/Library/Application Support/fnm/aliases/default/bin/node";
+    // Wynn's Mac: fnm v24 interactively, /usr/local/bin/node v22.20 installed too. fnm's default alias is too old here.
+    const versions: Record<string, string> = { [fnmDefault]: "22.12.0", "/usr/local/bin/node": "22.20.0", "/usr/bin/node": "18.19.1" };
+    const chosen = serviceNode(fnm, (p) => versions[p] ?? null, "24.1.0");
+    expect(chosen).toMatchObject({ path: "/usr/local/bin/node", version: "22.20.0", versioned: false });
+    expect(chosen.why).toBe(`a stable path that survives fnm/nvm upgrades (this shell's is ${fnm}, v24.1.0)`);
+    // Only nodes too old for agentinbox around: this shell's node, flagged as version-specific.
+    const old = serviceNode(fnm, (p) => (p === "/usr/bin/node" ? "20.11.0" : null), "24.1.0");
+    expect(old).toMatchObject({ path: fnm, version: "24.1.0", versioned: true });
+    expect(old.why).toContain("re-run install after upgrading or removing it");
+    // A node that isn't a version manager's is used as is, without probing anything.
+    expect(serviceNode("/usr/local/bin/node", () => { throw new Error("no probing"); }, "22.20.0")).toMatchObject({ path: "/usr/local/bin/node", why: "this shell's node" });
   });
 
   it("Claude Code: prefers a stable node over a version manager's, only when it exists and works", () => {

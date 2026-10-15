@@ -71,7 +71,7 @@ describe("command mode", () => {
       .filter((l) => l.startsWith("AGENTINBOX_"))
       .map((l) => l.split("=")[0])
       .sort();
-    expect(ours).toEqual(["AGENTINBOX_ACCOUNT", "AGENTINBOX_EVENT_FILE", "AGENTINBOX_EVENT_ID", "AGENTINBOX_EVENT_SEQ", "AGENTINBOX_EVENT_TYPE", "AGENTINBOX_MESSAGE_ID", "AGENTINBOX_THREAD_ID"]);
+    expect(ours).toEqual(["AGENTINBOX_ACCOUNT", "AGENTINBOX_EVENT_COUNT", "AGENTINBOX_EVENT_FILE", "AGENTINBOX_EVENT_ID", "AGENTINBOX_EVENT_SEQ", "AGENTINBOX_EVENT_TYPE", "AGENTINBOX_MESSAGE_ID", "AGENTINBOX_THREAD_ID"]);
     expect(env).not.toContain("touch");
     expect(env).not.toContain("Hello");
     expect(env).toContain("AGENTINBOX_EVENT_ID=evt_7\n");

@@ -444,6 +444,12 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
         >
           {!listenDone && !skipListen && (
             <>
+              {c.hermesRoute && (
+                <>
+                  <p className="text-sm text-muted-foreground">On the machine where you ran connect, create the Hermes route once (use the platform Hermes should tell you on):</p>
+                  <Command code={c.hermesRoute} label="hermes route command" />
+                </>
+              )}
               <p className="text-sm text-muted-foreground">On the machine where you ran connect (Ctrl-C stops it):</p>
               <Command code={c.listenTry} label="listen command" />
               <p className="text-xs text-muted-foreground">
@@ -451,7 +457,10 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
                   ? "This test command only confirms each email (a ✓ line per email); it starts nothing."
                   : (
                     <>
-                      Starts {label} for each new email you receive (not mail you send), with only the agentinbox tools. Add{" "}
+                      {tool === "hermes"
+                        ? `Forwards each new email you receive (not mail you send) to ${label}, which triages it.`
+                        : `Starts ${label} for each new email you receive (not mail you send), with only the agentinbox tools.`}{" "}
+                      Add{" "}
                       <code className="font-mono whitespace-nowrap text-foreground">--types</code> to wake it for other events too. Just testing delivery?{" "}
                       <code className="font-mono whitespace-nowrap text-foreground">--exec {shellQuote(LISTEN_TEST_EXEC)}</code> only confirms each email.
                     </>
