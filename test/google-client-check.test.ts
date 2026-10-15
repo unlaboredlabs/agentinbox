@@ -7,6 +7,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ApiError, GoogleClientCheck, GoogleClientImportResult, GoogleClientSaveResult } from "../shared/types.ts";
 import { googleApi } from "../server/api/google.ts";
+import { settingsApi } from "../server/api/settings.ts";
 import type { AppEnv } from "../server/api/util.ts";
 import type { AppContext } from "../server/context.ts";
 import { HttpError } from "../server/util/errors.ts";
@@ -59,6 +60,84 @@ describe("OAuth client check", () => {
     expect((await check()).body).toEqual({ clientId: "ok", redirectUri: "ok", secret: "ok", warnings: [] });
     // The probes didn't use up or disturb a real consent.
     await connectFakeAccount(ctx, fake, "a@example.com");
+  });
+
+  it("warns when the redirect URI changed since the client was saved, until a check passes or it is re-saved", async () => {
+    ctx.google.setClient({ ...FAKE_CLIENT, appType: "internal" });
+    const first = ctx.google.redirectUri();
+    expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBe(first);
+    expect(setupCodes()).toEqual([]);
+
+    ctx.settings.update({ publicUrl: "https://mail.example.org" });
+    const [w, ...rest] = ctx.google.setupWarnings();
+    expect(rest).toEqual([]);
+    expect(w).toMatchObject({ code: "redirect_uri_changed", severity: "error", url: `https://console.cloud.google.com/auth/clients?project=${FAKE_CLIENT.projectId}` });
+    expect(w!.message).toContain("https://mail.example.org/oauth/callback");
+    expect(w!.message).toContain(first);
+    expect(w!.hint).toContain("Google Auth Platform → Clients → your client → Authorized redirect URIs");
+    expect(w!.hint).toContain("enter https://mail.example.org/oauth/callback exactly");
+    expect(w!.hint).toContain('click "I\'ve added it, check now"');
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(false);
+
+    // Google confirms the new one: cleared.
+    expect((await check()).body).toMatchObject({ redirectUri: "ok", warnings: [] });
+    expect(setupCodes()).toEqual([]);
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(true);
+
+    // Changed again: back until the client is saved again (that records the URI in effect).
+    ctx.settings.update({ publicUrl: "https://mail2.example.org" });
+    expect(setupCodes()).toEqual(["redirect_uri_changed"]);
+    ctx.google.setClient({ clientId: FAKE_CLIENT.clientId, projectId: FAKE_CLIENT.projectId, appType: "internal" });
+    expect(setupCodes()).toEqual([]);
+
+    // Google says it's missing: that, not both.
+    ctx.settings.update({ publicUrl: "https://mail3.example.org" });
+    fake.registeredRedirectUris = ["https://mail2.example.org/oauth/callback"];
+    expect((await check()).body.warnings.map((x) => x.code)).toEqual(["redirect_uri_missing"]);
+    expect(setupCodes()).toEqual(["redirect_uri_missing"]);
+  });
+
+  it("clears redirect_uri_changed once an account connects through the new redirect URI", async () => {
+    ctx.google.setClient({ ...FAKE_CLIENT, appType: "internal" });
+    ctx.settings.update({ publicUrl: "http://127.0.0.1:8425" });
+    expect(setupCodes()).toEqual(["redirect_uri_changed"]);
+    await connectFakeAccount(ctx, fake, "a@example.com");
+    expect(ctx.settings.getState("google.client")?.verifiedRedirectUri).toBe("http://127.0.0.1:8425/oauth/callback");
+    expect(setupCodes()).not.toContain("redirect_uri_changed");
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(true);
+  });
+
+  it("records the old redirect URI for a client saved before it was tracked, when the public URL changes", async () => {
+    ctx.google.setClient({ ...FAKE_CLIENT, appType: "internal" });
+    const first = ctx.google.redirectUri();
+    const { savedRedirectUri: _dropped, ...legacy } = ctx.settings.getState("google.client")!;
+    ctx.settings.setState("google.client", legacy);
+    const patch = (publicUrl: string) =>
+      withErrors(settingsApi(ctx)).request("/settings", { method: "PATCH", body: JSON.stringify({ publicUrl }) });
+    // A rejected change records nothing.
+    expect((await patch("ftp://nope")).status).toBe(400);
+    expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBeUndefined();
+    expect((await patch("https://mail.example.org")).status).toBe(200);
+    expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBe(first);
+    expect(setupCodes()).toEqual(["redirect_uri_changed"]);
+    // Later changes keep the URI the client was saved with.
+    await patch("https://mail2.example.org");
+    expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBe(first);
+  });
+
+  it("lets a check that finds the URI missing override the imported JSON's list", async () => {
+    const uri = ctx.google.redirectUri();
+    fake.registeredRedirectUris = ["https://elsewhere.example/oauth/callback"];
+    const json = JSON.stringify({ web: { client_id: FAKE_CLIENT.clientId, client_secret: FAKE_CLIENT.clientSecret, project_id: FAKE_CLIENT.projectId, redirect_uris: [uri] } });
+    const imported = await call<GoogleClientImportResult>("POST", "/google/client/import", { json, appType: "internal" });
+    expect(imported.body.check.redirectUri).toBe("missing");
+    expect(imported.body.redirectUriConfirmed).toBe(false);
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(false);
+    expect(setupCodes()).toEqual(["redirect_uri_missing"]);
+    // Once Google has it, the check says so.
+    fake.registeredRedirectUris = null;
+    await check();
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(true);
   });
 
   it("needs a saved client", async () => {

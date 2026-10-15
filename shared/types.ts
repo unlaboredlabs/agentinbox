@@ -124,6 +124,9 @@ export interface SetupState {
  * - redirect_uri_missing: Google said the redirect URI isn't registered (GoogleClientCheck), or, when the
  *   check couldn't tell, the imported client JSON doesn't list it. Clears on a check or re-import that
  *   finds it, or once an account connects through the current redirect URI. Severity "error".
+ * - redirect_uri_changed: the redirect URI changed (a public URL change) since the OAuth client was saved or
+ *   imported, and nothing has shown the new one is registered yet. Names both URIs. Clears on a client check
+ *   that finds it, a re-save/re-import of the client, or a connection through it. Severity "error".
  * - client_invalid: the last GoogleClientCheck found Google doesn't know the client ID. "error".
  * - client_secret_invalid: the last GoogleClientCheck found Google rejects the secret. "error".
  * - needs_reauth: an account's sign-in was rejected; one per account (accountId set). Severity "error".
@@ -136,6 +139,7 @@ export type SetupWarningCode =
   | "client_secret_invalid"
   | "app_type_mismatch"
   | "redirect_uri_missing"
+  | "redirect_uri_changed"
   | "needs_reauth"
   | "pubsub_failing";
 
@@ -282,6 +286,11 @@ export interface GoogleClientView {
   callbackMode: "direct" | "paste";
   /** Last 4 characters of the saved secret (to recognize which one is saved), or null without a secret. */
   secretHint: string | null;
+  /**
+   * There is evidence `redirectUri` is registered on the saved client: an account connected through it,
+   * a client check found it, or the imported client JSON lists it. False without a client.
+   */
+  redirectUriConfirmed: boolean;
 }
 
 // ───────────────────────────── Accounts ─────────────────────────────
@@ -669,7 +678,8 @@ export interface Page<T> {
 
 /** All non-2xx console API responses have this body. */
 export interface ApiError {
-  error: { code: string; message: string; hint?: string };
+  /** `email`: only on oauth_already_connected (from the authenticated paste endpoint), the account that sign-in connected. */
+  error: { code: string; message: string; hint?: string; email?: string };
 }
 
 // ───────────────────────────── Console API route map ─────────────────────────────
@@ -680,6 +690,7 @@ export interface ApiError {
 //   GET    /api/health                                → HealthResponse
 //   GET    /api/setup/status                          → SetupStatus
 //   POST   /api/setup/claim {token,password}          → 204 + session cookie (only while unclaimed)
+//   POST   /api/setup/verify-token {token}            → 204 when the setup token is right (same limiter as claim)
 //   POST   /api/auth/login {password}                 → 204 + session cookie (5 failures/IP → 15 min lockout)
 //   POST   /api/auth/logout                           → 204
 //   GET    /oauth/callback?code&state                 → HTML result page; posts an OAuthCallbackMessage (ok/email or error/code/hint)

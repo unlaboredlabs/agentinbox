@@ -1,4 +1,6 @@
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { setupTokenPath } from "../server/auth/setup-token.ts";
 import { BAN_MS, LoginLimiter } from "../server/auth/lockout.ts";
 import { SESSION_TTL_MS, SessionStore } from "../server/auth/sessions.ts";
 import { resetAdminPassword } from "../server/auth/index.ts";
@@ -48,6 +50,52 @@ describe("setup claim", () => {
 
     const actions = h.ctx.audit.list().items.map((e) => `${e.action}:${e.outcome}`);
     expect(actions).toEqual(["admin.claim:ok", "admin.claim:denied"]);
+  });
+
+  it("verifies the setup token on its own, under the claim's lockout", async () => {
+    h = harness();
+    const token = h.setupToken()!;
+    const verify = (t: string) => h!.request("/api/setup/verify-token", { method: "POST", headers: CSRF, json: { token: t } });
+
+    let res = await verify(token);
+    expect(res.status).toBe(204);
+    expect(h.setupToken()).toBe(token); // checking doesn't consume it
+
+    // A mutating /api request: the CSRF header is required like everywhere else.
+    res = await h.request("/api/setup/verify-token", { method: "POST", json: { token } });
+    expect(res.status).toBe(403);
+    expect((await json(res)).error.code).toBe("csrf");
+
+    res = await verify(`${token}x`);
+    expect(res.status).toBe(403);
+    const body = await json(res);
+    expect(body.error.code).toBe("invalid_token");
+    // A custom data directory needs --data, but an unauthenticated caller never learns the path.
+    expect(body.error.hint).toMatch(/reset-password --data <dir>/);
+    expect(body.error.hint).not.toContain(h.ctx.config.dataDir);
+
+    // Five distinct wrong tokens lock the address out, for the claim as well.
+    for (let i = 1; i < 5; i++) await verify(`wrong-${i}`);
+    res = await verify(token);
+    expect(res.status).toBe(429);
+    res = await h.request("/api/setup/claim", { method: "POST", headers: CSRF, json: { token, password: PASSWORD } });
+    expect(res.status).toBe(429);
+    expect(h.ctx.audit.list().items.filter((e) => e.action === "admin.claim" && e.outcome === "denied")).toHaveLength(5);
+  });
+
+  it("says how to get a new link when the token file is gone, and 409 once claimed", async () => {
+    h = harness();
+    const token = h.setupToken()!;
+    rmSync(setupTokenPath(h.ctx.config.dataDir));
+    let res = await h.request("/api/setup/verify-token", { method: "POST", headers: CSRF, json: { token } });
+    expect(res.status).toBe(403);
+    const body = await json(res);
+    expect(body.error.code).toBe("setup_token_expired");
+    expect(body.error.hint).toMatch(/reset-password/);
+
+    h.ctx.settings.setState("admin.passwordHash", "x");
+    res = await h.request("/api/setup/verify-token", { method: "POST", headers: CSRF, json: { token } });
+    expect(res.status).toBe(409);
   });
 
   it("marks the cookie Secure behind an https proxy when trusted", async () => {

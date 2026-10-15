@@ -42,7 +42,29 @@ export function clientView(ctx: Ctx): GoogleClientView {
     redirectUri,
     callbackMode: mode,
     secretHint: c?.clientSecretEnc ? (c.secretHint ?? secretTail(ctx, c.clientSecretEnc)) : null,
+    redirectUriConfirmed: redirectConfirmed(ctx, redirectUri),
   };
+}
+
+/** Evidence that `uri` is registered on the saved client (see GoogleClientView.redirectUriConfirmed). */
+function redirectConfirmed(ctx: Ctx, uri: string): boolean {
+  const c = ctx.settings.getState("google.client");
+  if (!c?.clientId) return false;
+  if (c.verifiedRedirectUri === uri) return true;
+  // Google's own answer beats the imported JSON (a snapshot), as in redirectWarning.
+  const checked = c.check?.redirectUriTested === uri ? c.check.redirectUri : "unknown";
+  if (checked !== "unknown") return checked === "ok";
+  return !!c.importedRedirectUris?.includes(uri);
+}
+
+/**
+ * After a public URL change: a client saved before savedRedirectUri existed gets `previousUri` (the
+ * redirect URI in effect before the change), so the change is noticed (redirect_uri_changed).
+ */
+export function recordPreviousRedirect(ctx: Ctx, previousUri: string): void {
+  const c = ctx.settings.getState("google.client");
+  if (!c?.clientId || c.savedRedirectUri) return;
+  ctx.settings.setState("google.client", { ...c, savedRedirectUri: previousUri });
 }
 
 /** Last 4 characters of a stored secret (for clients saved before secretHint was recorded). */
@@ -99,6 +121,7 @@ function saveClient(
     projectId,
     appType: input.appType,
     ...(importedRedirectUris ? { importedRedirectUris } : {}),
+    savedRedirectUri: callbackMode(ctx).redirectUri,
     verifiedRedirectUri: same ? (prev?.verifiedRedirectUri ?? null) : null,
     ...(secretHint ? { secretHint } : {}),
   });
@@ -166,9 +189,10 @@ export function importClient(ctx: Ctx, input: GoogleClientImportInput): Omit<Goo
 const clientsUrl = (projectId: string) => `https://console.cloud.google.com/auth/clients${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
 
 /**
- * `redirect_uri_missing`, from the strongest evidence available for the current redirect URI: a
- * successful connection through it (registered), else the last client check (Google's own answer),
- * else the redirect_uris in the last imported JSON.
+ * `redirect_uri_missing` / `redirect_uri_changed`, from the strongest evidence available for the
+ * current redirect URI: a successful connection through it (registered), else the last client check
+ * (Google's own answer), else the redirect_uris in the last imported JSON, else whether the public URL
+ * changed since the client was saved (it was presumably registered with the redirect URI back then).
  */
 export function redirectWarning(ctx: Ctx): SetupWarning | null {
   const c = ctx.settings.getState("google.client");
@@ -191,7 +215,22 @@ export function redirectWarning(ctx: Ctx): SetupWarning | null {
       url: clientsUrl(c.projectId),
     };
   }
-  if (!registered || registered.includes(uri)) return null;
+  if (registered?.includes(uri)) return null;
+  if (!registered) {
+    const saved = c.savedRedirectUri;
+    if (!saved || saved === uri) return null;
+    return {
+      code: "redirect_uri_changed",
+      severity: "error",
+      message:
+        `agentinbox's address changed, so its redirect URI is now ${uri} (it was ${saved} when you saved the OAuth client). ` +
+        'Until the new one is added to the client, Google refuses to connect accounts ("Error 400: redirect_uri_mismatch").',
+      hint:
+        `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, click Add URI, enter ${uri} exactly ` +
+        "(no trailing slash) and save. Then click \"I've added it, check now\" (or save the client again): this warning clears once Google confirms it.",
+      url: clientsUrl(c.projectId),
+    };
+  }
   return {
     code: "redirect_uri_missing",
     severity: "error",

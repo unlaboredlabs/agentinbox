@@ -26,11 +26,6 @@ export interface SetupDraft {
   projectConfirmed?: boolean;
   appType?: GoogleAppType;
   productionConfirmed?: boolean;
-  /**
-   * The redirect URI the OAuth client was saved with (import or manual entry). When the public URL
-   * changes later, the current one differs and step 4 / Settings ask to add the new URI.
-   */
-  clientRedirectUri?: string;
   pubsubSkipped?: boolean;
   /** Set by the "Check that it works" step once the first event reached the agent. */
   verified?: boolean;

@@ -4,7 +4,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, InfoIcon, LaptopIcon, NetworkIcon,
 import { useState } from "react";
 import { ChoiceCards } from "@/components/choice-cards";
 import { CodeBlock, ErrorAlert, Wrapped } from "@/components/common";
-import { RedirectNotice, rememberRedirectBeforeChange, useRedirectProblem } from "@/components/google/redirect-notice";
+import { RedirectNotice, useRedirectProblem } from "@/components/google/redirect-notice";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
@@ -65,7 +65,7 @@ type Situation = "local" | "remote" | "tailscale" | "public";
 
 function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & { settings: Settings; addresses: string[] }) {
   const qc = useQueryClient();
-  const { draft, statuses } = useSetupProgress();
+  const { statuses } = useSetupProgress();
   const origin = window.location.origin;
   const browserRemote = !isLoopbackOrigin(origin);
   // First visit (nothing confirmed, no client, no account): the address in the browser's bar is the best
@@ -92,7 +92,8 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
       updateDraft({ urlConfirmed: true });
       const before = qc.getQueryData<GoogleClientView>(keys.googleClient);
       const after = await qc.fetchQuery({ ...queries.googleClient(), staleTime: 0 });
-      void qc.invalidateQueries({ queryKey: keys.setupState });
+      // The server compares the new redirect URI with the one the client was saved with (redirect_uri_changed).
+      await qc.fetchQuery({ ...queries.setupState(), staleTime: 0 });
       // A saved OAuth client was registered with the old redirect URI: say what to add before moving on.
       if (before?.clientId && before.redirectUri !== after.redirectUri) setChangedRedirect(true);
       else onNext();
@@ -105,7 +106,6 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
       updateDraft({ urlConfirmed: true });
       onNext();
     } else {
-      rememberRedirectBeforeChange(qc.getQueryData<GoogleClientView>(keys.googleClient), draft.clientRedirectUri);
       save.mutate(clean);
     }
   };
@@ -136,13 +136,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
           <p className="text-sm">
             Saved: agentinbox is now at <code className="font-mono">{settings.publicUrl}</code>.
           </p>
-          {redirectProblem ? (
-            <RedirectNotice />
-          ) : (
-            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
-              <CheckCircle2Icon className="size-4 text-success" /> The OAuth client already has the new redirect URI.
-            </p>
-          )}
+          <RedirectNotice showStatus />
         </div>
       ) : (
         <>

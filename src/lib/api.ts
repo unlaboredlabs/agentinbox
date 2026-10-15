@@ -6,12 +6,15 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly hint?: string;
-  constructor(status: number, code: string, message: string, hint?: string) {
+  /** Set on oauth_already_connected: the account that sign-in connected. */
+  readonly email?: string;
+  constructor(status: number, code: string, message: string, hint?: string, email?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.hint = hint;
+    this.email = email;
   }
 }
 
@@ -28,7 +31,7 @@ export interface RequestOptions {
 export const UNAUTHORIZED_EVENT = "agentinbox:unauthorized";
 
 // Auth endpoints answer 401/403 for wrong passwords and tokens; those are form errors, not session expiry.
-const AUTH_PATHS = ["/api/auth/login", "/api/setup/claim", "/api/auth/password", "/api/setup/status"];
+const AUTH_PATHS = ["/api/auth/login", "/api/setup/claim", "/api/setup/verify-token", "/api/auth/password", "/api/setup/status"];
 
 function isApiErrorBody(v: unknown): v is ApiErrorBody {
   return !!v && typeof v === "object" && "error" in v && !!(v as ApiErrorBody).error && typeof (v as ApiErrorBody).error.message === "string";
@@ -72,7 +75,7 @@ export async function api<T = void>(path: string, opts: RequestOptions = {}): Pr
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     }
     if (isApiErrorBody(parsed)) {
-      throw new ApiError(res.status, parsed.error.code, parsed.error.message, parsed.error.hint);
+      throw new ApiError(res.status, parsed.error.code, parsed.error.message, parsed.error.hint, parsed.error.email);
     }
     const msg = typeof parsed === "string" && parsed.trim() && parsed.length < 300 ? parsed.trim() : `Request failed (HTTP ${res.status})`;
     throw new ApiError(res.status, "http_" + res.status, msg);

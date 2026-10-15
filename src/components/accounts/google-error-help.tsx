@@ -42,7 +42,7 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
           The app is Internal, and this account isn't in its Google Workspace. Sign in with an account of that organization, or make the app
           External (<Path items={["Audience", "Make external"]} />), publish it, and set the audience to External in step 3.
         </Item>
-        <Item title="“Access blocked: agentinbox has not completed the Google verification process”, or “not a test user”">
+        <Item title="“Access blocked: agentinbox has not completed the Google verification process” (Error 403: access_denied on Google's page)">
           The app is still in Testing. Publish it: <Path items={["Audience", "Publish app", "Confirm"]} />
           {project && (
             <>

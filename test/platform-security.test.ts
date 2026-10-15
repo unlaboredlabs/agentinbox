@@ -1,11 +1,13 @@
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { adminAuth, checkSecret, MAX_CONCURRENT_VERIFICATIONS } from "../server/auth/index.ts";
 import { isTrustedProxy, parseRange } from "../server/auth/proxy.ts";
 import { contentSecurityPolicy, inlineScriptHashes, registerInlineScript, scriptHash } from "../server/csp.ts";
 import { BAN_MS, clientKey, GLOBAL_MAX_FAILURES, LoginLimiter, MAX_ATTEMPTS, MAX_ENTRIES } from "../server/auth/lockout.ts";
 import { SESSION_MAX_AGE_MS, SESSION_TTL_MS, SessionStore } from "../server/auth/sessions.ts";
-import { acquireInstanceLock, assertMasterKeyUsable, bootId, lockPath, processStartTime, runningInstance } from "../server/instance.ts";
+import { acquireInstanceLock, assertMasterKeyUsable, bootId, lockPath, processStartTime, resetPasswordCommand, runningInstance } from "../server/instance.ts";
 import { startServer } from "../server/server.ts";
 import { testConfig } from "./helpers.ts";
 import { CSRF, fakeGoogle, fakeIngest, type Harness, harness, json, PASSWORD } from "./platform-helpers.ts";
@@ -279,6 +281,12 @@ describe("M3: body limits", () => {
     expect(res.status).toBe(400);
     expect((await json(res)).error.message).toMatch(/at most 1024/);
   });
+
+  it("gives the unauthenticated setup token check the small auth limit", async () => {
+    h = harness();
+    const res = await h.request("/api/setup/verify-token", { method: "POST", headers: CSRF, json: { token: "x".repeat(20_000) } });
+    expect(res.status).toBe(413);
+  });
 });
 
 describe("N3: CSP hashes only known scripts", () => {
@@ -351,6 +359,25 @@ describe("instance lock", () => {
       await running.close();
       expect(existsSync(lockPath(config.dataDir))).toBe(false);
       const lock = acquireInstanceLock(config);
+      lock.release();
+    } finally {
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("instance lock: lost setup link", () => {
+  it("points to reset-password (with --data for a custom directory) while the instance isn't set up", () => {
+    const config = testConfig();
+    try {
+      const lock = acquireInstanceLock(config);
+      // No setup token yet (claimed, or never started): no hint.
+      expect(() => acquireInstanceLock(config)).toThrow(/^(?![\s\S]*Lost its setup link)/);
+      writeFileSync(join(config.dataDir, "setup-token"), "tok\n");
+      expect(() => acquireInstanceLock(config)).toThrow(`Lost its setup link? \`${resetPasswordCommand(config.dataDir)}\` prints it again.`);
+      expect(resetPasswordCommand(config.dataDir)).toMatch(/reset-password --data \S+/);
+      expect(resetPasswordCommand(join(homedir(), ".agentinbox"))).toMatch(/reset-password$/);
+      expect(resetPasswordCommand("/srv/agent inbox")).toMatch(/reset-password --data '\/srv\/agent inbox'$/);
       lock.release();
     } finally {
       rmSync(config.dataDir, { recursive: true, force: true });

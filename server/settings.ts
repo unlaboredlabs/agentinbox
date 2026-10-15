@@ -18,6 +18,11 @@ export interface InternalState {
     appType: GoogleAppType | null;
     /** redirect_uris listed in the last imported client JSON (absent after manual entry). */
     importedRedirectUris?: string[];
+    /**
+     * Redirect URI in effect when the client was last saved or imported: presumably the one registered
+     * on it. A later public URL change makes it differ (SetupWarning redirect_uri_changed).
+     */
+    savedRedirectUri?: string;
     /** Redirect URI of the last successful account connection: proves it is registered on the client. */
     verifiedRedirectUri?: string | null;
     /** Last 4 characters of the secret, for display (GoogleClientView.secretHint). */

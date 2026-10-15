@@ -3,6 +3,8 @@ import type { AppContext } from "../context.ts";
 import { registerInlineScript } from "../csp.ts";
 import { HttpError } from "../util/errors.ts";
 import { asHttpError } from "../google/http.ts";
+import { hasSession } from "../auth/index.ts";
+import { AlreadyConnectedError } from "../google/oauth.ts";
 import { router } from "./util.ts";
 
 const escapeHtml = (s: string) =>
@@ -25,6 +27,12 @@ export const OAUTH_CHANNEL = "agentinbox-oauth";
 export const OAUTH_CALLBACK_SCRIPT = `(function () {
   try {
     var r = JSON.parse(document.getElementById("oauth-result").textContent);
+    // A reload after success: the console already knows. Close it if it's the sign-in pop-up
+    // (browsers ignore close() for a tab the user opened, which keeps its link back).
+    if (r.already) {
+      setTimeout(function () { window.close(); }, 1500);
+      return;
+    }
     var msg = { type: "agentinbox:oauth", ok: r.ok, email: r.email, error: r.error, code: r.code, hint: r.hint };
     var toOpener = false;
     if (window.opener) {
@@ -52,6 +60,8 @@ registerInlineScript(OAUTH_CALLBACK_SCRIPT);
 
 interface PageInput {
   ok: boolean;
+  /** A reload of a callback that already connected `email`: nothing is posted to the console. */
+  already?: boolean;
   email?: string | null;
   title: string;
   message: string;
@@ -74,6 +84,7 @@ export function callbackPage(p: PageInput): string {
     code: p.ok ? null : (p.code ?? "internal"),
     hint: p.ok ? null : (p.hint ?? null),
     targetOrigin: p.targetOrigin,
+    ...(p.already ? { already: true } : {}),
   };
   return `<!doctype html>
 <html lang="en">
@@ -109,7 +120,7 @@ export function callbackPage(p: PageInput): string {
   <h1>${escapeHtml(p.title)}</h1>
   <p>${escapeHtml(p.message)}</p>
   ${p.hint ? `<p class="hint">${escapeHtml(p.hint)}</p>` : ""}
-  <a class="button" href="${escapeHtml(p.ok && p.email ? `/accounts?connected=${encodeURIComponent(p.email)}` : "/accounts")}">Go to accounts</a>
+  <a class="button" href="${escapeHtml(p.ok && p.email ? `/accounts?connected=${encodeURIComponent(p.email)}` : "/accounts")}">${p.already ? "Back to the console" : "Go to accounts"}</a>
   <div class="brand">agentinbox</div>
 </main>
 <script type="application/json" id="oauth-result">${scriptJson(result)}</script>
@@ -138,6 +149,20 @@ export function oauthRoutes(ctx: AppContext) {
         }),
       );
     } catch (err) {
+      if (err instanceof AlreadyConnectedError) {
+        // A used callback URL can sit in browser history or proxy logs: name the account only to a signed-in admin.
+        const email = hasSession(c, ctx) ? err.email : null;
+        return c.html(
+          callbackPage({
+            ok: true,
+            already: true,
+            email,
+            title: email ? `Already connected: ${email}` : "This sign-in was already completed",
+            message: "There's nothing more to do here. You can close this window.",
+            targetOrigin,
+          }),
+        );
+      }
       const e = asHttpError(err);
       ctx.log.child("oauth").warn("OAuth callback failed", { error: e instanceof Error ? e.message : String(e) });
       const known = e instanceof HttpError;

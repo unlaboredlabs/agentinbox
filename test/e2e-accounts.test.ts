@@ -52,10 +52,21 @@ describe("connect account", () => {
     expect(account).toMatchObject({ status: "active", displayName: "Direct Desk", lastError: null });
     expect(account!.historyId).toMatch(/^\d+$/);
 
-    // Replaying the callback (refresh, back button, attacker) fails cleanly.
+    // Reloading the callback says it's done, without exchanging anything again; only the admin's
+    // signed-in browser sees which account.
     const replay = await fetch(callback);
-    expect(replay.status).toBe(400);
-    expect(await replay.text()).toContain("expired or was already used");
+    expect(replay.status).toBe(200);
+    const anonymous = await replay.text();
+    expect(anonymous).toContain("This sign-in was already completed");
+    expect(anonymous).not.toContain(email);
+    const mine = await fetch(callback, { headers: { cookie: s.admin.cookie! } });
+    expect(await mine.text()).toContain(`Already connected: ${email}`);
+    // The used state with another code (a forged replay) fails cleanly.
+    const forged = new URL(callback);
+    forged.searchParams.set("code", "forged");
+    const bad = await fetch(forged);
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain("expired or was already used");
 
     // Labels come from Gmail through the account's token.
     const labels = await s.admin.get<{ id: string; name: string }[]>(`/api/accounts/${account!.id}/labels`);
@@ -70,7 +81,7 @@ describe("connect account", () => {
     const consent = await fetch(start.authUrl, { redirect: "manual" });
     const page = await fetch(consent.headers.get("location")!);
     expect(page.status).toBe(400);
-    expect(await page.text()).toContain("You cancelled on Google&#39;s screen.");
+    expect(await page.text()).toContain("You clicked Cancel (or denied access) on Google&#39;s screen");
     expect((await s.admin.get<Account[]>("/api/accounts")).some((a) => a.email === email)).toBe(false);
   });
 
@@ -160,7 +171,7 @@ describe("connect account", () => {
     const consent = await fetch(start.authUrl, { redirect: "manual" });
     const page = await fetch(consent.headers.get("location")!);
     expect(page.status).toBe(400);
-    expect(await page.text()).toContain(`this reconnect is for ${email}`);
+    expect(await page.text()).toContain(`You were reconnecting ${email}, but signed in to Google as ${other}`);
     expect((await s.admin.get<Account[]>("/api/accounts")).some((a) => a.email === other)).toBe(false);
   });
 });
