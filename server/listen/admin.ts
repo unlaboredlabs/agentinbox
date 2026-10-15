@@ -8,7 +8,7 @@ import { forwardEvent } from "./forward.ts";
 import { type ListenFlags, resolveListen } from "./options.ts";
 import { DEFAULT_PROFILE, deadPath, logPath, profilePath, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
-import { forwardSecret } from "./options.ts";
+import { DEFAULT_LISTEN_TYPES, forwardSecret } from "./options.ts";
 import { isServiceInstalled, launchdLabel, unitName } from "./service.ts";
 import { type DeadEntry, pidAlive, readDead, readStatus, writeDead } from "./state.ts";
 import { checkTransport, TransportError } from "./transport.ts";
@@ -58,6 +58,13 @@ export async function printStatus(profileName: string): Promise<void> {
   const forward = st && st.forward !== undefined ? st.forward : profile.forward?.url;
   const targets = [exec ? `exec ${safeText(exec, 120)}` : null, forward ? `forward ${forward}` : null].filter(Boolean);
   out(`${pc.bold("Runs")}      ${targets.length ? targets.join(" · ") : pc.gray("nothing saved (pass --exec/--forward with --save)")}`);
+  out(
+    `${pc.bold("Events")}    ${
+      profile.types?.length
+        ? profile.types.join(", ")
+        : `${DEFAULT_LISTEN_TYPES.join(", ")} ${pc.gray("(default types; add --types all --save for every event)")}`
+    }`,
+  );
 
   let svc = "not installed";
   if (process.platform === "linux" || process.platform === "darwin") {

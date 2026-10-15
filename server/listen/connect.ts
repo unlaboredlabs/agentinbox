@@ -419,7 +419,7 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
   out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
   out(`       ${pc.cyan(`${NPX} listen${p} --save --exec ${execArg}`)}`);
-  out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. For more, add --types, e.g. --types message.received,thread.reply_received.`));
+  out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. Change it with --types, e.g. --types thread.reply_received (only replies to threads you sent) or --types all.`));
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   for (const note of r.notes) out(pc.gray(`     ${note}`));
   out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);

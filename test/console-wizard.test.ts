@@ -8,7 +8,7 @@ import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
-import { allStepsDone, type SetupDraft, STEP_META, stepStatuses } from "../src/components/setup/steps.ts";
+import { allStepsDone, type SetupDraft, STEP_META, startsVerify, type StepId, type StepStatus, stepStatuses } from "../src/components/setup/steps.ts";
 import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
 import { fmtAgo } from "../src/lib/format.ts";
@@ -319,5 +319,40 @@ describe("fmtAgo", () => {
     expect(fmtAgo(later(-180), now)).toBe("3 minutes ago");
     expect(fmtAgo(later(30), now)).toBe("in 30 seconds");
     expect(fmtAgo(null, now)).toBe("—");
+  });
+});
+
+describe("startsVerify: which steps start the end-to-end check in this browser", () => {
+  const statuses = (over: Partial<Record<StepId, StepStatus>> = {}): Record<StepId, StepStatus> => ({
+    url: "done",
+    project: "done",
+    consent: "done",
+    client: "done",
+    accounts: "done",
+    pubsub: "skipped",
+    agent: "todo",
+    verify: "todo",
+    ...over,
+  });
+
+  it("starts on step 7 while no agent exists, so an early tool call can't complete step 8", () => {
+    expect(startsVerify("agent", statuses(), {})).toBe(true);
+    // Then the server's evidence arrives (a tool call before step 8 is opened): step 8 stays todo.
+    const s = { claimed: true, googleClientConfigured: true, gcpProjectId: "p-123456", googleAppType: "external", accountsConnected: 1, agentsCreated: 1, verified: true } as SetupState;
+    expect(stepStatuses({ ...s, pubsub: { mode: "poll" } } as SetupState, { verifyStarted: true }).verify).toBe("todo");
+  });
+
+  it("starts on step 8 while it is todo", () => {
+    expect(startsVerify("verify", statuses({ agent: "done" }), {})).toBe(true);
+  });
+
+  it("doesn't start on an install already verified, or twice", () => {
+    expect(startsVerify("verify", statuses({ agent: "done", verify: "done" }), {})).toBe(false);
+    expect(startsVerify("agent", statuses({ agent: "done", verify: "done" }), {})).toBe(false);
+    expect(startsVerify("verify", statuses({ agent: "done" }), { verifyStarted: true })).toBe(false);
+    expect(startsVerify("verify", statuses({ agent: "done" }), { verified: true })).toBe(false);
+    // Revisiting step 7 to add a second agent changes nothing.
+    expect(startsVerify("agent", statuses({ agent: "done" }), {})).toBe(false);
+    expect(startsVerify("accounts", statuses(), {})).toBe(false);
   });
 });

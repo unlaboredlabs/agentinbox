@@ -78,12 +78,6 @@ function useLatch(on: boolean) {
 
 
 export function StepVerify({ index, onBack, onNext }: StepProps) {
-  const { statuses } = useSetupProgress();
-  // Opening the step while it is still unfinished: from now on only Finish completes it (see stepStatuses).
-  const verifyTodo = statuses.verify === "todo";
-  useEffect(() => {
-    if (verifyTodo && !readDraft().verifyStarted) updateDraft({ verifyStarted: true });
-  }, [verifyTodo]);
   // Listener connect/ack and MCP use arrive on the console stream (`agent` messages); the slow refetch is a fallback.
   const agents = useQuery({ ...queries.agents(), refetchInterval: 30_000 });
   const state = useVerifyState();
@@ -534,6 +528,7 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const selectId = useId();
+  const verifyTodo = useSetupProgress().statuses.verify === "todo";
 
   const send = async () => {
     if (!accountId) return;
@@ -544,8 +539,8 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
       // Only listeners known now can be credited with delivering it (see VerifyTest.listenersAtSend). A briefly
       // disconnected one keeps its cursor and handles the mail when it reconnects, so it counts too.
       writeState({ test: { ...res, accountId, listenersAtSend: agent.listeners.map((l) => l.consumer) } });
-      // A test in flight: the step isn't done until Finish, even if the server already had evidence.
-      if (!readDraft().verified && !readDraft().verifyStarted) updateDraft({ verifyStarted: true });
+      // Only while the step is unfinished: on an install already verified, a test changes nothing.
+      if (verifyTodo && !readDraft().verifyStarted) updateDraft({ verifyStarted: true });
     } catch (err) {
       setError(err);
     } finally {

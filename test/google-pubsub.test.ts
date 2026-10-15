@@ -116,7 +116,7 @@ describe("Pub/Sub provisioning", () => {
     fake.disableApi("gmail", true);
     const err = await provisionError();
     expect(err.message).toMatch(/Gmail API isn't enabled/);
-    expect(err.hint).toContain("gmail.googleapis.com");
+    expect(err.hint).toContain(`https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=${FAKE_CLIENT.projectId}`);
     expect(ctx.settings.get().ingestMode).toBe("poll");
   });
 

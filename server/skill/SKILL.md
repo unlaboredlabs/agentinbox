@@ -202,8 +202,9 @@ blocked and why. The usual ones:
 ## Reacting to new mail
 
 Events are `message.received`, `message.sent`, `thread.reply_received` (someone answered a thread the account sent
-into), `label.added`, `label.removed`, `account.auth_failed` and `sync.gap`. You only get events for mailboxes and
-labels you can read. Events carry metadata (sender, subject, snippet, labels, ids), not bodies: fetch the content with
+into), `label.added`, `label.removed`, `account.auth_failed` and `sync.gap`. `thread.reply_received` is a subset of
+`message.received` (a reply produces both), so filter on one or the other, never both, or you handle each reply twice.
+You only get events for mailboxes and labels you can read. Events carry metadata (sender, subject, snippet, labels, ids), not bodies: fetch the content with
 `get_thread` or `get_message`.
 
 ### Pull loop (MCP)

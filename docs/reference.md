@@ -125,7 +125,8 @@ npx agentinbox-cli skill install --target ./skills --url https://mail.example.co
 
 Event types: `message.received`, `message.sent`, `thread.reply_received` (a reply in a thread the account sent into),
 `label.added`, `label.removed`, `account.auth_failed` and `sync.gap`. Agents only receive events for mailboxes and
-labels their grants let them read.
+labels their grants let them read. `thread.reply_received` is a subset of `message.received` (a reply produces both),
+so subscribe to one or the other, not both.
 
 - **Agents without an HTTP endpoint** use the MCP tools `wait_for_events` (long poll), `list_events` and `ack_events`
   while a session runs; the server keeps each agent's position. To start an agent when mail arrives, use

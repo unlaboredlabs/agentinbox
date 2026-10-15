@@ -42,7 +42,7 @@ export function health(ctx: AppContext): HealthResponse {
   }
   let setupComplete = false;
   try {
-    setupComplete = setupState(ctx, { warnings: false }).complete;
+    setupComplete = setupState(ctx, { healthOnly: true }).complete;
   } catch {
     // Reported as not complete.
   }

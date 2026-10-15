@@ -71,6 +71,17 @@ export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): 
   };
 }
 
+/**
+ * Whether showing `step` starts the end-to-end check in this browser (sets SetupDraft.verifyStarted),
+ * so the server's weaker evidence can't complete step 8 behind the user's back. Opening step 7 while
+ * no agent exists counts too: the agent's first tool call often lands before step 8 is opened.
+ * Never on an install that is already verified (opening the guide later changes nothing).
+ */
+export function startsVerify(step: StepId, statuses: Record<StepId, StepStatus>, draft: SetupDraft): boolean {
+  if (draft.verifyStarted || draft.verified || statuses.verify !== "todo") return false;
+  return step === "verify" || (step === "agent" && statuses.agent === "todo");
+}
+
 /** Setup counts as done once every step is (Pub/Sub is optional). */
 export function allStepsDone(statuses: Record<StepId, StepStatus>): boolean {
   return STEP_IDS.every((id) => statuses[id] !== "todo" || STEP_META[id].optional);

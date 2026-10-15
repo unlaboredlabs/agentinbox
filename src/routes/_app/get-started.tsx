@@ -1,7 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { PageHeader, QueryError } from "@/components/common";
-import { STEP_IDS, type StepId, useSetupProgress } from "@/components/setup/progress";
+import { useEffect } from "react";
+import { STEP_IDS, type StepId, startsVerify, updateDraft, useSetupProgress } from "@/components/setup/progress";
 import { StepAccounts } from "@/components/setup/step-accounts";
 import { StepAgent } from "@/components/setup/step-agent";
 import { StepClient } from "@/components/setup/step-client";
@@ -43,6 +44,11 @@ function GetStarted() {
   const { step, from } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const progress = useSetupProgress();
+  const shown = step ?? progress.firstTodo ?? "verify";
+  const startVerify = progress.state !== undefined && startsVerify(shown, progress.statuses, progress.draft);
+  useEffect(() => {
+    if (startVerify) updateDraft({ verifyStarted: true });
+  }, [startVerify]);
 
   if (progress.query.isPending) {
     return (
@@ -57,7 +63,7 @@ function GetStarted() {
   }
   if (progress.query.isError) return <QueryError error={progress.query.error} onRetry={() => void progress.query.refetch()} />;
 
-  const current = step ?? progress.firstTodo ?? "verify";
+  const current = shown;
   const index = STEP_IDS.indexOf(current);
   const go = (id: StepId, returnTo?: StepId) => {
     // Toasts belong to the step that raised them; don't let them cover the next one's buttons.

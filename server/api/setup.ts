@@ -114,9 +114,10 @@ export function checkPassword(password: string): void {
 
 /**
  * Composes the setup checklist. Reads the stored state directly if a service is unavailable.
- * `warnings: false` skips the warning checks (the health endpoint only needs `complete`).
+ * `healthOnly`: the (unauthenticated) health endpoint only needs `complete`, so the warning checks and
+ * the verified query (and its one-time write) are skipped; `warnings` is empty and `verified` false.
  */
-export function setupState(ctx: AppContext, opts: { warnings?: boolean } = {}): SetupState {
+export function setupState(ctx: AppContext, opts: { healthOnly?: boolean } = {}): SetupState {
   const claimed = isClaimed(ctx);
   const client = attempt(ctx, () => ctx.google.clientView()) ?? storedClientView(ctx);
   const pubsub = attempt(ctx, () => ctx.google.pubsubState()) ?? storedPubsub(ctx);
@@ -131,9 +132,9 @@ export function setupState(ctx: AppContext, opts: { warnings?: boolean } = {}): 
     pubsub,
     accountsConnected,
     agentsCreated: count("agents"),
-    verified: isVerified(ctx),
+    verified: opts.healthOnly ? false : isVerified(ctx),
     complete: claimed && googleClientConfigured && accountsConnected > 0,
-    warnings: opts.warnings === false ? [] : (attempt(ctx, () => ctx.google.setupWarnings()) ?? []),
+    warnings: opts.healthOnly ? [] : (attempt(ctx, () => ctx.google.setupWarnings()) ?? []),
   };
 }
 

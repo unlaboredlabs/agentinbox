@@ -111,7 +111,8 @@ export function recipesHelp(): string {
   const lines = [
     "",
     "Which events: only new mail (message.received) by default, so mail you send doesn't start your agent.",
-    "  Add others with --types, e.g. --types message.received,thread.reply_received, or --types all.",
+    "  Change it with --types: --types thread.reply_received (only replies to threads you sent), or --types all.",
+    "  thread.reply_received is a subset of message.received: don't combine them, or each reply runs twice.",
     "",
     "Recipes (--exec runs via /bin/sh; the event arrives on stdin, never in the command line):",
     "",

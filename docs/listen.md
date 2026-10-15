@@ -112,12 +112,16 @@ Flags override the profile, and `--save` writes them back. Overrides work group 
 
 **Which events:** without `--types` (and with none saved in the profile), a listener gets only `message.received`, so
 each run is for new mail someone sent the account. That keeps a paid agent from starting for every email you send
-yourself. Opt in to more with a comma-separated list, or `all`:
+yourself. Choose others with a comma-separated list, or `all`:
 
 ```sh
-npx agentinbox-cli listen --save --types message.received,thread.reply_received --exec '…'
+npx agentinbox-cli listen --save --types thread.reply_received --exec '…'  # only replies to threads the account sent
+npx agentinbox-cli listen --save --types message.received,label.added --exec '…'
 npx agentinbox-cli listen --save --types all --exec '…'   # also message.sent, label.added/removed, account.auth_failed, sync.gap
 ```
+
+`thread.reply_received` is a subset of `message.received`: a reply produces both events. Don't combine the two, or
+each reply runs your command twice (the listener warns about it). The startup log says when the default is in use.
 
 `--dry-run` prints matching events without running anything. It uses a separate throwaway consumer
 (`<consumer>-dry-run`) that starts at the current position and is never advanced, so it neither moves nor creates the

@@ -115,11 +115,14 @@ describe("setup state", () => {
     audit("pairing.key_delivered", "ok");
     audit("get_message", "denied");
     audit("search_threads", "error");
-    audit("tools/list", "ok");
     expect(await verified()).toBe(false);
 
     audit("list_accounts", "ok");
+    // Unauthenticated health polls neither run the query nor write the remembered flag.
+    await h.request("/health");
+    expect(h.ctx.settings.getState("setup.verifiedAt")).toBeNull();
     expect(await verified()).toBe(true);
+    expect(h.ctx.settings.getState("setup.verifiedAt")).not.toBeNull();
     // Remembered: pruning the audit log doesn't undo it.
     h.ctx.db.run("DELETE FROM audit_log");
     expect(await verified()).toBe(true);

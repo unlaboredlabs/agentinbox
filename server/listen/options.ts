@@ -40,6 +40,8 @@ export interface EffectiveConfig {
   forward: { url: string; secret: string } | null;
   /** Never empty: DEFAULT_LISTEN_TYPES unless --types or the profile says otherwise. */
   types: EventType[];
+  /** Neither --types nor the profile named types: `types` is DEFAULT_LISTEN_TYPES. */
+  typesDefaulted: boolean;
   filter: WebhookFilter | undefined;
   includeBody: boolean;
   concurrency: number;
@@ -161,7 +163,8 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
   if (forward) validateForwardUrl(forward.url);
 
   // Saved as given (no types saved = the default), so the profile follows the default if it changes.
-  const types = flags.types !== undefined ? parseTypes(flags.types) : profile.types?.length ? profile.types : [...DEFAULT_LISTEN_TYPES];
+  const typesDefaulted = flags.types === undefined && !profile.types?.length;
+  const types = flags.types !== undefined ? parseTypes(flags.types) : typesDefaulted ? [...DEFAULT_LISTEN_TYPES] : profile.types!;
   const filter = filterFromFlags(flags) ?? profile.filter;
   const includeBody = flags.includeBody ?? profile.includeBody ?? false;
   const concurrency = positiveInt(flags.concurrency, "--concurrency", 32) ?? profile.concurrency ?? DEFAULTS.concurrency;
@@ -191,7 +194,20 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
     if (flags.cwd !== undefined) next.cwd = chosenCwd;
   }
 
-  return { config: { exec, forward, types, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
+  return { config: { exec, forward, types, typesDefaulted, filter, includeBody, concurrency, timeoutSeconds, maxAttempts, consumer, insecure, cwd, cwdIsDefault: !chosenCwd }, next, changed };
+}
+
+/** Notes about the event types for the listener's log: the default in use, or types that overlap. */
+export function typesNotes(c: Pick<EffectiveConfig, "types" | "typesDefaulted">): { info: string[]; warn: string[] } {
+  const info: string[] = [];
+  const warn: string[] = [];
+  if (c.typesDefaulted) info.push(`Using default types: ${DEFAULT_LISTEN_TYPES.join(", ")} (add --types all for every event).`);
+  if (c.types.includes("message.received") && c.types.includes("thread.reply_received")) {
+    warn.push(
+      "thread.reply_received is a subset of message.received: with both, every reply to a thread you sent runs your command twice. Keep one of them (--types thread.reply_received for replies only).",
+    );
+  }
+  return { info, warn };
 }
 
 /** One-line description of the filter for the console. */
