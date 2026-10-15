@@ -130,11 +130,16 @@ describe("connect account", () => {
       const resync = await s.admin.failure(s.admin.post(`/api/accounts/${account.id}/resync`));
       expect(resync.status).toBe(409);
 
+      // Mail that arrives while the account can't sync is picked up after reconnecting (cursor continuity).
+      const during = s.fake.deliver(email, { from: "Gap <gap@elsewhere.test>", subject: "During reauth", text: "queued" });
+
       // Reconnect (the console passes reauthAccountId): same account id, active again.
       const back = await s.connectAccount(email, { reauthAccountId: account.id });
       expect(back).toMatchObject({ id: account.id, status: "active", lastError: null });
       expect((await fetch(`${s.url}/health`)).status).toBe(200);
       await stream.next("account", (a) => a.id === account.id && a.status === "active");
+
+      await s.waitForEvent((e) => e.accountId === account.id && e.message?.id === during.id);
 
       // Mail flows again with the new token.
       s.fake.deliver(email, { from: "Back <back@elsewhere.test>", subject: "After reauth", text: "hello again" });

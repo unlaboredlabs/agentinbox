@@ -93,4 +93,35 @@ describe("pub/sub provisioning", () => {
     expect(ev).toMatchObject({ type: "message.received", accountId: account!.id });
     expect((await s.admin.get<SystemInfo>("/api/system")).ingest).toMatchObject({ mode: "poll", running: true, lastError: null });
   }, 15_000);
+
+  it("watches accounts connected after provisioning and stops the watch when an account is removed", async () => {
+    s = await startStack();
+    const first = mailbox("ps-first");
+    const second = mailbox("ps-second");
+    await s.bootstrap({ accounts: [first], pubsub: true });
+    const acc2 = await s.connectAccount(second);
+    expect(s.fake.watch(second)?.topic).toBe(TOPIC);
+
+    s.fake.deliver(second, { from: "x@else.test", subject: "Second realtime", text: "x" });
+    await s.waitForEvent((e) => e.message?.subject === "Second realtime", { kick: false, timeout: 4000 });
+
+    await s.admin.del(`/api/accounts/${acc2.id}`);
+    expect(s.fake.watch(second)).toBeNull();
+  });
+
+  // BUG: after a Pub/Sub pull failure the loop sleeps an exponential backoff (2 s, 4 s, … 60 s; server/ingest/index.ts:286-293) that nothing interrupts, so once the principal account is reconnected new mail waits for the backoff (and isn't polled meanwhile).
+  it.fails("resumes real-time ingest promptly after the Pub/Sub principal account is reconnected", async () => {
+    s = await startStack();
+    const email = mailbox("ps-principal");
+    const [account] = await s.bootstrap({ accounts: [email], pubsub: true });
+    s.fake.failRefresh(email);
+    s.kick(account!.id);
+    await waitFor(async () => (await s!.admin.get<{ id: string; status: string }[]>("/api/accounts"))[0]!.status === "needs_reauth", { what: "needs_reauth" });
+    await new Promise((r) => setTimeout(r, 3500)); // the pull loop fails meanwhile (no usable principal) and backs off
+
+    await s.connectAccount(email, { reauthAccountId: account!.id });
+    s.fake.deliver(email, { from: "x@else.test", subject: "Realtime after reauth", text: "x" });
+    // Real time means about a second (one pull), as before the outage; without the fix this takes ≥ 2.5 s.
+    await s.waitForEvent((e) => e.message?.subject === "Realtime after reauth", { kick: false, timeout: 1500 });
+  }, 15_000);
 });

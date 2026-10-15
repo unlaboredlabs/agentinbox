@@ -493,4 +493,38 @@ describe("MCP agent journey", () => {
     expect(gmailHeader(sent, "Subject")).toBe("Fwd: Forward me");
     expect(gmailHeader(sent, "To")).toContain("bob@partner.test");
   });
+
+  it("asks multi-account agents to pick an account and resolves it by email or id", async () => {
+    const second = mailbox("mcp-second");
+    const acc2 = await s.connectAccount(second);
+    const msg = s.fake.deliver(second, { from: "z@else.test", subject: "Second box", text: "hello two" });
+    const { agent, apiKey } = await s.createAgent("multi", [grant(account.id), grant(acc2.id)]);
+    const mcp = await s.agent(apiKey);
+    agents.push(mcp);
+    const list = await mcp.ok("list_accounts");
+    expect(list).toContain("You can access 2 accounts");
+    const ambiguous = await mcp.call("search_threads", { query: "Second box" });
+    expect(ambiguous.isError).toBe(true);
+    expect(ambiguous.text).toContain(second);
+    expect(await mcp.ok("search_threads", { account: second, query: "Second box" })).toContain(msg.threadId);
+    expect(await mcp.ok("get_message", { account: acc2.id, message_id: msg.id })).toContain("hello two");
+    const wrong = await mcp.call("get_message", { account: "nobody@nowhere.test", message_id: msg.id });
+    expect(wrong.isError).toBe(true);
+    expect((await audit(agent.id, "denied")).map((e) => e.reason)).toContain("capability");
+  });
+
+  it("sends exactly once when two admins approve the same request concurrently", async () => {
+    const msg = deliverOrder("Double click");
+    const { mcp } = await agentWith("double", { capabilities: ["read", "send"], sendMode: "approval" });
+    const r = await mcp.json<{ approvalId: string }>("reply", { message_id: msg.id, body: "Once only" });
+    const results = await Promise.allSettled([
+      s.admin.post<Approval>(`/api/approvals/${r.approvalId}/approve`),
+      s.admin.post<Approval>(`/api/approvals/${r.approvalId}/approve`),
+    ]);
+    expect(results.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((x) => x.status === "rejected") as PromiseRejectedResult;
+    expect((rejected.reason as { status: number }).status).toBe(409);
+    expect(s.fake.sent(email).filter((m) => m.threadId === msg.threadId)).toHaveLength(1);
+    expect((await s.admin.get<Approval>(`/api/approvals/${r.approvalId}`)).status).toBe("sent");
+  });
 });

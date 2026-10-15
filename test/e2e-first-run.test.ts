@@ -114,6 +114,15 @@ describe("first run", () => {
     expect(agent.keyPrefix).toBe(apiKey.slice(0, agent.keyPrefix.length));
     expect((await s.admin.get<SetupState>("/api/setup/state")).agentsCreated).toBe(1);
 
+    // The public skill points agents at this instance's MCP endpoint, and the MCP endpoint is POST-only.
+    const skill = await fetch(`${s.url}/skill.md`);
+    expect(skill.headers.get("content-type")).toMatch(/text\/markdown/);
+    const md = await skill.text();
+    expect(md).toContain(`${s.url}/mcp`);
+    expect(md).not.toContain("{{AGENTINBOX_URL}}");
+    expect(md).not.toContain(apiKey);
+    expect((await fetch(`${s.url}/mcp`, { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(405);
+
     // The key is shown once: listing never returns it.
     const listed = JSON.stringify(await s.admin.get("/api/agents"));
     expect(listed).not.toContain(apiKey);
