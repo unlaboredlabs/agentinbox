@@ -11,7 +11,7 @@ import { grantInWords } from "../src/components/agents/grant-words.ts";
 import { deniedDescription, linkedPairing } from "../src/components/approvals/pairing-link.ts";
 import { listenerHandled } from "../src/components/agents/listener-handled.ts";
 import { allStepsDone, type SetupDraft, showsSetupLink, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, wizardStep } from "../src/components/setup/steps.ts";
-import { activeTest, checksComplete, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
+import { activeTest, checksComplete, doneSummary, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks, verifyFooter, verifyMode } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
 import { accountsStat, agentOnHost, fmtAgo } from "../src/lib/format.ts";
 
@@ -379,6 +379,52 @@ describe("stepStatuses: the verify step", () => {
     expect(STEP_IDS.filter((id) => statuses[id] !== "todo")).toHaveLength(STEP_IDS.length);
     // Already done: nothing to write.
     expect(verifiedPatch(true, patched)).toBeNull();
+  });
+
+  it("shows a done step as complete when revisited, even with this browser's test email gone", () => {
+    // An hour later (test past TEST_TTL_MS), or another browser (no draft): the step is still done.
+    expect(activeTest(test0, Date.parse(SENT_AT) + TEST_TTL_MS + 1)).toBeUndefined();
+    for (const draft of [{ verifyStarted: true, verified: true }, {}] as SetupDraft[]) {
+      const done = stepStatuses(state(true), draft).verify === "done";
+      expect(done).toBe(true);
+      expect(verifyMode(done, false)).toBe("complete");
+      // Never a disabled Finish next to a ✓ in the stepper, even while the checks run again.
+      expect(verifyFooter(done, false)).toEqual({ nextDisabled: false, hint: null, skip: false });
+    }
+    // "Run the checks again": the live checks, and the step stays done.
+    expect(verifyMode(true, true)).toBe("checks");
+    // Opened before it was done: the checks, which stay up when they turn green.
+    expect(verifyMode(false, false)).toBe("checks");
+    expect(verifyFooter(false, false)).toEqual({ nextDisabled: true, hint: "Finish turns on when every check is green", skip: true });
+    expect(verifyFooter(false, true).nextDisabled).toBe(false);
+  });
+
+  it("summarizes what was verified from what is still known", () => {
+    const old = { ...listener("host-default", 9, false), lastSeenAt: later(60), client: { hostname: "anvil" } };
+    expect(
+      doneSummary({
+        serverVerified: true,
+        test: test0,
+        calls: [call("get_message", "error", later(90)), call("get_message", "ok", later(30))],
+        connectedAt: later(90),
+        listeners: [old],
+        skipListen: false,
+      }),
+    ).toEqual([
+      // The last successful call, not the newer rejected one.
+      { id: "mcp", at: later(30), action: "get_message" },
+      { id: "listener", connected: false, hostname: "anvil", at: later(60) },
+      { id: "test", at: SENT_AT },
+    ]);
+    // Another browser, MCP only: no test email known here; the connection alone still shows.
+    expect(doneSummary({ serverVerified: true, test: undefined, calls: [], connectedAt: later(5), listeners: [], skipListen: true })).toEqual([
+      { id: "mcp", at: later(5), action: null },
+      { id: "mcpOnly" },
+    ]);
+    // A connected listener wins over an older one; finished without checking is said so.
+    expect(
+      doneSummary({ serverVerified: false, test: undefined, calls: [], connectedAt: null, listeners: [old, { ...listener("b", 0), client: {} }], skipListen: false }),
+    ).toEqual([{ id: "listener", connected: true, hostname: null, at: null }, { id: "unchecked" }]);
   });
 
   it("keeps the sidebar entry while on /get-started, and drops it on navigation once done", () => {

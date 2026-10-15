@@ -2,7 +2,7 @@ import type { AgentTool } from "@shared/agent-api";
 import type { Account, Agent, MailEvent, Page, TestEmailResult } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { CheckCircle2Icon, CircleIcon, MailIcon, PartyPopperIcon, SendIcon } from "lucide-react";
+import { CheckCircle2Icon, CircleIcon, InfoIcon, MailIcon, PartyPopperIcon, RotateCcwIcon, SendIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { useAgentOrigin, useMcpActivity } from "@/components/agents/agent-status";
 import { Command } from "@/components/agents/command";
@@ -21,7 +21,18 @@ import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { readDraft, updateDraft, useSetupProgress, verifiedPatch } from "./progress";
-import { activeTest, checksComplete, TEST_SUBJECT, type VerifyTest, verifyChecks } from "./verify-checks";
+import {
+  activeTest,
+  checksComplete,
+  type DoneLine,
+  doneSummary,
+  READ_TOOLS,
+  TEST_SUBJECT,
+  type VerifyTest,
+  verifyChecks,
+  verifyFooter,
+  verifyMode,
+} from "./verify-checks";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
 
@@ -84,23 +95,44 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
   const state = useVerifyState();
   const list = agents.data ?? [];
   const agent = list.find((a) => a.id === state.agentId) ?? [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const progress = useSetupProgress();
+  const stepDone = progress.statuses.verify === "done";
+  // Done when opened: show it done (the test email this browser remembers may be gone), not checks at "waiting".
+  const [doneWhenOpened] = useState(stepDone);
+  const [recheck, setRecheck] = useState(false);
+  const mode = verifyMode(doneWhenOpened, recheck);
 
   const finish = () => {
     updateDraft({ verified: true });
     onNext();
+  };
+  // A fresh check: forget the last test email. The step stays done (nothing here un-verifies it).
+  const runAgain = () => {
+    writeState({ test: undefined });
+    setRecheck(true);
   };
 
   return (
     <StepCard
       index={index}
       title="Check that it works"
-      description="Each line turns green on its own as your agent connects. Then send a test email and watch it arrive."
-      footer={<VerifyFooter agent={agent} state={state} onBack={onBack} onFinish={finish} />}
+      description={
+        mode === "complete"
+          ? "Setup is complete. Here's what was checked and what to do next."
+          : "Each line turns green on its own as your agent connects. Then send a test email and watch it arrive."
+      }
+      footer={<VerifyFooter agent={agent} stepDone={stepDone} onBack={onBack} onFinish={finish} />}
     >
       {agents.isPending ? (
         <Skeleton className="h-72 rounded-xl" />
       ) : agents.isError ? (
         <ErrorAlert error={agents.error} title="Couldn't load your agents" />
+      ) : mode === "complete" ? (
+        agent ? (
+          <CompletedView key={agent.id} agent={agent} state={state} serverVerified={!!progress.state?.verified} onRunAgain={runAgain} />
+        ) : (
+          <CompletedNoAgent />
+        )
       ) : !agent ? (
         <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
           No agent yet. Go back one step, run <code className="font-mono text-foreground">connect</code> and approve the request.
@@ -126,6 +158,12 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
               </Select>
             </div>
           )}
+          {recheck && (
+            <p className="flex items-start gap-2 text-sm text-muted-foreground">
+              <InfoIcon className="mt-0.5 size-4 shrink-0" />
+              Setup stays complete whatever these checks show.
+            </p>
+          )}
           <Checklist key={agent.id} agent={agent} state={state} severalAgents={list.length > 1} />
         </>
       )}
@@ -143,17 +181,18 @@ function setComplete(agentId: string | null) {
 }
 const useComplete = () => useSyncExternalStore((l) => (completeSubs.add(l), () => completeSubs.delete(l)), () => completeFor);
 
-function VerifyFooter({ agent, onBack, onFinish }: { agent: Agent | undefined; state: VerifyState; onBack?: () => void; onFinish: () => void }) {
+function VerifyFooter({ agent, stepDone, onBack, onFinish }: { agent: Agent | undefined; stepDone: boolean; onBack?: () => void; onFinish: () => void }) {
   const complete = useComplete() === agent?.id && !!agent;
+  const f = verifyFooter(stepDone, complete);
   return (
     <StepFooter
       onBack={onBack}
       onNext={onFinish}
       nextLabel="Finish setup"
-      nextDisabled={!complete}
-      hint={complete ? undefined : "Finish turns on when every check is green"}
+      nextDisabled={f.nextDisabled}
+      hint={f.hint ?? undefined}
       extra={
-        !complete && (
+        f.skip && (
           <Button variant="ghost" onClick={onFinish}>
             Finish without checking
           </Button>
@@ -610,6 +649,163 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
   );
 }
 
+/** Step 8 revisited once done: what was verified, the same next steps, and a way to check again. */
+function CompletedView({ agent, state, serverVerified, onRunAgain }: { agent: Agent; state: VerifyState; serverVerified: boolean; onRunAgain: () => void }) {
+  const origin = useAgentOrigin(agent);
+  const { publicUrl } = usePublicUrl();
+  const tool: AgentTool = origin.tool ?? "other";
+  const label = origin.tool ? toolName(origin.tool) : agent.name;
+  const Label = label[0]!.toUpperCase() + label.slice(1);
+  const c = connectCommands(publicUrl, tool);
+  const mcp = useMcpActivity(agent);
+  const skipListen = !!state.skipListen || (origin.known && !origin.paired);
+  const lines = doneSummary({
+    serverVerified,
+    test: state.test,
+    calls: mcp.calls,
+    connectedAt: agent.lastMcpAt,
+    listeners: agent.listeners,
+    skipListen,
+  });
+  const readIt = mcp.calls.some((e) => e.outcome === "ok" && READ_TOOLS.has(e.action));
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  return (
+    <div className="space-y-4">
+      <SuccessPanel
+        agent={agent}
+        label={label}
+        tool={tool}
+        listening={!skipListen && agent.listeners.length > 0}
+        readIt={readIt}
+        headingRef={headingRef}
+        serviceCmd={c.listenService}
+        accountId={state.test?.accountId}
+        summary={
+          <ul aria-label="What was checked" className="space-y-1.5 text-sm">
+            <DoneItem ok>
+              <Visible text={agent.name} /> is approved{" "}
+              <span className="text-muted-foreground">
+                ({agent.grants.length ? agent.grants.map((g) => grantInWords(g)).join(" · ") : "no mailbox access yet"})
+              </span>
+            </DoneItem>
+            {lines.map((l) => (
+              <DoneSummaryLine key={l.id} line={l} Label={Label} />
+            ))}
+          </ul>
+        }
+      />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Button variant="outline" size="sm" onClick={onRunAgain}>
+          <RotateCcwIcon />
+          Run the checks again
+        </Button>
+        <span className="text-xs text-muted-foreground">Optional: sends a new test email. Setup stays complete.</span>
+      </div>
+    </div>
+  );
+}
+
+function DoneItem({ ok, children }: { ok: boolean; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-2">
+      {ok ? <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" /> : <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}
+      <span className="min-w-0">{children}</span>
+    </li>
+  );
+}
+
+function DoneSummaryLine({ line: l, Label }: { line: DoneLine; Label: string }) {
+  switch (l.id) {
+    case "mcp":
+      return (
+        <DoneItem ok>
+          {Label} reached agentinbox{" "}
+          <span className="text-muted-foreground">
+            ({l.action ? <>last tool call {l.action}, </> : <>connected </>}
+            <TimeAgo date={l.at} />)
+          </span>
+        </DoneItem>
+      );
+    case "listener":
+      return (
+        <DoneItem ok={l.connected}>
+          {l.connected ? "Listener connected" : "Listener not connected now"}
+          {l.hostname && (
+            <>
+              {" "}
+              on <Visible text={l.hostname} />
+            </>
+          )}
+          {!l.connected && l.at && (
+            <span className="text-muted-foreground">
+              {" "}
+              (last seen <TimeAgo date={l.at} />)
+            </span>
+          )}
+        </DoneItem>
+      );
+    case "mcpOnly":
+      return <DoneItem ok>No listener: MCP only</DoneItem>;
+    case "test":
+      return (
+        <DoneItem ok>
+          Test email sent <TimeAgo date={l.at} />
+        </DoneItem>
+      );
+    case "unchecked":
+      return (
+        <DoneItem ok={false}>
+          <span className="text-muted-foreground">Finished without every check: agentinbox hasn't seen a successful tool call yet.</span>
+        </DoneItem>
+      );
+  }
+}
+
+/** Done, but no agent left to summarize (deleted since). */
+function CompletedNoAgent() {
+  const system = useQuery(queries.system());
+  return (
+    <section aria-labelledby="verify-done" className="space-y-4 rounded-xl border border-success/40 bg-success/5 p-4 sm:p-5">
+      <div className="flex items-start gap-3">
+        <PartyPopperIcon className="mt-0.5 size-5 shrink-0 text-success" />
+        <div className="space-y-1">
+          <h3 id="verify-done" className="font-semibold">
+            Setup complete
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            No agent is connected now.{" "}
+            <Link to="/agents" className="font-medium text-foreground underline underline-offset-4">
+              Connect one on the Agents page
+            </Link>
+            .
+          </p>
+        </div>
+      </div>
+      {system.data?.service === false && (
+        <ul className="space-y-3 text-sm">
+          <DaemonServiceItem command={system.data.serviceCommand} />
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Keep the daemon itself running: it's in a terminal now. serviceCommand carries this instance's flags. */
+function DaemonServiceItem({ command }: { command: string }) {
+  return (
+    <li className="space-y-1.5">
+      <p>
+        <span className="font-medium">Keep agentinbox itself running.</span>{" "}
+        <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On the computer running agentinbox, run:</span>
+      </p>
+      <Command code={command} label="agentinbox service command" />
+      <p className="text-xs text-muted-foreground">
+        Stop the one in your terminal first (Ctrl-C): the service can't start while it runs. This page reconnects once the service is up.
+      </p>
+    </li>
+  );
+}
+
 function SuccessPanel({
   agent,
   label,
@@ -619,6 +815,7 @@ function SuccessPanel({
   headingRef,
   serviceCmd,
   accountId,
+  summary,
 }: {
   agent: Agent;
   label: string;
@@ -629,6 +826,8 @@ function SuccessPanel({
   serviceCmd: string;
   /** The mailbox the test email went through: real-time also needs its Gmail watch. */
   accountId?: string;
+  /** What was verified (the completed step, revisited). */
+  summary?: React.ReactNode;
 }) {
   const system = useQuery(queries.system());
   return (
@@ -653,6 +852,7 @@ function SuccessPanel({
           </p>
         </div>
       </div>
+      {summary}
       <ul className="space-y-3 text-sm">
         {listening && (
           <li className="space-y-1.5">
@@ -666,16 +866,7 @@ function SuccessPanel({
             </p>
           </li>
         )}
-        {/* The daemon itself in a terminal: closing it stops everything. serviceCommand carries this instance's flags. */}
-        {system.data?.service === false && (
-          <li className="space-y-1.5">
-            <p>
-              <span className="font-medium">Keep agentinbox itself running.</span>{" "}
-              <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On the computer running agentinbox, run:</span>
-            </p>
-            <Command code={system.data.serviceCommand} label="agentinbox service command" />
-          </li>
-        )}
+        {system.data?.service === false && <DaemonServiceItem command={system.data.serviceCommand} />}
         {!readIt && (
           <li className="text-muted-foreground">
             Try it: ask {label} to <span className="text-foreground">“use agentinbox to summarize my latest email.”</span>
