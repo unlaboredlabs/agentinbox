@@ -8,6 +8,12 @@ import { NPX } from "./version.ts";
 
 /** `agentinbox connect`, `agentinbox setup-mcp` and `agentinbox listen …`, all lazily loaded. */
 
+/**
+ * Options of a `listen` subcommand plus any its ancestors parsed: `listen` declares the same flags
+ * (--profile, --exec…), and commander lets the parent claim them wherever they appear.
+ */
+const all = <T>(cmd: Command): T => cmd.optsWithGlobals() as T;
+
 const collect = (value: string, previous: string[] | undefined) => [...(previous ?? []), value];
 
 const int = (name: string) => (value: string) => {
@@ -83,8 +89,7 @@ Example:
   const listen = listenFlags(
     program
       .command("listen")
-      .description("wake a local agent on new mail: hold an outbound stream to the daemon and run a command or POST to localhost per event")
-      .enablePositionalOptions(),
+      .description("wake a local agent on new mail: hold an outbound stream to the daemon and run a command or POST to localhost per event"),
   )
     .option("--dry-run", "print matching events without running anything or advancing the cursor")
     .addHelpText("after", recipesHelp())
@@ -93,14 +98,16 @@ Example:
       process.exit(await runListener({ flags, handleSignals: true }));
     });
 
-  profileOption(listen.command("status").description("show the listener's connection, cursor, recent events and dead letters")).action(async (flags: { profile?: string }) => {
+  profileOption(listen.command("status").description("show the listener's connection, cursor, recent events and dead letters")).action(async (_o: unknown, cmd: Command) => {
+    const flags = all<{ profile?: string }>(cmd);
     const { printStatus } = await import("./admin.ts");
     await printStatus(flags.profile ?? DEFAULT_PROFILE);
   });
 
   profileOption(listen.command("secret").description("print the forward-mode signing secret (whsec_…) for your local receiver"))
     .option("--rotate", "generate a new secret (restart the listener afterwards)")
-    .action(async (flags: { profile?: string; rotate?: boolean }) => {
+    .action(async (_o: unknown, cmd: Command) => {
+      const flags = all<{ profile?: string; rotate?: boolean }>(cmd);
       const { printSecret } = await import("./admin.ts");
       printSecret(flags.profile ?? DEFAULT_PROFILE, flags);
     });
@@ -110,7 +117,8 @@ Example:
     .option("--id <eventId>", "only this event (with --replay or --clear)")
     .option("--clear", "delete dead events without running them")
     .option("--json", "print raw JSON lines")
-    .action(async (flags: ListenFlags & { replay?: boolean; id?: string; clear?: boolean; json?: boolean }) => {
+    .action(async (_o: unknown, cmd: Command) => {
+      const flags = all<ListenFlags & { replay?: boolean; id?: string; clear?: boolean; json?: boolean }>(cmd);
       const admin = await import("./admin.ts");
       const profile = flags.profile ?? DEFAULT_PROFILE;
       if (flags.clear) admin.clearDead(profile, flags.id);
@@ -121,16 +129,19 @@ Example:
 
   const service = listen.command("service").description("run the listener in the background (systemd user service / launchd agent, one per profile)");
   listenFlags(service.command("install").description("install and start the listener service; flags are saved to the profile. Re-run to update")).action(
-    async (flags: ListenFlags) => {
+    async (_o: unknown, cmd: Command) => {
+      const flags = all<ListenFlags>(cmd);
       const { installListenService } = await import("./service.ts");
       await installListenService(flags);
     },
   );
-  profileOption(service.command("uninstall").description("stop and remove the listener service (keeps the profile)")).action(async (flags: { profile?: string }) => {
+  profileOption(service.command("uninstall").description("stop and remove the listener service (keeps the profile)")).action(async (_o: unknown, cmd: Command) => {
+    const flags = all<{ profile?: string }>(cmd);
     const { uninstallListenService } = await import("./service.ts");
     uninstallListenService(flags.profile ?? DEFAULT_PROFILE);
   });
-  profileOption(service.command("status").description("show the service manager's status for the listener")).action(async (flags: { profile?: string }) => {
+  profileOption(service.command("status").description("show the service manager's status for the listener")).action(async (_o: unknown, cmd: Command) => {
+    const flags = all<{ profile?: string }>(cmd);
     const { listenServiceStatus } = await import("./service.ts");
     listenServiceStatus(flags.profile ?? DEFAULT_PROFILE);
   });
