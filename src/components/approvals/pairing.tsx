@@ -20,7 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AccountAvatar, AccountStatusBadge } from "@/components/accounts/account-status";
 import { GrantFieldsForm } from "@/components/agents/grant-editor";
-import { ErrorAlert, SectionLabel, TimeAgo, ToneBadge } from "@/components/common";
+import { ErrorAlert, SectionLabel, StatusDot, TimeAgo, ToneBadge } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,7 @@ import { type Choice, ChoiceCards } from "@/components/choice-cards";
 import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useSilencePairingToasts } from "@/components/pairing-notifier";
 
 /** "jxgr xd93" → "JXGR-XD93". Codes are 8 characters from an alphabet without 0/O/1/I/L. */
 export function normalizeCode(raw: string): string {
@@ -328,6 +329,7 @@ interface AccountChoice {
   fields: GrantFields;
 }
 
+const NEW_CHOICE: AccountChoice = { on: false, preset: "read", fields: PAIRING_DEFAULT };
 const presetById = (id: string) => GRANT_PRESETS.find((p) => p.id === id);
 const PAIRING_CHOICES: Choice<string>[] = [
   { value: "read", title: "Read only", description: "Search and read mail, get events. Can't change or send anything.", badge: <Badge variant="secondary">Default</Badge> },
@@ -344,10 +346,12 @@ export function PairingApproveDialog({
   p,
   accounts,
   onOpenChange,
+  onApproved,
 }: {
   p: PairingRequest | null;
   accounts: Account[];
   onOpenChange: (open: boolean) => void;
+  onApproved?: (agent: Agent) => void;
 }) {
   const [approved, setApproved] = useState<{ agent: Agent; request: PairingRequest } | null>(null);
   const open = !!p || !!approved;
@@ -361,7 +365,16 @@ export function PairingApproveDialog({
         {approved ? (
           <ApprovedState agent={approved.agent} onClose={close} />
         ) : p ? (
-          <ApproveForm key={p.id} p={p} accounts={accounts} onApproved={(agent) => setApproved({ agent, request: p })} onCancel={close} />
+          <ApproveForm
+            key={p.id}
+            p={p}
+            accounts={accounts}
+            onApproved={(agent) => {
+              setApproved({ agent, request: p });
+              onApproved?.(agent);
+            }}
+            onCancel={close}
+          />
         ) : null}
       </DialogContent>
     </Dialog>
@@ -393,16 +406,34 @@ function ApprovedState({ agent, onClose }: { agent: Agent; onClose: () => void }
   );
 }
 
+/** Why the code is typed rather than taken from the link, and when to deny. */
+export function CodeWhy() {
+  return (
+    <>
+      Typing it proves the request comes from a terminal you can see, so nobody can get access by sending you a link. If you didn't just run{" "}
+      <code className="font-mono">connect</code> yourself, deny it.
+    </>
+  );
+}
+
 function ApproveForm({
   p,
   accounts,
   onApproved,
   onCancel,
+  onDeny,
+  denying,
+  inline,
 }: {
   p: PairingRequest;
   accounts: Account[];
   onApproved: (a: Agent) => void;
-  onCancel: () => void;
+  onCancel?: () => void;
+  /** Inline (in the setup wizard): no dialog chrome, and Deny instead of Cancel. */
+  onDeny?: () => void;
+  /** The Deny request is in flight. */
+  denying?: boolean;
+  inline?: boolean;
 }) {
   const qc = useQueryClient();
   // Never pre-filled: the human types what the agent's terminal shows.
@@ -449,8 +480,7 @@ function ApproveForm({
           grants: selected.map((a) => ({ accountId: a.id, ...choices[a.id]!.fields })),
         },
       });
-      void qc.invalidateQueries({ queryKey: keys.pairings });
-      void qc.invalidateQueries({ queryKey: keys.agents });
+      for (const key of [keys.pairings, keys.agents, keys.setupState, keys.overview]) void qc.invalidateQueries({ queryKey: key });
       onApproved(agent);
     } catch (err) {
       if (err instanceof ApiError && err.code === "user_code_mismatch") setCodeError(err.message);
@@ -466,25 +496,28 @@ function ApproveForm({
     }
   };
 
+  const Footer = inline ? "div" : DialogFooter;
   return (
-    <form onSubmit={(e) => void submit(e)} className="contents" noValidate>
-      <DialogHeader>
-        <DialogTitle>Approve agent access</DialogTitle>
-        <DialogDescription>
-          <span className="font-medium text-foreground">
-            <Visible text={p.name} />
-          </span>{" "}
-          <span className="rounded border px-1 text-xs">self-reported</span> from <span className="font-mono">{p.ip ?? "an unknown address"}</span>{" "}
-          wants access. Nothing is granted until you confirm the code. <ExpiresIn at={p.expiresAt} />.
-        </DialogDescription>
-      </DialogHeader>
+    <form onSubmit={(e) => void submit(e)} className={inline ? "space-y-5" : "contents"} noValidate>
+      {!inline && (
+        <DialogHeader>
+          <DialogTitle>Approve agent access</DialogTitle>
+          <DialogDescription>
+            <span className="font-medium text-foreground">
+              <Visible text={p.name} />
+            </span>{" "}
+            <span className="rounded border px-1 text-xs">self-reported</span> from <span className="font-mono">{p.ip ?? "an unknown address"}</span>{" "}
+            wants access. Nothing is granted until you confirm the code. <ExpiresIn at={p.expiresAt} />.
+          </DialogDescription>
+        </DialogHeader>
+      )}
 
       <Field data-invalid={!!codeError}>
-        <FieldLabel htmlFor="pairing-code">Code from your agent's terminal</FieldLabel>
+        <FieldLabel htmlFor={`pairing-code-${p.id}`}>Code from your agent's terminal</FieldLabel>
         <Input
-          id="pairing-code"
+          id={`pairing-code-${p.id}`}
           ref={codeRef}
-          autoFocus
+          autoFocus={!inline}
           autoComplete="off"
           spellCheck={false}
           value={code}
@@ -500,14 +533,14 @@ function ApproveForm({
           <FieldError>{codeError}</FieldError>
         ) : (
           <FieldDescription>
-            Type the code from your agent's terminal. If you didn't just run <code className="font-mono">connect</code> yourself, deny this request.
+            <CodeWhy />
           </FieldDescription>
         )}
       </Field>
 
       <Field>
-        <FieldLabel htmlFor="pairing-name">Agent name</FieldLabel>
-        <Input id="pairing-name" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
+        <FieldLabel htmlFor={`pairing-name-${p.id}`}>Agent name</FieldLabel>
+        <Input id={`pairing-name-${p.id}`} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
       </Field>
 
       <AskedFor p={p} accounts={accounts} />
@@ -529,8 +562,9 @@ function ApproveForm({
           </p>
         ) : (
           usable.map((a) => {
-            const c = choices[a.id]!;
-            const set = (patch: Partial<AccountChoice>) => setChoices((all) => ({ ...all, [a.id]: { ...all[a.id]!, ...patch } }));
+            // An account that appeared after the form opened starts unticked.
+            const c = choices[a.id] ?? NEW_CHOICE;
+            const set = (patch: Partial<AccountChoice>) => setChoices((all) => ({ ...all, [a.id]: { ...(all[a.id] ?? NEW_CHOICE), ...patch } }));
             return (
               <div key={a.id} className={cn("rounded-lg border", c.on && "bg-card")}>
                 <label className="flex cursor-pointer items-center gap-3 p-3">
@@ -572,15 +606,21 @@ function ApproveForm({
 
       {error != null && <ErrorAlert error={error} title="Couldn't approve" />}
 
-      <DialogFooter>
-        <Button type="button" variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
+      <Footer className={inline ? "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end" : undefined}>
+        {onDeny ? (
+          <Button type="button" variant="outline" onClick={onDeny} disabled={busy || denying}>
+            {denying ? <Spinner /> : <XIcon />} Deny
+          </Button>
+        ) : (
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        )}
         {problem && !gone && <span className="mr-auto self-center text-xs text-muted-foreground">{problem}</span>}
-        <Button type="submit" disabled={busy || gone || !!problem}>
+        <Button type="submit" disabled={busy || denying || gone || !!problem} className={inline ? "h-auto min-h-9 whitespace-normal" : undefined}>
           {busy ? <Spinner /> : <CheckIcon />} Approve and send key to terminal
         </Button>
-      </DialogFooter>
+      </Footer>
     </form>
   );
 }
@@ -623,5 +663,98 @@ export function RecentPairings({ items }: { items: PairingRequest[] }) {
         </ul>
       </Card>
     </div>
+  );
+}
+
+/**
+ * Pending pairing requests with the approve form inline (setup wizard, Connect dialog), so the code
+ * from the terminal can be typed right where the command was copied. A new request is announced
+ * politely without moving focus (the user is usually in their terminal at that moment).
+ */
+export function PendingPairings({ onApproved, className }: { onApproved?: (agent: Agent) => void; className?: string }) {
+  const pairings = useQuery({ ...queries.pairings("pending"), refetchInterval: 5000 });
+  const accounts = useQuery(queries.accounts());
+  const now = useNow(5000);
+  const [approved, setApproved] = useState<Agent | null>(null);
+  useSilencePairingToasts();
+  const pending = (pairings.data ?? []).filter((p) => Date.parse(p.expiresAt) > now);
+
+  return (
+    <div className={cn("space-y-3", className)}>
+      <p role="status" aria-live="polite" className="flex items-center gap-2 text-sm">
+        {approved && !pending.length ? (
+          <>
+            <CheckCircle2Icon className="size-4 text-success" />
+            <span>
+              {approved.name} is approved. Its key went to the terminal.{" "}
+              <Link to="/agents/$agentId" params={{ agentId: approved.id }} className="font-medium underline underline-offset-4">
+                Open agent
+              </Link>
+            </span>
+          </>
+        ) : pending.length ? (
+          <>
+            <StatusDot tone="warn" pulse />
+            <span className="font-medium">{pending.length === 1 ? "A request is waiting for you" : `${pending.length} requests are waiting for you`}</span>
+          </>
+        ) : (
+          <>
+            <StatusDot tone="idle" pulse />
+            <span className="text-muted-foreground">Waiting for a request. It shows up here as soon as you run the command.</span>
+          </>
+        )}
+      </p>
+      {/* The form's account choices are set up on mount, so wait for the accounts. */}
+      {accounts.data &&
+        pending.map((p) => (
+          <PairingInline
+            key={p.id}
+            p={p}
+            accounts={accounts.data}
+            onApproved={(a) => {
+              setApproved(a);
+              onApproved?.(a);
+            }}
+          />
+        ))}
+    </div>
+  );
+}
+
+function PairingInline({ p, accounts, onApproved }: { p: PairingRequest; accounts: Account[]; onApproved: (a: Agent) => void }) {
+  const qc = useQueryClient();
+  const [denying, setDenying] = useState(false);
+  const deny = async () => {
+    setDenying(true);
+    try {
+      await api(`/api/pairings/${encodeURIComponent(p.id)}/deny`, { body: {} });
+      await qc.invalidateQueries({ queryKey: keys.pairings });
+    } catch (err) {
+      toastError(err, "Couldn't deny the request");
+    } finally {
+      setDenying(false);
+    }
+  };
+  return (
+    <section aria-labelledby={`pairing-${p.id}`} className="rounded-xl border bg-card">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b p-4">
+        <div className="min-w-0 space-y-3">
+          <h3 id={`pairing-${p.id}`} className="flex flex-wrap items-center gap-2 font-semibold break-words">
+            <Visible text={p.name} />
+            <Badge variant="outline" className="font-normal text-muted-foreground">
+              self-reported by the agent
+            </Badge>
+          </h3>
+          <ClientFacts p={p} />
+        </div>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <ClockIcon className="size-3.5" />
+          <ExpiresIn at={p.expiresAt} />
+        </div>
+      </div>
+      <div className="p-4">
+        <ApproveForm p={p} accounts={accounts} inline onApproved={onApproved} onDeny={() => void deny()} denying={denying} />
+      </div>
+    </section>
   );
 }

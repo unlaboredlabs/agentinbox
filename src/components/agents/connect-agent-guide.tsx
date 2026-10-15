@@ -1,15 +1,18 @@
 import type { AgentTool } from "@shared/agent-api";
+import type { Agent } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { BellRingIcon, MessageSquareTextIcon, ShieldAlertIcon, ShieldCheckIcon, SparklesIcon, TerminalIcon } from "lucide-react";
+import { BellRingIcon, BookOpenIcon, ShieldAlertIcon, ShieldCheckIcon, SparklesIcon, TerminalIcon } from "lucide-react";
 import { useState } from "react";
-import { CodeBlock, CopyButton } from "@/components/common";
+import { CopyButton } from "@/components/common";
+import { PendingPairings } from "@/components/approvals/pairing";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { connectCommands, RECIPES, TOOL_LABEL, TOOLS, transportOf } from "@/lib/cli";
+import { type ConnectCommands, connectCommands, RECIPES, TOOL_LABEL, TOOLS, transportOf } from "@/lib/cli";
 import { queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { Command } from "./command";
 
 /**
  * Loud warning for plain-http public URLs that aren't loopback or Tailscale. The CLI refuses them
@@ -73,7 +76,7 @@ export function ToolTabs({ value, onChange, className }: { value: AgentTool; onC
   return (
     <Tabs value={value} onValueChange={(v) => onChange(v as AgentTool)} className={className}>
       <div className="-mx-1 overflow-x-auto px-1 pb-1">
-        <TabsList>
+        <TabsList aria-label="Your agent's tool" className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto">
           {TOOLS.map((t) => (
             <TabsTrigger key={t} value={t}>
               {TOOL_LABEL[t]}
@@ -85,90 +88,163 @@ export function ToolTabs({ value, onChange, className }: { value: AgentTool; onC
   );
 }
 
-/**
- * Device-flow pairing, step by step: run `connect` on the agent's machine, approve the matching
- * code here, then (optionally) keep a listener running that wakes the agent on new mail.
- */
-export function ConnectAgentGuide({ className }: { className?: string }) {
+export const toolName = (tool: AgentTool) => (tool === "other" ? "your agent" : TOOL_LABEL[tool]);
+
+/** The public URL agents connect to (the browser's origin until settings load). */
+export function usePublicUrl() {
   const settings = useQuery(queries.settings());
+  return { publicUrl: settings.data?.publicUrl ?? window.location.origin, settings: settings.data };
+}
+
+export function PairingOffAlert() {
+  const { settings } = usePublicUrl();
+  if (!settings || settings.pairingEnabled) return null;
+  return (
+    <Alert>
+      <ShieldAlertIcon />
+      <AlertTitle>Pairing is turned off</AlertTitle>
+      <AlertDescription>
+        <p>
+          <code className="font-mono">connect</code> will be refused until you turn on{" "}
+          <Link to="/settings" hash="pairing" className="font-medium text-foreground underline underline-offset-4">
+            Accept pairing requests
+          </Link>{" "}
+          in Settings. You can still create an agent and copy its key yourself.
+        </p>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+/**
+ * `connect` saves a second agent only with --profile <name>, and setup-mcp / listen act on the
+ * default profile unless given the same flag.
+ */
+export function ProfileHint() {
+  return (
+    <>
+      Connected it with <code className="font-mono text-foreground">--profile &lt;name&gt;</code>? Add the same flag to these commands.
+    </>
+  );
+}
+
+/** `listen`: try it in the foreground first, then install it as a service (the order `connect` prints). */
+export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentTool }) {
+  const label = toolName(tool);
+  return (
+    <ol className="space-y-3 text-sm">
+      <li className="space-y-1.5">
+        <p>
+          <span className="font-medium">1. Try it.</span> <span className="text-muted-foreground">Runs in this terminal until you press Ctrl-C.</span>
+        </p>
+        <Command code={c.listenTry} label="listen command" />
+        <p className="text-xs text-muted-foreground">
+          {tool === "other"
+            ? "This test command only confirms each email (a ✓ line per email). Swap in your own script for the service."
+            : `Starts ${label} for each new email. ${RECIPES[tool].note}`}
+        </p>
+      </li>
+      <li className="space-y-1.5">
+        <p>
+          <span className="font-medium">2. Keep it running.</span>{" "}
+          <span className="text-muted-foreground">Installs a background service that starts at login and survives closing the terminal.</span>
+        </p>
+        <Command code={c.listenService} label="service install command" />
+        {tool === "other" && <p className="text-xs text-muted-foreground">Replace /path/to/handle-email.sh with your script. {RECIPES.other.note}</p>}
+      </li>
+      <li className="text-xs text-muted-foreground">
+        <ProfileHint />
+      </li>
+    </ol>
+  );
+}
+
+/** "Tell your agent to set itself up": hidden on plain http, where the commands need an explicit opt-in. */
+function SelfSetup({ c }: { c: ConnectCommands }) {
+  return (
+    <div className="rounded-lg border bg-muted/30 p-3">
+      <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+        <SparklesIcon className="size-4 text-chart-1" /> Or let the agent set itself up
+      </div>
+      <p className="mb-2 text-sm text-muted-foreground">Tell your agent:</p>
+      <div className="flex flex-col items-start gap-2 rounded-md border bg-background py-1.5 pr-1.5 pl-3 sm:flex-row">
+        <p className="min-w-0 flex-1 py-1 text-sm break-words">“{c.selfSetup}”</p>
+        <CopyButton value={c.selfSetup} label="Copy prompt" withText variant="outline" className="self-end sm:self-auto" />
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">It reads the skill, runs connect for you, and its request shows up here to approve.</p>
+    </div>
+  );
+}
+
+/**
+ * Device-flow pairing, step by step: run `connect` on the agent's machine, approve the request
+ * inline by typing its code, then (full variant) install the skill and keep a listener running.
+ * The wizard variant stops after approval: its next step checks MCP and the listener live.
+ */
+export function ConnectAgentGuide({
+  className,
+  variant = "full",
+  onApproved,
+}: {
+  className?: string;
+  variant?: "full" | "wizard";
+  onApproved?: (agent: Agent) => void;
+}) {
+  const { publicUrl } = usePublicUrl();
   const [tool, setTool] = useState<AgentTool>("claude-code");
   const [acceptInsecure, setAcceptInsecure] = useState(false);
-  const publicUrl = settings.data?.publicUrl ?? window.location.origin;
   const insecure = transportOf(publicUrl) === "insecure";
   const c = connectCommands(publicUrl, tool, acceptInsecure);
-  const label = tool === "other" ? "your agent" : TOOL_LABEL[tool];
+  const label = toolName(tool);
 
   return (
     <div className={cn("space-y-5", className)}>
-      {settings.data && !settings.data.pairingEnabled && (
-        <Alert>
-          <ShieldAlertIcon />
-          <AlertTitle>Pairing is turned off</AlertTitle>
-          <AlertDescription>
-            <p>
-              <code className="font-mono">connect</code> will be refused until you turn on{" "}
-              <Link to="/settings" hash="pairing" className="font-medium text-foreground underline underline-offset-4">
-                Accept pairing requests
-              </Link>{" "}
-              in Settings. You can still create an agent and copy its key yourself.
-            </p>
-          </AlertDescription>
-        </Alert>
-      )}
-
+      <PairingOffAlert />
       <InsecureTransportAlert publicUrl={publicUrl} accepted={acceptInsecure} onAcceptedChange={setAcceptInsecure} />
 
-      {!insecure && (
-      <div className="rounded-lg border bg-muted/30 p-3">
-        <div className="mb-2 flex items-center gap-2 text-sm font-medium">
-          <SparklesIcon className="size-4 text-chart-1" /> Quickest: let the agent set itself up
-        </div>
-        <p className="mb-2 text-sm text-muted-foreground">Tell your agent:</p>
-        <div className="flex flex-col items-start gap-2 rounded-md border bg-background py-1.5 pr-1.5 pl-3 sm:flex-row">
-          <p className="min-w-0 flex-1 py-1 text-sm [overflow-wrap:anywhere]">“{c.selfSetup}”</p>
-          <CopyButton value={c.selfSetup} withText variant="outline" className="self-end sm:self-auto" />
-        </div>
-        <p className="mt-2 text-xs text-muted-foreground">It reads the skill, runs the commands below and asks you to approve it here.</p>
-      </div>
-      )}
-
       <div className="space-y-3">
-        <div className="text-sm font-medium">{insecure ? "Run it yourself" : "Or run it yourself"}</div>
+        <div className="text-sm font-medium">
+          Which tool does your agent run in?
+        </div>
         <ToolTabs value={tool} onChange={setTool} />
         <ol>
-          <Step n={1} icon={TerminalIcon} title={`On the machine where ${label} runs`}>
-            <CodeBlock code={c.connect} wrap />
+          <Step n={1} icon={TerminalIcon} title={`Run this on the machine where ${label} runs`}>
+            <Command code={c.connect} label="connect command" />
             <p className="text-xs text-muted-foreground">
-              It prints a code like <span className="font-mono">K7QM-2XPD</span> and waits.
-              {tool !== "other" && ` --setup-mcp adds agentinbox to ${label} without ever showing the key.`} The agent is named “
-              {tool === "other" ? "Agent" : TOOL_LABEL[tool]} on &lt;hostname&gt;” unless you pass <span className="font-mono">--name</span>.
+              It prints a code like <span className="font-mono">K7QM-2XPD</span> and waits for you. Keep the terminal open.
+              {tool === "other"
+                ? " It then shows how to point your agent's MCP client at agentinbox."
+                : ` --setup-mcp then adds agentinbox to ${label}; the key is saved on that machine and never shown.`}
             </p>
           </Step>
-          <Step n={2} icon={ShieldCheckIcon} title="Approve it here">
-            <p className="text-sm text-muted-foreground">
-              The request appears in{" "}
-              <Link to="/approvals" search={{ tab: "access" }} className="font-medium text-foreground underline underline-offset-4">
-                Approvals → Agent access
-              </Link>
-              . Type the code from the terminal to approve it and choose what the agent may do. Its key goes straight to the terminal; you never
-              see or paste it.
-            </p>
+          <Step n={2} icon={ShieldCheckIcon} title="Approve it here with the code from your terminal">
+            <PendingPairings onApproved={onApproved} />
           </Step>
-          <Step n={3} icon={BellRingIcon} title={<>Wake it on new mail <span className="font-normal text-muted-foreground">(optional)</span></>}>
-            <CodeBlock code={c.listen} wrap />
-            <p className="text-xs text-muted-foreground">
-              Runs in the background (systemd or launchd) and starts {label} for each new email. {RECIPES[tool].note}
-            </p>
-          </Step>
+          {variant === "full" && (
+            <>
+              <Step n={3} icon={BookOpenIcon} title={`Teach ${label} the rules`}>
+                <Command code={c.skillInstall} label="skill install command" />
+                <p className="text-xs text-muted-foreground">
+                  Installs the agentinbox skill: how to triage, reply in threads, wait for approvals, and treat email content as untrusted.
+                </p>
+              </Step>
+              <Step
+                n={4}
+                icon={BellRingIcon}
+                title={
+                  <>
+                    Wake it on new mail <span className="font-normal text-muted-foreground">(optional)</span>
+                  </>
+                }
+              >
+                <ListenCommands c={c} tool={tool} />
+              </Step>
+            </>
+          )}
         </ol>
       </div>
 
-      <p className="flex items-start gap-2 text-xs text-muted-foreground">
-        <MessageSquareTextIcon className="mt-px size-3.5 shrink-0" />
-        <span>
-          Only the agentinbox skill, for an agent you've already set up: <code className="font-mono text-foreground">{c.skillInstall}</code>
-        </span>
-      </p>
+      {!insecure && <SelfSetup c={c} />}
     </div>
   );
 }

@@ -52,7 +52,7 @@ export async function copyText(text: string, near: HTMLElement) {
   if (!ok) throw new Error("Copy failed");
 }
 
-function useCopy(value: string, toastLabel?: string) {
+function useCopy(value: string) {
   const [copied, setCopied] = useState(false);
   const onClick = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
@@ -62,8 +62,8 @@ function useCopy(value: string, toastLabel?: string) {
       toast.error("Couldn't copy", { description: "Select the text and copy it with your keyboard instead." });
       return;
     }
+    // The button itself says "Copied" (no toast: it would cover buttons and outlive the step).
     setCopied(true);
-    toast.success(toastLabel ?? "Copied to clipboard");
     setTimeout(() => setCopied(false), 1500);
   };
   return { copied, onClick };
@@ -100,7 +100,7 @@ export function CopyButton({
           variant={variant}
           size="icon-sm"
           className={cn("text-muted-foreground", className)}
-          aria-label={label}
+          aria-label={copied ? "Copied" : label}
           onClick={onClick}
         >
           {copied ? <CheckIcon /> : <CopyIcon />}
