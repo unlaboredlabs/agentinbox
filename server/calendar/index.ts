@@ -35,9 +35,10 @@ export function createCalendarService(ctx: AppContext): CalendarService {
     eventContent: (accountId, calendarId, eventId) => eventContent(ctx, accountId, calendarId, eventId),
     async start() {
       await sync.start?.();
-      void reconcile();
+      push.start?.();
     },
     async stop() {
+      await push.stop?.();
       await sync.stop?.();
     },
   };

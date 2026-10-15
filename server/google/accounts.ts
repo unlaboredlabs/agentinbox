@@ -1,5 +1,6 @@
 import type { Account, AccountCalendar, AccountStatus } from "../../shared/types.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
+import { stopAccountChannels } from "../calendar/push.ts";
 import type { AppContext } from "../context.ts";
 import { json } from "../db/index.ts";
 import { errorMessage, notFound } from "../util/errors.ts";
@@ -129,6 +130,8 @@ export function createAccountsService(ctx: AppContext): AccountsService {
           log.warn("Could not stop the Gmail watch", { email: row.email, error: errorMessage(err) });
         }
       }
+      // Before revoking: channels.stop needs the account's token.
+      await stopAccountChannels(ctx, id);
       try {
         await ctx.google.revoke(id);
       } catch (err) {
