@@ -224,19 +224,32 @@ export function fontSizePx(style: Style, parent: number): number {
 export const DEFAULT_FONT_PX = ROOT_FONT_PX;
 
 // ───────────── Stylesheets ─────────────
+//
+// Mail clients honour <style> blocks, so hiding rules there matter. Any sender controls this input, so the
+// work is bounded: CSS over MAX_CSS_CHARS is ignored, at most MAX_RULES rules are read, selectors are
+// matched through an index built in one tree walk (never querySelectorAll per selector), and matching
+// stops after MAX_MATCH_OPS checks. When anything is skipped, colours are treated as uncertain (which only
+// ever keeps text) and the hiding found so far still applies.
 
 /** Properties taken from <style> rules: only the ones that can hide content. */
 const SHEET_PROPS = new Set(["display", "visibility", "opacity", "font-size", "font", "overflow", "height", "max-height", "width", "max-width"]);
+const COLOR_PROPS = /^(?:color|background(?:-color|-image)?)$/;
+const MAX_CSS_CHARS = 200_000;
+const MAX_RULES = 1_000;
+const MAX_SELECTORS = 3_000;
+const MAX_MATCH_OPS = 2_000_000;
 
 interface Rule {
   selectors: string[];
   decls: Style;
+  /** In @media/@supports (print-only media are dropped). */
+  conditional: boolean;
 }
 
-/** Splits CSS into top-level rules and the rules nested in conditional groups (@media, @supports). */
-function parseRules(css: string): { top: Rule[]; conditional: Rule[] } {
-  const top: Rule[] = [];
-  const conditional: Rule[] = [];
+/** Splits CSS into rules; rules inside conditional groups are marked. Linear in the CSS size. */
+function parseRules(css: string): { rules: Rule[]; truncated: boolean } {
+  const rules: Rule[] = [];
+  let truncated = false;
   const text = css.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/<!--|-->/g, " ");
   const block = (from: number): number => {
     // Index just past the "}" matching the "{" at `from`.
@@ -247,7 +260,7 @@ function parseRules(css: string): { top: Rule[]; conditional: Rule[] } {
     }
     return text.length;
   };
-  const walk = (start: number, end: number, into: Rule[], nested: boolean) => {
+  const walk = (start: number, end: number, conditional: boolean) => {
     let i = start;
     while (i < end) {
       const open = text.indexOf("{", i);
@@ -255,53 +268,158 @@ function parseRules(css: string): { top: Rule[]; conditional: Rule[] } {
       const prelude = text.slice(i, open).trim();
       const close = block(open);
       if (prelude.startsWith("@")) {
-        if (/^@(media|supports|document|container)\b/i.test(prelude) && !nested) walk(open + 1, close - 1, conditional, true);
+        const printOnly = /^@media\s+(?:only\s+)?print\b/i.test(prelude) && !/\b(?:screen|all)\b/i.test(prelude);
+        if (/^@(media|supports|document|container)\b/i.test(prelude) && !conditional && !printOnly) walk(open + 1, close - 1, true);
+      } else if (rules.length >= MAX_RULES) {
+        truncated = true;
+        return;
       } else {
-        into.push({ selectors: prelude.split(",").map((s) => s.trim()).filter(Boolean), decls: parseStyle(text.slice(open + 1, close - 1)) });
+        rules.push({ selectors: prelude.split(",").map((x) => x.trim()).filter(Boolean), decls: parseStyle(text.slice(open + 1, close - 1)), conditional });
       }
       i = close;
     }
   };
-  walk(0, text.length, top, false);
-  return { top, conditional };
+  walk(0, text.length, false);
+  return { rules, truncated };
 }
 
-function select(root: DomElement, selector: string): DomElement[] {
-  // Pseudo-classes/elements (:hover, ::before) describe other states; never apply them.
-  if (selector.includes(":")) return [];
-  try {
-    return Array.from(root.querySelectorAll(selector));
-  } catch {
-    return [];
-  }
+/** tag#id.class.class (no combinators, attributes or pseudo-classes). */
+interface Compound {
+  tag: string | null;
+  id: string | null;
+  classes: string[];
+}
+
+function parseCompound(sel: string): Compound | null {
+  const m = /^([a-z][a-z0-9-]*|\*)?((?:[#.][\w-]+)*)$/i.exec(sel.trim());
+  if (!m || (!m[1] && !m[2])) return null;
+  const parts = m[2]!.match(/[#.][\w-]+/g) ?? [];
+  const ids = parts.filter((x) => x.startsWith("#")).map((x) => x.slice(1));
+  if (ids.length > 1) return null;
+  return {
+    tag: m[1] && m[1] !== "*" ? m[1].toUpperCase() : null,
+    id: ids[0] ?? null,
+    classes: parts.filter((x) => x.startsWith(".")).map((x) => x.slice(1)),
+  };
 }
 
 /**
- * Hiding-related declarations that top-level <style> rules apply to each element (later rules win).
- * Elements also matched by a rule inside @media/@supports are skipped: a conditional rule may reveal
- * them on some device, so they count as visible.
+ * The element a complex selector applies to, over-approximated: its last compound with attribute and
+ * pseudo parts dropped (`td > a.btn:hover` → `a.btn`). "any" when that leaves nothing specific.
  */
-export function stylesheetHiding(doc: DomDocument): Map<DomElement, Style> {
-  const out = new Map<DomElement, Style>();
+function subjectOf(sel: string): Compound | "any" {
+  const last = sel.trim().split(/\s*[\s>+~]\s*/).at(-1) ?? "";
+  const bare = last.replace(/\[[^\]]*\]/g, "").replace(/::?[\w-]+(?:\([^)]*\))?/g, "");
+  const c = parseCompound(bare);
+  return !c || (!c.tag && !c.id && !c.classes.length) ? "any" : c;
+}
+
+const indexKey = (c: Compound) => (c.id ? `#${c.id}` : c.classes.length ? `.${c.classes[0]}` : c.tag ? c.tag : "*");
+
+interface Entry {
+  compound: Compound;
+  /** Apply these hiding declarations (exact simple selectors in top-level rules only). */
+  hide: Style | null;
+  /** Sets colour or background: the element's colours can't be known from inline styles. */
+  colour: boolean;
+  /** A conditional rule that makes hidden content visible again on some device. */
+  reveal: boolean;
+  order: number;
+}
+
+const VISIBLE_VALUES: Record<string, (v: string) => boolean> = {
+  display: (v) => v !== "none",
+  visibility: (v) => v === "visible",
+  opacity: (v) => parseFloat(v) >= 0.1,
+  "font-size": (v) => !isZeroLength(v),
+  overflow: (v) => v === "visible" || v === "auto" || v === "scroll",
+  height: (v) => !isZeroLength(v),
+  "max-height": (v) => !isZeroLength(v),
+  width: (v) => !isZeroLength(v),
+  "max-width": (v) => !isZeroLength(v),
+};
+
+const reveals = (decls: Style) => [...decls].some(([p, v]) => VISIBLE_VALUES[p]?.(v));
+
+export interface SheetEffects {
+  /** Hiding declarations per element, from top-level rules with simple selectors. */
+  hiding: Map<DomElement, Style>;
+  /** Elements whose colour/background a rule may set. */
+  colourStyled: Set<DomElement>;
+  /** Rules were skipped or a colour rule targets anything: treat every background as uncertain. */
+  allColourUncertain: boolean;
+}
+
+export function stylesheetEffects(doc: DomDocument): SheetEffects {
+  const out: SheetEffects = { hiding: new Map(), colourStyled: new Set(), allColourUncertain: false };
   const root = doc.documentElement;
   const css = Array.from(root.querySelectorAll("style"))
     .map((s) => s.textContent ?? "")
     .join("\n");
   if (!css.trim()) return out;
-  const { top, conditional } = parseRules(css);
-  const revealable = new Set<DomElement>();
-  for (const rule of conditional) for (const sel of rule.selectors) for (const el of select(root, sel)) revealable.add(el);
-  for (const rule of top) {
-    const decls = [...rule.decls].filter(([p]) => SHEET_PROPS.has(p));
-    if (!decls.length) continue;
+  if (css.length > MAX_CSS_CHARS) {
+    out.allColourUncertain = true;
+    return out;
+  }
+  const { rules, truncated } = parseRules(css);
+  if (truncated) out.allColourUncertain = true;
+
+  const index = new Map<string, Entry[]>();
+  let selectors = 0;
+  let order = 0;
+  for (const rule of rules) {
+    const hide = new Map([...rule.decls].filter(([p]) => SHEET_PROPS.has(p)));
+    const colour = [...rule.decls.keys()].some((p) => COLOR_PROPS.test(p));
+    const reveal = rule.conditional && reveals(hide);
+    if (!colour && !reveal && (rule.conditional || !hide.size)) continue;
     for (const sel of rule.selectors) {
-      for (const el of select(root, sel)) {
-        if (revealable.has(el)) continue;
-        const style = out.get(el) ?? new Map<string, string>();
-        for (const [p, v] of decls) style.set(p, v);
-        out.set(el, style);
+      if (++selectors > MAX_SELECTORS) {
+        out.allColourUncertain = true;
+        break;
+      }
+      const exact = parseCompound(sel);
+      const subject = exact ?? subjectOf(sel);
+      if (subject === "any") {
+        // Over-approximation is only safe for "keep visible" effects.
+        if (colour) out.allColourUncertain = true;
+        if (!reveal) continue;
+      }
+      const compound = subject === "any" ? { tag: null, id: null, classes: [] } : subject;
+      const entry: Entry = { compound, hide: !rule.conditional && exact && hide.size ? hide : null, colour, reveal, order: order++ };
+      if (!entry.hide && !entry.colour && !entry.reveal) continue;
+      const key = indexKey(compound);
+      index.set(key, [...(index.get(key) ?? []), entry]);
+    }
+  }
+  if (!index.size) return out;
+
+  // One walk: each element only checks the rules indexed under its id, classes, tag and "*".
+  let ops = 0;
+  for (const el of Array.from(root.querySelectorAll("*"))) {
+    const tag = el.tagName.toUpperCase();
+    const id = el.getAttribute("id");
+    const classes = (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean).slice(0, 50);
+    const keys = [...(id ? [`#${id}`] : []), ...classes.map((c) => `.${c}`), tag, "*"];
+    const matched: Entry[] = [];
+    for (const key of keys) {
+      for (const e of index.get(key) ?? []) {
+        if (++ops > MAX_MATCH_OPS) {
+          out.allColourUncertain = true;
+          return out;
+        }
+        const c = e.compound;
+        if ((c.tag && c.tag !== tag) || (c.id && c.id !== id) || !c.classes.every((x) => classes.includes(x))) continue;
+        matched.push(e);
       }
     }
+    if (!matched.length) continue;
+    if (matched.some((e) => e.colour)) out.colourStyled.add(el);
+    if (matched.some((e) => e.reveal)) continue;
+    const hiding = matched.filter((e) => e.hide).sort((a, b) => a.order - b.order);
+    if (!hiding.length) continue;
+    const style: Style = new Map();
+    for (const e of hiding) for (const [p, v] of e.hide!) style.set(p, v);
+    out.hiding.set(el, style);
   }
   return out;
 }

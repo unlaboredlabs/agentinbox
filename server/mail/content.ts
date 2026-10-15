@@ -20,7 +20,8 @@ import {
   normalizeColor,
   parseStyle,
   type Style,
-  stylesheetHiding,
+  type SheetEffects,
+  stylesheetEffects,
 } from "./css.ts";
 
 export { normalizeColor } from "./css.ts";
@@ -44,7 +45,7 @@ const JOINING_SCRIPTS = [
 const PICTO = "\\p{Extended_Pictographic}";
 const VS = "\\uFE00-\\uFE0F\\u{E0100}-\\u{E01EF}";
 const KEEP_FLAG = "\\u{1F3F4}[\\u{E0030}-\\u{E0039}\\u{E0061}-\\u{E007A}]{2,7}\\u{E007F}";
-// Also a ZWJ after a virama at the end of a word (Malayalam chillu forms such as "ന്‍").
+// Also a ZWJ after a virama at the end of a word (Malayalam chillu forms such as "ന്\u200D").
 const KEEP_JOINER = `(?<=[${JOINING_SCRIPTS}])[\\u200C\\u200D](?=[${JOINING_SCRIPTS}])|(?<=[${JOINING_SCRIPTS}])(?<=\\p{M})\\u200D`;
 const KEEP_EMOJI_ZWJ = `(?<=${PICTO}(?:\\uFE0F|\\p{Emoji_Modifier})?)\\u200D(?=${PICTO})`;
 const KEEP_VS = `(?<=[^${VS}])[\\uFE00-\\uFE0F](?![${VS}])|(?<=\\p{Ideographic})[\\u{E0100}-\\u{E01EF}](?![${VS}])`;
@@ -146,7 +147,7 @@ function isTrackingPixel(el: DomElement, style: Style): boolean {
 interface Inherited {
   color: string | null;
   bg: string | null;
-  /** The real background may differ from `bg`: a background image, or a class/id a stylesheet could target. */
+  /** The real background may differ from `bg`: a background image, or a stylesheet rule setting colours. */
   bgUncertain: boolean;
   /** `background-clip: text` (gradient text): transparent text colour is still visible. */
   clipText: boolean;
@@ -160,9 +161,8 @@ interface Inherited {
 interface CleanState {
   /** Hidden elements/text that carried readable text. */
   removed: number;
-  /** The document had <style> blocks, so class/id selectors may change colours we can't see. */
-  styled: boolean;
-  sheet: Map<DomElement, Style>;
+  /** What the document's <style> blocks do: hiding rules and which elements' colours they may change. */
+  sheet: SheetEffects;
 }
 
 /** Opacity below this, or text smaller than 1px, is invisible to a reader. */
@@ -178,7 +178,7 @@ function textHidden(ctx: Inherited): boolean {
 
 function styleOf(el: DomElement, state: CleanState): Style {
   const inline = parseStyle(el.getAttribute("style"));
-  const sheet = state.sheet.get(el);
+  const sheet = state.sheet.hiding.get(el);
   return sheet ? new Map([...sheet, ...inline]) : inline;
 }
 
@@ -187,12 +187,12 @@ function childContext(el: DomElement, style: Style, parent: Inherited, state: Cl
   const visibility = style.get("visibility");
   const ownBg = backgroundColor(style, el);
   const bg = ownBg && ownBg !== "transparent" ? ownBg : null;
-  const targetable = state.styled && (el.hasAttribute("class") || el.hasAttribute("id"));
+  const sheetColour = state.sheet.allColourUncertain || state.sheet.colourStyled.has(el);
   const clip = style.get("background-clip") ?? style.get("-webkit-background-clip");
   return {
     color: normalizeColor(style.get("color")) ?? (tag === "FONT" ? normalizeColor(el.getAttribute("color")) : null) ?? parent.color,
     bg: bg ?? parent.bg,
-    bgUncertain: (bg ? false : parent.bgUncertain) || hasBackgroundImage(style, el) || targetable,
+    bgUncertain: (bg ? false : parent.bgUncertain) || hasBackgroundImage(style, el) || sheetColour,
     clipText: parent.clipText || clip === "text",
     fontPx: fontSizePx(style, parent.fontPx),
     opacity: parent.opacity * parseOpacity(style.get("opacity")),
@@ -391,7 +391,7 @@ function normalizeDocument(html: string): string {
 export function htmlToMarkdown(html: string): { markdown: string; removed: number } {
   const doc = parseHTML(normalizeDocument(html)).document as unknown as DomDocument;
   const root = doc.body ?? doc.documentElement;
-  const state: CleanState = { removed: 0, styled: doc.documentElement.querySelector("style") !== null, sheet: stylesheetHiding(doc) };
+  const state: CleanState = { removed: 0, sheet: stylesheetEffects(doc) };
   const rootStyle = styleOf(root, state);
   const base: Inherited = { color: null, bg: null, bgUncertain: false, clipText: false, fontPx: DEFAULT_FONT_PX, opacity: 1, invisible: false };
   const rootCtx = childContext(root, rootStyle, base, state);
@@ -548,6 +548,8 @@ export interface BuiltContent extends MessageContent {
 }
 
 const UNCONVERTIBLE = "[The HTML body of this message could not be converted to text.]";
+/** Larger HTML bodies are not converted (bounded work per message); the text/plain part is used instead. */
+export const MAX_HTML_CHARS = 1_000_000;
 
 /**
  * Cleaned, markdown-converted content with signals. Prefers HTML (more faithful), else text/plain. The
@@ -558,7 +560,11 @@ export function buildContent(parsed: ParsedMessage, opts: { accountEmail: string
   let removed = 0;
   let allHidden = false;
   let failed = false;
-  if (parsed.html && parsed.html.trim()) {
+  let note = "";
+  if (parsed.html && parsed.html.length > MAX_HTML_CHARS) {
+    failed = true;
+    note = `[The HTML version of this message is too large to convert (${Math.round(parsed.html.length / 1024)} KB); showing the plain-text version.]`;
+  } else if (parsed.html && parsed.html.trim()) {
     try {
       const r = htmlToMarkdown(parsed.html);
       body = r.markdown;
@@ -573,7 +579,8 @@ export function buildContent(parsed: ParsedMessage, opts: { accountEmail: string
     body = r.text;
     removed += r.removed;
   }
-  if (!body && failed) body = UNCONVERTIBLE;
+  if (!body && failed) body = note ? note.replace("; showing the plain-text version", "") : UNCONVERTIBLE;
+  else if (note) body = `${note}\n\n${body}`;
   body = escapeDelimiters(body);
   const subject = stripInvisible(parsed.summary.subject ?? "");
   removed += subject.removed;

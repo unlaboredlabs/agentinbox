@@ -125,18 +125,6 @@ describe("MCP over HTTP", () => {
     expect(Object.keys(getThread.inputSchema.properties ?? {}).sort()).toEqual(["account", "thread_id"]);
   });
 
-  it("rejects oversized request bodies with 413", async () => {
-    const { http, ctx } = setup();
-    const { apiKey } = ctx.policy.createAgent({ name: "x" });
-    const res = await http.request("/mcp", {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { pad: "x".repeat(5 * 1024 * 1024) } }),
-    });
-    expect(res.status).toBe(413);
-    expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/too large/);
-  });
-
   it("calls tools and audits successes and denials with reasons", async () => {
     const { http, ctx, addAgent, gmail } = setup();
     const { agent, apiKey } = addAgent("bot", [

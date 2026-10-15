@@ -85,12 +85,25 @@ export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_FORWARD_BYTES = 20 * 1024 * 1024;
 /** System labels agents may not add/remove via modify_labels (trash has its own capability; the rest are Gmail-managed). */
 const PROTECTED_LABELS = new Set(["TRASH", "SPAM", "DRAFT", "SENT", "CHAT"]);
-/** Labels a label-scoped agent may add besides its scope labels (adding others could pull mail out of its scope's reach or into another agent's). */
-const SCOPED_ADDABLE = new Set(["INBOX", "STARRED", "IMPORTANT", "UNREAD"]);
 /** System labels shown to label-scoped agents (they're needed for search and organizing). */
 const SCOPED_VISIBLE_SYSTEM = new Set(["INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "STARRED", "IMPORTANT", "UNREAD"]);
 const EMAIL = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 const SUMMARY_HEADERS = ["From", "To", "Cc", "Subject", "Date"];
+
+/** How long a label name that wasn't found (even fresh) is remembered as missing. */
+const LABEL_MISS_TTL_MS = 30_000;
+const labelMisses = new WeakMap<AppContext, Map<string, Map<string, number>>>();
+
+/** Per account: lower-cased label name/id → time until which it's known to be missing. */
+function recentLabelMisses(ctx: AppContext, accountId: string): Map<string, number> {
+  let byAccount = labelMisses.get(ctx);
+  if (!byAccount) labelMisses.set(ctx, (byAccount = new Map()));
+  let misses = byAccount.get(accountId);
+  if (!misses) byAccount.set(accountId, (misses = new Map()));
+  const now = Date.now();
+  for (const [k, until] of misses) if (until <= now) misses.delete(k);
+  return misses;
+}
 
 const DRAFT_ONLY_MESSAGE = "Saved as a draft; a human will review and send it from Gmail.";
 
@@ -223,16 +236,28 @@ export class AgentMail {
     return p;
   }
 
-  /**
-   * Bypasses the Google label cache (a label created in Gmail a moment ago). `labels(id, { fresh })` is an
-   * additive option of the google service; older implementations ignore the extra argument.
-   */
+  /** Bypasses the Google label cache (a label created in Gmail a moment ago). */
   private labelsFresh(a: Access): Promise<GmailLabel[]> {
-    const fetchLabels = this.ctx.google.labels as (accountId: string, opts?: { fresh?: boolean }) => Promise<GmailLabel[]>;
-    const p = fetchLabels.call(this.ctx.google, a.account.id, { fresh: true });
+    const p = this.ctx.google.labels(a.account.id, { fresh: true });
     this.labelCache.set(a.account.id, p);
     p.catch(() => this.labelCache.delete(a.account.id));
     return p;
+  }
+
+  /**
+   * Labels, refetched once (fresh) when one of `wanted` (ids or names) is missing, unless that name was
+   * already missing from a fresh list moments ago (so repeated misses don't hammer Gmail).
+   */
+  private async labelsHaving(a: Access, wanted: string[]): Promise<GmailLabel[]> {
+    const matches = (list: GmailLabel[], key: string) => list.some((l) => l.id === key || l.name.toLowerCase() === key.toLowerCase());
+    const list = await this.labels(a);
+    const misses = recentLabelMisses(this.ctx, a.account.id);
+    const missing = wanted.filter((k) => !matches(list, k.trim()));
+    if (!missing.length || missing.every((k) => misses.has(k.trim().toLowerCase()))) return list;
+    const fresh = await this.labelsFresh(a);
+    const until = Date.now() + LABEL_MISS_TTL_MS;
+    for (const k of missing) if (!matches(fresh, k.trim())) misses.set(k.trim().toLowerCase(), until);
+    return fresh;
   }
 
   /** Labels for display only: falls back to raw ids on failure. */
@@ -323,13 +348,8 @@ export class AgentMail {
     const syntax = querySyntaxError(query);
     if (syntax) throw new ToolError("invalid_query", `${syntax} Fix the query and try again.`);
     const scope = a.grant.labelScope;
-    let known: GmailLabel[] = [];
-    if (scope !== null) {
-      known = await this.labels(a);
-      // A scope label missing from the cached list may have just been created: look again once.
-      if (scope.some((id) => !known.some((l) => l.id === id))) known = await this.labelsFresh(a);
-    }
-    const search = scopedSearch(query, scope, known);
+    // A scope label missing from the cached list may have just been created: look again once.
+    const search = scopedSearch(query, scope, scope === null ? [] : await this.labelsHaving(a, scope));
     this.trace.detail = { queryLength: query.length, scoped: scope !== null };
     const labels = await this.labelsSafe(a);
     if (search === null) return { account: a.account, threads: [], nextPageToken: null, hidden: 0, labels };
@@ -514,7 +534,8 @@ export class AgentMail {
     const ccList = dedupe(cc);
     if (!toList.length && !ccList.length) throw new ToolError("no_recipients", "This message has no one to reply to (it only involves this account).");
     const recipients = [...toList, ...ccList];
-    if (a.grant.replyOnly) await this.assertThreadParticipants(a, src.threadId, recipients);
+    // Reply-only needs no extra recipient check here: drafts are refused above, so every recipient comes
+    // from a message that was actually sent or received in this thread.
     const hint =
       args.replyAll && !disallowed(a.grant, toList).length
         ? "Retry with reply_all: false to answer only the sender, or use send_message for the allowed recipients."
@@ -535,30 +556,6 @@ export class AgentMail {
       references: p.messageId ? [...p.references.filter((r) => r !== p.messageId), p.messageId] : p.references,
       reason: args.reason ?? null,
     });
-  }
-
-  /**
-   * Reply-only grants may only write to people already in the conversation: every recipient must appear
-   * (From, Reply-To, To or Cc) on a non-draft message of the thread.
-   */
-  private async assertThreadParticipants(a: Access, threadId: string, recipients: Address[]): Promise<void> {
-    const thread = await this.fetchById("Thread", threadId, () =>
-      a.gmail.getThread(threadId, "metadata", ["From", "To", "Cc", "Reply-To", "Subject", "Date"]),
-    );
-    const known = new Set<string>();
-    for (const m of thread.messages ?? []) {
-      if (m.labelIds?.includes("DRAFT")) continue;
-      const s = this.ctx.google.mime.summarize(m);
-      const replyTo = this.ctx.google.mime.parseAddresses(header(m, "Reply-To"));
-      for (const x of [...(s.from ? [s.from] : []), ...replyTo, ...s.to, ...s.cc]) known.add(x.email.toLowerCase());
-    }
-    const outsiders = recipients.filter((x) => !known.has(x.email.toLowerCase())).map((x) => x.email);
-    if (outsiders.length) {
-      throw new PolicyDenied(
-        "reply_only",
-        `Your access to ${a.account.email} only allows replying to people already in this conversation; ${outsiders.join(", ")} ${outsiders.length === 1 ? "is" : "are"} not.`,
-      );
-    }
   }
 
   async forward(
@@ -715,16 +712,17 @@ export class AgentMail {
   private async resolveLabelIds(a: Access, names: string[], mode: "add" | "remove"): Promise<string[]> {
     if (!names.length) return [];
     const scope = a.grant.labelScope;
-    let all = await this.labels(a);
-    const find = (list: GmailLabel[], key: string) => list.find((l) => l.id === key) ?? list.find((l) => l.name.toLowerCase() === key.toLowerCase());
     // A name we don't know may be a label created in Gmail since the cache was filled: look again once.
-    if (names.some((n) => !find(all, n.trim()))) all = await this.labelsFresh(a);
+    const all = await this.labelsHaving(a, names);
+    const find = (list: GmailLabel[], key: string) => list.find((l) => l.id === key) ?? list.find((l) => l.name.toLowerCase() === key.toLowerCase());
     // Scoped agents only see (and may name) their scope labels and common system labels.
     const labels = scope === null ? all : all.filter((l) => scope.includes(l.id) || SCOPED_VISIBLE_SYSTEM.has(l.id));
     return names.map((n) => {
       const key = n.trim();
       const label = find(labels, key);
-      const addable = () => [...SCOPED_ADDABLE, ...all.filter((l) => scope!.includes(l.id)).map((l) => l.name)].join(", ");
+      // Scoped agents may add only their own scope labels: any other label (INBOX included) can be another
+      // grant's scope, so adding it would hand the thread to that grant. Read state goes through mark_read.
+      const addable = () => all.filter((l) => scope!.includes(l.id)).map((l) => l.name).join(", ") || "(none)";
       if (!label && scope !== null) {
         // Same answer whether or not the label exists outside the scope.
         throw new PolicyDenied("label_scope", `"${key}" isn't a label you can use. Labels you can add: ${addable()}.`);
@@ -739,7 +737,7 @@ export class AgentMail {
           label.id === "TRASH" ? "Use the trash tool to move mail to the trash." : `The ${label.id} label can't be changed with modify_labels.`,
         );
       }
-      if (mode === "add" && scope !== null && !scope.includes(label.id) && !SCOPED_ADDABLE.has(label.id)) {
+      if (mode === "add" && scope !== null && !scope.includes(label.id)) {
         throw new PolicyDenied("label_scope", `You can't add the ${label.name} label. Labels you can add: ${addable()}.`);
       }
       return label.id;

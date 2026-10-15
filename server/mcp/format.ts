@@ -3,6 +3,7 @@
 import type { Account, Approval, GmailLabel, Grant, MailEvent } from "../../shared/types.ts";
 import type { FeedResult } from "../events/types.ts";
 import type { RenderedMessage, SendOutcome, ThreadSummary } from "../mail/agent.ts";
+import { CANCELLED_PREFIX } from "../mail/approvals.ts";
 import { cleanLine, formatAddress, formatAddresses, labelNames, renderMessage } from "../mail/content.ts";
 
 const SEND_MODE_HELP: Record<Grant["sendMode"], string> = {
@@ -84,6 +85,8 @@ export function formatSendOutcome(o: SendOutcome): string {
 }
 
 export function formatApprovalStatus(a: Approval): string {
+  // Automatic cancellations keep the "rejected" status (console contract) with a "cancelled: …" note.
+  const cancelled = a.status === "rejected" && !!a.decisionNote?.startsWith(CANCELLED_PREFIX);
   const next: Record<Approval["status"], string> = {
     pending: "Still waiting for a human decision. Check again later.",
     approved: "Approved; sending now. Check again shortly.",
@@ -95,7 +98,7 @@ export function formatApprovalStatus(a: Approval): string {
   return JSON.stringify(
     {
       approvalId: a.id,
-      status: a.status,
+      status: cancelled ? "cancelled" : a.status,
       kind: a.kind,
       to: a.to.map((x) => x.email),
       subject: a.subject,
@@ -103,7 +106,9 @@ export function formatApprovalStatus(a: Approval): string {
       decisionNote: a.decisionNote,
       error: a.error,
       expiresAt: a.expiresAt,
-      message: next[a.status],
+      message: cancelled
+        ? `Cancelled automatically (${a.decisionNote!.slice(CANCELLED_PREFIX.length)}); it was not sent and the draft was deleted.`
+        : next[a.status],
     },
     null,
     2,

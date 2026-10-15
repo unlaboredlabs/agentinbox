@@ -1,7 +1,8 @@
 // Review round 2: legitimate content must survive cleaning; spoofable signals must not be trusted.
 
 import { describe, expect, it } from "vitest";
-import { cleanLine, formatAddress, htmlToMarkdown, isExternal, parseAuthResults, stripInvisible } from "../server/mail/content.ts";
+import { buildContent, cleanLine, formatAddress, htmlToMarkdown, isExternal, MAX_HTML_CHARS, parseAuthResults, stripInvisible } from "../server/mail/content.ts";
+import type { ParsedMessage } from "../server/google/types.ts";
 
 const ch = (...cps: number[]) => String.fromCodePoint(...cps);
 const ZWNJ = ch(0x200c);
@@ -159,5 +160,62 @@ describe("one-line untrusted text", () => {
     expect(cleanLine("abcdef", 4)).toBe("abc…");
     expect(formatAddress({ name: "<ceo@acme.com>", email: "attacker@evil.com" })).toBe('"ceo@acme.com" <attacker@evil.com>');
     expect(formatAddress({ name: "Alice", email: "alice@x.com" })).toBe("Alice <alice@x.com>");
+  });
+});
+
+describe("stylesheets: bounded work, precise effects", () => {
+  const time = (fn: () => void) => {
+    const t0 = performance.now();
+    fn();
+    return performance.now() - t0;
+  };
+
+  it("handles a hostile ~700 KB document (8,000 rules x 10,000 elements) quickly", () => {
+    const rules = Array.from({ length: 8000 }, (_, i) => `.c${i} p, .c${i}{display:none}`).join("\n");
+    const els = Array.from({ length: 10000 }, (_, i) => `<div class="c${i % 9000} a b">item ${i}</div>`).join("");
+    const html = `<html><head><style>${rules}</style></head><body>${els}</body></html>`;
+    expect(html.length).toBeGreaterThan(600_000);
+    let r: ReturnType<typeof htmlToMarkdown> | undefined;
+    expect(time(() => (r = htmlToMarkdown(html)))).toBeLessThan(500);
+    expect(r!.markdown).toContain("item 9999");
+  });
+
+  it("stops matching after its operation budget (many rules on one class)", () => {
+    const rules = Array.from({ length: 1000 }, (_, i) => `.a{margin:${i}px;color:#000}`).join("");
+    const els = '<div class="a">x</div>'.repeat(10000);
+    expect(time(() => htmlToMarkdown(`<style>${rules}</style>${els}`))).toBeLessThan(500);
+  });
+
+  it("a stylesheet that doesn't set colours doesn't disable the same-colour check", () => {
+    const r = htmlToMarkdown('<style>.a{margin:0}</style><div class="a" style="background:#fff;color:#fff">SECRET</div><p>ok</p>');
+    expect(r.markdown).toBe("ok");
+    expect(r.removed).toBe(1);
+  });
+
+  it("colour rules with complex selectors keep their subjects uncertain", () => {
+    expect(htmlToMarkdown('<style>td > a.btn:hover{background:#00f}</style><div style="background:#fff"><a class="btn" href="https://x.io" style="color:#fff">Go</a></div>').markdown).toBe("[Go](https://x.io)");
+  });
+
+  it("only revealing, non-print @media rules exempt hidden elements", () => {
+    expect(htmlToMarkdown("<style>.h{display:none} @media print{.h{display:block}} @media screen{.h{color:red}}</style><p>ok</p><p class=\"h\">SECRET</p>").markdown).toBe("ok");
+    expect(htmlToMarkdown("<style>.h{display:none} @media (max-width:600px){.h{display:block !important}}</style><p class=\"h\">Mobile</p>").markdown).toBe("Mobile");
+  });
+
+  it("does not convert HTML over the size cap; uses the text part with a note", () => {
+    const parsed = {
+      summary: { id: "m", threadId: "t", from: null, to: [], cc: [], subject: "s", snippet: "", date: "", labelIds: [], hasAttachments: false },
+      headers: {},
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      replyTo: [],
+      text: "Plain version.",
+      html: `<p>${"x".repeat(MAX_HTML_CHARS)}</p>`,
+      attachments: [],
+      authenticationResults: null,
+    } satisfies ParsedMessage;
+    const c = buildContent(parsed, { accountEmail: "me@acme.com", maxChars: 0 });
+    expect(c.body).toMatch(/^\[The HTML version of this message is too large to convert \(\d+ KB\); showing the plain-text version\.\]\n\nPlain version\.$/);
+    expect(buildContent({ ...parsed, text: null }, { accountEmail: "me@acme.com", maxChars: 0 }).body).toMatch(/too large to convert \(\d+ KB\)\.\]$/);
   });
 });

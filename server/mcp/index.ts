@@ -1,29 +1,16 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { bodyLimit } from "hono/body-limit";
 import { router } from "../api/util.ts";
 import type { AppContext } from "../context.ts";
 import { buildMcpServer } from "./server.ts";
-
-/** Enough for long text bodies; attachments are never uploaded through MCP. */
-export const MCP_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 const bearer = (header: string | undefined): string | null => {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? "");
   return m ? m[1]! : null;
 };
 
-/** Streamable HTTP MCP endpoint (stateless: one server + transport per request). Mounted at the root. */
+/** Streamable HTTP MCP endpoint (stateless: one server + transport per request). Mounted at the root; server/app.ts limits the body size. */
 export function mcpRoutes(ctx: AppContext) {
   const app = router();
-
-  app.post(
-    "/mcp",
-    bodyLimit({
-      maxSize: MCP_MAX_BODY_BYTES,
-      onError: (c) =>
-        c.json({ jsonrpc: "2.0", error: { code: -32600, message: "Request body too large (max 4 MB). Keep message bodies shorter." }, id: null }, 413),
-    }),
-  );
 
   app.all("/mcp", async (c) => {
     const key = bearer(c.req.header("authorization"));

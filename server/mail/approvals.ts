@@ -3,6 +3,7 @@ import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { bool, json, now } from "../db/index.ts";
 import { AccountNeedsReauthError, type GmailMessage, type GmailPart, GoogleApiError } from "../google/types.ts";
+import { disallowedRecipients } from "../policy/enforce.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { newId } from "../util/ids.ts";
 
@@ -85,12 +86,19 @@ export function draftFingerprint(msg: GmailMessage): string {
   return sha256(json.str([msg.id, headers, parts]));
 }
 
-/** Worth retrying: rate limits, Google outages, network errors, or an account waiting to be reconnected. */
+const NETWORK_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"]);
+
+/** Worth retrying: rate limits, Google outages, connection failures, or an account waiting to be reconnected. */
 function isTransient(err: unknown): boolean {
   if (err instanceof AccountNeedsReauthError) return true;
   if (err instanceof GoogleApiError) return err.status === 429 || err.status >= 500;
-  return err instanceof TypeError; // fetch network failure
+  // fetch() network failures: TypeError("fetch failed") with a system error code as the cause.
+  const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return err instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
 }
+
+/** Prefix of the decision note on approvals cancelled automatically (status stays "rejected"). */
+export const CANCELLED_PREFIX = "cancelled: ";
 
 /** Approval persistence and admin decisions. Agent-side creation goes through `create`. */
 export class Approvals {
@@ -135,9 +143,9 @@ export class Approvals {
     if (current.status !== "pending") throw this.notPending(current);
 
     // The human approves a send by this agent under its current grant: both must still allow it.
-    const blocked = this.sendBlockedReason(current.agentId, current.accountId);
+    const blocked = this.sendBlockedReason(current);
     if (blocked) {
-      this.cancel([current.id], `Cancelled: ${blocked}`);
+      this.cancel([current.id], `${CANCELLED_PREFIX}${blocked}`);
       throw conflict(`This request can no longer be sent: ${blocked}.`, "It was cancelled and its draft deleted.");
     }
 
@@ -232,7 +240,7 @@ export class Approvals {
       : this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
     return this.cancel(
       rows.map((r) => r.id),
-      `Cancelled: ${why}`,
+      `${CANCELLED_PREFIX}${why}`,
     );
   }
 
@@ -248,13 +256,19 @@ export class Approvals {
     return drafts.length;
   }
 
-  /** Why the agent may no longer send on this account, or null. */
-  private sendBlockedReason(agentId: string, accountId: string): string | null {
-    const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", agentId);
+  /** Why this send is no longer allowed under the agent's current grant, or null. */
+  private sendBlockedReason(a: Approval): string | null {
+    const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", a.agentId);
     if (!agent) return "the agent was deleted";
     if (bool(agent.disabled)) return "the agent is disabled";
-    const grant = this.ctx.policy.grant(agentId, accountId);
+    const grant = this.ctx.policy.grant(a.agentId, a.accountId);
     if (!grant || !grant.capabilities.includes("send")) return "the agent is no longer allowed to send from this account";
+    if (grant.replyOnly && a.kind !== "reply") return "the agent may now only send replies from this account";
+    const bad = disallowedRecipients(
+      grant,
+      [...a.to, ...a.cc, ...a.bcc].map((x) => x.email),
+    );
+    if (bad.length) return `the agent may no longer send to ${bad.join(", ")}`;
     return null;
   }
 

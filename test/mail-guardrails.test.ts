@@ -92,7 +92,7 @@ describe("reply-only", () => {
     expect(decodeRaw(s.gmail.sent[0]!.raw).cc?.map((a) => a.email)).toEqual(["carol@partner.com"]);
   });
 
-  it("denies recipients who aren't in the conversation", async () => {
+  it("replies to the Reply-To of a received message", async () => {
     const s = await setup({ replyOnly: true, sendMode: "direct" });
     s.gmail.add({
       id: "m9",
@@ -104,8 +104,8 @@ describe("reply-only", () => {
       subject: "s",
       text: "x",
     });
-    // Thread metadata shows the participant; a forged Reply-To on a *draft* wouldn't count.
     expect((await s.call("reply", { message_id: "m9", body: "ok" })).isError).toBe(false);
+    expect(decodeRaw(s.gmail.sent[0]!.raw).to?.map((a) => a.email)).toEqual(["bob@client.com"]);
   });
 });
 
@@ -127,15 +127,20 @@ describe("scoped labels", () => {
     expect(r.text).not.toContain("Private");
   });
 
-  it("modify_labels may only add scope labels and INBOX/STARRED/IMPORTANT/UNREAD", async () => {
+  it("modify_labels may only add the grant's own scope labels", async () => {
     const s = await setup({ labelScope: ["Label_support"] });
     const denied = await s.call("modify_labels", { thread_id: "t1", add: ["Private"] });
-    expect(denied.text).toMatch(/"Private" isn't a label you can use\. Labels you can add: INBOX, STARRED, IMPORTANT, UNREAD, Support/);
+    expect(denied.text).toMatch(/"Private" isn't a label you can use\. Labels you can add: Support\./);
     expect(s.audits("modify_labels")[0]).toMatchObject({ outcome: "denied", reason: "label_scope" });
     // Same answer for a label that doesn't exist at all.
     expect((await s.call("modify_labels", { thread_id: "t1", add: ["Nope"] })).text).toMatch(/"Nope" isn't a label you can use/);
-    expect((await s.call("modify_labels", { thread_id: "t1", add: ["STARRED", "Support"], remove: ["INBOX"] })).isError).toBe(false);
-    expect(s.gmail.messages.get("m1")!.labelIds).toEqual(expect.arrayContaining(["STARRED", "Label_support"]));
+    // INBOX/STARRED could be another grant's scope: not addable unless in this grant's scope.
+    expect((await s.call("modify_labels", { thread_id: "t1", add: ["INBOX"] })).text).toMatch(/can't add the INBOX label/);
+    expect((await s.call("modify_labels", { thread_id: "t1", add: ["STARRED"] })).text).toMatch(/can't add the STARRED label/);
+    expect((await s.call("modify_labels", { thread_id: "t1", add: ["Support"], remove: ["INBOX"] })).isError).toBe(false);
+    expect(s.gmail.messages.get("m1")!.labelIds).not.toContain("INBOX");
+    // Read state stays available through mark_read.
+    expect((await s.call("mark_read", { thread_id: "t1", read: false })).isError).toBe(false);
   });
 
   it("unscoped grants can add any user label", async () => {
@@ -156,6 +161,12 @@ describe("label cache", () => {
     s.google.labelCalls.length = 0;
     expect((await s.call("modify_labels", { thread_id: "t1", add: ["New Things"] })).isError).toBe(false);
     expect(s.google.labelCalls).toEqual([null, { fresh: true }]);
+
+    // A name missing even from a fresh list isn't refetched again right away.
+    s.google.labelCalls.length = 0;
+    await s.call("modify_labels", { thread_id: "t1", add: ["Nope"] });
+    await s.call("modify_labels", { thread_id: "t1", add: ["Nope"] });
+    expect(s.google.labelCalls.filter((c) => c?.fresh)).toHaveLength(1);
   });
 });
 
@@ -255,7 +266,7 @@ describe("approval robustness", () => {
     const draftId = s.ctx.mail.getApproval(s.id)!.draftId;
     change(s);
     await tick();
-    expect(s.ctx.mail.getApproval(s.id)).toMatchObject({ status: "rejected", decisionNote: expect.stringMatching(/^Cancelled: /) });
+    expect(s.ctx.mail.getApproval(s.id)).toMatchObject({ status: "rejected", decisionNote: expect.stringMatching(/^cancelled: /) });
     expect(s.gmail.drafts.has(draftId)).toBe(false);
   });
 
@@ -266,6 +277,31 @@ describe("approval robustness", () => {
     await tick();
     expect(s.gmail.drafts.has(draftId)).toBe(false);
     expect(s.ctx.mail.getApproval(s.id)).toBeNull();
+  });
+
+  it.each([
+    ["the allowlist now excludes a recipient", { allowTo: ["*@other.com"], replyOnly: false }, /may no longer send to a@client.com/],
+    ["the grant became reply-only", { allowTo: [] as string[], replyOnly: true }, /may now only send replies/],
+  ])("re-applies the current grant at approval time: %s", async (_name, patch, message) => {
+    const s = await queued();
+    s.ctx.db.run("UPDATE grants SET allow_to = ?, reply_only = ?", JSON.stringify(patch.allowTo), patch.replyOnly ? 1 : 0);
+    await expect(s.ctx.mail.approve(s.id)).rejects.toThrow(message);
+    expect(s.gmail.sent).toHaveLength(0);
+    const status = JSON.parse((await s.call("get_send_status", { approval_id: s.id })).text);
+    expect(status.status).toBe("cancelled");
+    expect(status.message).toMatch(/^Cancelled automatically/);
+  });
+
+  it("treats unexpected errors as permanent failures", async () => {
+    const s = await queued();
+    s.gmail.sendDraftErrors.push(new TypeError("Cannot read properties of undefined"));
+    expect((await s.ctx.mail.approve(s.id)).status).toBe("failed");
+  });
+
+  it("treats fetch network failures as transient", async () => {
+    const s = await queued();
+    s.gmail.sendDraftErrors.push(new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }));
+    expect((await s.ctx.mail.approve(s.id)).status).toBe("pending");
   });
 
   it("get_send_status is read-only: overdue requests read as expired without changing them", async () => {

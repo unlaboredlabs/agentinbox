@@ -137,8 +137,8 @@ export function sendsSince(db: Db, agentId: string, accountId: string, sinceIso:
   return row?.n ?? 0;
 }
 
-/** Sends in flight (checked but not yet audited), per agent × account. Counted with the audit log. */
-const inFlight = new Map<string, number>();
+/** Sends in flight (checked but not yet audited), per database (= app context), per agent × account. */
+const inFlightByDb = new WeakMap<Db, Map<string, number>>();
 
 /**
  * Checks the grant's send caps and reserves a slot, synchronously, so concurrent calls can't all pass the
@@ -146,8 +146,11 @@ const inFlight = new Map<string, number>();
  * (or the send failed). Caps count messages, not recipients.
  */
 export function reserveSend(db: Db, grant: Grant, at = Date.now()): () => void {
+  let inFlight = inFlightByDb.get(db);
+  if (!inFlight) inFlightByDb.set(db, (inFlight = new Map()));
+  const counts = inFlight;
   const key = `${grant.agentId}:${grant.accountId}`;
-  const pending = inFlight.get(key) ?? 0;
+  const pending = counts.get(key) ?? 0;
   const windows = [
     { cap: grant.maxSendsPerHour, ms: 3_600_000, label: "hour" },
     { cap: grant.maxSendsPerDay, ms: 86_400_000, label: "24 hours" },
@@ -163,13 +166,13 @@ export function reserveSend(db: Db, grant: Grant, at = Date.now()): () => void {
       );
     }
   }
-  inFlight.set(key, pending + 1);
+  counts.set(key, pending + 1);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const n = (inFlight.get(key) ?? 1) - 1;
-    if (n > 0) inFlight.set(key, n);
-    else inFlight.delete(key);
+    const n = (counts.get(key) ?? 1) - 1;
+    if (n > 0) counts.set(key, n);
+    else counts.delete(key);
   };
 }
