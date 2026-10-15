@@ -11,6 +11,7 @@ import { grantInWords } from "../src/components/agents/grant-words.ts";
 import { allStepsDone, type SetupDraft, STEP_META, stepStatuses } from "../src/components/setup/steps.ts";
 import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
+import { fmtAgo } from "../src/lib/format.ts";
 
 // ───────────── Verify checks ─────────────
 
@@ -303,5 +304,20 @@ describe("stepStatuses: the verify step", () => {
   it("calls setup done without the optional real-time delivery step", () => {
     expect(allStepsDone(stepStatuses(state(true), {}))).toBe(true);
     expect(STEP_META.pubsub.short).toBe("Real-time delivery");
+  });
+});
+
+// ───────────── Relative times ─────────────
+
+describe("fmtAgo", () => {
+  const now = Date.parse(SENT_AT);
+  it('says "just now" under 10 seconds instead of "0 seconds ago"', () => {
+    expect(fmtAgo(SENT_AT, now)).toBe("just now");
+    expect(fmtAgo(later(-9), now)).toBe("just now");
+    expect(fmtAgo(later(1), now)).toBe("just now"); // clock skew
+    expect(fmtAgo(later(-12), now)).toBe("12 seconds ago");
+    expect(fmtAgo(later(-180), now)).toBe("3 minutes ago");
+    expect(fmtAgo(later(30), now)).toBe("in 30 seconds");
+    expect(fmtAgo(null, now)).toBe("—");
   });
 });

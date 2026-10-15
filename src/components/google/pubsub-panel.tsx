@@ -315,6 +315,17 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         </div>
       )}
 
+      {!active && provisionError === undefined && projectId && (
+        <div className="space-y-1 text-sm text-muted-foreground">
+          <p>
+            First, turn on the Pub/Sub API in <span className="font-mono text-foreground">{projectId}</span>:{" "}
+            <ExternalLink href={cloudUrl.enablePubsub(projectId)}>Enable the Pub/Sub API</ExternalLink>, confirm the project, then click Next and
+            Enable. Then set it up here.
+          </p>
+          <BillingNote interval={settings.data?.pollIntervalSeconds ?? 30} />
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 empty:hidden">
         {provisionError === undefined && (
           <Button onClick={() => void provision()} disabled={provisioning || accounts.length === 0} variant={active ? "outline" : "default"}>
@@ -346,15 +357,6 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         {provisionError === undefined && accounts.length > 1 && accountPicker}
       </div>
       {accounts.length === 0 && <p className="text-xs text-muted-foreground">Connect a Gmail account first: setting this up uses its Google access.</p>}
-      {!active && provisionError === undefined && projectId && (
-        <div className="space-y-1 text-xs text-muted-foreground">
-          <p>
-            Before the first setup, turn on the Pub/Sub API in <span className="font-mono">{projectId}</span>:{" "}
-            <ExternalLink href={cloudUrl.enablePubsub(projectId)}>Enable the Pub/Sub API</ExternalLink> (confirm the project, then Next and Enable).
-          </p>
-          <BillingNote interval={settings.data?.pollIntervalSeconds ?? 30} />
-        </div>
-      )}
     </div>
   );
 }

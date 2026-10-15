@@ -1,5 +1,6 @@
-import type { Address } from "@shared/types";
-import { formatDistanceToNowStrict } from "date-fns";
+// Relative (not @shared): unit tests type-check this file under the server config.
+import type { Address } from "../../shared/types.ts";
+import { formatDistanceStrict } from "date-fns";
 
 const full = new Intl.NumberFormat("en");
 const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
@@ -37,9 +38,16 @@ function valid(date: string | number | Date | null | undefined): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export function fmtAgo(date: string | number | Date | null | undefined) {
+/** Under this, a past time reads "just now" rather than "0 seconds ago". */
+const JUST_NOW_MS = 10_000;
+
+/** "just now", "3 minutes ago", "in 2 hours". A couple of seconds ahead (clock skew) still counts as just now. */
+export function fmtAgo(date: string | number | Date | null | undefined, now = Date.now()) {
   const d = valid(date);
-  return d ? formatDistanceToNowStrict(d, { addSuffix: true }) : "—";
+  if (!d) return "—";
+  const age = now - d.getTime();
+  if (age > -2000 && age < JUST_NOW_MS) return "just now";
+  return formatDistanceStrict(d, now, { addSuffix: true });
 }
 
 /** Full local timestamp for tooltips, e.g. "Oct 15, 2026, 14:03:22 (UTC+2)". */

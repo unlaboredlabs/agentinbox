@@ -21,7 +21,7 @@ running agentinbox in production, scripting it, and understanding what it does.
   Agents only ever see an `aib_…` key.
 - **MCP for every agent.** Streamable HTTP at `/mcp`: `search_threads`, `get_thread`, `reply`, `send_message`,
   `modify_labels`, `wait_for_events` and more. Each agent sees only the tools its grants allow.
-- **Real-time events.** New mail, replies to threads you sent into, and label changes arrive within seconds through
+- **Real-time delivery.** New mail, replies to threads you sent into, and label changes arrive within seconds through
   Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or by polling with zero extra setup.
   [`agentinbox listen`](listen.md) wakes agents on a laptop behind NAT.
 - **Webhooks.** Filter by account, label, sender, recipient, subject or attachments. Payloads are signed per
@@ -83,7 +83,7 @@ never passes through anyone else's app. The parts that most often go wrong:
   (`<public URL>/oauth/callback`). Google won't redirect to plain HTTP on a non-localhost address; the console then uses
   a `localhost` redirect URI and asks you to paste the URL you land on.
 - **Scopes.** Each connected account grants `gmail.modify` plus `openid email profile`, nothing more.
-- **Pub/Sub (real-time) setup** asks one connected account for the extra `pubsub` scope, and that account needs
+- **Real-time delivery (Pub/Sub) setup** asks one connected account for the extra `pubsub` scope, and that account needs
   **Owner** or **Pub/Sub Admin** on the project (Editor can't change topic permissions). A Workspace organization policy
   (domain-restricted sharing) can block granting Gmail's push service
   (`gmail-api-push@system.gserviceaccount.com`); the console says so, and polling (every 30 seconds by default) works
