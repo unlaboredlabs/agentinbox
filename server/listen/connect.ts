@@ -280,10 +280,10 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   }
   out(`  ${n++}. Install the agentinbox skill so ${label} knows the rules:`);
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
-  out(`  ${n++}. Wake ${label} when mail arrives. Try it in the foreground:`);
-  out(`       ${pc.cyan(`${NPX} listen${p} --exec ${execArg}`)}`);
-  out(`     then keep it running in the background:`);
-  out(`       ${pc.cyan(`${NPX} listen service install${p} --exec ${execArg}`)}`);
+  out(`  ${n++}. Wake ${label} when mail arrives. Try it in the foreground (--save keeps the command in the profile):`);
+  out(`       ${pc.cyan(`${NPX} listen${p} --save --exec ${execArg}`)}`);
+  out(`     then keep it running in the background (systemd / launchd, starts at login):`);
+  out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
   for (const note of r.notes) out(pc.gray(`     ${note}`));
   out();
   out(pc.gray("  What this agent may do (mailboxes, capabilities, send mode) was set by whoever approved it. New grants are draft-only:"));
