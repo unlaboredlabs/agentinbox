@@ -7,6 +7,14 @@ import { ContentPool } from "../server/mail/pool.ts";
 import { createLogger } from "../server/util/log.ts";
 
 const log = createLogger("test").child("content");
+
+/**
+ * In source mode the real worker is server/mail/content-worker.ts, which Node can only load with built-in
+ * type stripping (22.18+ / 23.6+). On older Node the pool cleans in-process (by design), so tests that
+ * need a real worker thread are skipped there; the build ships plain JS and is unaffected.
+ */
+const supportsTsWorkers = !!(process.features as { typescript?: unknown }).typescript;
+const workerOnly = it.skipIf(!supportsTsWorkers);
 const OPTS = { accountEmail: "me@acme.com", maxChars: 0 };
 const pools: ContentPool[] = [];
 afterEach(async () => {
@@ -57,7 +65,7 @@ describe("content pool", () => {
     expect((await p.html("<h1>T</h1>")).markdown).toBe("# T");
   });
 
-  it("falls back to the text part when the deadline passes, then keeps working", async () => {
+  workerOnly("falls back to the text part when the deadline passes, then keeps working", async () => {
     const p = pool({ deadlineMs: 1 });
     const slow = message(`<table>${"<tr><td>cell</td><td>x</td></tr>".repeat(4000)}</table>`, "Plain version.");
     const c = await p.content(slow, OPTS);
@@ -69,7 +77,7 @@ describe("content pool", () => {
     expect((await relaxed.content(message("<p>ok</p>"), OPTS)).body).toBe("ok");
   });
 
-  it("keeps the event loop responsive and every hostile message under 3 s", async () => {
+  workerOnly("keeps the event loop responsive and every hostile message under 3 s", async () => {
     const p = pool();
     const hostile = {
       selectorBacktracking: `<style>section div div div div div div div div{display:none}</style>${"<div>".repeat(60)}x`,
@@ -87,9 +95,13 @@ describe("content pool", () => {
     }
   });
 
-  it("cleans in-process when workers can't start", async () => {
-    const p = pool({ workerUrl: new URL("./does-not-exist.js", import.meta.url) });
-    expect((await p.content(message("<p>inline</p>"), OPTS)).body).toBe("inline");
+  it("cleans in-process when workers can't start, and says so once", async () => {
+    const warnings: string[] = [];
+    const quiet = { ...log, warn: (msg: string) => void warnings.push(msg), child: () => quiet };
+    const p = new ContentPool(quiet, { workerUrl: new URL("./does-not-exist.js", import.meta.url) });
+    pools.push(p);
+    for (let i = 0; i < 5; i++) expect((await p.content(message(`<p>inline ${i}</p>`), OPTS)).body).toBe(`inline ${i}`);
+    expect(warnings.filter((w) => /could not start/.test(w))).toHaveLength(1);
   });
 
   it("resolves pending work with the fallback on close", async () => {
@@ -137,7 +149,7 @@ describe("review inputs finish well inside the deadline", () => {
     buildContent(message(html, "text"), OPTS);
     expect(performance.now() - t0).toBeLessThan(1_000);
   });
-  it("all of them through the pool, without fallbacks", async () => {
+  workerOnly("all of them through the pool, without fallbacks", async () => {
     const p = pool();
     for (const [name, html] of Object.entries(big)) {
       const m = await measure(() => p.content(message(html, "text"), OPTS));
@@ -149,7 +161,7 @@ describe("review inputs finish well inside the deadline", () => {
 });
 
 describe("queueing: total deadline, bounded queue, memory of slow inputs, lanes", () => {
-  const SLOW_WORKER = new URL("./content-slow-worker.ts", import.meta.url);
+  const SLOW_WORKER = new URL("./content-slow-worker.mjs", import.meta.url);
   const msg = (html: string, id = html) => ({ ...message(html, "plain"), summary: { ...message(html).summary, id } });
   const warm = async (p: ContentPool) => {
     await Promise.all([p.content(msg("warm1"), OPTS, "interactive"), p.content(msg("warm2"), OPTS, "interactive")]);
@@ -223,7 +235,7 @@ describe("bidi bombs stay linear on every main-thread path", () => {
     expect(time(fn)).toBeLessThan(50);
   });
 
-  it("text attachments are cleaned in a worker", async () => {
+  workerOnly("text attachments are cleaned in a worker", async () => {
     const p = pool();
     const m = await measure(() => p.text(`hi${bomb}`));
     expect(m.result).toBe("hi");
