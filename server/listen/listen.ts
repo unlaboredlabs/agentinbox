@@ -143,17 +143,17 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
   });
   status.flush();
 
-  // Who am I? Purely informational: the stream itself decides whether the key is valid.
-  try {
-    const self = await getSelf(profile.url, profile.apiKey, 8000);
-    const scopes = self.grants.map((g) => `${g.accountEmail} (${g.capabilities.join(", ")}; ${g.sendMode})`);
-    log.info(`Signed in as agent "${safeText(self.name)}"${scopes.length ? `: ${scopes.join(", ")}` : pc.yellow(": no mailbox grants yet, ask the operator to add one")}`);
-  } catch (err) {
-    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-      return revokedExit(log, status, profileName, profile, err.message, opts);
-    }
-    log.warn(`Could not reach the daemon yet (${err instanceof Error ? err.message : String(err)}); will keep trying.`);
-  }
+  // Who am I? Informational and not awaited: the stream itself decides whether the key is valid.
+  void getSelf(profile.url, profile.apiKey, 8000).then(
+    (self) => {
+      const scopes = self.grants.map((g) => `${g.accountEmail} (${g.capabilities.join(", ")}; ${g.sendMode})`);
+      log.info(`Signed in as agent "${safeText(self.name)}"${scopes.length ? `: ${scopes.join(", ")}` : pc.yellow(": no mailbox grants yet, ask the operator to add one")}`);
+    },
+    (err: unknown) => {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return; // The stream reports it.
+      log.debug(`identity check failed: ${err instanceof Error ? err.message : String(err)}`);
+    },
+  );
 
   const acker = new Acker(async (seq) => (await ackEvents(profile.url, profile.apiKey, config.consumer, seq)).ackedSeq, log);
   const timeoutMs = config.timeoutSeconds * 1000;
