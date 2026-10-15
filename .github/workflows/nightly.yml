@@ -4,11 +4,8 @@ name: Nightly
 # `latest` dist-tag, using npm trusted publishing (OIDC): no npm token is stored
 # anywhere, and npm attaches provenance automatically.
 #
-# Publishing stays off until the repository variable NPM_PUBLISH_ENABLED is set
-# to `true`; until then the job is skipped and the run is green.
-# Setup checklist: docs/npm-publishing.md
-#
-# npm matches this file by name: renaming it breaks publishing until the
+# The trusted publisher on npmjs.com is registered for unlaboredlabs/agentinbox,
+# workflow `nightly.yml`, no environment. npm matches this file by name: renaming it breaks publishing until the
 # trusted publisher on npmjs.com is recreated with the new filename.
 on:
   push:
@@ -25,9 +22,8 @@ concurrency:
 
 jobs:
   publish:
-    # Skipped (not failed) unless publishing is enabled, and never from a
-    # manual dispatch on a branch other than main.
-    if: vars.NPM_PUBLISH_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    # Never publish from a manual dispatch on a branch other than main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest # trusted publishing needs a GitHub-hosted runner
     timeout-minutes: 30
     steps:
