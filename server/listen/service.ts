@@ -354,9 +354,12 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
           () => null,
           (e: unknown) => why(e),
         );
+        const svc = restarted ? null : managerState(ops, profileName);
         outcome = restarted
           ? `Put the previous install back, but restarting it failed (${restarted}), so no listener service is running now`
-          : "Put the previous install back and restarted it";
+          : svc!.running
+            ? `Put the previous install back; it is running again (${svc!.detail})`
+            : `Put the previous install back and started it, but the service manager doesn't report it running (${svc!.detail})`;
       } else {
         step("removing the new service", () => uninstallListenService(profileName, true, { ops }));
         outcome = "Removed the new service again (no listener service is installed)";
@@ -389,7 +392,7 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   console.log(`    Log:       ${logPath(profileName)}`);
   const change = hermesChangeNote(flags.recipe, config.exec);
   if (change) console.log(`    Note:      ${change}`);
-  if (config.forward && isHermesRoute(config.forward.url, profileName)) {
+  if (config.forward && isHermesRoute(config.forward.url)) {
     const w = await (deps.gatewayCheck ?? gatewayWarning)(config.forward.url);
     if (w) console.log(pc.yellow(`    Warning:   ${w}`));
   }

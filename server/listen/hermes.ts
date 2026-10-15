@@ -1,9 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import pc from "picocolors";
+import { hermesHome, yamlMcpServerState } from "./mcpsetup.ts";
 import { forwardSecret } from "./options.ts";
 import { DEFAULT_PROFILE, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
@@ -23,7 +22,10 @@ import { NPX, version } from "./version.ts";
  *   can't set that (by design) and replaces the whole route; it lives in
  *   <HERMES_HOME>/webhook_subscriptions.json (0600, written under .webhook_subscriptions.lock by flock and
  *   atomic rename; the gateway reloads it when the file changes). `["mcp-<server>"]` resolves through
- *   `_get_platform_tools` to that one MCP server and no built-in toolsets;
+ *   `_get_platform_tools` to that one MCP server and no built-in toolsets, but only when <server> is an
+ *   enabled MCP server in config.yaml (else every enabled server is added);
+ * - `subscribe` without --secret keeps an existing route's secret, an update keeps `enabled: false`, and
+ *   the gateway answers 403 for a disabled route; `webhook remove` refuses while the platform is off;
  * - a cron job's own `enabled_toolsets` decides its tools; there `mcp-<server>` does NOT narrow the MCP
  *   servers (every enabled server is added unless a bare server name is listed), so only `["<server>"]`
  *   confines it.
@@ -40,16 +42,11 @@ export interface HermesFlags {
 
 const out = (s = "") => process.stdout.write(`${s}\n`);
 
-/** Hermes' home: $HERMES_HOME, else ~/.hermes (plus HERMES_DATA_DIR_SUFFIX), as hermes_constants.py does. */
-export function hermesHome(env: NodeJS.ProcessEnv = process.env): string {
-  const set = env.HERMES_HOME?.trim();
-  if (set) return set.replace(/^~(?=\/|$)/, homedir());
-  return join(homedir(), `.hermes${env.HERMES_DATA_DIR_SUFFIX ?? ""}`);
-}
+export { hermesHome };
 export const subscriptionsPath = () => join(hermesHome(), "webhook_subscriptions.json");
 
-/** The argv for `hermes …`. */
-export function subscribeArgs(profileName: string, flags: HermesFlags, secret: string): string[] {
+/** The argv for `hermes …`; without `secret`, hermes keeps the route's existing one. */
+export function subscribeArgs(profileName: string, flags: HermesFlags, secret?: string): string[] {
   if (!!flags.deliver === !!flags.cronJob) {
     throw new Error(
       "Where should Hermes tell you about important mail? Pass one of:\n" +
@@ -59,7 +56,7 @@ export function subscribeArgs(profileName: string, flags: HermesFlags, secret: s
   }
   if (flags.deliverChatId && !flags.deliver) throw new Error("--deliver-chat-id goes with --deliver.");
   if (flags.deliver && !/^[a-z0-9][a-z0-9_-]{0,40}$/i.test(flags.deliver)) throw new Error(`--deliver takes a platform name such as telegram, not "${flags.deliver}".`);
-  const args = ["webhook", "subscribe", hermesRoute(profileName), "--secret", secret, "--prompt", HERMES_ROUTE_PROMPT, "--description", `agentinbox listener (profile ${profileName})`];
+  const args = ["webhook", "subscribe", hermesRoute(profileName), ...(secret ? ["--secret", secret] : []), "--prompt", HERMES_ROUTE_PROMPT, "--description", `agentinbox listener (profile ${profileName})`];
   if (flags.deliver) args.push("--deliver", flags.deliver);
   // = form: chat ids such as Telegram's -100… must not look like an option.
   if (flags.deliverChatId) args.push(`--deliver-chat-id=${flags.deliverChatId}`);
@@ -69,10 +66,34 @@ export function subscribeArgs(profileName: string, flags: HermesFlags, secret: s
 }
 
 /**
+ * `toolsets ["mcp-<server>"]` (and a cron job's `["<server>"]`) only narrow Hermes' MCP servers when that
+ * server is an enabled one in Hermes' config.yaml; otherwise Hermes adds every enabled MCP server. So the
+ * agentinbox server must be there and on, or nothing is set up.
+ */
+export function checkMcpServer(profileName: string, home = hermesHome()): void {
+  const server = mcpServerName(profileName);
+  const file = join(home, "config.yaml");
+  const state = existsSync(file) ? yamlMcpServerState(readFileSync(file, "utf8"), server) : "missing";
+  if (state === "enabled") return;
+  const why =
+    state === "missing"
+      ? `Hermes has no MCP server "${server}" (in ${file})`
+      : state === "disabled"
+        ? `the MCP server "${server}" is disabled in ${file}`
+        : `${file} lays out mcp_servers in a way agentinbox can't check, so it can't tell whether "${server}" is on`;
+  throw new Error(
+    `${why}. The route's tools are limited to that server, and Hermes only honours the limit for an enabled server (otherwise it adds every MCP server you have).
+` +
+      `  Run \`${NPX} setup-mcp --tool hermes${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`}\` first (check it with \`hermes mcp test ${server}\`), then run this again.`,
+  );
+}
+
+/**
  * A cron job gets the email with its OWN toolset, which may include a shell. Only a job limited to the
  * agentinbox MCP server (enabled_toolsets naming exactly the bare server name) is accepted.
  */
-export function checkCronJob(ref: string, profileName: string, file = join(hermesHome(), "cron", "jobs.json")): void {
+export function checkCronJob(ref: string, profileName: string, home = hermesHome()): void {
+  const file = join(home, "cron", "jobs.json");
   const server = mcpServerName(profileName);
   const fix =
     `Limit the job to agentinbox first: ask Hermes to update cron job "${ref}" with enabled_toolsets ["${server}"] (its cronjob tool), ` +
@@ -109,27 +130,48 @@ async function gatewayHealthy(base: string): Promise<boolean> {
 }
 
 /**
- * Under Hermes' own lock (.webhook_subscriptions.lock, flock): checks the route still has the throwaway
- * secret `hermes webhook subscribe` was given, then sets the listener's real secret and the route's
- * toolsets in one atomic, 0600 write. The real secret comes in on stdin, never in argv. Python because
- * Hermes needs it anyway and Node has no flock.
+ * Edits <HERMES_HOME>/webhook_subscriptions.json under Hermes' own lock (.webhook_subscriptions.lock,
+ * flock), with an atomic 0600 write, as hermes_cli/webhook.py does. Python because Hermes needs it anyway
+ * and Node has no flock. The secret comes in on stdin, never in argv. Modes:
+ * - prepare: the route exists, disabled (`enabled: false`), with the listener's secret. `hermes webhook
+ *   subscribe` without --secret then keeps both (it reuses an existing secret and never re-enables a route).
+ * - confine: only if the route still has that secret and is still disabled, set its toolsets and enable it.
+ * - remove: delete the route if it has that secret (cleanup after a failure).
  */
-const CONFINE_PY = `
+const ROUTES_PY = `
 import fcntl, json, os, sys, tempfile
-path, lock, name, toolset = sys.argv[1:5]
+mode, path, lock, name, toolset = sys.argv[1:6]
 inp = json.load(sys.stdin)
 os.makedirs(os.path.dirname(lock), exist_ok=True)
 with open(lock, "a+b") as lf:
     fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-    with open(path, "r", encoding="utf-8-sig") as f:
-        subs = json.load(f)
-    route = subs.get(name) if isinstance(subs, dict) else None
-    if not isinstance(route, dict):
-        sys.exit("route %s is missing from %s" % (name, path))
-    if route.get("secret") != inp["throwaway"]:
-        sys.exit("route %s changed since hermes created it; run this again" % name)
-    route["secret"] = inp["secret"]
-    route["toolsets"] = [toolset]
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            subs = json.load(f)
+    except FileNotFoundError:
+        subs = {}
+    if not isinstance(subs, dict):
+        sys.exit("%s is not a JSON object" % path)
+    route = subs.get(name)
+    if mode == "prepare":
+        route = dict(route) if isinstance(route, dict) else {"description": inp["description"]}
+        route["secret"] = inp["secret"]
+        route["enabled"] = False
+        route.pop("toolsets", None)
+        subs[name] = route
+    elif mode == "confine":
+        if not isinstance(route, dict):
+            sys.exit("route %s is missing" % name)
+        if route.get("secret") != inp["secret"] or route.get("enabled") is not False:
+            sys.exit("route %s changed while it was being set up; run this again" % name)
+        route["toolsets"] = [toolset]
+        route["enabled"] = True
+    elif mode == "remove":
+        if not isinstance(route, dict) or route.get("secret") != inp["secret"]:
+            sys.exit(0)
+        del subs[name]
+    else:
+        sys.exit("bad mode")
     fd, tmp = tempfile.mkstemp(prefix=".webhook_subscriptions_", dir=os.path.dirname(path))
     try:
         os.fchmod(fd, 0o600)
@@ -154,6 +196,7 @@ export function verifyRoute(profileName: string, secret: string, file = subscrip
     const route = (JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as Record<string, { secret?: string; toolsets?: unknown }>)[hermesRoute(profileName)];
     if (!route) return `route ${hermesRoute(profileName)} is missing`;
     if (route.secret !== secret) return "the route's secret isn't the listener's";
+    if ((route as { enabled?: unknown }).enabled === false) return "the route is disabled";
     if (JSON.stringify(route.toolsets) !== JSON.stringify([hermesRouteToolset(profileName)])) return `the route's toolsets are ${JSON.stringify(route.toolsets ?? null)}`;
     return null;
   } catch (err) {
@@ -170,20 +213,24 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
   const profileName = validProfileName(profileArg);
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   const profile = loadProfile(profileName);
-  // Validates the flags (and a cron job's tools) before a secret is generated or anything runs.
-  subscribeArgs(profileName, flags, "");
-  if (flags.cronJob) checkCronJob(flags.cronJob, profileName);
+  // Validates the flags, the agentinbox MCP server in Hermes and a cron job's tools before a secret is
+  // generated or anything runs.
+  subscribeArgs(profileName, flags);
+  const home = hermesHome();
+  checkMcpServer(profileName, home);
+  if (flags.cronJob) checkCronJob(flags.cronJob, profileName, home);
   const { secret, created } = forwardSecret(profile);
   if (created) {
     // Same as `listen secret`: generated once and kept, so the listener and Hermes agree from now on.
     profile.forwardSecret = secret;
     saveProfile(profileName, profile);
   }
-  const base = hermesGatewayBase(profileName, profile.forward?.url);
+  const base = hermesGatewayBase(profile.forward?.url);
   const route = `${base}/webhooks/${hermesRoute(profileName)}`;
   const forwardsThere = profile.forward?.url === route;
   const toolset = hermesRouteToolset(profileName);
-  const file = subscriptionsPath();
+  const name = hermesRoute(profileName);
+  const file = join(home, "webhook_subscriptions.json");
 
   if (!flags.run) {
     const npx = `npx -y agentinbox-cli@${version}`;
@@ -193,11 +240,11 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
     out(`Set it up with (recommended; it also limits the route to the agentinbox tools, see step 2):`);
     out(`  ${pc.cyan(`${NPX} listen hermes${p} ${flagsText(flags)} --run`)}`);
     out();
-    out(pc.gray("Or by hand, in two steps. 1. Create the route; the secret is read from the profile as it runs (stops if that fails),"));
-    out(pc.gray("so it isn't typed or kept in your shell history. hermes prints it back once as Secret: …"));
-    out(`  S=$(${npx} listen secret${p}) && hermes ${shown.join(" ")}`);
+    out(pc.gray("Or by hand, in two steps. 1. Create the route; the secret is read from the profile in a subshell as it runs (stops"));
+    out(pc.gray("if that fails), so it isn't typed, kept in your shell history or left in a variable. hermes prints it back once."));
+    out(`  ( S=$(${npx} listen secret${p}) && HERMES_HOME=${shellQuote(home)} hermes ${shown.join(" ")} )`);
     out();
-    out(`2. ${pc.bold("REQUIRED:")} in ${file}, add this to the "${hermesRoute(profileName)}" entry (the gateway reloads the file by itself):`);
+    out(`2. ${pc.bold("REQUIRED:")} in ${file}, add this to the "${name}" entry (the gateway reloads the file by itself):`);
     out(`  "toolsets": ["${toolset}"]`);
     out(
       pc.yellow(
@@ -209,45 +256,63 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
   }
 
   const spawn = deps.spawn ?? spawnSync;
-  // hermes only takes the secret as an argument (visible in `ps`) and serves the route as soon as it is
-  // saved. So it gets a throwaway secret: requests fail (401, retried) until the locked edit below sets the
-  // real secret together with the toolsets. The real secret is never in argv, and the route never runs unconfined.
-  const throwaway = `agentinbox-pending-${randomBytes(18).toString("base64url")}`;
-  const run = spawn("hermes", subscribeArgs(profileName, flags, throwaway), { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
-  const redact = (t: string | null | undefined) => (t ?? "").split(throwaway).join("(set by agentinbox next)").split(secret).join("whsec_…(hidden)");
+  // Every hermes we run uses the home whose files we edit.
+  const env = { ...process.env, HERMES_HOME: home };
+  const lock = join(dirname(file), ".webhook_subscriptions.lock");
+  const redact = (t: string | null | undefined) => (t ?? "").split(secret).join("whsec_…(hidden)");
+  const routes = (mode: "prepare" | "confine" | "remove"): string | null => {
+    const r = spawn("python3", ["-I", "-c", ROUTES_PY, mode, file, lock, name, toolset], {
+      encoding: "utf8",
+      input: JSON.stringify({ secret, description: `agentinbox listener (profile ${profileName})` }),
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+    if (r.error) return `python3: ${(r.error as NodeJS.ErrnoException).code === "ENOENT" ? "not found (Hermes needs it; install python3)" : r.error.message}`;
+    return r.status === 0 ? null : redact(`${r.stderr ?? ""}`.trim().split("\n").at(-1)) || `python3 exited ${r.status}`;
+  };
+
+  // 1. The route exists, disabled, with the listener's secret: hermes then never needs the secret in its argv
+  //    (`ps`), and the route can't run anything before step 3 (Hermes answers 403 for a disabled route).
+  const prepared = routes("prepare");
+  if (prepared) {
+    out(pc.red(`✖ Couldn't prepare the Hermes route in ${file}: ${prepared}. Nothing was changed.`));
+    return 1;
+  }
+  const fail = (why: string): number => {
+    out();
+    out(pc.red(`✖ ${why}`));
+    // Never leave the route behind half set up.
+    const rm = spawn("hermes", ["webhook", "remove", name], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+    const removedByHermes = !rm.error && rm.status === 0 && /Removed webhook subscription/.test(rm.stdout ?? "");
+    const ours = removedByHermes ? null : routes("remove");
+    if (removedByHermes || ours === null) out(`  Removed the route ${name} again${removedByHermes ? "" : " (hermes couldn't, so agentinbox did, under Hermes' lock)"}; nothing receives the listener's events. Fix the cause and run this again.`);
+    else out(pc.red(`  Removing the route failed too (${ours}). It is disabled, so it runs nothing; remove it with \`hermes webhook remove ${name}\`.`));
+    return 1;
+  };
+
+  // 2. Without --secret, hermes keeps the route's secret, and it never re-enables a disabled route.
+  const run = spawn("hermes", subscribeArgs(profileName, flags), { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   if (run.error) {
     const missing = (run.error as NodeJS.ErrnoException).code === "ENOENT";
-    throw new Error(missing ? "hermes isn't on your PATH. Install Hermes Agent (https://hermes-agent.nousresearch.com), or run this where `hermes` works." : `Couldn't run hermes: ${redact(run.error.message)}`);
+    return fail(missing ? "hermes isn't on your PATH. Install Hermes Agent (https://hermes-agent.nousresearch.com), or run this where `hermes` works." : `Couldn't run hermes: ${redact(run.error.message)}`);
   }
   const text = `${redact(run.stdout)}${redact(run.stderr)}`.trim();
   if (text) out(text.split("\n").map((l) => `  ${pc.gray("hermes │")} ${l}`).join("\n"));
   // hermes prints "Error: …" (or its setup hint) and still exits 0, so success is the line it prints on success.
   if (run.status !== 0 || !/(Created|Updated) webhook subscription/.test(run.stdout ?? "")) {
-    out();
-    out(pc.red(`✖ hermes didn't create the route${run.status ? ` (exit ${run.status})` : ""}.`));
-    if (/not enabled/i.test(text)) out(`  Turn on the gateway's webhook platform first: hermes gateway setup (or WEBHOOK_ENABLED=true in ~/.hermes/.env), then run this again.`);
-    return 1;
+    const hint = /not enabled/i.test(text) ? " Turn on the gateway's webhook platform first: hermes gateway setup (or WEBHOOK_ENABLED=true in ~/.hermes/.env)." : "";
+    return fail(`hermes didn't create the route${run.status ? ` (exit ${run.status})` : ""}.${hint}`);
   }
 
-  const lock = join(dirname(file), ".webhook_subscriptions.lock");
-  const py = spawn("python3", ["-I", "-c", CONFINE_PY, file, lock, hermesRoute(profileName), toolset], {
-    encoding: "utf8",
-    input: JSON.stringify({ secret, throwaway }),
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-  });
-  const problem = py.error ? `python3: ${py.error.message}` : py.status !== 0 ? redact(`${py.stderr ?? ""}`.trim().split("\n").at(-1)) || `python3 exited ${py.status}` : verifyRoute(profileName, secret, file);
-  if (problem) {
-    out();
-    out(pc.red(`✖ Couldn't limit the Hermes route to the agentinbox tools: ${problem}.`));
-    out(`  The route still has a placeholder secret, so Hermes refuses the listener's requests (they're retried, nothing runs). Fix the cause and run this again.`);
-    return 1;
-  }
+  // 3. Limit its tools and only then enable it, under the lock; 4. read it back.
+  const problem = routes("confine") ?? verifyRoute(profileName, secret, file);
+  if (problem) return fail(`Couldn't limit the Hermes route to the agentinbox tools: ${problem}.`);
   out();
-  out(`${pc.green("✔")} Hermes route ${hermesRoute(profileName)} is set up with this listener's secret, limited to the toolset ${toolset} (no web or other tools, no other MCP servers).`);
-  out(pc.gray(`  Running \`hermes webhook subscribe ${hermesRoute(profileName)}\` yourself later resets that; run this command again afterwards.`));
+  out(`${pc.green("✔")} Hermes route ${name} is set up with this listener's secret, limited to the toolset ${toolset} (the agentinbox MCP server; no other MCP servers or web tools).`);
+  out(pc.gray(`  Hermes may still add plugin toolsets you never configured for its webhook platform (see \`hermes tools\`).`));
+  out(pc.gray(`  Running \`hermes webhook subscribe ${name}\` yourself later resets the limit; run this command again afterwards.`));
   if (await gatewayHealthy(base)) out(`  The Hermes gateway answers at ${base}.`);
-  else out(pc.yellow(`  The Hermes gateway isn't answering at ${base}/health: start it (hermes gateway), or if it uses another port, forward there with --forward <its URL>/webhooks/${hermesRoute(profileName)}.`));
+  else out(pc.yellow(`  The Hermes gateway isn't answering at ${base}/health: start it (hermes gateway), or if it uses another port, forward there with --forward <its URL>/webhooks/${name}.`));
   printNext(forwardsThere, p);
   return 0;
 }

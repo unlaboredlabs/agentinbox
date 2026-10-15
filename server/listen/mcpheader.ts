@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { MIN_NODE, nodeVersionError } from "../node-check.ts";
 import { writePrivateFile } from "./fsutil.ts";
 import { configDir, profilePath, validProfileName } from "./paths.ts";
@@ -83,13 +83,23 @@ export function nodeVersionOf(path: string): string | null {
 }
 
 /**
- * A node binary the service may run: its real file is owned by root or by this user and isn't group- or
- * world-writable (otherwise someone else could replace what the service runs at every login).
+ * A node binary the service may run: the real file, and every directory above both the path as given and
+ * the real file, are owned by root or by this user and not writable by group or others (a sticky
+ * directory such as /tmp excepted). Otherwise someone else could replace what the service runs at every login.
  */
 export function trustedNodeFile(path: string, uid = process.getuid?.() ?? 0): boolean {
+  const owned = (st: { uid: number }) => st.uid === 0 || st.uid === uid;
+  const dirsOk = (p: string) => {
+    for (let d = dirname(p); ; d = dirname(d)) {
+      const st = statSync(d);
+      if (!owned(st) || ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0)) return false;
+      if (d === dirname(d)) return true;
+    }
+  };
   try {
-    const st = statSync(realpathSync(path));
-    return (st.uid === 0 || st.uid === uid) && (st.mode & 0o022) === 0;
+    const real = realpathSync(path);
+    const st = statSync(real);
+    return owned(st) && (st.mode & 0o022) === 0 && dirsOk(path) && dirsOk(real);
   } catch {
     return false;
   }

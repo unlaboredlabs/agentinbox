@@ -70,8 +70,9 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    **Hermes:** `--recipe hermes` doesn't start a Hermes run per email. It forwards each email to the user's running
    Hermes gateway (`http://127.0.0.1:8644/webhooks/agentinbox`), which triages it and tells the user where its route
    says. Create that route once (ask the user which platform Hermes should message them on):
-   `npx -y agentinbox-cli listen hermes --deliver telegram --run`. It sets the listener's secret without showing it
-   and limits the route to the agentinbox MCP server: without that, Hermes webhook runs get web tools (`web_search`,
+   `npx -y agentinbox-cli listen hermes --deliver telegram --run` (after `npx -y agentinbox-cli setup-mcp --tool
+   hermes`: the limit below only holds while agentinbox is an enabled MCP server in Hermes). It sets the listener's
+   secret without showing it and limits the route to the agentinbox MCP server: without that, Hermes webhook runs get web tools (`web_search`,
    `web_extract`, …) and every MCP server enabled in Hermes, so an email could make you leak mail. Never ask for or
    print the secret yourself, and never remove the route's `toolsets`. `--cron-job <job>` only works for a job whose
    `enabled_toolsets` is exactly `["agentinbox"]`. The old one-run-per-mail command is `--recipe hermes-oneshot`.

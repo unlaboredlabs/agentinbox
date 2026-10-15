@@ -200,7 +200,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     for (const m of notes.warn) log.warn(m);
     const change = hermesChangeNote(opts.flags.recipe, config.exec);
     if (change) log.info(change);
-    if (config.forward && isHermesRoute(config.forward.url, profileName) && !dryRun) {
+    if (config.forward && isHermesRoute(config.forward.url) && !dryRun) {
       void gatewayWarning(config.forward.url).then((w) => w && log.warn(w));
     }
     if (backfill && backfillHead === 0) {
@@ -293,7 +293,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
 
     const batched = config.batchSeconds > 0 && !!config.exec;
     // The Hermes route reads the body as prompt text: send it the cleaned, notice-first form.
-    const wrapForward = !!config.forward && isHermesRoute(config.forward.url, profileName);
+    const wrapForward = !!config.forward && isHermesRoute(config.forward.url);
     const runTargets = async (job: Job, signal: AbortSignal): Promise<string[]> => {
       const errors: string[] = [];
       const tag = job.payloads.length === 1 ? `#${job.seq}` : `batch #${job.seq}–#${job.lastSeq} (${job.payloads.length} events)`;

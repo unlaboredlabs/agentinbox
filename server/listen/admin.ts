@@ -195,7 +195,7 @@ export async function replayDead(flags: ListenFlags & { id?: string }, opts: { r
         else errors.push(`command: ${r.error}`);
       }
       if (job.remaining.has("forward") && config.forward) {
-        const r = await forwardEvent(config.forward.url, config.forward.secret, job.payload, { timeoutMs: Math.min(timeoutMs, 30_000), signal, wrap: isHermesRoute(config.forward.url, name) });
+        const r = await forwardEvent(config.forward.url, config.forward.secret, job.payload, { timeoutMs: Math.min(timeoutMs, 30_000), signal, wrap: isHermesRoute(config.forward.url) });
         if (r.ok) job.remaining.delete("forward");
         else errors.push(`forward: ${r.error}`);
       }

@@ -28,18 +28,28 @@ export const hermesForwardUrl = (profile: string) => `${HERMES_GATEWAY}/webhooks
 /** The only toolset `listen hermes --run` gives the route: this profile's agentinbox MCP server. */
 export const hermesRouteToolset = (profile: string) => `mcp-${mcpServerName(profile)}`;
 
-/** Whether a forward URL is this profile's Hermes route (any loopback port): it then gets the wrapped, cleaned body. */
-export function isHermesRoute(url: string, profile: string): boolean {
+/**
+ * Whether a forward URL looks like a Hermes gateway webhook route on this machine (`/webhooks/<name>` or
+ * `/p/<profile>/webhooks/<name>`, any loopback port, after percent-decoding): it then gets the wrapped,
+ * cleaned body, since Hermes puts the body into the prompt. Other receivers get the raw payload.
+ */
+export function isHermesRoute(url: string): boolean {
   try {
     const u = new URL(url);
-    return isLoopbackHost(u.hostname) && u.pathname === `/webhooks/${hermesRoute(profile)}`;
+    let path: string;
+    try {
+      path = decodeURIComponent(u.pathname);
+    } catch {
+      path = u.pathname;
+    }
+    return isLoopbackHost(u.hostname) && /^\/(p\/[^/]+\/)?webhooks\/[^/]+\/?$/.test(path);
   } catch {
     return false;
   }
 }
 
 /** The gateway the listener forwards to: the saved Hermes route's origin, else the default. */
-export const hermesGatewayBase = (profile: string, forwardUrl: string | undefined) => (forwardUrl && isHermesRoute(forwardUrl, profile) ? new URL(forwardUrl).origin : HERMES_GATEWAY);
+export const hermesGatewayBase = (forwardUrl: string | undefined) => (forwardUrl && isHermesRoute(forwardUrl) ? new URL(forwardUrl).origin : HERMES_GATEWAY);
 
 /**
  * The default task every recipe gets: triage, act or tell the user only when it matters, otherwise

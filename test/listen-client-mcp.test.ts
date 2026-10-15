@@ -220,5 +220,24 @@ describe("trustedNodeFile", () => {
     chmodSync(node, 0o775);
     expect(trustedNodeFile(join(dir, "link"))).toBe(false); // group-writable target
     expect(trustedNodeFile(join(dir, "missing"))).toBe(false);
+    chmodSync(node, 0o755);
+    // A parent directory others can write to (and that isn't sticky): of the real file, or of the link.
+    const shared = mkdtempSync(join(tmpdir(), "aib-shared-"));
+    const inShared = join(shared, "node");
+    writeFileSync(inShared, "");
+    chmodSync(inShared, 0o755);
+    expect(trustedNodeFile(inShared)).toBe(true);
+    chmodSync(shared, 0o777);
+    expect(trustedNodeFile(inShared)).toBe(false);
+    symlinkSync(inShared, join(dir, "link2"));
+    expect(trustedNodeFile(join(dir, "link2"))).toBe(false); // via the target's parent
+    chmodSync(shared, 0o1777);
+    expect(trustedNodeFile(inShared)).toBe(true); // sticky, like /tmp
+    chmodSync(shared, 0o755);
+    const looseLinks = mkdtempSync(join(tmpdir(), "aib-links-"));
+    symlinkSync(node, join(looseLinks, "node"));
+    chmodSync(looseLinks, 0o777);
+    expect(trustedNodeFile(join(looseLinks, "node"))).toBe(false); // via the link's own parent
+    chmodSync(looseLinks, 0o755);
   });
 });

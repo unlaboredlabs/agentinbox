@@ -62,10 +62,13 @@ a [SILENT] reply, which Hermes doesn't deliver.
 A Hermes webhook run normally gets web tools (web_search, web_extract, vision_analyze, clarify) and every MCP
 server enabled in Hermes: with email as the trigger, an attacker could make it read your mail and send it out.
 --run therefore also limits the route to the agentinbox MCP server ("toolsets": ["mcp-agentinbox"] in
-~/.hermes/webhook_subscriptions.json, which \`hermes webhook subscribe\` can't set). It gives hermes a throwaway
-secret, then sets the real one and the toolsets together under Hermes' lock (python3), so the real secret is never
-in a command line and the route never runs unconfined. Re-run it after any \`hermes webhook subscribe\` for this
-route (that resets the toolsets).
+webhook_subscriptions.json, which \`hermes webhook subscribe\` can't set). That limit only holds when agentinbox is an
+enabled MCP server in Hermes' config.yaml (else Hermes adds every MCP server), so this refuses until
+\`${NPX} setup-mcp --tool hermes\` has added it. --run creates the route disabled with the real secret under Hermes'
+lock (python3), runs \`hermes webhook subscribe\` without --secret (hermes keeps the secret and the disabled state),
+then sets the toolsets and enables it. The secret is never in a command line, the route never runs unconfined, and
+any failure removes it again. Re-run it after any \`hermes webhook subscribe\` for this route (that resets the
+toolsets). The Hermes home follows HERMES_HOME or Hermes' sticky active_profile.
 
 Without --run it prints both steps for you to do by hand; the toolsets edit is required.
 

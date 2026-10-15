@@ -155,7 +155,7 @@ describe("listen service install", () => {
     await installListenService({}, { ops, stage, waitStarted: ok, node });
     const before = { unit: readFileSync(unit("default"), "utf8"), app: installed() };
     ops.calls.length = 0;
-    await expect(installListenService({ exec: "new-cmd", concurrency: 7 }, { ops, stage, waitStarted: never })).rejects.toThrow(/Put the previous install back and restarted it\./);
+    await expect(installListenService({ exec: "new-cmd", concurrency: 7 }, { ops, stage, waitStarted: never })).rejects.toThrow(/Put the previous install back; it is running again \(systemd active, MainPID 4242\)\./);
     expect(readFileSync(unit("default"), "utf8")).toBe(before.unit);
     expect(installed()).toBe(before.app);
     expect(loadProfile()).toMatchObject({ exec: "cat > /dev/null" });
