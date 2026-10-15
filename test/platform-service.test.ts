@@ -65,6 +65,7 @@ describe("service env", () => {
       AGENTINBOX_LOG_LEVEL: "warn",
     });
     expect(mergeServiceEnv({}, { TRUST_PROXY: "1", PATH: "/bin" })).toEqual({ TRUST_PROXY: "1" });
+    expect(mergeServiceEnv({ TRUST_PROXY_FROM: "10.0.0.0/8" }, {})).toEqual({ TRUST_PROXY_FROM: "10.0.0.0/8" });
   });
 
   it("validates the master key", () => {

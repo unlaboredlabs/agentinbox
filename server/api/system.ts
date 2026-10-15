@@ -143,14 +143,18 @@ export function compareVersions(a: string, b: string): number {
 const DEFAULT_DATA_DIR = () => resolve(join(homedir(), ".agentinbox"));
 
 /** Runs, or reinstalls as a service, the latest version with this instance's options. */
-export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "port" | "host" | "trustProxy">): string {
-  // A service keeps TRUST_PROXY from its previous install, but a foreground run needs it again.
-  const args = [...(config.trustProxy ? ["TRUST_PROXY=1"] : []), "npx", "-y", NPM_PACKAGE];
+export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "port" | "host" | "trustProxy">, env: NodeJS.ProcessEnv = process.env): string {
+  // A service keeps these from its previous install (service.env), but a foreground run needs them again.
+  const proxyEnv = config.trustProxy
+    ? ["TRUST_PROXY=1", ...(["TRUST_PROXY_HOPS", "TRUST_PROXY_FROM"] as const).filter((k) => env[k]?.trim()).map((k) => `${k}=${shellQuote(env[k]!.trim())}`)]
+    : [];
+  // Assignments are quoted per value above: quoting the whole `KEY=value` word would turn it into a command.
+  const args = ["npx", "-y", NPM_PACKAGE];
   if (config.service) args.push("service", "install");
   if (config.dataDir !== DEFAULT_DATA_DIR()) args.push("--data", config.dataDir);
   if (config.port !== DEFAULT_PORT) args.push("--port", String(config.port));
   if (config.host !== DEFAULT_HOST) args.push("--host", config.host);
-  return args.map(shellQuote).join(" ");
+  return [...proxyEnv, ...args.map(shellQuote)].join(" ");
 }
 
 export const shellQuote = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);

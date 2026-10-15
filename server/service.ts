@@ -22,7 +22,7 @@ const ROOT = resolve(import.meta.dirname, "..");
  * (mode 0600) so re-running `service install` from a shell without them (the documented update
  * path) keeps them. Set one to an empty value to drop it.
  */
-export const SERVICE_ENV_KEYS = ["AGENTINBOX_MASTER_KEY", "TRUST_PROXY", "TRUST_PROXY_HOPS", "AGENTINBOX_LOG_LEVEL"] as const;
+export const SERVICE_ENV_KEYS = ["AGENTINBOX_MASTER_KEY", "TRUST_PROXY", "TRUST_PROXY_HOPS", "TRUST_PROXY_FROM", "AGENTINBOX_LOG_LEVEL"] as const;
 
 type ServiceConfig = Pick<Config, "dataDir" | "port" | "host" | "dbPath" | "masterKeyPath">;
 
@@ -136,7 +136,8 @@ export function mergeServiceEnv(previous: Record<string, string>, current: NodeJ
   const out: Record<string, string> = {};
   for (const key of SERVICE_ENV_KEYS) {
     const value = key in current ? current[key] : previous[key];
-    if (value) out[key] = value;
+    // A single comma-separated token, so systemd's EnvironmentFile parsing can't split it.
+    if (value) out[key] = key === "TRUST_PROXY_FROM" ? value.split(/[\s,]+/).filter(Boolean).join(",") : value;
   }
   return out;
 }
