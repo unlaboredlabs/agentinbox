@@ -181,8 +181,11 @@ export function CodeBlock({
   code: string;
   className?: string;
   title?: React.ReactNode;
-  /** Wrap long lines (shell commands) at spaces and separators instead of scrolling. */
-  wrap?: boolean;
+  /**
+   * Wrap long lines instead of scrolling: true (shell commands) at spaces and separators only;
+   * "anywhere" (JSON, logs) also inside long words, so it never widens its container (table cells).
+   */
+  wrap?: boolean | "anywhere";
   /** What the copy button copies, e.g. "Copy command". */
   copyLabel?: string;
 }) {
@@ -195,8 +198,15 @@ export function CodeBlock({
         </div>
       )}
       <div className="relative">
-        <pre className={cn("overflow-x-auto p-3 font-mono text-xs leading-relaxed text-foreground", !title && "pr-10", wrap && "whitespace-pre-wrap")}>
-          {wrap ? <Wrapped text={code} /> : code}
+        <pre
+          className={cn(
+            "overflow-x-auto p-3 font-mono text-xs leading-relaxed text-foreground",
+            !title && "pr-10",
+            wrap && "whitespace-pre-wrap",
+            wrap === "anywhere" && "[overflow-wrap:anywhere]",
+          )}
+        >
+          {wrap === true ? <Wrapped text={code} /> : code}
         </pre>
         {!title && <CopyButton value={code} label={copyLabel} className="absolute top-1.5 right-1.5" />}
       </div>
@@ -222,12 +232,13 @@ export function StatCard({
   return (
     <Card className="gap-0 py-4">
       <CardContent className="space-y-1.5 px-4">
-        <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
-          <span className="truncate">{label}</span>
-          {Icon && <Icon className={cn("size-4 shrink-0", tone && TONE_TEXT[tone])} />}
+        {/* Narrow tiles (six per row at laptop widths): labels and hints wrap rather than clip. */}
+        <div className="flex items-start justify-between gap-2 text-sm text-muted-foreground">
+          <span className="min-w-0 leading-snug break-words">{label}</span>
+          {Icon && <Icon className={cn("mt-0.5 size-4 shrink-0", tone && TONE_TEXT[tone])} />}
         </div>
         {loading ? <Skeleton className="h-8 w-20" /> : <div className="text-2xl font-semibold tracking-tight tabular">{value}</div>}
-        {hint && <div className="truncate text-xs text-muted-foreground">{hint}</div>}
+        {hint && <div className="text-xs leading-snug break-words text-muted-foreground">{hint}</div>}
       </CardContent>
     </Card>
   );

@@ -35,7 +35,8 @@ export function AuditTable({ entries, accounts, empty }: { entries: AuditEntry[]
       }),
       col.accessor("outcome", {
         header: "Outcome",
-        meta: { className: "hidden sm:table-cell" },
+        // Guardrail explanations are sentences: let them wrap instead of running out of the table.
+        meta: { className: "hidden whitespace-normal sm:table-cell" },
         cell: (c) => (
           <div className="flex flex-wrap items-center gap-1.5">
             <OutcomeBadge outcome={c.getValue()} />
@@ -69,7 +70,7 @@ export function AuditTable({ entries, accounts, empty }: { entries: AuditEntry[]
 
 function AuditDetail({ entry: e, email }: { entry: AuditEntry; email?: string }) {
   return (
-    <div className="space-y-3 text-sm">
+    <div className="min-w-0 space-y-3 text-sm">
       {e.reason && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-muted-foreground">{e.outcome === "denied" ? "Blocked by" : "Reason"}</span>
@@ -99,7 +100,7 @@ function AuditDetail({ entry: e, email }: { entry: AuditEntry; email?: string })
         <dt className="text-muted-foreground">Entry</dt>
         <dd className="font-mono">#{e.id}</dd>
       </dl>
-      {e.detail && Object.keys(e.detail).length > 0 && <CodeBlock code={JSON.stringify(e.detail, null, 2)} />}
+      {e.detail && Object.keys(e.detail).length > 0 && <CodeBlock code={JSON.stringify(e.detail, null, 2)} wrap="anywhere" />}
     </div>
   );
 }
