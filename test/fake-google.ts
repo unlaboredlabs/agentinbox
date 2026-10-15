@@ -53,7 +53,8 @@
  * encoded-words only in free-text headers (Subject).
  *
  * Google Calendar (`g.calendar.*`, routes under /calendar/v3; every account starts with a primary calendar whose id is its email)
- *   addCalendar(email, { name, accessRole?, id?, timeZone? }) → id    a calendar in the account's list (default role owner)
+ *   addCalendar(email, { name, accessRole?, id?, timeZone?, hidden? }) → id    a calendar in the account's list (default role owner)
+ *   removeCalendar(email, calendarId)              deleted or unshared: gone from the list, its routes answer 404
  *   putEvent(email, calendarId, event) → event     create, or replace by id (bumps `updated`, etag and the change log sync tokens read)
  *   invite(organizer, attendees, event) → event    the organizer's event (when the organizer is a fake account) plus each fake
  *                                                  attendee's copy on their primary calendar (same id, `self`, needsAction), like Google
@@ -74,7 +75,8 @@
  * pageToken/maxResults (nextSyncToken on the last page only), timeMin/timeMax overlap, q, iCalUID, showDeleted,
  * singleEvents (expands RRULE DAILY/WEEKLY with INTERVAL, COUNT, UNTIL, BYDAY and EXDATE, in UTC; instance ids
  * `<series>_<YYYYMMDDTHHMMSSZ>`) and orderBy=startTime. PATCH/DELETE honor If-Match (412) and answer 410 for deleted
- * events; invitees may only change their own response (403 forbiddenForNonOrganizer); insert with an id that exists → 409.
+ * events; invitees may only change their own response (403 forbiddenForNonOrganizer); insert with an id that exists → 409,
+ * with an id that isn't base32hex (a-v0-9, 5–1024 chars) → 400. Unexpanded listings include cancelled occurrences of live series.
  *
  * Gmail search (`q`) supports label:, in:, is:, from:, to:, cc:, subject:, has:attachment, newer_than:, older_than:,
  * after:, before:, rfc822msgid:, quoted phrases, free text, -negation, OR, AND, (…) and {…}.
@@ -182,7 +184,8 @@ export interface FakeChannel {
 }
 
 export interface FakeCalendar {
-  addCalendar(email: string, opts: { name: string; accessRole?: CalendarAccessRole; id?: string; timeZone?: string }): string;
+  addCalendar(email: string, opts: { name: string; accessRole?: CalendarAccessRole; id?: string; timeZone?: string; hidden?: boolean }): string;
+  removeCalendar(email: string, calendarId: string): void;
   putEvent(email: string, calendarId: string, event: Partial<CalendarEventRaw>): CalendarEventRaw;
   invite(organizer: string, attendees: string[], event: Partial<CalendarEventRaw>): CalendarEventRaw;
   respond(email: string, eventId: string, status: CalendarResponseStatus): void;
@@ -1560,7 +1563,8 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     const m = /^(.+)_(\d{8}(?:T\d{6}Z)?)$/.exec(id);
     const series = m ? cal.events.get(m[1]!)?.raw : undefined;
     if (!series?.recurrence || series.status === "cancelled") return null;
-    return instances(cal, series, parseIcalTime(m![2]!) + 1).find((i) => i.id === id) ?? null;
+    // The id drops sub-second parts of the series start: look a day past it.
+    return instances(cal, series, parseIcalTime(m![2]!) + DAY).find((i) => i.id === id) ?? null;
   }
 
   const overlaps = (e: CalendarEventRaw, min: number, max: number) => {
@@ -1570,12 +1574,12 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   const matchesText = (e: CalendarEventRaw, text: string) =>
     [e.summary, e.description, e.location, e.organizer?.email, e.organizer?.displayName, ...(e.attendees ?? []).flatMap((a) => [a.email, a.displayName])]
       .some((v) => v?.toLowerCase().includes(text));
-  /** What incremental results carry for a deleted event: little more than its id. */
+  /** What listings carry for a deleted event: little more than its id (a cancelled occurrence also says which one, and when). */
   const tombstone = (e: CalendarEventRaw): CalendarEventRaw => ({
     id: e.id,
     status: "cancelled",
     etag: e.etag,
-    ...(e.recurringEventId ? { recurringEventId: e.recurringEventId, originalStartTime: e.originalStartTime } : {}),
+    ...(e.recurringEventId ? { recurringEventId: e.recurringEventId, originalStartTime: e.originalStartTime, updated: e.updated } : {}),
   });
 
   interface SyncTokenData {
@@ -1619,7 +1623,9 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     for (const { raw, seq } of cal.events.values()) {
       if (since !== null && seq <= since) continue;
       if (raw.status === "cancelled") {
-        if (showDeleted) items.push(tombstone(raw));
+        // Unexpanded listings also carry cancelled occurrences of live series, so clients can hide them.
+        const occurrence = !single && raw.recurringEventId && cal.events.get(raw.recurringEventId)?.raw.status !== "cancelled";
+        if (showDeleted || (occurrence && overlaps(raw, min, max))) items.push(tombstone(raw));
         continue;
       }
       if (iCalUID && raw.iCalUID !== iCalUID) continue;
@@ -1674,6 +1680,8 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     const cal = calendarOf(t.email, calParam(m));
     if (!canWrite(cal)) throw apiError(403, "You need to have writer access to this calendar.", "requiredAccessLevel");
     const input = json(body) as Partial<CalendarEventRaw>;
+    // Google's rule for client-chosen ids: base32hex (lowercase a-v, 0-9), 5 to 1024 characters.
+    if (input.id !== undefined && !/^[a-v0-9]{5,1024}$/.test(input.id)) throw apiError(400, "Invalid resource id value.", "invalid");
     if (input.id && cal.events.has(input.id)) throw apiError(409, "The requested identifier already exists.", "duplicate");
     if (!input.start || !input.end) throw apiError(400, "Missing end time.", "required");
     const { organizer: _o, ...rest } = input;
@@ -1844,8 +1852,12 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         accessRole: opts.accessRole ?? "owner",
         timeZone: opts.timeZone ?? "UTC",
         backgroundColor: "#9fe1e7",
-        selected: true,
+        selected: !opts.hidden,
+        ...(opts.hidden ? { hidden: true } : {}),
       });
+    },
+    removeCalendar(email, calendarId) {
+      calendarsOf(email).delete(calendarOf(email, calendarId, false).entry.id);
     },
     putEvent(email, calendarId, input) {
       const cal = calendarOf(email, calendarId, false);

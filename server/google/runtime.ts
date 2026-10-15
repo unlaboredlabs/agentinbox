@@ -8,6 +8,7 @@ import {
   isRetryable,
   MAX_ATTEMPTS,
   networkError,
+  OUTCOME_UNKNOWN,
   type Query,
   rejectedBeforeProcessing,
   REQUEST_TIMEOUT_MS,
@@ -65,6 +66,8 @@ export class GoogleRuntime {
     const idempotent = opts.idempotent ?? true;
     const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
     let forced = false;
+    /** An earlier attempt that may have reached Google (5xx, timeout, reset) before this one was sent. */
+    let uncertain: GoogleApiError | null = null;
     for (let attempt = 0; ; attempt++) {
       if (opts.cost) await this.bucket(accountId).take(opts.cost);
       const token = await this.tokens.accessToken(accountId, { force: forced });
@@ -99,7 +102,12 @@ export class GoogleRuntime {
         continue;
       }
       const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
-      if (!retry || attempt >= MAX_ATTEMPTS - 1) throw idempotent ? err : ambiguous(err, opts.ambiguousHint);
+      if (!retry || attempt >= MAX_ATTEMPTS - 1) {
+        // A conditional write (If-Match) whose retry fails its precondition: the first attempt may have been what changed it.
+        if (uncertain && err.status === 412) throw ambiguous(uncertain, opts.ambiguousHint);
+        throw idempotent ? err : ambiguous(err, opts.ambiguousHint);
+      }
+      if (!rejectedBeforeProcessing(err)) uncertain ??= err;
       await sleep(backoffMs(attempt, err.details.retryAfterMs), opts.signal);
       if (opts.signal?.aborted) throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
@@ -115,12 +123,7 @@ export class GoogleRuntime {
 /** For non-idempotent calls, a timeout, dropped connection or 5xx may have happened after Google acted. */
 function ambiguous(err: GoogleApiError, hint = "The message may have been sent: check Sent in Gmail before retrying."): GoogleApiError {
   if (rejectedBeforeProcessing(err) || (err.status !== 0 && err.status < 500)) return err;
-  return new GoogleApiError(
-    err.status,
-    `${err.message}. ${hint}`,
-    err.reason,
-    err.details,
-  );
+  return new GoogleApiError(err.status, `${err.message}. ${hint}`, err.reason, { ...err.details, reasons: [...(err.details.reasons ?? []), OUTCOME_UNKNOWN] });
 }
 
 function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {

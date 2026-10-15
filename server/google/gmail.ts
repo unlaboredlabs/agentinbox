@@ -108,6 +108,7 @@ export function createGmailClient(ctx: AppContext, accountId: string): GmailClie
         body: { message: { raw, ...(threadId ? { threadId } : {}) } },
         idempotent: false,
         timeoutMs: uploadTimeout(raw),
+        ambiguousHint: "A draft may have been created: check Drafts in Gmail before retrying.",
       }),
     getDraft: (draftId) => call<GmailDraft>("drafts.get", `/drafts/${id(draftId)}`, { query: { format: "full" } }),
     sendDraft: (draftId) => call<GmailMessage>("drafts.send", "/drafts/send", { method: "POST", body: { id: draftId }, idempotent: false }),

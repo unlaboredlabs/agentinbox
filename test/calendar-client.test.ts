@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AppContext } from "../server/context.ts";
 import { activationUrl, type CalendarClient, classifyCalendarError } from "../server/google/calendar.ts";
 import { CALENDAR_SCOPES, GMAIL_SCOPE } from "../server/google/scopes.ts";
+import { isOutcomeUnknown } from "../server/google/http.ts";
 import { GoogleApiError } from "../server/google/types.ts";
 import { connectFakeAccount, type FakeGoogle, startFakeGoogle } from "./fake-google.ts";
 import { testContext } from "./helpers.ts";
@@ -42,11 +43,14 @@ describe("calendar list and events", () => {
   it("lists the account's calendars, primary first, with their roles", async () => {
     const team = fake.calendar.addCalendar(ME, { name: "Team" });
     fake.calendar.addCalendar(ME, { name: "Holidays", accessRole: "reader" });
+    fake.calendar.addCalendar(ME, { name: "Archive", hidden: true });
     const list = await cal.listCalendars();
-    expect(list.map((c) => [c.summary, c.accessRole, !!c.primary])).toEqual([
-      [ME, "owner", true],
-      ["Team", "owner", false],
-      ["Holidays", "reader", false],
+    // Hidden calendars are the user's too; callers decide whether to show them.
+    expect(list.map((c) => [c.summary, c.accessRole, !!c.primary, !!c.hidden])).toEqual([
+      [ME, "owner", true, false],
+      ["Team", "owner", false, false],
+      ["Holidays", "reader", false, false],
+      ["Archive", "owner", false, true],
     ]);
     expect(list[1]!.id).toBe(team);
   });
@@ -97,6 +101,27 @@ describe("calendar list and events", () => {
     const after = await cal.listEvents(ME, { ...window, singleEvents: true, orderBy: "startTime" });
     expect(after.items.map((e) => e.summary)).toEqual(["Standup", "Lunch", "Standup (moved)", "Standup"]);
     expect((await cal.listEvents(ME, { q: "lunch" })).items.map((e) => e.summary)).toEqual(["Lunch"]);
+  });
+
+  it("lists cancelled occurrences of a series in unexpanded listings, and finds instances of a series starting at odd milliseconds", async () => {
+    const start = T0 + 123;
+    const series = fake.calendar.putEvent(ME, ME, {
+      summary: "Standup",
+      start: { dateTime: new Date(start).toISOString() },
+      end: { dateTime: new Date(start + 900_000).toISOString() },
+      recurrence: ["RRULE:FREQ=DAILY;COUNT=3"],
+    });
+    const id = `${series.id}_20300305T090000Z`;
+    expect((await cal.getEvent(ME, id)).recurringEventId).toBe(series.id);
+    await cal.deleteEvent(ME, id, { sendUpdates: "none" });
+    const listed = await cal.listEvents(ME, {});
+    expect(listed.items.map((e) => [e.id, e.status])).toEqual([
+      [series.id, "confirmed"],
+      [id, "cancelled"],
+    ]);
+    expect(listed.items[1]).toMatchObject({ recurringEventId: series.id, originalStartTime: { dateTime: expect.stringMatching(/^2030-03-05T09:00:00/) } });
+    const expanded = await cal.listEvents(ME, { singleEvents: true, timeMin: new Date(T0 - 1).toISOString(), timeMax: new Date(T0 + 5 * 86_400_000).toISOString() });
+    expect(expanded.items).toHaveLength(2);
   });
 
   it("gets an event, and maps a missing one to 404", async () => {
@@ -171,6 +196,50 @@ describe("writes", () => {
     await cal.insertEvent(ME, { summary: "Twice asked", start: at(0), end: at(1) }, { sendUpdates: "none" });
     expect(posts(events)).toBe(3);
     expect(fake.calendar.events(ME, ME)).toHaveLength(2);
+  });
+
+  it("retries an insert with an id of its own, which Google answers 409 (duplicate) once it exists", async () => {
+    const events = /^\/calendar\/v3\/calendars\/[^/]+\/events$/;
+    fake.failNext({ method: "POST", path: events, status: 503, retryAfter: 0, afterProcessing: true });
+    const err = await rejection(cal.insertEvent(ME, { id: "aib0000001", summary: "Once", start: at(0), end: at(1) }, { sendUpdates: "none" }));
+    expect(posts(events)).toBe(2);
+    expect(err?.status).toBe(409);
+    expect(classifyCalendarError(err)).toBe("duplicate");
+    expect(fake.calendar.events(ME, ME).map((e) => e.id)).toEqual(["aib0000001"]);
+
+    fake.failNext({ method: "POST", path: events, status: 503, retryAfter: 0 });
+    await cal.insertEvent(ME, { id: "aib0000002", summary: "Retried", start: at(0), end: at(1) }, { sendUpdates: "none" });
+    expect(fake.calendar.events(ME, ME)).toHaveLength(2);
+  });
+
+  it("rejects event ids Google wouldn't accept", async () => {
+    for (const id of ["abc", "Has-Upper-And-Dash", "wxyz12345"]) {
+      const err = await rejection(cal.insertEvent(ME, { id, summary: "x", start: at(0), end: at(1) }, { sendUpdates: "none" }));
+      expect([id, err?.status]).toEqual([id, 400]);
+    }
+  });
+
+  it("calls a retried If-Match write that then fails its precondition an unknown outcome, not a conflict", async () => {
+    const e = await cal.insertEvent(ME, { summary: "v1", start: at(0), end: at(1) }, { sendUpdates: "none" });
+    // The first attempt is applied (the etag changes), then answers 503; the retry's If-Match no longer matches.
+    fake.failNext({ method: "PATCH", path: "/events/", status: 503, retryAfter: 0, afterProcessing: true });
+    const err = await rejection(cal.patchEvent(ME, e.id, { summary: "v2" }, { sendUpdates: "none", ifMatchEtag: e.etag }));
+    expect(err?.status).toBe(503);
+    expect(classifyCalendarError(err)).toBe("outcome_unknown");
+    expect(isOutcomeUnknown(err)).toBe(true);
+    expect(err?.message).toMatch(/may already have been applied/);
+    expect(fake.calendar.event(ME, ME, e.id)!.summary).toBe("v2");
+
+    const v2 = fake.calendar.event(ME, ME, e.id)!;
+    fake.failNext({ method: "DELETE", path: "/events/", status: 503, retryAfter: 0, afterProcessing: true });
+    const del = await rejection(cal.deleteEvent(ME, e.id, { sendUpdates: "none", ifMatchEtag: v2.etag }));
+    // Deleted by the first attempt: the retry gets 410 (already gone), which counts as done.
+    expect(del).toBeNull();
+    // A plain stale etag is still a conflict.
+    const f = await cal.insertEvent(ME, { summary: "f1", start: at(0), end: at(1) }, { sendUpdates: "none" });
+    await cal.patchEvent(ME, f.id, { summary: "f2" }, { sendUpdates: "none" });
+    const stale = await rejection(cal.patchEvent(ME, f.id, { summary: "f3" }, { sendUpdates: "none", ifMatchEtag: f.etag }));
+    expect([stale?.status, classifyCalendarError(stale)]).toEqual([412, "other"]);
   });
 
   it("retries idempotent calls after a 5xx", async () => {

@@ -5,7 +5,7 @@
 
 import type { CalendarAccessRole, CalendarResponseStatus } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
-import { hasReason } from "./http.ts";
+import { hasReason, isOutcomeUnknown } from "./http.ts";
 import { googleRuntime, type RequestOptions } from "./runtime.ts";
 import { GoogleApiError } from "./types.ts";
 
@@ -131,11 +131,13 @@ export interface WatchChannel {
  * Thin Calendar REST client bound to one account. Throws GoogleApiError (see classifyCalendarError for the
  * disabled-API and missing-scope cases) or AccountNeedsReauthError, like GmailClient. Calendar calls don't
  * use the Gmail quota bucket (cost 0); Google's Calendar quotas are per minute per user and per project.
- * Writes are non-idempotent (`idempotent: false`) except patch/delete.
+ * Inserts are retried only when Google provably didn't act, unless the event carries a client-chosen id (a
+ * repeat then gets 409, classified "duplicate"). Patch and delete are retried; when a retry fails its If-Match
+ * after an attempt that may have been applied, the error says the change may already have happened.
  */
 export interface CalendarClient {
   readonly accountId: string;
-  /** calendarList.list, every page, deleted/hidden entries skipped. */
+  /** calendarList.list, every page, deleted entries skipped. Hidden calendars are kept (`hidden: true`): callers filter. */
   listCalendars(): Promise<CalendarListEntryRaw[]>;
   /** events.list. A stale syncToken throws GoogleApiError 410 (isSyncTokenExpired): full resync. */
   listEvents(calendarId: string, p: EventsListParams): Promise<EventsListResult>;
@@ -158,6 +160,7 @@ const LIST_PAGE = 250;
 
 const writeQuery = (o: WriteOptions) => ({ sendUpdates: o.sendUpdates, conferenceDataVersion: o.conferenceDataVersion });
 const ifMatch = (o: WriteOptions) => (o.ifMatchEtag ? { "if-match": o.ifMatchEtag } : undefined);
+const MAY_HAVE_CHANGED = "The change may already have been applied: check the event in Google Calendar before retrying.";
 
 /** ctx.google.calendar(accountId). Calendar calls aren't throttled by the Gmail quota bucket (cost 0). */
 export function createCalendarClient(ctx: AppContext, accountId: string): CalendarClient {
@@ -176,7 +179,7 @@ export function createCalendarClient(ctx: AppContext, accountId: string): Calend
         const r = await call<{ items?: CalendarListEntryRaw[]; nextPageToken?: string }>("/users/me/calendarList", {
           query: { maxResults: LIST_PAGE, pageToken },
         });
-        out.push(...(r?.items ?? []).filter((c) => !c.deleted && !c.hidden));
+        out.push(...(r?.items ?? []).filter((c) => !c.deleted));
         pageToken = r?.nextPageToken;
       } while (pageToken);
       return out;
@@ -204,14 +207,21 @@ export function createCalendarClient(ctx: AppContext, accountId: string): Calend
         method: "POST",
         query: writeQuery(opts),
         body: event,
-        idempotent: false,
+        // With an id of our choosing a repeat can't create a second event (Google answers 409).
+        idempotent: !!event.id,
         ambiguousHint: "The event may have been created: check Google Calendar before retrying.",
       }),
     patchEvent: (calendarId, eventId, patch, opts) =>
-      call<CalendarEventRaw>(`${events(calendarId)}/${id(eventId)}`, { method: "PATCH", query: writeQuery(opts), body: patch, headers: ifMatch(opts) }),
+      call<CalendarEventRaw>(`${events(calendarId)}/${id(eventId)}`, {
+        method: "PATCH",
+        query: writeQuery(opts),
+        body: patch,
+        headers: ifMatch(opts),
+        ambiguousHint: MAY_HAVE_CHANGED,
+      }),
     async deleteEvent(calendarId, eventId, opts) {
       try {
-        await call<void>(`${events(calendarId)}/${id(eventId)}`, { method: "DELETE", query: writeQuery(opts), headers: ifMatch(opts) });
+        await call<void>(`${events(calendarId)}/${id(eventId)}`, { method: "DELETE", query: writeQuery(opts), headers: ifMatch(opts), ambiguousHint: MAY_HAVE_CHANGED });
       } catch (err) {
         // 410 "Resource has been deleted": already gone (e.g. a retry after Google acted on the first attempt).
         if (!(err instanceof GoogleApiError && err.status === 410)) throw err;
@@ -252,13 +262,19 @@ export function createCalendarClient(ctx: AppContext, accountId: string): Calend
  * - scope_missing: 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT / insufficientPermissions: the account hasn't granted
  *   the calendar scopes (or unticked them).
  * - sync_token_expired: 410 (fullSyncRequired): discard the sync token and do a full resync.
+ * - duplicate: 409 on insert: an event with that (client-chosen) id already exists, e.g. a retried insert landed.
+ * - outcome_unknown: a write that Google may or may not have applied (an insert after a 5xx or timeout, or a
+ *   retried If-Match patch/delete whose precondition failed after such an attempt). Re-read the event and
+ *   compare before retrying; never report it as a conflict. Checked first (the status is the first attempt's).
  * - other: anything else (retry, report).
  */
-export type CalendarErrorKind = "api_disabled" | "scope_missing" | "sync_token_expired" | "other";
+export type CalendarErrorKind = "api_disabled" | "scope_missing" | "sync_token_expired" | "duplicate" | "outcome_unknown" | "other";
 
 export function classifyCalendarError(err: unknown): CalendarErrorKind {
   if (!(err instanceof GoogleApiError)) return "other";
+  if (isOutcomeUnknown(err)) return "outcome_unknown";
   if (err.status === 410) return "sync_token_expired";
+  if (err.status === 409) return "duplicate";
   if (err.status !== 403) return "other";
   if (hasReason(err, "SERVICE_DISABLED", "accessNotConfigured")) return "api_disabled";
   if (hasReason(err, "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions")) return "scope_missing";
