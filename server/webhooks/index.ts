@@ -20,6 +20,8 @@ export interface WebhooksOptions {
   /** Worker poll interval. New deliveries also wake it immediately. */
   tickMs?: number;
   concurrency?: number;
+  /** In-flight requests per webhook, so one slow receiver can't take every worker slot. */
+  perWebhookConcurrency?: number;
   timeoutMs?: number;
   /** DNS resolver for the SSRF guard (tests). */
   lookup?: LookupFn;
@@ -42,11 +44,11 @@ interface WebhookRow {
   last_delivery_at: string | null;
 }
 
-/** ?1 = the 24 h cutoff; further plain `?` params bind from 2. */
+/** ?1 = the 24 h cutoff; further plain `?` params bind from 2. Stats leave out test deliveries. */
 const WEBHOOK_SELECT = `SELECT w.*,
-  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.status = 'succeeded' AND d.updated_at >= ?1) AS succeeded_24h,
-  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.status IN ('failed', 'dead') AND d.updated_at >= ?1) AS failed_24h,
-  (SELECT MAX(d.updated_at) FROM deliveries d WHERE d.webhook_id = w.id AND d.attempts > 0) AS last_delivery_at
+  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.status = 'succeeded' AND d.updated_at >= ?1) AS succeeded_24h,
+  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.status IN ('failed', 'dead') AND d.updated_at >= ?1) AS failed_24h,
+  (SELECT MAX(d.updated_at) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.attempts > 0) AS last_delivery_at
   FROM webhooks w`;
 
 const toWebhook = (r: WebhookRow): Webhook => ({
@@ -73,8 +75,6 @@ interface AttemptRow {
   agent_id: string;
 }
 
-type PayloadData = WebhookPayload["data"] & { contentError?: string };
-
 const CONTENT_TIMEOUT_MS = 20_000;
 
 const TEST_CONTENT: MessageContent = {
@@ -89,9 +89,11 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
   const schedule = options.retryScheduleMs ?? RETRY_SCHEDULE_MS;
   const tickMs = options.tickMs ?? 1000;
   const concurrency = options.concurrency ?? 8;
+  const perWebhook = options.perWebhookConcurrency ?? 2;
   const timeoutMs = options.timeoutMs ?? 10_000;
 
-  const inflight = new Map<string, Promise<void>>();
+  /** Delivery id → its running attempt and webhook. */
+  const inflight = new Map<string, { promise: Promise<void>; webhookId: string }>();
   let shutdown = new AbortController();
   let timer: NodeJS.Timeout | null = null;
   let wakeQueued = false;
@@ -257,7 +259,10 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
     requireRow(id);
     const deliveryId = ctx.db.tx(() => {
       const ts = now();
-      const seq = ctx.db.get<{ s: number }>("SELECT MIN(COALESCE(MIN(seq), 0), 0) - 1 AS s FROM events")!.s;
+      // Below every negative seq still in use by an event or a delivery.
+      const seq = ctx.db.get<{ s: number }>(
+        `SELECT MIN(0, COALESCE((SELECT MIN(seq) FROM events), 0), COALESCE((SELECT MIN(event_seq) FROM deliveries), 0)) - 1 AS s`,
+      )!.s;
       const evtId = newId("evt");
       const msgId = `test_${randomToken(16)}`;
       const message = {
@@ -306,24 +311,38 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
   async function replay(deliveryId: string): Promise<Delivery> {
     const existing = deliveryById(ctx.db, deliveryId);
     if (!existing) throw notFound("Delivery");
-    await inflight.get(deliveryId);
+    await inflight.get(deliveryId)?.promise;
     const ts = now();
-    ctx.db.run("UPDATE deliveries SET status = 'pending', next_attempt_at = ?, updated_at = ? WHERE id = ?", ts, ts, deliveryId);
+    // Test deliveries stay off the worker's schedule (next_attempt_at NULL); this call delivers them.
+    ctx.db.run(
+      "UPDATE deliveries SET status = 'pending', next_attempt_at = CASE WHEN event_seq < 0 THEN NULL ELSE ? END, updated_at = ? WHERE id = ?",
+      ts,
+      ts,
+      deliveryId,
+    );
     publishDelivery(deliveryId);
     await run(deliveryId);
     return deliveryById(ctx.db, deliveryId)!;
   }
 
+  /**
+   * Retention: deliveries still pending or failed past the cutoff (e.g. on a webhook or agent that
+   * stayed disabled) are given up as dead, so re-enabling doesn't flood the receiver with stale
+   * events and their events can be pruned. Finished deliveries older than the cutoff are deleted.
+   */
   function prune(beforeIso: string): number {
-    const n = ctx.db.tx(() => {
-      const removed = ctx.db.run(
-        `DELETE FROM deliveries WHERE updated_at < ? AND (status IN ('succeeded', 'dead') OR event_seq < 0)`,
+    return ctx.db.tx(() => {
+      const ts = now();
+      ctx.db.run(
+        `UPDATE deliveries SET status = 'dead', next_attempt_at = NULL, last_error = 'expired (retention)', updated_at = ?
+         WHERE status IN ('pending', 'failed') AND created_at < ?`,
+        ts,
         beforeIso,
-      ).changes;
+      );
+      const removed = ctx.db.run(`DELETE FROM deliveries WHERE status IN ('succeeded', 'dead') AND updated_at < ?`, beforeIso).changes;
       deleteOrphanTestEvents();
       return removed;
     });
-    return n;
   }
 
   // ───────────── Worker ─────────────
@@ -337,40 +356,57 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
     });
   }
 
+  /**
+   * Fills free worker slots round-robin across webhooks (at most `perWebhook` in flight each), so a
+   * receiver that hangs or has a large backlog doesn't hold up the others.
+   */
   function tick(): void {
     if (!timer) return;
-    const capacity = concurrency - inflight.size;
+    let capacity = concurrency - inflight.size;
     if (capacity <= 0) return;
     const busy = [...inflight.keys()];
-    let due: { id: string }[];
+    const perHook = new Map<string, number>();
+    for (const { webhookId } of inflight.values()) perHook.set(webhookId, (perHook.get(webhookId) ?? 0) + 1);
+    let due: { id: string; webhook_id: string }[];
     try {
-      due = ctx.db.all<{ id: string }>(
-        `SELECT d.id FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id JOIN agents a ON a.id = w.agent_id
-         WHERE d.status IN ('pending', 'failed') AND d.next_attempt_at IS NOT NULL AND d.next_attempt_at <= ?
-           AND w.enabled = 1 AND a.disabled = 0 ${busy.length ? `AND d.id NOT IN (${busy.map(() => "?").join(", ")})` : ""}
-         ORDER BY d.next_attempt_at LIMIT ?`,
+      due = ctx.db.all<{ id: string; webhook_id: string }>(
+        `SELECT id, webhook_id FROM (
+           SELECT d.id, d.webhook_id, d.next_attempt_at,
+             ROW_NUMBER() OVER (PARTITION BY d.webhook_id ORDER BY d.next_attempt_at, d.rowid) AS rn
+           FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id JOIN agents a ON a.id = w.agent_id
+           WHERE d.status IN ('pending', 'failed') AND d.next_attempt_at IS NOT NULL AND d.next_attempt_at <= ?
+             AND w.enabled = 1 AND a.disabled = 0 ${busy.length ? `AND d.id NOT IN (${busy.map(() => "?").join(", ")})` : ""}
+         ) WHERE rn <= ? ORDER BY rn, next_attempt_at`,
         now(),
         ...busy,
-        capacity,
+        perWebhook,
       );
     } catch (err) {
       log.error("Delivery worker query failed", { error: errorMessage(err) });
       return;
     }
-    for (const d of due) void run(d.id);
+    for (const d of due) {
+      if (capacity <= 0) break;
+      const used = perHook.get(d.webhook_id) ?? 0;
+      if (used >= perWebhook) continue;
+      perHook.set(d.webhook_id, used + 1);
+      capacity--;
+      void run(d.id, d.webhook_id);
+    }
   }
 
   /** One attempt per delivery at a time; the worker and manual replays share this. */
-  function run(id: string): Promise<void> {
+  function run(id: string, webhookId?: string): Promise<void> {
     const existing = inflight.get(id);
-    if (existing) return existing;
+    if (existing) return existing.promise;
+    const hook = webhookId ?? ctx.db.get<{ webhook_id: string }>("SELECT webhook_id FROM deliveries WHERE id = ?", id)?.webhook_id ?? "";
     const p = attempt(id)
       .catch((err) => log.error("Delivery attempt failed", { delivery: id, error: errorMessage(err) }))
       .finally(() => {
         inflight.delete(id);
         wake();
       });
-    inflight.set(id, p);
+    inflight.set(id, { promise: p, webhookId: hook });
     return p;
   }
 
@@ -388,18 +424,27 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
       return record(d, isTest, fail("The webhook's agent can no longer see this event (grant or label scope changed)"), true);
     }
 
+    const signal = shutdown.signal;
+    // Shutting down mid-attempt: a real delivery keeps its state and is retried after restart; a
+    // one-shot test delivery is reported as interrupted.
+    const interrupted = () => (isTest ? record(d, isTest, fail("Interrupted by shutdown")) : undefined);
     const url = new URL(d.url);
     let target;
     try {
-      target = await resolveTarget(url, ctx.settings.get().webhookAllowlist, options.lookup);
+      target = await untilAborted(resolveTarget(url, ctx.settings.get().webhookAllowlist, options.lookup), signal);
     } catch (err) {
-      if (shutdown.signal.aborted) return;
+      if (signal.aborted) return interrupted();
       const hint = err instanceof SsrfError && err.hint ? ` ${err.hint}` : "";
       return record(d, isTest, fail(`${err instanceof SsrfError && err.kind === "blocked" ? "Blocked: " : ""}${errorMessage(err)}.${hint}`));
     }
 
-    const body = JSON.stringify(await payload(event, bool(d.include_body), isTest));
-    if (shutdown.signal.aborted) return;
+    let body: string;
+    try {
+      body = JSON.stringify(await untilAborted(payload(event, bool(d.include_body), isTest), signal));
+    } catch (err) {
+      if (signal.aborted) return interrupted();
+      throw err;
+    }
     const timestamp = Math.floor(Date.now() / 1000);
     const headers = {
       "content-type": "application/json",
@@ -408,14 +453,13 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
       "webhook-timestamp": String(timestamp),
       "webhook-signature": sign(ctx.crypto.decrypt(d.secret_enc), d.id, timestamp, body),
     };
-    const result = await postPinned(url, target, headers, body, { timeoutMs, signal: shutdown.signal });
-    // Shutting down mid-request: leave the row as it was so it's retried after restart.
-    if (shutdown.signal.aborted) return;
+    const result = await postPinned(url, target, headers, body, { timeoutMs, signal });
+    if (signal.aborted) return interrupted();
     record(d, isTest, result);
   }
 
   async function payload(event: StoredEvent, includeBody: boolean, isTest: boolean): Promise<WebhookPayload> {
-    const data: PayloadData = toMailEvent(event);
+    const data: WebhookPayload["data"] = toMailEvent(event);
     if (includeBody && event.message) {
       if (isTest) data.content = TEST_CONTENT;
       else {
@@ -486,6 +530,15 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
     start() {
       if (timer) return;
       if (shutdown.signal.aborted) shutdown = new AbortController();
+      // Test deliveries are one-shot; any left pending were cut off by a crash.
+      const busy = [...inflight.keys()];
+      ctx.db.run(
+        `UPDATE deliveries SET status = 'failed', last_error = 'Interrupted by a restart', updated_at = ?
+         WHERE event_seq < 0 AND status = 'pending' AND next_attempt_at IS NULL
+         ${busy.length ? `AND id NOT IN (${busy.map(() => "?").join(", ")})` : ""}`,
+        now(),
+        ...busy,
+      );
       timer = setInterval(tick, tickMs);
       timer.unref();
       ctx.bus.on("event", onEvent);
@@ -496,7 +549,7 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
       timer = null;
       ctx.bus.off("event", onEvent);
       shutdown.abort();
-      await Promise.allSettled([...inflight.values()]);
+      await Promise.allSettled([...inflight.values()].map((f) => f.promise));
     },
   };
 }
@@ -511,6 +564,19 @@ function parse<S extends z.ZodType>(schema: S, input: unknown): z.infer<S> {
 
 function stripUndefined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+/** Rejects as soon as `signal` aborts; the underlying work is left to settle on its own. */
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  let onAbort!: () => void;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+    }),
+  ]).finally(() => signal.removeEventListener("abort", onAbort));
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

@@ -44,12 +44,18 @@ export interface FeedResult {
   cursor: number;
   /** The agent's acknowledged position. */
   ackedSeq: number;
+  /**
+   * More matching events exist after `cursor`: either `limit` was reached or the scan stopped at its
+   * per-call bound while skipping events the agent can't see. Call again with `after: cursor`.
+   */
+  hasMore: boolean;
 }
 
 export interface EventsService extends Lifecycle {
   /**
    * FROZEN. Outbox write: inserts the event and its webhook deliveries in one transaction, then emits
-   * bus "event". Returns null when dedupeKey was already seen.
+   * bus "event". Returns null when dedupeKey was already seen. Must not be called inside an open
+   * `db.tx` (it throws): listeners and the delivery worker would see the event before it commits.
    */
   emit(e: NewEvent): MailEvent | null;
   get(id: string): StoredEvent | null;

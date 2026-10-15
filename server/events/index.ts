@@ -1,6 +1,6 @@
 import type { EventType, MailEvent, Page } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
-import { json, now, type Param } from "../db/index.ts";
+import { type Db, json, now, type Param } from "../db/index.ts";
 import { newId } from "../util/ids.ts";
 import { deliveriesForEvent } from "../webhooks/deliveries.ts";
 import { EVENT_SELECT, type EventRow, eventBySeq, toMailEvent, toStoredEvent } from "./repo.ts";
@@ -16,6 +16,7 @@ export function createEventsService(ctx: AppContext): EventsService {
   const log = ctx.log.child("events");
 
   function emit(e: NewEvent): MailEvent | null {
+    if (inTransaction(ctx.db)) throw new Error("events.emit must not be called inside a transaction: it publishes after its own commit");
     const stored = ctx.db.tx((): StoredEvent | null => {
       const createdAt = now();
       const id = newId("evt");
@@ -103,7 +104,8 @@ export function createEventsService(ctx: AppContext): EventsService {
       where.push(`e.account_id IN (${opts.accountIds.map(() => "?").join(", ")})`);
       params.push(...opts.accountIds);
     }
-    const sql = `${EVENT_SELECT} WHERE ${where.join(" AND ")} ORDER BY e.seq ASC LIMIT ?`;
+    const filter = where.join(" AND ");
+    const sql = `${EVENT_SELECT} WHERE ${filter} ORDER BY e.seq ASC LIMIT ?`;
 
     const events: MailEvent[] = [];
     let cursor = after;
@@ -119,7 +121,8 @@ export function createEventsService(ctx: AppContext): EventsService {
       }
       if (rows.length < SCAN_BATCH) break;
     }
-    return { events, cursor, ackedSeq: acked };
+    const hasMore = !!ctx.db.get(`SELECT 1 FROM events e WHERE ${filter} LIMIT 1`, cursor, ...params);
+    return { events, cursor, ackedSeq: acked, hasMore };
   }
 
   function wait(agentId: string, opts: FeedOptions & { timeoutMs: number; signal?: AbortSignal }): Promise<FeedResult> {
@@ -129,30 +132,40 @@ export function createEventsService(ctx: AppContext): EventsService {
     return new Promise<FeedResult>((resolve) => {
       let last = first;
       let done = false;
+      let pending: NodeJS.Immediate | null = null;
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        if (pending) clearImmediate(pending);
         ctx.bus.off("event", onEvent);
         signal?.removeEventListener("abort", finish);
         resolve(last);
       };
-      const onEvent = (ev: MailEvent) => {
-        if (ev.seq <= last.cursor) return;
-        if (feedOpts.types?.length && !feedOpts.types.includes(ev.type)) return;
-        if (feedOpts.accountIds?.length && !feedOpts.accountIds.includes(ev.accountId)) return;
+      // Continues from the last scanned position, so invisible events aren't rescanned. A scan that
+      // hit its bound yields to the event loop and goes on until it finds something or catches up.
+      const scan = () => {
+        pending = null;
+        if (done) return;
         try {
-          // Continue from the last scanned position so invisible events aren't rescanned.
           last = feed(agentId, { ...feedOpts, after: last.cursor });
         } catch (err) {
           log.error("wait_for_events feed failed", { error: err instanceof Error ? err.message : String(err) });
           return finish();
         }
-        if (last.events.length) finish();
+        if (last.events.length) return finish();
+        if (last.hasMore) pending = setImmediate(scan);
+      };
+      const onEvent = (ev: MailEvent) => {
+        if (pending || ev.seq <= last.cursor) return;
+        if (feedOpts.types?.length && !feedOpts.types.includes(ev.type)) return;
+        if (feedOpts.accountIds?.length && !feedOpts.accountIds.includes(ev.accountId)) return;
+        scan();
       };
       const timer = setTimeout(finish, timeoutMs);
       ctx.bus.on("event", onEvent);
       signal?.addEventListener("abort", finish, { once: true });
+      if (first.hasMore) pending = setImmediate(scan);
     });
   }
 
@@ -170,16 +183,24 @@ export function createEventsService(ctx: AppContext): EventsService {
     return { ackedSeq: ackedSeq(agentId) };
   }
 
-  /** Keeps events that still have deliveries waiting to go out. */
+  /** Keeps events still referenced by a delivery; webhooks.prune expires and removes those first. */
   function prune(beforeIso: string): number {
-    return ctx.db.run(
-      `DELETE FROM events WHERE created_at < ?
-       AND seq NOT IN (SELECT event_seq FROM deliveries WHERE status IN ('pending', 'failed'))`,
-      beforeIso,
-    ).changes;
+    return ctx.db.run(`DELETE FROM events WHERE created_at < ? AND seq NOT IN (SELECT event_seq FROM deliveries)`, beforeIso).changes;
   }
 
   return { emit, get, list, feed, wait, ack, prune };
+}
+
+/** node:sqlite exposes `isTransaction` from Node 22.16; older versions get a BEGIN probe (fails inside a transaction). */
+function inTransaction(db: Db): boolean {
+  const flag = (db.raw as { isTransaction?: unknown }).isTransaction;
+  if (typeof flag === "boolean") return flag;
+  try {
+    db.raw.exec("BEGIN; ROLLBACK");
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 const clamp = (n: number, min: number, max: number) => Math.min(Math.max(Number.isFinite(n) ? n : min, min), max);
