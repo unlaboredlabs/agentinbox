@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { GoogleClientView, HealthResponse, SetupState, SetupStatus } from "../shared/types.ts";
-import { FAKE_CLIENT, grant, mailbox, PASSWORD, type Stack, startStack } from "./e2e/harness.ts";
+import { AdminClient, FAKE_CLIENT, grant, mailbox, PASSWORD, type Stack, startStack } from "./e2e/harness.ts";
 
 describe("first run", () => {
   let s: Stack;
@@ -122,6 +122,15 @@ describe("first run", () => {
     expect(md).not.toContain("{{AGENTINBOX_URL}}");
     expect(md).not.toContain(apiKey);
     expect((await fetch(`${s.url}/mcp`, { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(405);
+
+    // Signing out invalidates the session server-side.
+    const other = new AdminClient(() => s.url);
+    await other.post("/api/auth/login", { password: PASSWORD });
+    expect(other.cookie).toBeTruthy();
+    const stale = other.cookie!;
+    await other.post("/api/auth/logout");
+    const res = await fetch(`${s.url}/api/setup/state`, { headers: { cookie: stale } });
+    expect(res.status).toBe(401);
 
     // The key is shown once: listing never returns it.
     const listed = JSON.stringify(await s.admin.get("/api/agents"));

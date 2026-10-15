@@ -92,7 +92,15 @@ describe("pub/sub provisioning", () => {
     const ev = await s.waitForEvent((e) => e.message?.subject === "Polled mail", { kick: false, timeout: 9000 });
     expect(ev).toMatchObject({ type: "message.received", accountId: account!.id });
     expect((await s.admin.get<SystemInfo>("/api/system")).ingest).toMatchObject({ mode: "poll", running: true, lastError: null });
-  }, 15_000);
+
+    // The org admin grants an exception: retrying provisioning reuses the existing topic and succeeds.
+    s.fake.orgPolicyBlocksIam(false);
+    const fixed = await s.provisionPubsub();
+    expect(fixed).toMatchObject({ mode: "pubsub", topic: TOPIC, subscription: SUBSCRIPTION, lastError: null });
+    expect((await s.admin.get<SetupState>("/api/setup/state")).pubsub.lastError).toBeNull();
+    s.fake.deliver(email, { from: "poll@else.test", subject: "Realtime at last", text: "x" });
+    await s.waitForEvent((e) => e.message?.subject === "Realtime at last", { kick: false, timeout: 4000 });
+  }, 20_000);
 
   it("watches accounts connected after provisioning and stops the watch when an account is removed", async () => {
     s = await startStack();

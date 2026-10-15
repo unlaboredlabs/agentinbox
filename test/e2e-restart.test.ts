@@ -4,7 +4,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createWebhooksService } from "../server/webhooks/index.ts";
-import type { Account, Delivery, MailEvent, Page, SetupStatus, WebhookWithSecret } from "../shared/types.ts";
+import type { Account, Approval, Delivery, MailEvent, Page, SetupStatus, WebhookWithSecret } from "../shared/types.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver } from "./e2e/webhook-receiver.ts";
 import { sleep, waitFor } from "./e2e/wait.ts";
@@ -124,5 +124,20 @@ describe("restart durability", () => {
     for (const subject of ["While down 1", "While down 2", "After restart", "After expiry"]) {
       expect(subjects.filter((x) => x === subject), subject).toHaveLength(1);
     }
+  });
+
+  it("keeps a pending approval across a restart and sends it when approved afterwards", async () => {
+    const sender = await s.createAgent("restart-sender", [grant(account.id, { capabilities: ["read", "send"], sendMode: "approval" })]);
+    const msg = s.fake.deliver(email, { from: "Alice <alice@client.test>", subject: "Pending over restart", text: "?" });
+    const mcp = await s.agent(sender.apiKey);
+    const r = await mcp.json<{ approvalId: string }>("reply", { message_id: msg.id, body: "Answer after restart" });
+    await mcp.close();
+
+    await s.restart(fastRetries);
+    const pending = await s.admin.get<Approval[]>("/api/approvals?status=pending");
+    expect(pending.map((a) => a.id)).toContain(r.approvalId);
+    const sent = await s.admin.post<Approval>(`/api/approvals/${r.approvalId}/approve`);
+    expect(sent.status).toBe("sent");
+    expect(s.fake.sent(email).some((m) => m.id === sent.sentMessageId && m.threadId === msg.threadId)).toBe(true);
   });
 });
