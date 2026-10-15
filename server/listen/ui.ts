@@ -1,6 +1,7 @@
 import pc from "picocolors";
 
 /** Visible width of a string (ignores ANSI colour codes). */
+// eslint-disable-next-line no-control-regex
 const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
 
 /** Draws a rounded box around lines of text. */

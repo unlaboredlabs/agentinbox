@@ -14,7 +14,7 @@ import { appendDead, StatusWriter } from "./state.ts";
 import { EventStream } from "./stream.ts";
 import { checkTransport, insecureBanner } from "./transport.ts";
 import { formatDuration, safeText } from "./ui.ts";
-import { version } from "./version.ts";
+import { NPX, version } from "./version.ts";
 
 /** Exit codes. 78 (EX_CONFIG) means "don't restart me": the service units are told not to. */
 export const EXIT = { ok: 0, error: 1, revoked: 78 } as const;
@@ -117,7 +117,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
   if (!targets.length && !dryRun) {
     throw new Error(
       `Nothing to run for events. Pass --exec "<command>" and/or --forward http://localhost:<port>/<path> (add --save to keep it in profile "${profileName}"),\n` +
-        `  or --dry-run to just print matching events. Recipes: npx agentinbox listen --help`,
+        `  or --dry-run to just print matching events. Recipes: ${NPX} listen --help`,
     );
   }
 
@@ -214,7 +214,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         targets: [...job.remaining],
         payload: job.payload,
       });
-      log.error(`${describeEvent(job.payload)}: gave up after ${job.attempts} attempts (${job.lastError}). Saved to dead letters: npx agentinbox listen dead${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`}`, {
+      log.error(`${describeEvent(job.payload)}: gave up after ${job.attempts} attempts (${job.lastError}). Saved to dead letters: ${NPX} listen dead${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`}`, {
         seq: job.seq,
         id: job.payload.data.id,
       });
@@ -323,7 +323,7 @@ async function revokedExit(log: ListenLogger, status: StatusWriter, profileName:
   log.error(
     `Access revoked: ${reason}\n` +
       `The daemon no longer accepts this listener's key (key rotated, agent disabled or deleted, or its grants removed).\n` +
-      `Pair again with: npx agentinbox connect ${profile.url}${p} --force`,
+      `Pair again with: ${NPX} connect ${profile.url}${p} --force`,
   );
   status.update({ connected: false, stoppedAt: new Date().toISOString(), exitReason: `revoked: ${reason}` });
   status.flush();

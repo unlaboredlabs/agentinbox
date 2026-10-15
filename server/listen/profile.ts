@@ -5,6 +5,7 @@ import { EVENT_TYPES } from "../../shared/types.ts";
 import { webhookFilterSchema } from "../webhooks/filter.ts";
 import { isTooOpen, writePrivateFile } from "./fsutil.ts";
 import { DEFAULT_PROFILE, profilePath, profilesDir, validProfileName } from "./paths.ts";
+import { NPX } from "./version.ts";
 
 /**
  * A profile file: the shared ListenerConfig plus a few agent-side extras. Holds the agent's API key,
@@ -60,7 +61,7 @@ export function loadProfile(name: string = DEFAULT_PROFILE): Profile {
   const path = profilePath(n);
   if (!existsSync(path)) {
     const others = listProfiles();
-    const hint = others.length ? ` Known profiles: ${others.join(", ")} (pick one with --profile).` : " Run `npx agentinbox connect <daemon-url>` first.";
+    const hint = others.length ? ` Known profiles: ${others.join(", ")} (pick one with --profile).` : ` Run \`${NPX} connect <daemon-url>\` first.`;
     throw new Error(`No agentinbox profile "${n}" (${path}).${hint}`);
   }
   // Someone loosened the permissions: tighten them rather than keep a readable key around.
