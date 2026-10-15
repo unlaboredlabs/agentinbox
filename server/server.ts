@@ -1,17 +1,16 @@
 import { existsSync, rmdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { homedir } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { type ServerType, serve } from "@hono/node-server";
 import open from "open";
 import pc from "picocolors";
 import { createApp, hasMcp } from "./app.ts";
 import { currentSetupToken } from "./auth/index.ts";
-import { type Config, type ConfigInput, loadConfig } from "./config.ts";
+import { type Config, type ConfigInput, DEFAULT_PORT, loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { acquireInstanceLock, assertMasterKeyUsable, cliCommand, type InstanceLock } from "./instance.ts";
 import { startMaintenance } from "./maintenance.ts";
-import { setupTokenPath } from "./auth/setup-token.ts";
 import { consoleUrls, isPrivateIPv4, isWildcardHost, loopbackUrl, networkAddresses } from "./urls.ts";
 import { errorMessage } from "./util/errors.ts";
 import { createAppContext, type ServiceOverrides, startServices, stopServices } from "./wire.ts";
@@ -177,38 +176,111 @@ export async function runForeground(opts: RunOptions): Promise<void> {
 }
 
 function printBanner(ctx: AppContext, info: { mcp: boolean }): void {
+  console.log(bannerLines(ctx, info).join("\n") + "\n");
+}
+
+/** What the banner needs to know about the machine; injectable for tests. */
+export interface BannerEnv {
+  env: NodeJS.ProcessEnv;
+  platform: NodeJS.Platform;
+  /** Non-internal IPv4 addresses (see networkAddresses). */
+  addresses: string[];
+  hostname: string;
+  username: string;
+}
+
+function currentBannerEnv(): BannerEnv {
+  let username = process.env.USER || process.env.LOGNAME || "";
+  try {
+    username ||= userInfo().username;
+  } catch {
+    // No passwd entry (some containers): leave it out of the ssh command.
+  }
+  return { env: process.env, platform: process.platform, addresses: networkAddresses(), hostname: hostname(), username };
+}
+
+/** True over SSH, or on Linux without a graphical session: a browser here won't reach the user. */
+export function isHeadless(e: Pick<BannerEnv, "env" | "platform">): boolean {
+  if (e.env.SSH_CONNECTION || e.env.SSH_CLIENT || e.env.SSH_TTY) return true;
+  return e.platform === "linux" && !e.env.DISPLAY && !e.env.WAYLAND_DISPLAY;
+}
+
+/**
+ * The `ssh -L` command that makes this server's port reachable as localhost on the user's own
+ * machine. The host is the address this SSH session came in on, else the hostname.
+ */
+export function tunnelCommand(config: Pick<Config, "host" | "port">, e: BannerEnv): string {
+  const serverIp = e.env.SSH_CONNECTION?.trim().split(/\s+/)[2];
+  const remote = serverIp && !/^(127\.|::1$|::ffff:127\.)/.test(serverIp) ? serverIp : e.hostname || "<server>";
+  const bound = config.host.trim().toLowerCase();
+  const target = isWildcardHost(bound) || bound === "localhost" || bound === "::1" || bound.startsWith("127.") ? "localhost" : bound;
+  const forward = `${config.port}:${target.includes(":") ? `[${target}]` : target}:${config.port}`;
+  return `ssh -L ${forward} ${e.username ? `${e.username}@` : ""}${remote}`;
+}
+
+/** `service install` with the flags this run used, so the service gets the same data and address. */
+function serviceInstallCommand(config: Config): string {
+  const flags: string[] = [];
+  if (config.dataDir !== resolve(join(homedir(), ".agentinbox"))) flags.push(`--data ${shellQuote(config.dataDir)}`);
+  if (config.host !== "0.0.0.0") flags.push(`--host ${config.host}`);
+  if (config.port !== DEFAULT_PORT) flags.push(`--port ${config.port}`);
+  return cliCommand(["service install", ...flags].join(" "));
+}
+
+const shellQuote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
+/** The startup banner: what is running, and the one thing to do next. */
+export function bannerLines(ctx: AppContext, info: { mcp: boolean }, e: BannerEnv = currentBannerEnv()): string[] {
   const { config } = ctx;
-  const urls = config.dev ? ["http://localhost:5173"] : consoleUrls(config.host, config.port);
+  const local = config.dev ? "http://localhost:5173" : null;
+  const urls = local ? [local] : isWildcardHost(config.host) ? [`http://localhost:${config.port}`, ...e.addresses.map((a) => `http://${a}:${config.port}`)] : consoleUrls(config.host, config.port);
   const token = currentSetupToken(ctx);
-  const out: string[] = ["", `  ${pc.bold("agentinbox")} ${pc.dim(`v${config.version} · data in ${config.dataDir}`)}`, ""];
+  const out: string[] = ["", `  ${pc.bold("agentinbox is running.")} ${pc.dim(`v${config.version} · data in ${config.dataDir}`)}`, ""];
+
   if (token && config.service) {
     // Service logs are often readable by others (journal, log files): never print the token there.
     out.push(
-      `  ${pc.yellow("Not claimed yet.")} Print the setup link with \`${cliCommand(`reset-password --data ${config.dataDir}`)}\`,`,
-      `  or open ${urls[0]}/setup?token=<token> with the token from \`cat ${setupTokenPath(config.dataDir)}\`.`,
+      `  ${pc.yellow("Not set up yet.")} Get the setup link with: ${pc.bold(cliCommand(`reset-password --data ${shellQuote(config.dataDir)}`))}`,
     );
   } else if (token) {
-    out.push(`  ${pc.yellow("First run:")} open this link to claim the instance and finish setup:`, "");
-    for (const url of urls) out.push(`  ${pc.cyan(`${url}/setup?token=${token}`)}`);
+    const link = (url: string) => `${url}/setup?token=${token}`;
+    out.push(`  Open this link to finish setup (the console walks you through Google and your first agent):`, "");
+    out.push(`    ${pc.cyan(link(urls[0]!))}`, "");
+    if (urls.length > 1) {
+      out.push(`  ${pc.dim("Or, from another machine:")}`);
+      for (const url of urls.slice(1)) out.push(`    ${pc.dim(link(url))}`);
+      out.push("");
+    }
+    const exposed = isWildcardHost(config.host) ? e.addresses.filter((a) => !isPrivateIPv4(a)) : [];
+    if (exposed.length) {
+      out.push(
+        `  ${pc.yellow("Heads up:")} anyone reaching ${exposed.join(", ")}:${config.port} could claim this first. Open the link now, or restart with --host 127.0.0.1.`,
+      );
+    }
+    if (!config.dev && isHeadless(e)) {
+      // The tunnel makes the port local on the laptop, so a loopback link above works there as is.
+      const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(new URL(urls[0]!).hostname);
+      const where = loopback ? "the link above" : pc.cyan(link(`http://localhost:${config.port}`));
+      out.push(`  ${pc.yellow("No browser here?")} On your laptop run ${pc.bold(tunnelCommand(config, e))}, then open ${where} in its browser.`);
+    }
+    if (exposed.length || (!config.dev && isHeadless(e))) out.push("");
   } else {
+    const publicUrl = ctx.settings.publicUrl();
     out.push(`  ${pc.dim("Console")}  ${pc.cyan(urls[0]!)}`);
-    for (const url of urls.slice(1)) out.push(`           ${pc.cyan(url)}`);
-    if (info.mcp) out.push(`  ${pc.dim("MCP")}      ${pc.cyan(`${ctx.settings.publicUrl()}/mcp`)}`);
+    if (!config.dev && !urls.includes(publicUrl)) out.push(`           ${pc.cyan(publicUrl)}`);
+    if (info.mcp) out.push(`  Agents connect to ${pc.cyan(`${publicUrl}/mcp`)}`);
+    out.push("");
   }
-  const exposed = token && isWildcardHost(config.host) ? networkAddresses().filter((a) => !isPrivateIPv4(a)) : [];
-  if (exposed.length) {
-    out.push(
-      "",
-      `  ${pc.yellow("Heads up:")} port ${config.port} is reachable on the public address ${exposed.join(", ")}.`,
-      `  Claim the instance now, or restart with --host 127.0.0.1 (or firewall the port) until you have.`,
-    );
+
+  if (config.dev) out.push(pc.dim(`  Dev mode: API on :${config.port}, console via Vite on :5173.`), "");
+  else if (!config.service) {
+    out.push(pc.dim(`  Keep this terminal open; Ctrl-C stops it. Run it in the background later with: ${serviceInstallCommand(config)}`));
   }
-  if (config.dev) out.push("", pc.dim(`  Dev mode: API on :${config.port}, console via Vite on :5173.`));
-  console.log(out.join("\n") + "\n");
+  return out;
 }
 
 function openBrowser(url: string): void {
-  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return;
+  if (isHeadless({ env: process.env, platform: process.platform })) return;
   try {
     open(url).then(
       (child) => child.on("error", () => {}),

@@ -63,13 +63,39 @@ const withServerOptions = (cmd: CommandType) =>
 const configInput = (o: ServerFlags) => ({ port: portOption(o.port), host: o.host, dataDir: o.data });
 
 const program = new Command("agentinbox")
-  .description("Self-hosted Gmail broker for AI agents: MCP tools, webhooks, guardrails and a web console.")
+  .description(
+    "Self-hosted Gmail broker for AI agents. Start it, open the link it prints, and the web console " +
+      "walks you through the rest (Google Cloud, connecting Gmail, your first agent).",
+  )
   .version(version, "-v, --version", "print the version")
   .helpOption("-h, --help", "show help")
-  .addHelpText("after", "\nWithout installing: npx agentinbox-cli [command]. To install the command: npm i -g agentinbox-cli")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  npx agentinbox-cli                     start the server and print the setup link
+  npx agentinbox-cli service install     keep it running in the background, also after a reboot
+  npx agentinbox-cli reset-password      print a new setup link (forgot the console password)
+  npx agentinbox-cli connect https://mail.example.com --tool claude-code --setup-mcp
+                                         on an agent's machine: pair it (you approve in the console)
+  npx agentinbox-cli listen --print-recipe claude-code
+                                         the --exec command that wakes Claude Code on new mail
+
+Run any command with --help for details. Install it with npm i -g agentinbox-cli to type agentinbox instead.
+Docs: https://github.com/unlaboredlabs/agentinbox/blob/main/docs/reference.md`,
+  )
   .showSuggestionAfterError();
 
-withServerOptions(program.command("start", { isDefault: true }).description("run agentinbox in the foreground (default)"))
+const SERVER_GROUP = "Run agentinbox:";
+const AGENT_GROUP = "On an agent's machine:";
+
+withServerOptions(
+  program
+    .command("start", { isDefault: true })
+    .description("run agentinbox in this terminal and print the setup link (the default command)")
+    .summary("run it in this terminal (the default command)")
+    .helpGroup(SERVER_GROUP),
+)
   .option("--no-open", "don't open a browser on first run")
   .option("--dev", "development: API only, the console runs on Vite (:5173)")
   // `agentinbox typo` lands here as an extra argument: report it as the unknown command it is.
@@ -80,9 +106,13 @@ withServerOptions(program.command("start", { isDefault: true }).description("run
     await runForeground({ ...configInput(o), dev: !!o.dev, open: o.open, version });
   });
 
-const service = program.command("service").description("run agentinbox as a background service (systemd / launchd)");
+const service = program
+  .command("service")
+  .description("run agentinbox in the background as a systemd / launchd service, started at boot")
+  .summary("run it in the background (systemd / launchd)")
+  .helpGroup(SERVER_GROUP);
 
-withServerOptions(service.command("install").description("install and start the service; re-run to update")).action(async (o: ServerFlags) => {
+withServerOptions(service.command("install").description("install and start the service; re-run it to change the port or update")).action(async (o: ServerFlags) => {
   const { loadConfig } = await import("./config.ts");
   const { installService } = await import("./service.ts");
   await installService(loadConfig(configInput(o), version));
@@ -106,7 +136,11 @@ service
     serviceStatus();
   });
 
-const skill = program.command("skill").description("the agentinbox agent skill (SKILL.md)");
+const skill = program
+  .command("skill")
+  .description("the agentinbox agent skill (SKILL.md): teaches an agent how to use agentinbox's tools")
+  .summary("install the agent skill (SKILL.md)")
+  .helpGroup(AGENT_GROUP);
 
 skill
   .command("print")
@@ -136,7 +170,9 @@ skill
 
 program
   .command("reset-password")
-  .description("remove the admin password and print a new setup link")
+  .description("forgot the console password? Removes it and prints a new setup link (or the first-run link)")
+  .summary("print a new setup link (forgot the password?)")
+  .helpGroup(SERVER_GROUP)
   .option("-d, --data <dir>", "data directory (default ~/.agentinbox, env AGENTINBOX_DATA)")
   .option("-p, --port <port>", "port of the running instance, used for the printed link", parsePort)
   .option("--host <host>", "host of the running instance, used for the printed link")
@@ -192,6 +228,18 @@ program
 // docs/listen.md). Imported after the Node check, like everything else.
 const { registerListenCommands } = await import("./listen/commands.ts");
 registerListenCommands(program);
+// Short one-liners for the command list; each command's own --help keeps its full description.
+const AGENT_SUMMARIES: Record<string, string> = {
+  connect: "pair an agent; you approve it in the console",
+  "setup-mcp": "add agentinbox to the agent's MCP config",
+  "mcp-header": "print the agent's auth header (MCP clients)",
+  listen: "wake the agent when new mail arrives",
+};
+for (const cmd of program.commands) {
+  const summary = AGENT_SUMMARIES[cmd.name()];
+  if (summary) cmd.summary(summary).helpGroup(AGENT_GROUP);
+}
+program.commandsGroup(SERVER_GROUP).helpCommand("help [command]", "show help for a command").helpCommand(true);
 
 /**
  * The URL written into SKILL.md: --url, AGENTINBOX_URL, else the agentinbox running on this
