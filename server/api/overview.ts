@@ -19,7 +19,7 @@ export function overviewStats(ctx: AppContext, at = new Date()): OverviewStats {
   )!;
   const deliveries = db.get<{ ok: number | null; failed: number | null }>(
     `SELECT SUM(status = 'succeeded') AS ok, SUM(status IN ('failed', 'dead')) AS failed
-     FROM deliveries WHERE updated_at >= ? AND attempts > 0`,
+     FROM deliveries WHERE updated_at >= ? AND attempts > 0 AND event_seq > 0`,
     since,
   )!;
   const agentCalls = db.get<{ calls: number; denied: number | null }>(

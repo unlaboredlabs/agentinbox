@@ -65,6 +65,7 @@ describe("webhooks API", () => {
     const page = await call<Page<Delivery>>("GET", `/deliveries?webhookId=${id}&status=succeeded`);
     expect(page.body.items.map((d) => d.id)).toEqual([tested.body.id]);
     expect((await call("GET", "/deliveries?status=weird")).status).toBe(400);
+    expect((await call("GET", "/deliveries?cursor=x")).status).toBe(400);
 
     const replayed = await call<Delivery>("POST", `/deliveries/${tested.body.id}/replay`);
     expect(replayed.body).toMatchObject({ status: "succeeded", attempts: 2 });

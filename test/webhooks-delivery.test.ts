@@ -7,9 +7,12 @@ import type { NewEvent, StoredEvent } from "../server/events/types.ts";
 import type { MailService } from "../server/mail/types.ts";
 import type { PolicyService } from "../server/policy/types.ts";
 import { HttpError } from "../server/util/errors.ts";
-import { matchesFilter } from "../server/webhooks/filter.ts";
+import { rmSync } from "node:fs";
+import { createAppContext, startServices, stopServices } from "../server/wire.ts";
+import { matchesFilter, webhookFilterSchema } from "../server/webhooks/filter.ts";
+import { regexRisk } from "../server/webhooks/regex.ts";
 import { createWebhooksService, type WebhooksOptions } from "../server/webhooks/index.ts";
-import { testContext } from "./helpers.ts";
+import { testConfig, testContext } from "./helpers.ts";
 
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
@@ -178,6 +181,53 @@ describe("webhook filters", () => {
     expect(matchesFilter({ labelIds: ["Label_gone"] }, removed)).toBe(true);
   });
 
+  it("tests only the first 256 subject characters", () => {
+    const long = ev({ message: message("m1", { subject: `${"x".repeat(256)}invoice` }) });
+    expect(matchesFilter({ subject: "invoice" }, long)).toBe(false);
+    expect(matchesFilter({ subject: "^x+" }, long)).toBe(true);
+  });
+
+  it.each([
+    ["(a+)+", true],
+    ["^(\\w+\\s?)+$", true],
+    ["^(re:\\s*|fwd?:\\s*)*(.*\\s*)*invoice", true],
+    ["(\\w*\\s?)*$", true],
+    ["(?:x|y+){2,}", true],
+    ["((ab)+c)*", true],
+    ["(.*)*", true],
+    ["(a|a)*", true],
+    ["(?:re|fwd)+:", true],
+    ["\\w*\\w*x", true],
+    [".*\\s+x", true],
+    ["a+\\ba*", true],
+    ["a*b*c*d*e*f*g*", true],
+    ["(a|b)", false],
+    ["(?:re|fwd):\\s*invoice", false],
+    ["^re:.*invoice", false],
+    ["invoice|receipt", false],
+    ["[(+)]+", false],
+    ["\\(a+\\)+", false],
+    ["invoice #\\d+", false],
+    ["(ab){2}", false],
+    ["\\w+@\\w+", false],
+  ])("regex risk %s → %s", (pattern, risky) => expect(regexRisk(pattern) !== null).toBe(risky));
+
+  it("rejects the known catastrophic patterns at validation, so they never run", () => {
+    for (const subject of ["^(\\w+\\s?)+$", "^(re:\\s*|fwd?:\\s*)*(.*\\s*)*invoice"]) {
+      const r = webhookFilterSchema.safeParse({ subject });
+      expect(r.success).toBe(false);
+      expect(r.error!.issues[0]!.message).toMatch(/can make matching hang/);
+    }
+    // Accepted patterns stay fast even on long adversarial subjects (only 256 chars are tested).
+    const t0 = performance.now();
+    const hostile = ev({ message: message("m1", { subject: `${"a ".repeat(5000)}!` }) });
+    for (const subject of ["^(?:re|fwd):\\s*\\w+ invoice", "invoice|receipt", "^a.*!$"]) {
+      expect(webhookFilterSchema.safeParse({ subject }).success).toBe(true);
+      matchesFilter({ subject }, hostile);
+    }
+    expect(performance.now() - t0).toBeLessThan(200);
+  });
+
   it("message criteria never match events without a message", () => {
     expect(matchesFilter({ hasAttachments: false }, ev({ message: null }))).toBe(false);
   });
@@ -189,7 +239,7 @@ describe("webhook CRUD", () => {
     const { webhook, secret } = await ctx.webhooks.create(input("https://93.184.216.34/hook", { filter: { from: ["*@stripe.com"], to: [] } }));
     expect(secret).toMatch(/^whsec_[A-Za-z0-9+/]{32}$/);
     expect(Buffer.from(secret.slice(6), "base64")).toHaveLength(24);
-    expect(webhook.secretPrefix).toBe(secret.slice(0, 12));
+    expect(webhook.secretPrefix).toBe(secret.slice(0, 10));
     expect(webhook.filter).toEqual({ from: ["*@stripe.com"] });
     expect(webhook.stats).toEqual({ succeeded24h: 0, failed24h: 0, lastDeliveryAt: null });
     const stored = ctx.db.get<{ secret_enc: string }>("SELECT secret_enc FROM webhooks")!.secret_enc;
@@ -210,6 +260,9 @@ describe("webhook CRUD", () => {
     expect(await bad({ url: "ftp://example.com" })).toMatch(/http/);
     expect(await bad({ url: "http://10.0.0.1/" })).toMatch(/private/);
     expect(await bad({ name: " " })).toMatch(/Name/);
+    expect(await bad({ filter: { subject: "(a+)+$" } })).toMatch(/hang/);
+    expect(await bad({ filter: { from: ["*a*a*a*a*a*a*a*a*a@x.com"] } })).toMatch(/at most 8/);
+    expect(await bad({ url: "http://93.184.216.34/hook" })).toMatch(/must use https/);
 
     const rotated = ctx.webhooks.rotateSecret(webhook.id);
     expect(rotated.secret).not.toBe(secret);
@@ -427,5 +480,129 @@ describe("enqueue + delivery", () => {
     await new Promise((r) => setTimeout(r, 100));
     await ctx.webhooks.stop!();
     expect(deliveries(ctx)[0]).toMatchObject({ status: "pending", attempts: 0 });
+  });
+
+  it("test deliveries are left out of webhook stats", async () => {
+    const ctx = setup();
+    const rx = await receiver();
+    const { webhook } = await ctx.webhooks.create(input(rx.url));
+    await ctx.webhooks.test(webhook.id);
+    expect(ctx.webhooks.get(webhook.id)!.stats).toEqual({ succeeded24h: 0, failed24h: 0, lastDeliveryAt: null });
+  });
+});
+
+describe("worker fairness, retention and shutdown", () => {
+  it("caps in-flight requests per webhook so a hanging receiver doesn't starve others", async () => {
+    const ctx = setup({ concurrency: 3 });
+    let hanging = 0;
+    const stuck = createServer(() => {
+      hanging++;
+    });
+    await new Promise<void>((r) => stuck.listen(0, "127.0.0.1", r));
+    cleanups.push(() => {
+      stuck.closeAllConnections();
+      return new Promise((r) => stuck.close(r));
+    });
+    const healthy = await receiver();
+    await ctx.webhooks.create(input(`http://127.0.0.1:${(stuck.address() as AddressInfo).port}/`, { name: "stuck" }));
+    await ctx.webhooks.create(input(healthy.url, { name: "healthy" }));
+    for (let i = 0; i < 6; i++) ctx.events.emit(received(`m${i}`));
+    ctx.webhooks.start!();
+    await until(() => healthy.requests.length === 6);
+    expect(hanging).toBe(2);
+    await ctx.webhooks.stop!();
+  });
+
+  it("expires stale pending deliveries on prune instead of flooding a re-enabled webhook", async () => {
+    const ctx = setup();
+    const rx = await receiver();
+    const { webhook } = await ctx.webhooks.create(input(rx.url));
+    const ev = ctx.events.emit(received("m1"))!;
+    await ctx.webhooks.update(webhook.id, { enabled: false });
+    ctx.db.run("UPDATE deliveries SET created_at = '2000-01-01T00:00:00.000Z', updated_at = '2000-01-01T00:00:00.000Z'");
+    ctx.db.run("UPDATE events SET created_at = '2000-01-01T00:00:00.000Z'");
+    const cutoff = "2001-01-01T00:00:00.000Z";
+
+    expect(ctx.webhooks.prune(cutoff)).toBe(0); // expired now, deleted on a later run
+    expect(deliveries(ctx)[0]).toMatchObject({ status: "dead", lastError: "expired (retention)", nextAttemptAt: null });
+    expect(ctx.events.prune(cutoff)).toBe(0); // still referenced
+
+    ctx.webhooks.start!();
+    await ctx.webhooks.update(webhook.id, { enabled: true });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(rx.requests).toHaveLength(0);
+
+    expect(ctx.webhooks.prune(new Date(Date.now() + 1000).toISOString())).toBe(1);
+    expect(ctx.events.prune(cutoff)).toBe(1);
+    expect(ctx.events.get(ev.id)).toBeNull();
+  });
+
+  it("picks fresh test seqs even after events were pruned", async () => {
+    const ctx = setup();
+    const rx = await receiver();
+    const { webhook } = await ctx.webhooks.create(input(rx.url));
+    const first = await ctx.webhooks.test(webhook.id);
+    ctx.db.run("UPDATE events SET created_at = '2000-01-01T00:00:00.000Z'");
+    expect(ctx.events.prune("2001-01-01T00:00:00.000Z")).toBe(0);
+    // Even if the synthetic event vanished, the delivery's seq stays reserved.
+    ctx.db.run("PRAGMA foreign_keys = OFF");
+    ctx.db.run("DELETE FROM events WHERE seq < 0");
+    const second = await ctx.webhooks.test(webhook.id);
+    expect(second.status).toBe("succeeded");
+    expect(second.id).not.toBe(first.id);
+  });
+
+  it("stops promptly while DNS resolution hangs, keeping the delivery for later", async () => {
+    let lookups = 0;
+    const ctx = setup({
+      // Creation resolves; delivery-time lookups never answer.
+      lookup: () => (++lookups === 1 ? Promise.resolve([{ address: "93.184.216.34", family: 4 }]) : new Promise(() => {})),
+    });
+    const { webhook } = await ctx.webhooks.create(input("https://hooks.example.com/x"));
+    ctx.events.emit(received("m1"));
+    ctx.webhooks.start!();
+    await until(() => lookups >= 2);
+    const testing = ctx.webhooks.test(webhook.id);
+    await until(() => lookups >= 3);
+    const t0 = Date.now();
+    await ctx.webhooks.stop!();
+    expect(Date.now() - t0).toBeLessThan(1000);
+    const real = deliveries(ctx).find((d) => d.attempts === 0 && d.status === "pending");
+    expect(real).toBeTruthy();
+    expect(await testing).toMatchObject({ status: "failed", lastError: "Interrupted by shutdown" });
+  });
+
+  it("delivers rows left pending by a previous process after restart", async () => {
+    const config = testConfig();
+    cleanups.push(() => rmSync(config.dataDir, { recursive: true, force: true }));
+    const overrides = {
+      policy: () => ({ canSeeEvent: () => true }) as unknown as PolicyService,
+      webhooks: (c: AppContext) => createWebhooksService(c, { tickMs: 10 }),
+    };
+    const rx = await receiver();
+
+    const first = createAppContext(config, overrides);
+    first.db.run("INSERT INTO agents (id, name, key_prefix, key_hash, created_at) VALUES ('agt_all', 'a', 'p', 'h', ?)", new Date().toISOString());
+    await first.webhooks.create(input(rx.url));
+    first.events.emit(received("m1"));
+    first.events.emit(received("m2"));
+    // A test delivery cut off by a crash: pending, off the schedule.
+    first.db.run(
+      `INSERT INTO events (seq, id, type, account_id, dedupe_key, created_at) VALUES (-1, 'evt_t', 'message.received', 'acc_test', 'test:x', ?)`,
+      new Date().toISOString(),
+    );
+    first.db.run(
+      `INSERT INTO deliveries (id, webhook_id, event_seq, status, next_attempt_at, created_at, updated_at)
+       SELECT 'dlv_t', id, -1, 'pending', NULL, created_at, created_at FROM webhooks`,
+    );
+    await stopServices(first); // never started: simulates a crash before delivery
+
+    const second = createAppContext(config, overrides);
+    cleanups.push(() => stopServices(second));
+    await startServices(second).catch(() => second.webhooks.start!()); // other services may still be placeholders
+    await until(() => rx.requests.length === 2);
+    const all = second.webhooks.listDeliveries({}).items;
+    expect(all.filter((d) => d.status === "succeeded")).toHaveLength(2);
+    expect(all.find((d) => d.id === "dlv_t")).toMatchObject({ status: "failed", lastError: "Interrupted by a restart" });
   });
 });

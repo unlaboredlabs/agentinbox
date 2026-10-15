@@ -15,10 +15,10 @@ afterEach(async () => {
   dispose = undefined;
 });
 
-function setup(heartbeatMs?: number) {
+function setup(heartbeatMs?: number, maxPendingWrites?: number) {
   const t = testContext({ policy: () => ({ canSeeEvent: () => true }) as unknown as PolicyService });
   dispose = t.dispose;
-  const app = new Hono<AppEnv>().route("/api", eventsApi(t.ctx, { heartbeatMs })).route("/api", auditApi(t.ctx));
+  const app = new Hono<AppEnv>().route("/api", eventsApi(t.ctx, { heartbeatMs, maxPendingWrites })).route("/api", auditApi(t.ctx));
   app.onError((err, c) => (err instanceof HttpError ? c.json(err.toJSON(), err.status as 400) : c.json({ error: { code: "internal", message: err.message } }, 500)));
   return { ctx: t.ctx, app };
 }
@@ -38,6 +38,8 @@ describe("GET /api/events", () => {
     const gaps = (await (await app.request("/api/events?type=sync.gap&accountId=acc_1")).json()) as Page<MailEvent>;
     expect(gaps.items).toHaveLength(2);
     expect((await app.request("/api/events?type=bogus")).status).toBe(400);
+    expect((await app.request("/api/events?cursor=abc")).status).toBe(400);
+    expect((await app.request("/api/events?cursor=-5")).status).toBe(400);
   });
 });
 
@@ -49,6 +51,7 @@ describe("GET /api/audit", () => {
     const page = (await (await app.request("/api/audit?outcome=denied&accountId=acc_1")).json()) as Page<{ action: string }>;
     expect(page.items.map((e) => e.action)).toEqual(["y"]);
     expect((await app.request("/api/audit?outcome=nope")).status).toBe(400);
+    expect((await app.request("/api/audit?cursor=1;DROP")).status).toBe(400);
   });
 });
 
@@ -100,5 +103,15 @@ describe("GET /api/events/stream", () => {
     await reader.cancel();
     for (let i = 0; i < 50 && ctx.bus.listenerCount("event") > before; i++) await new Promise((r) => setTimeout(r, 10));
     for (const ch of ["event", "delivery", "approval", "audit", "account"] as const) expect(ctx.bus.listenerCount(ch)).toBe(ch === "event" ? before : 0);
+  });
+
+  it("drops a stalled client instead of buffering without bound", async () => {
+    const { ctx, app } = setup(60_000, 5);
+    const res = await app.request("/api/events/stream");
+    // Never read the body: writes back up until the cap trips.
+    for (let i = 0; i < 20; i++) ctx.audit.record({ actorType: "admin", action: `a${i}`, outcome: "ok" });
+    for (let i = 0; i < 50 && ctx.bus.listenerCount("audit") > 0; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(ctx.bus.listenerCount("audit")).toBe(0);
+    await res.body!.cancel().catch(() => {});
   });
 });

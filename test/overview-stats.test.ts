@@ -54,6 +54,7 @@ describe("overview", () => {
     delivery("d3", "dead", ago(HOUR));
     delivery("d4", "succeeded", ago(30 * HOUR));
     delivery("d5", "pending", ago(HOUR), 0);
+    db.run("INSERT INTO deliveries (id, webhook_id, event_seq, status, attempts, created_at, updated_at) VALUES ('t1', 'w', -1, 'succeeded', 1, ?, ?)", ago(HOUR), ago(HOUR)); // test delivery
 
     const approval = (id: string, status: string, expiresAt: string) =>
       db.run("INSERT INTO approvals (id, agent_id, account_id, kind, status, draft_id, payload, created_at, expires_at) VALUES (?, 'g1', 'a1', 'send', ?, 'd', '{}', ?, ?)", id, status, ago(0), expiresAt);

@@ -50,6 +50,8 @@ for (const [net, prefix] of [
   ["::", 128], // unspecified
   ["::1", 128],
   ["100::", 64], // discard
+  ["64:ff9b:1::", 48], // local-use NAT64: the embedded IPv4 position depends on the operator's prefix
+  ["2001::", 32], // Teredo tunnels to arbitrary IPv4 hosts
   ["fc00::", 7], // unique-local, incl. fd00:ec2::254
   ["fe80::", 10], // link-local
   ["fec0::", 10], // deprecated site-local
@@ -58,12 +60,17 @@ for (const [net, prefix] of [
   BLOCKED.addSubnet(net, prefix, "ipv6");
 }
 
+const LOOPBACK = new BlockList();
+LOOPBACK.addSubnet("127.0.0.0", 8, "ipv4");
+LOOPBACK.addAddress("::1", "ipv6");
+
 /** Cloud metadata endpoints: only an exact-IP allowlist entry unlocks these, never a CIDR or hostname. */
 const METADATA = new Set(["169.254.169.254", "fd00:ec2::254", "169.254.170.2", "100.100.100.200"]);
 
 /**
- * Canonical form for comparisons. IPv6 addresses that embed an IPv4 address (IPv4-mapped
- * "::ffff:10.0.0.1" / "::ffff:a00:1", IPv4-compatible, NAT64 64:ff9b::/96) become that IPv4 address.
+ * Canonical form for comparisons. IPv6 addresses that embed an IPv4 address become that IPv4
+ * address: IPv4-mapped ("::ffff:10.0.0.1", "::ffff:a00:1"), SIIT ::ffff:0:0:0/96, IPv4-compatible,
+ * NAT64 64:ff9b::/96 and 6to4 2002::/16. (Teredo and local-use NAT64 are blocked as whole ranges.)
  */
 export function normalizeIp(ip: string): string {
   const bare = ip.replace(/^\[|\]$/g, "").replace(/%.*$/, "").toLowerCase();
@@ -72,8 +79,11 @@ export function normalizeIp(ip: string): string {
   const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
   const mapped = zero(0, 5) && g[5] === 0xffff;
   const compatible = zero(0, 6) && (g[6]! > 0 || g[7]! > 1); // not "::" or "::1"
+  const siit = zero(0, 4) && g[4] === 0xffff && g[5] === 0;
   const nat64 = g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6);
-  if (mapped || compatible || nat64) return `${g[6]! >> 8}.${g[6]! & 255}.${g[7]! >> 8}.${g[7]! & 255}`;
+  const v4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  if (mapped || siit || compatible || nat64) return v4(g[6]!, g[7]!);
+  if (g[0] === 0x2002) return v4(g[1]!, g[2]!);
   return new URL(`http://[${bare}]/`).hostname.slice(1, -1);
 }
 
@@ -131,7 +141,9 @@ function compileAllowlist(entries: readonly string[]): Allowlist {
   return out;
 }
 
+/** Hostname entries match names only: an IP literal is never matched as text (e.g. by "*.0.0.1"). */
 function hostAllowed(host: string, list: Allowlist): boolean {
+  if (isIP(host)) return false;
   const h = host.toLowerCase().replace(/\.$/, "");
   return list.hosts.some((entry) => (entry.startsWith("*.") ? h.endsWith(entry.slice(1)) : h === entry));
 }
@@ -174,6 +186,16 @@ export async function resolveTarget(url: URL, allowlist: readonly string[], look
       `${host === ip ? ip : `${host} resolves to ${ip}, which`} is a private, loopback or reserved address`,
       `To allow it, add "${host}" or a matching CIDR to the webhook allowlist in Settings.`,
     );
+  }
+  // Plain http only where cleartext stays local or was explicitly allowed: mail content travels in it.
+  if (url.protocol === "http:" && !hostListed) {
+    const local = answers.every((a) => {
+      const ip = normalizeIp(a.address);
+      return LOOPBACK.check(ip, family(ip)) || ipAllowed(ip, list);
+    });
+    if (!local) {
+      throw new SsrfError("blocked", "Webhook URLs must use https", "Plain http is only allowed for loopback addresses and hosts on the webhook allowlist in Settings.");
+    }
   }
   const first = answers[0]!;
   return { address: first.address, family: first.family === 6 ? 6 : 4 };
