@@ -129,6 +129,15 @@ export function rejectedBeforeProcessing(err: GoogleApiError): boolean {
   return err.status === 403 && (err.details.reasons ?? []).some((r) => RATE_REASONS.has(r));
 }
 
+/**
+ * Reason added to errors of writes whose outcome is unknown: Google may have applied them (a 5xx, timeout or
+ * reset on a non-idempotent call, or a retried If-Match write whose precondition then failed). Re-read before
+ * retrying. See isOutcomeUnknown.
+ */
+export const OUTCOME_UNKNOWN = "outcome_unknown";
+
+export const isOutcomeUnknown = (err: unknown): boolean => err instanceof GoogleApiError && hasReason(err, OUTCOME_UNKNOWN);
+
 export function hasReason(err: GoogleApiError, ...reasons: string[]): boolean {
   const all = [err.reason, err.details.status, ...(err.details.reasons ?? [])];
   return reasons.some((r) => all.includes(r));

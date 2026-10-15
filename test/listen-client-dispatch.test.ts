@@ -98,9 +98,14 @@ describe("local filter", () => {
     expect(r.next.exec).toBe(r.config.exec);
     expect(r.next.forward).toBeUndefined();
     expect(resolveListen("default", profile, { recipe: "Claude" }).config.exec).toBe(recipe("claude-code").exec);
-    expect(resolveListen("default", profile, { recipe: "hermes", forward: "http://localhost:9/y" }).config).toMatchObject({ exec: recipe("hermes").exec, forward: { url: "http://localhost:9/y" } });
+    expect(resolveListen("default", profile, { recipe: "hermes-oneshot", forward: "http://localhost:9/y" }).config).toMatchObject({ exec: recipe("hermes-oneshot").exec, forward: { url: "http://localhost:9/y" } });
+    // hermes is the gateway forward: the profile's secret signs it, and it replaces a saved exec.
+    const h = resolveListen("work", profile, { recipe: "hermes", save: true });
+    expect(h.config).toMatchObject({ exec: null, forward: { url: "http://127.0.0.1:8644/webhooks/agentinbox-work", secret: "whsec_x" } });
+    expect(h.next.forward?.url).toBe("http://127.0.0.1:8644/webhooks/agentinbox-work");
+    expect(() => resolveListen("default", profile, { recipe: "hermes", forward: "http://localhost:9/y" })).toThrow(/already forwards/);
     expect(() => resolveListen("default", profile, { recipe: "codex", exec: "x" })).toThrow(/--recipe and --exec can't be combined/);
-    expect(() => resolveListen("default", profile, { recipe: "vim" })).toThrow(/Unknown --recipe "vim"\. Built-in recipes: claude-code, codex, cursor, hermes\./);
+    expect(() => resolveListen("default", profile, { recipe: "vim" })).toThrow(/Unknown --recipe "vim"\. Built-in recipes: claude-code, codex, cursor, hermes, hermes-oneshot\./);
     expect(() => resolveListen("default", profile, { recipe: "other" })).toThrow(/"other" has no built-in recipe/);
   });
 
@@ -118,8 +123,8 @@ describe("local filter", () => {
     const all = resolveListen("default", profile, { types: "all" }).config;
     expect(all.types).toContain("message.sent");
     expect(all.types).toContain("sync.gap");
-    expect(describeFilter(all)).toBe("all event types");
-    expect(describeFilter(resolveListen("default", profile, {}).config)).toBe("types message.received");
+    expect(describeFilter(all)).toBe("all event types · skipping Gmail promotions, social, forums");
+    expect(describeFilter(resolveListen("default", profile, {}).config)).toBe("types message.received · skipping Gmail promotions, social, forums");
     expect(() => resolveListen("default", profile, { types: "" })).toThrow(/at least one event type/);
     expect(() => resolveListen("default", profile, { types: "all,message.sent" })).toThrow(/can't be combined/);
   });

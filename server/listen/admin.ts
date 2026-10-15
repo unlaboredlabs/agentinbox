@@ -5,7 +5,9 @@ import { Dispatcher, type Job, type Target } from "./dispatcher.ts";
 import { runCommand } from "./exec.ts";
 import { ensurePrivateDir } from "./fsutil.ts";
 import { forwardEvent } from "./forward.ts";
-import { type ListenFlags, resolveListen } from "./options.ts";
+import { describeFilter, type ListenFlags, MAX_BATCH, resolveListen } from "./options.ts";
+import { outputLine } from "./listen.ts";
+import { isHermesRoute } from "./recipes.ts";
 import { DEFAULT_PROFILE, deadPath, logPath, profilePath, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
 import { DEFAULT_LISTEN_TYPES, forwardSecret } from "./options.ts";
@@ -65,6 +67,17 @@ export async function printStatus(profileName: string): Promise<void> {
         : `${DEFAULT_LISTEN_TYPES.join(", ")} ${pc.gray("(default types; add --types all --save for every event)")}`
     }`,
   );
+  // The running listener's filters (flags included), else the profile's.
+  let saved: ReturnType<typeof resolveListen>["config"] | null = null;
+  try {
+    saved = resolveListen(name, profile, {}).config;
+  } catch {
+    // An invalid saved setting: `listen` itself reports it.
+  }
+  out(`${pc.bold("Filters")}   ${(alive && st?.filters) || (saved ? describeFilter(saved) : "?")}`);
+  const batchSeconds = alive && st && st.batchSeconds !== undefined ? st.batchSeconds : (saved?.batchSeconds ?? 0);
+  if (batchSeconds) out(`${pc.bold("Batch")}     ${formatDuration(batchSeconds * 1000)} window, up to ${MAX_BATCH} events per --exec run`);
+  out(`${pc.bold("Output")}    ${outputLine(name, { exec: exec ?? null, forward: forward ? { url: forward } : null }, logPath(name))}`);
 
   let svc = "not installed";
   if (process.platform === "linux" || process.platform === "darwin") {
@@ -97,7 +110,9 @@ export async function printStatus(profileName: string): Promise<void> {
         ? pc.green(`running (pid ${st.pid}), connected ${ago(st.connectedSince)}`)
         : pc.yellow(`running (pid ${st.pid}), disconnected${st.lastDisconnect ? ` ${ago(st.lastDisconnect.at)}: ${safeText(st.lastDisconnect.reason, 160)}` : ""}`);
     out(`${pc.bold("Listener")}  ${state}`);
-    out(`${pc.bold("Cursor")}    acked #${st.ackedSeq} · received #${st.receivedSeq}${alive && st.running ? ` · ${st.running} in progress` : ""} · last event ${ago(st.lastEventAt)}`);
+    out(
+      `${pc.bold("Cursor")}    acked #${st.ackedSeq} · received #${st.receivedSeq}${alive && st.running ? ` · ${st.running} in progress` : ""}${st.skipped ? ` · ${st.skipped} skipped by filters` : ""} · last event ${ago(st.lastEventAt)}`,
+    );
     if (st.recent.length) {
       out(pc.bold("Recent"));
       for (const r of st.recent.slice(0, 8)) {
@@ -180,7 +195,7 @@ export async function replayDead(flags: ListenFlags & { id?: string }, opts: { r
         else errors.push(`command: ${r.error}`);
       }
       if (job.remaining.has("forward") && config.forward) {
-        const r = await forwardEvent(config.forward.url, config.forward.secret, job.payload, { timeoutMs: Math.min(timeoutMs, 30_000), signal });
+        const r = await forwardEvent(config.forward.url, config.forward.secret, job.payload, { timeoutMs: Math.min(timeoutMs, 30_000), signal, wrap: isHermesRoute(config.forward.url) });
         if (r.ok) job.remaining.delete("forward");
         else errors.push(`forward: ${r.error}`);
       }

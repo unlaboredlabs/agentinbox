@@ -4,7 +4,7 @@ import { sha256 } from "../crypto.ts";
 import { bool, json, now } from "../db/index.ts";
 import { AccountNeedsReauthError, type GmailMessage, type GmailPart, GoogleApiError } from "../google/types.ts";
 import { disallowedRecipients } from "../policy/enforce.ts";
-import { conflict, errorMessage, notFound } from "../util/errors.ts";
+import { conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { newId } from "../util/ids.ts";
 
 export interface ApprovalPayload {
@@ -91,10 +91,14 @@ export function draftFingerprint(msg: GmailMessage): string {
 
 const NETWORK_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"]);
 
-/** Worth retrying: rate limits, Google outages, connection failures, or an account waiting to be reconnected. */
+/**
+ * Worth retrying: rate limits, Google outages, timeouts and connection failures (GoogleApiError status 0),
+ * or an account waiting to be reconnected.
+ */
 function isTransient(err: unknown): boolean {
   if (err instanceof AccountNeedsReauthError) return true;
-  if (err instanceof GoogleApiError) return err.status === 429 || err.status >= 500;
+  if (err instanceof HttpError) return err.code === "needs_reauth";
+  if (err instanceof GoogleApiError) return err.status === 0 || err.status === 429 || err.status >= 500;
   // fetch() network failures: TypeError("fetch failed") with a system error code as the cause.
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
   return err instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
@@ -149,6 +153,9 @@ export class Approvals {
     const blocked = this.sendBlockedReason(current);
     if (blocked) {
       this.cancel([current.id], `${CANCELLED_PREFIX}${blocked}`);
+      if (isCalendarApprovalKind(current.kind)) {
+        throw conflict(`This change can no longer be applied: ${blocked}.`, "It was cancelled; nothing was changed in Google Calendar.");
+      }
       throw conflict(`This request can no longer be sent: ${blocked}.`, "It was cancelled and its draft deleted.");
     }
 
@@ -196,7 +203,8 @@ export class Approvals {
     try {
       const { eventId } = await this.ctx.calendar.applyApproval(current);
       this.ctx.db.run("UPDATE approvals SET status = 'sent', sent_message_id = ?, error = NULL WHERE id = ?", eventId, id);
-      this.audit("approval.approve", current, "ok", started, { eventId });
+      const notified = current.calendar?.notified?.length ?? 0;
+      this.audit("approval.approve", current, "ok", started, { calendarId: current.calendar?.calendarId ?? null, eventId, emailed: notified > 0, notified });
     } catch (err) {
       const message = errorMessage(err);
       if (isTransient(err)) {
@@ -249,14 +257,16 @@ export class Approvals {
   /** Approvals stuck in "approved" (the process died between claiming and sending) go back to pending. */
   recoverInterrupted(olderThanMs = STUCK_AFTER_MS): number {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-    const rows = this.ctx.db.all<{ id: string }>(
-      "SELECT id FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? ORDER BY rowid",
+    const rows = this.ctx.db.all<{ id: string; kind: string }>(
+      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? ORDER BY rowid",
       cutoff,
     );
-    for (const { id } of rows) {
+    for (const { id, kind } of rows) {
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
-        "Sending was interrupted before it finished. Approve again to retry (if it was actually sent, the retry fails harmlessly).",
+        isCalendarApprovalKind(kind)
+          ? "Applying the change was interrupted before it finished. Approve again to retry: agentinbox checks Google Calendar first, so it is never applied twice."
+          : "Sending was interrupted before it finished. Approve again to retry (if it was actually sent, the retry fails harmlessly).",
         id,
       );
       this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: id, outcome: "ok" });
@@ -291,12 +301,12 @@ export class Approvals {
     return drafts.length;
   }
 
-  /** Why this send is no longer allowed under the agent's current grant, or null. */
+  /** Why this send (or calendar change) is no longer allowed under the agent's current grant, or null. */
   private sendBlockedReason(a: Approval): string | null {
-    if (isCalendarApprovalKind(a.kind)) return this.ctx.calendar.approvalBlockedReason(a);
     const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", a.agentId);
     if (!agent) return "the agent was deleted";
     if (bool(agent.disabled)) return "the agent is disabled";
+    if (isCalendarApprovalKind(a.kind)) return this.ctx.calendar.approvalBlockedReason(a);
     const grant = this.ctx.policy.grant(a.agentId, a.accountId);
     if (!grant || !grant.capabilities.includes("send")) return "the agent is no longer allowed to send from this account";
     if (grant.replyOnly && a.kind !== "reply") return "the agent may now only send replies from this account";

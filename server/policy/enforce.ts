@@ -1,5 +1,5 @@
 // Action-side guardrails as pure functions over a Grant: label scope, query rewriting, recipient
-// allowlists and send caps. Callers (server/mail/agent.ts) throw these as PolicyDenied.
+// allowlists and send caps. Callers (server/mail/agent.ts, server/calendar/agent.ts) throw these as PolicyDenied.
 
 import type { Capability, GmailLabel, Grant } from "../../shared/types.ts";
 import type { Db } from "../db/index.ts";
@@ -8,6 +8,8 @@ import { PolicyDenied } from "../util/errors.ts";
 
 /** MCP tools that send mail. Successful calls (sent, draft created, approval queued) count toward send caps. */
 export const SEND_ACTIONS = ["send_message", "reply", "forward"] as const;
+/** MCP calendar tools that may email people; their successful calls with detail.emailed count toward send caps. */
+export const CALENDAR_WRITE_ACTIONS = ["create_calendar_event", "update_calendar_event", "delete_calendar_event", "respond_to_invitation"] as const;
 
 export const CAPABILITY_HELP: Record<Capability, string> = {
   read: "read and search mail",
@@ -126,19 +128,23 @@ export function assertRecipientsAllowed(grant: Grant, emails: string[], hint?: s
 }
 
 /**
- * Send/reply/forward calls by this agent on this account since `sinceIso` (from the audit log): successful
- * ones, plus failures that may still have sent (detail.maybeSent).
+ * Sends by this agent on this account since `sinceIso` (from the audit log): send/reply/forward calls, and
+ * calendar writes that emailed someone or put the event on new attendees' calendars (detail.emailed,
+ * detail.invited; docs/calendar.md "Send caps"). Successful ones, plus failures that may still have gone
+ * out (detail.maybeSent).
  */
 export function sendsSince(db: Db, agentId: string, accountId: string, sinceIso: string): number {
-  const placeholders = SEND_ACTIONS.map(() => "?").join(", ");
+  const list = (xs: readonly string[]) => xs.map(() => "?").join(", ");
   const row = db.get<{ n: number }>(
     `SELECT COUNT(*) AS n FROM audit_log
-     WHERE actor_type = 'agent' AND actor_id = ? AND ts >= ? AND account_id = ? AND action IN (${placeholders})
+     WHERE actor_type = 'agent' AND actor_id = ? AND ts >= ? AND account_id = ?
+       AND (action IN (${list(SEND_ACTIONS)}) OR (action IN (${list(CALENDAR_WRITE_ACTIONS)}) AND (json_extract(detail, '$.emailed') = 1 OR json_extract(detail, '$.invited') > 0)))
        AND (outcome = 'ok' OR (outcome = 'error' AND json_extract(detail, '$.maybeSent') = 1))`,
     agentId,
     sinceIso,
     accountId,
     ...SEND_ACTIONS,
+    ...CALENDAR_WRITE_ACTIONS,
   );
   return row?.n ?? 0;
 }
@@ -149,9 +155,9 @@ const inFlightByDb = new WeakMap<Db, Map<string, number>>();
 /**
  * Checks the grant's send caps and reserves a slot, synchronously, so concurrent calls can't all pass the
  * check before any of them is recorded. Call the returned release once the outcome is in the audit log
- * (or the send failed). Caps count messages, not recipients.
+ * (or the send failed). Caps count messages, not recipients. `hint` replaces the default way out.
  */
-export function reserveSend(db: Db, grant: Grant, at = Date.now()): () => void {
+export function reserveSend(db: Db, grant: Grant, at = Date.now(), hint?: string): () => void {
   let inFlight = inFlightByDb.get(db);
   if (!inFlight) inFlightByDb.set(db, (inFlight = new Map()));
   const counts = inFlight;
@@ -168,7 +174,7 @@ export function reserveSend(db: Db, grant: Grant, at = Date.now()): () => void {
       throw new PolicyDenied(
         "rate_limit",
         `Send limit reached: ${used} of ${w.cap} sends in the last ${w.label} for this account. ` +
-          "Try again later, or save it as a draft (create_draft, if available) for a human to send.",
+          (hint ?? "Try again later, or save it as a draft (create_draft, if available) for a human to send."),
       );
     }
   }

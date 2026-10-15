@@ -105,6 +105,11 @@ export interface ListenStatus {
   /** What the (last) run executed, flags included. */
   exec?: string | null;
   forward?: string | null;
+  /** The (last) run's filters in words, and its --batch window. */
+  filters?: string;
+  batchSeconds?: number;
+  /** Events the filters skipped this run (acknowledged without running anything). */
+  skipped?: number;
 }
 
 export function readStatus(profile: string): ListenStatus | null {

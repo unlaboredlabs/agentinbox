@@ -19,6 +19,12 @@ export interface Profile extends ListenerConfig {
   forwardSecret?: string;
   /** Working directory for --exec commands (default: a private dir in the state dir). */
   cwd?: string;
+  /** Senders / labels to skip (listener-side; `--not-from`, `--not-label`). */
+  exclude?: { from?: string[]; labelIds?: string[] };
+  /** Gmail category labels to skip; absent = the default (promotions, social, forums), [] = none. */
+  skipCategories?: string[];
+  /** `--batch`: seconds to collect events into one --exec run. */
+  batchSeconds?: number;
   createdAt?: string;
 }
 
@@ -45,6 +51,9 @@ const profileSchema = z
     skillUrl: z.string().optional(),
     forwardSecret: z.string().startsWith("whsec_").optional(),
     cwd: z.string().startsWith("/").optional(),
+    exclude: webhookFilterSchema.pick({ from: true, labelIds: true }).optional(),
+    skipCategories: z.array(z.string().regex(/^CATEGORY_[A-Z]+$/)).max(10).optional(),
+    batchSeconds: z.number().int().min(1).max(3600).optional(),
     createdAt: z.string().optional(),
   })
   .loose();

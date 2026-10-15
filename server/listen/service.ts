@@ -10,6 +10,7 @@ import {
   readText,
   removeOwnInstall,
   sdQuote,
+  serviceMainPid,
   type ServiceOps,
   stagePackage,
   swapIn,
@@ -21,7 +22,10 @@ import { ensurePrivateDir } from "./fsutil.ts";
 import { EXIT } from "./listen.ts";
 import { acquireFileLock } from "./lock.ts";
 import { type ListenFlags, resolveListen } from "./options.ts";
+import { serviceNode, type ServiceNodeChoice } from "./mcpheader.ts";
 import { DEFAULT_PROFILE, dataDir, listenAppDir, logPath, profilePath, profileStateDir, validProfileName } from "./paths.ts";
+import { gatewayWarning } from "./hermes.ts";
+import { hermesChangeNote, isHermesRoute, RECIPE_NAMES } from "./recipes.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
 import { pidAlive, readStatus } from "./state.ts";
 import { checkTransport } from "./transport.ts";
@@ -42,27 +46,28 @@ export const launchdLabel = (profile: string) => `com.unlaboredlabs.agentinbox.l
  * PATH for the service: this shell's PATH (so `claude`, `codex`… resolve as they do here) minus
  * transient entries npx, npm scripts and version-manager shells add, plus node's own directory.
  */
-export function servicePath(raw = process.env.PATH ?? ""): string {
+export function servicePath(raw = process.env.PATH ?? "", node = process.execPath): string {
   const transient = /\/_npx\/|node_modules\/\.bin|node-gyp-bin|fnm_multishells|\/\.pnpm\//;
-  const dirs = [dirname(process.execPath), ...raw.split(delimiter)].filter((d) => d && d.startsWith("/") && !transient.test(d));
+  // This shell's node first (global npm tools such as `claude` live next to it), then the service's own.
+  const dirs = [dirname(process.execPath), dirname(node), ...raw.split(delimiter)].filter((d) => d && d.startsWith("/") && !transient.test(d));
   if (!dirs.includes("/usr/bin")) dirs.push("/usr/local/bin", "/usr/bin", "/bin");
   return [...new Set(dirs)].join(delimiter);
 }
 
 /** Environment the service needs to behave like the shell `service install` ran in. Never contains the key. */
-export function serviceEnvironment(): Record<string, string> {
+export function serviceEnvironment(node = process.execPath): Record<string, string> {
   const env: Record<string, string> = { AGENTINBOX_SERVICE: "1" };
   // PATH matters most: `claude`, `codex`, `hermes`… usually live in ~/.local/bin, nvm or Homebrew dirs
   // that a service manager's minimal PATH doesn't include.
-  env.PATH = servicePath();
+  env.PATH = servicePath(undefined, node);
   for (const key of ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "LANG", "AGENTINBOX_DEBUG"]) {
     if (process.env[key]) env[key] = process.env[key]!;
   }
   return env;
 }
 
-export function systemdListenUnit(profile: string, entry: string, cwd: string, system = false): string {
-  const vars = Object.entries(serviceEnvironment())
+export function systemdListenUnit(profile: string, entry: string, cwd: string, system = false, node = process.execPath): string {
+  const vars = Object.entries(serviceEnvironment(node))
     .map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`)
     .join("\n");
   return `[Unit]
@@ -70,7 +75,7 @@ Description=agentinbox listener (profile ${profile})${system ? "\nAfter=network-
 StartLimitIntervalSec=0
 
 [Service]
-ExecStart=${sdQuote(process.execPath)} ${sdQuote(entry)} listen --profile ${profile}
+ExecStart=${sdQuote(node)} ${sdQuote(entry)} listen --profile ${profile}
 WorkingDirectory=${cwd.replace(/%/g, "%%")}
 ${vars}
 Restart=on-failure
@@ -86,9 +91,9 @@ WantedBy=${system ? "multi-user.target" : "default.target"}
 `;
 }
 
-export function launchdListenPlist(profile: string, entry: string, cwd: string): string {
+export function launchdListenPlist(profile: string, entry: string, cwd: string, node = process.execPath): string {
   const esc = xmlEscape;
-  const vars = Object.entries(serviceEnvironment())
+  const vars = Object.entries(serviceEnvironment(node))
     .map(([k, v]) => `    <key>${esc(k)}</key><string>${esc(v)}</string>`)
     .join("\n");
   // The listener logs to the rotated listen.log and stays quiet on the console under launchd; only
@@ -101,7 +106,7 @@ export function launchdListenPlist(profile: string, entry: string, cwd: string):
   <key>Label</key><string>${esc(launchdLabel(profile))}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${esc(process.execPath)}</string>
+    <string>${esc(node)}</string>
     <string>${esc(entry)}</string>
     <string>listen</string>
     <string>--profile</string>
@@ -150,34 +155,102 @@ function listenerHints(ops: ServiceOps, profile: string): string[] {
   return [`systemctl${scope} status ${unitName(profile)}`, `journalctl${scope} -u ${unitName(profile)} -e`, `the log ${logPath(profile)}`];
 }
 
-/** Resolves true once a listener started after `since` is running for the profile (it writes status.json on start). */
-export async function waitListenerStarted(profile: string, since: number, timeoutMs = 20_000): Promise<boolean> {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The pid of a listener started after `since` for the profile (it writes status.json on start), once it
+ * has stayed up for a moment; null if none did within the timeout, or it stopped again.
+ */
+export async function waitListenerStarted(profile: string, since: number, timeoutMs = 20_000): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const st = readStatus(profile);
     if (st && Date.parse(st.startedAt) >= since - 1000) {
-      if (st.stoppedAt) return false;
-      if (pidAlive(st.pid)) return true;
+      if (st.stoppedAt) return null;
+      if (pidAlive(st.pid)) {
+        // A listener that exits at once (bad settings, revoked key) must not count as started.
+        await sleep(1000);
+        const again = readStatus(profile);
+        return again?.pid === st.pid && !again.stoppedAt && pidAlive(st.pid) ? st.pid : null;
+      }
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await sleep(250);
   }
-  return false;
+  return null;
 }
 
-function startUnit(ops: ServiceOps, profile: string, file: string): void {
+/** First line of a failed command's stderr (what launchctl / systemctl said), else of the error. */
+const why = (err: unknown) => {
+  const stderr = String((err as { stderr?: unknown })?.stderr ?? "").trim();
+  return (stderr || (err instanceof Error ? err.message : String(err))).split("\n")[0]!;
+};
+
+const launchdJob = (ops: ServiceOps, profile: string) => `${launchdTarget(ops)}/${launchdLabel(profile)}`;
+
+/** Whether launchd has a job with this profile's label loaded (`launchctl print` fails when it hasn't). */
+function launchdLoaded(ops: ServiceOps, profile: string): boolean {
+  try {
+    ops.capture("launchctl", ["print", launchdJob(ops, profile)]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** What the service manager says about the profile's listener: running (with its pid), or why not. */
+export function managerState(ops: ServiceOps, profile: string): { running: boolean; pid: number | null; detail: string } {
+  const pid = serviceMainPid(ops, { launchd: launchdLabel(profile), systemd: unitName(profile) });
+  if (ops.platform === "darwin") {
+    let text: string;
+    try {
+      text = ops.capture("launchctl", ["print", launchdJob(ops, profile)]);
+    } catch (err) {
+      return { running: false, pid: null, detail: `launchctl print: ${why(err)}` };
+    }
+    const state = /^\s*state = (\S+)/m.exec(text)?.[1] ?? "unknown";
+    return { running: state === "running" && pid !== null, pid, detail: `launchd state ${state}${pid ? `, pid ${pid}` : ""}` };
+  }
+  let active: string;
+  try {
+    active = ops.capture("systemctl", [...(ops.root ? [] : ["--user"]), "is-active", unitName(profile)]).trim();
+  } catch (err) {
+    active = String((err as { stdout?: unknown })?.stdout ?? "").trim() || why(err);
+  }
+  return { running: active === "active" && pid !== null, pid, detail: `systemd ${active || "unknown"}${pid ? `, MainPID ${pid}` : ""}` };
+}
+
+/**
+ * (Re)starts the profile's unit with the file just written. launchd: a job with the same label still
+ * loaded (or still being torn down after `bootout`, which returns early) makes `bootstrap` fail with
+ * "5: Input/output error", so wait until it is really gone before each bootstrap attempt.
+ */
+async function startUnit(ops: ServiceOps, profile: string, file: string, pollMs = 250): Promise<void> {
   if (ops.platform === "linux") {
     systemctl(ops, "daemon-reload");
     systemctl(ops, "enable", unitName(profile));
     // restart, not start: a re-install must pick up the new install and settings.
     systemctl(ops, "restart", unitName(profile));
-  } else {
+    return;
+  }
+  let last: unknown = null;
+  for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      ops.exec("launchctl", ["bootout", `${launchdTarget(ops)}/${launchdLabel(profile)}`], { quiet: true });
+      ops.exec("launchctl", ["bootout", launchdJob(ops, profile)], { quiet: true });
     } catch {
       // Not loaded.
     }
-    ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
+    const deadline = Date.now() + 10_000;
+    while (launchdLoaded(ops, profile) && Date.now() < deadline) await sleep(pollMs);
+    try {
+      ops.capture("launchctl", ["bootstrap", launchdTarget(ops), file]);
+      return;
+    } catch (err) {
+      last = err;
+      await sleep(pollMs * 4);
+    }
   }
+  const stillLoaded = launchdLoaded(ops, profile);
+  throw new Error(`launchctl bootstrap failed: ${why(last)}${stillLoaded ? ` (a job labelled ${launchdLabel(profile)} is still loaded and wouldn't unload)` : ""}`);
 }
 
 /** Stages the listeners' install (no web console needed). */
@@ -187,8 +260,14 @@ export interface ListenServiceDeps {
   ops?: ServiceOps;
   /** Installs the package into the given staging dir (tests). */
   stage?: (staging: string) => string;
-  /** Readiness check after (re)starting the unit (tests). */
-  waitStarted?: (profile: string, since: number) => Promise<boolean>;
+  /** Readiness check after (re)starting the unit: the new listener's pid (tests). */
+  waitStarted?: (profile: string, since: number) => Promise<number | null>;
+  /** The node the unit runs (tests). */
+  node?: ServiceNodeChoice;
+  /** launchd polling interval (tests). */
+  pollMs?: number;
+  /** Probes the Hermes gateway (tests). */
+  gatewayCheck?: (url: string) => Promise<string | null>;
 }
 
 export async function installListenService(flags: ListenFlags, deps: ListenServiceDeps = {}): Promise<void> {
@@ -199,7 +278,7 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   // Service settings live in the profile: save whatever was passed with this command.
   const { config, next } = resolveListen(profileName, profile, { ...flags, save: true });
   if (!config.exec && !config.forward) {
-    throw new Error(`Nothing for the service to run. Pass --recipe <tool> (claude-code, codex, cursor, hermes), --exec "<command>" and/or --forward <url> (they are saved to profile "${profileName}").`);
+    throw new Error(`Nothing for the service to run. Pass --recipe <name> (${RECIPE_NAMES.join(", ")}), --exec "<command>" and/or --forward <url> (they are saved to profile "${profileName}").`);
   }
   await checkTransport(next.url, { insecure: config.insecure });
   preflight(ops);
@@ -210,6 +289,8 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   }
 
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
+  const node = deps.node ?? serviceNode();
+  let runningPid = 0;
   // Commands run in config.cwd (a private dir unless --cwd was given); the unit uses it too.
   const cwd = config.cwd;
   mkdirSync(profileStateDir(profileName), { recursive: true, mode: 0o700 });
@@ -241,43 +322,51 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
     try {
       swap = swapIn(staging, app);
       mkdirSync(ops.unitDir(), { recursive: true });
-      if (ops.platform === "linux") writeFileSync(file, systemdListenUnit(profileName, entry, cwd, ops.root));
-      else writeFileSync(file, launchdListenPlist(profileName, entry, cwd), { mode: 0o600 });
-      // Right after a bootout, launchd can still be tearing the old job down: retry briefly.
-      for (let attempt = 1; ; attempt++) {
-        try {
-          startUnit(ops, profileName, file);
-          break;
-        } catch (err) {
-          if (ops.platform !== "darwin" || attempt >= 5) throw err;
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-      }
-      if (!(await (deps.waitStarted ?? waitListenerStarted)(profileName, since))) throw new Error("the listener did not start");
+      if (ops.platform === "linux") writeFileSync(file, systemdListenUnit(profileName, entry, cwd, ops.root, node.path));
+      else writeFileSync(file, launchdListenPlist(profileName, entry, cwd, node.path), { mode: 0o600 });
+      await startUnit(ops, profileName, file, deps.pollMs);
+      const pid = await (deps.waitStarted ?? waitListenerStarted)(profileName, since);
+      if (!pid) throw new Error("the listener did not start");
+      // Only a listener the service manager itself runs counts: not an older job still loaded, nor a
+      // foreground one (the profile lock keeps those apart, so a pid match means it is ours).
+      const svc = managerState(ops, profileName);
+      if (!svc.running) throw new Error(`the service manager doesn't report it running (${svc.detail})`);
+      if (svc.pid !== pid) throw new Error(`the listener that started (pid ${pid}) isn't the service's process (${svc.detail})`);
+      runningPid = pid;
     } catch (err) {
-      const quietly = (fn: () => void) => {
+      // Best effort, but reported as it went: never claim a rollback that didn't happen.
+      const failed: string[] = [];
+      const step = (what: string, fn: () => void) => {
         try {
           fn();
-        } catch {
-          // Best effort: report the original failure.
+        } catch (e) {
+          failed.push(`${what}: ${why(e)}`);
         }
       };
-      if (swap) quietly(() => swap!.restore());
+      if (swap) step("restoring the previous install", () => swap!.restore());
       // The settings this install saved go back too, so the restored listener runs as before.
-      quietly(() => saveProfile(profileName, profile));
-      quietly(() => rmSync(staging, { recursive: true, force: true }));
+      step("restoring the profile's settings", () => saveProfile(profileName, profile));
+      step("removing the staged install", () => rmSync(staging, { recursive: true, force: true }));
+      let outcome: string;
       if (previousUnit !== null) {
-        quietly(() => {
-          writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 });
-          startUnit(ops, profileName, file);
-        });
+        step("restoring the previous unit file", () => writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 }));
+        const restarted = await startUnit(ops, profileName, file, deps.pollMs).then(
+          () => null,
+          (e: unknown) => why(e),
+        );
+        const svc = restarted ? null : managerState(ops, profileName);
+        outcome = restarted
+          ? `Put the previous install back, but restarting it failed (${restarted}), so no listener service is running now`
+          : svc!.running
+            ? `Put the previous install back; it is running again (${svc!.detail})`
+            : `Put the previous install back and started it, but the service manager doesn't report it running (${svc!.detail})`;
       } else {
-        quietly(() => uninstallListenService(profileName, true, { ops }));
+        step("removing the new service", () => uninstallListenService(profileName, true, { ops }));
+        outcome = "Removed the new service again (no listener service is installed)";
       }
+      if (failed.length) outcome += `. These rollback steps failed too: ${failed.join("; ")}`;
       const hints = listenerHints(ops, profileName).map((h) => `    ${h}`).join("\n");
-      throw new Error(
-        `Starting the listener service failed (${(err instanceof Error ? err.message : String(err)).split("\n")[0]}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
-      );
+      throw new Error(`Starting the listener service failed (${why(err)}). ${outcome}.\n  To find out why:\n${hints}`);
     }
     swap.commit();
     enableLinger(ops);
@@ -293,12 +382,20 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   }
 
   const kind = ops.platform === "linux" ? (ops.root ? "systemd system service" : "systemd user service") : "launchd agent";
-  console.log(`\n  ${pc.green("✔")} Installed the listener for profile "${profileName}" as a ${kind} (${ops.platform === "linux" ? unitName(profileName) : launchdLabel(profileName)}).`);
+  console.log(
+    `\n  ${pc.green("✔")} Installed the listener for profile "${profileName}" as a ${kind} (${ops.platform === "linux" ? unitName(profileName) : launchdLabel(profileName)}); it is running as pid ${runningPid}.`,
+  );
   console.log(`    Runs:      ${config.exec ? `--exec ${config.exec}` : ""}${config.exec && config.forward ? "  and  " : ""}${config.forward ? `--forward ${config.forward.url}` : ""}`);
   console.log(`    Directory: ${cwd}${config.cwdIsDefault ? " (private; pass --cwd to run in a project)" : ""}`);
-  console.log(`    Node.js:   ${process.execPath} (v${process.versions.node}); if you remove or replace it, run \`${NPX} listen service install${p}\` again.`);
+  console.log(`    Node.js:   ${node.path} (v${node.version}): ${node.why}. If you remove it, run \`${NPX} listen service install${p}\` again.`);
   console.log(`    Settings:  ${profilePath(profileName)} (change them with \`${NPX} listen${p} … --save\`, then reinstall)`);
   console.log(`    Log:       ${logPath(profileName)}`);
+  const change = hermesChangeNote(flags.recipe, config.exec);
+  if (change) console.log(`    Note:      ${change}`);
+  if (config.forward && isHermesRoute(config.forward.url)) {
+    const w = await (deps.gatewayCheck ?? gatewayWarning)(config.forward.url);
+    if (w) console.log(pc.yellow(`    Warning:   ${w}`));
+  }
   console.log(`    Status:    ${NPX} listen status${p}`);
   if (ops.platform === "linux") console.log(`    Follow:    journalctl ${ops.root ? "" : "--user "}-u ${unitName(profileName)} -f`);
   console.log();
