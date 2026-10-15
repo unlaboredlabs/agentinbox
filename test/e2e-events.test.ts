@@ -3,7 +3,7 @@
 // replay and a delivery log.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { Account, Delivery, MailEvent, Page, Webhook, WebhookInput, WebhookWithSecret } from "../shared/types.ts";
+import type { Account, Delivery, MailEvent, OverviewStats, Page, Webhook, WebhookInput, WebhookWithSecret } from "../shared/types.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { type ReceivedHook, startWebhookReceiver, verifyStandardWebhook, type WebhookReceiver } from "./e2e/webhook-receiver.ts";
 import { stays, waitFor } from "./e2e/wait.ts";
@@ -228,5 +228,95 @@ describe("event delivery", () => {
     const bad = await s.admin.failure(s.admin.get("/api/events?type=nope"));
     expect(bad.status).toBe(400);
   });
-});
 
+  it("turns label changes into label events for label-filtered webhooks and thread-scoped agents", async () => {
+    const urgent = s.fake.addLabel(email, "Urgent");
+    // Whole-mailbox agent, webhook filtered on the label (message-level filter, incl. the changed labels).
+    const { webhook: filtered } = await createHook("/hooks/label-filter", { eventTypes: ["label.added", "label.removed", "message.received"], filter: { labelIds: [urgent] } });
+    // Label-scoped agent, unfiltered webhook (visibility is thread-level).
+    const scoped = await s.createAgent("urgent-only", [grant(account.id, { capabilities: ["read"], labelScope: [urgent] })]);
+    const { webhook: scopedHook } = await s.admin.post<WebhookWithSecret>("/api/webhooks", {
+      agentId: scoped.agent.id,
+      name: "urgent scope",
+      url: `${rx.url}/hooks/label-scope`,
+      eventTypes: ["label.added", "label.removed", "message.received"],
+    });
+
+    const msg = s.fake.deliver(email, { from: "boss@else.test", subject: "Label me", text: "x" });
+    await s.waitForEvent((e) => e.message?.id === msg.id);
+
+    s.fake.setLabels(email, msg.id, [urgent], []);
+    const added = await s.waitForEvent((e) => e.type === "label.added" && e.message?.id === msg.id);
+    expect(added.labelIds).toEqual([urgent]);
+    expect(added.message!.labelIds).toContain(urgent);
+
+    // A reply in the now-urgent thread has no label itself but is in scope at thread level.
+    const reply = s.fake.deliver(email, { from: "boss@else.test", subject: "Re: Label me", text: "y", threadId: msg.threadId });
+    await s.waitForEvent((e) => e.type === "message.received" && e.message?.id === reply.id);
+
+    s.fake.setLabels(email, msg.id, [], [urgent]);
+    const removed = await s.waitForEvent((e) => e.type === "label.removed" && e.message?.id === msg.id);
+    expect(removed.labelIds).toEqual([urgent]);
+    expect(removed.message!.labelIds).not.toContain(urgent);
+
+    const succeeded = async (id: string, n: number) =>
+      waitFor(async () => (await deliveries(id)).filter((d) => d.status === "succeeded").length === n, { what: `${n} deliveries` });
+    await succeeded(filtered.id, 2);
+    await succeeded(scopedHook.id, 2);
+    const seen = (path: string) => rx.at(path).map((h) => [h.json!.type, h.json!.data.message?.id]);
+    // The filter matches the label on the message, and the removed label on label.removed.
+    expect(seen("/hooks/label-filter")).toEqual([
+      ["label.added", msg.id],
+      ["label.removed", msg.id],
+    ]);
+    // Scope is thread-level: the label event and the unlabeled reply are visible. Per the canSeeEvent
+    // contract (server/policy/types.ts) the label.removed that takes the thread out of scope is not.
+    expect(seen("/hooks/label-scope")).toEqual([
+      ["label.added", msg.id],
+      ["message.received", reply.id],
+    ]);
+  });
+
+  it("delivers account.auth_failed to webhooks subscribed to it", async () => {
+    const other = mailbox("events-auth");
+    const acc = await s.connectAccount(other);
+    const watcher = await s.createAgent("auth-watcher", [grant(acc.id, { capabilities: ["read"], labelScope: ["INBOX"] })]);
+    const { webhook, secret } = await s.admin.post<WebhookWithSecret>("/api/webhooks", {
+      agentId: watcher.agent.id,
+      name: "auth",
+      url: `${rx.url}/hooks/auth`,
+      eventTypes: ["account.auth_failed"],
+      filter: { accountIds: [acc.id], from: ["*@never.test"] }, // message criteria don't apply to account events
+    });
+    s.fake.failRefresh(other);
+    s.kick(acc.id);
+    const ev = await s.waitForEvent((e) => e.type === "account.auth_failed" && e.accountId === acc.id, { kick: false });
+    const hook = await waitFor(() => rx.at("/hooks/auth")[0], { what: "auth_failed webhook" });
+    expect(verifyStandardWebhook(secret, hook).ok).toBe(true);
+    expect(hook.json).toMatchObject({ type: "account.auth_failed", data: { id: ev.id, accountId: acc.id, accountEmail: other, message: null } });
+    expect((await deliveries(webhook.id))[0]).toMatchObject({ status: "succeeded", eventId: ev.id });
+  });
+
+  it("keeps the console stream and event list behind the admin session", async () => {
+    for (const path of ["/api/events", "/api/events/stream", "/api/deliveries", "/api/webhooks"]) {
+      const res = await fetch(`${s.url}${path}`);
+      expect(res.status, path).toBe(401);
+    }
+  });
+
+  it("summarizes activity on the overview", async () => {
+    const { webhook } = await createHook("/hooks/overview");
+    await s.admin.post<Delivery>(`/api/webhooks/${webhook.id}/test`);
+    rx.status = 500;
+    await s.admin.post<Delivery>(`/api/webhooks/${webhook.id}/test`);
+    const o = await s.admin.get<OverviewStats>("/api/overview");
+    const accounts = await s.admin.get<Account[]>("/api/accounts");
+    expect(o.accounts.total).toBe(accounts.length);
+    expect(o.accounts.needsAttention).toBe(accounts.filter((a) => a.status === "needs_reauth" || a.status === "error").length);
+    expect(o.events24h).toBeGreaterThanOrEqual((await s.events()).length);
+    expect(o.deliveries24h.succeeded).toBeGreaterThan(0);
+    expect(o.deliveries24h.failed).toBeGreaterThan(0);
+    expect(o.activity).toHaveLength(24);
+    expect(o.activity.reduce((n, h) => n + h.events, 0)).toBe(o.events24h);
+  });
+});

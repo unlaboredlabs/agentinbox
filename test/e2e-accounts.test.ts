@@ -159,6 +159,32 @@ describe("connect account", () => {
   });
 });
 
+describe("pause and resume", () => {
+  it("stops ingest while paused and catches up on resume", async () => {
+    const email = mailbox("pause");
+    const account = await s.connectAccount(email);
+    const paused = await s.admin.post<Account>(`/api/accounts/${account.id}/pause`);
+    expect(paused.status).toBe("paused");
+
+    const during = s.fake.deliver(email, { from: "p@else.test", subject: "While paused", text: "x" });
+    s.kick();
+    await new Promise((r) => setTimeout(r, 400));
+    expect((await s.events({ accountId: account.id })).some((e) => e.message?.id === during.id)).toBe(false);
+    const resync = await s.admin.failure(s.admin.post(`/api/accounts/${account.id}/resync`));
+    expect(resync.status).toBe(409);
+
+    const resumed = await s.admin.post<Account>(`/api/accounts/${account.id}/resume`);
+    expect(resumed.status).toBe("active");
+    await s.waitForEvent((e) => e.message?.id === during.id, { accountId: account.id });
+
+    // Manual resync re-scans recent mail without duplicating it and reports a sync.gap.
+    await s.admin.post<Account>(`/api/accounts/${account.id}/resync`);
+    const events = await s.events({ accountId: account.id });
+    expect(events.filter((e) => e.message?.id === during.id)).toHaveLength(1);
+    expect(events.find((e) => e.type === "sync.gap")?.detail).toMatchObject({ reason: "manual" });
+  });
+});
+
 describe("account removal", () => {
   it("deletes the account's grants, revokes the token, and the agent loses access over MCP", async () => {
     const email = mailbox("remove");

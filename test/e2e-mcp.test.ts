@@ -3,7 +3,7 @@
 // console approval flow, allowlist and rate-limit denials in the audit log, and the event feed.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Account, AgentTestResult, Approval, AuditEntry, GrantInput, Page } from "../shared/types.ts";
+import type { Account, AgentTestResult, AgentWithKey, Approval, AuditEntry, GrantInput, Page, Settings } from "../shared/types.ts";
 import { gmailHeader, grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import type { Agent } from "./e2e/mcp.ts";
 import { waitFor } from "./e2e/wait.ts";
@@ -22,6 +22,7 @@ beforeAll(async () => {
   email = mailbox("mcp");
   [account] = (await s.bootstrap({ accounts: [{ email, name: "Support Desk" }], pubsub: true })) as [Account];
   support = s.fake.addLabel(email, "Support");
+  s.fake.addLabel(email, "VIP");
 });
 afterAll(async () => {
   await Promise.allSettled(agents.map((a) => a.close()));
@@ -345,5 +346,151 @@ describe("MCP agent journey", () => {
     // Type filter.
     expect(await mcp.ok("list_events", { after: 0, types: ["message.sent"] })).toMatch(/^No new events/);
     await waitFor(async () => (await mcp.ok("list_events", { after: 0, types: ["message.received"] })).startsWith("3 events:"), { what: "3 received events" });
+  });
+
+  it("lists attachments and returns text and image attachments", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+    const msg = s.fake.deliver(email, {
+      from: "finance@vendor.test",
+      subject: "Q3 report",
+      text: "See attached.",
+      attachments: [
+        { filename: "report.csv", mimeType: "text/csv", content: "region,revenue\nEU,100\nUS,200" },
+        { filename: "chart.png", mimeType: "image/png", content: png },
+      ],
+    });
+    const ev = await s.waitForEvent((e) => e.message?.id === msg.id);
+    expect(ev.message!.hasAttachments).toBe(true);
+
+    const { mcp } = await agentWith("attachments", { capabilities: ["read"] });
+    expect(await mcp.ok("search_threads", { query: "has:attachment subject:Q3" })).toContain(msg.threadId);
+    const out = await mcp.ok("get_message", { message_id: msg.id });
+    const ids = [...out.matchAll(/attachment_id: ([^)\s;]+)/g)].map((m) => m[1]!);
+    expect(out).toMatch(/Attachments: report\.csv \(text\/csv, .*\); chart\.png \(image\/png, /);
+    expect(ids).toHaveLength(2);
+
+    const csv = await mcp.ok("get_attachment", { message_id: msg.id, attachment_id: ids[0] });
+    expect(csv).toContain('<email_content from="finance@vendor.test" untrusted>');
+    expect(csv).toContain("EU,100");
+    const image = await mcp.call("get_attachment", { message_id: msg.id, attachment_id: ids[1] });
+    expect(image.isError).toBe(false);
+    const parts = image.raw.content as { type: string; data?: string; mimeType?: string }[];
+    expect(parts.find((p) => p.type === "image")).toMatchObject({ mimeType: "image/png", data: png.toString("base64") });
+  });
+
+  it("organizes mail (labels, archive, read state) within the label scope", async () => {
+    const inScope = deliverOrder("Organize me");
+    const outside = s.fake.deliver(email, { from: "x@else.test", subject: "Not mine", text: "z" });
+    const { id, mcp } = await agentWith("organizer-scoped", { capabilities: ["read", "organize"], labelScope: [support] });
+    const vip = s.fake.addLabel(email, "VIP"); // created in beforeAll
+
+    expect(await mcp.ok("modify_labels", { thread_id: inScope.threadId, add: ["VIP"] })).toContain("VIP");
+    expect(s.fake.message(email, inScope.id)!.labelIds).toContain(vip);
+    await mcp.ok("mark_read", { message_id: inScope.id });
+    expect(s.fake.message(email, inScope.id)!.labelIds).not.toContain("UNREAD");
+    await mcp.ok("archive", { thread_id: inScope.threadId });
+    expect(s.fake.message(email, inScope.id)!.labelIds).not.toContain("INBOX");
+    await s.waitForEvent((e) => e.type === "label.removed" && e.message?.id === inScope.id && !!e.labelIds?.includes("INBOX"));
+
+    const protectedLabel = await mcp.call("modify_labels", { thread_id: inScope.threadId, add: ["TRASH"] });
+    expect(protectedLabel.isError).toBe(true);
+    for (const [tool, args] of [
+      ["archive", { thread_id: outside.threadId }],
+      ["mark_read", { message_id: outside.id }],
+      ["modify_labels", { thread_id: outside.threadId, add: ["VIP"] }],
+    ] as const) {
+      const r = await mcp.call(tool, args);
+      expect(r.isError, tool).toBe(true);
+    }
+    expect(s.fake.message(email, outside.id)!.labelIds).toEqual(expect.arrayContaining(["INBOX", "UNREAD"]));
+    expect(s.fake.message(email, outside.id)!.labelIds).not.toContain(vip);
+    expect((await audit(id, "denied")).filter((e) => e.reason === "label_scope")).toHaveLength(3);
+  });
+
+  // BUG: google.labels caches labels for 60 s (server/google/index.ts:39-40) and AgentMail.resolveLabelIds (server/mail/agent.ts:585-587) never refreshes on a miss, so a label just created in Gmail is "No label named …" for up to a minute.
+  it.fails("can use a label that was created in Gmail moments ago", async () => {
+    const msg = deliverOrder("Fresh label");
+    const { mcp } = await agentWith("fresh-label", { capabilities: ["read", "organize"] });
+    await mcp.ok("list_labels"); // warms the label cache, as any earlier tool call would
+    const name = `Fresh ${Date.now()}`;
+    const id = s.fake.addLabel(email, name);
+    await mcp.ok("modify_labels", { thread_id: msg.threadId, add: [name] });
+    expect(s.fake.message(email, msg.id)!.labelIds).toContain(id);
+  });
+
+  it("revokes MCP access when the agent is disabled, its key rotated or the agent deleted", async () => {
+    const created = await s.createAgent("lifecycle", [grant(account.id)]);
+    const mcp = await s.agent(created.apiKey);
+    agents.push(mcp);
+    expect(await mcp.tools()).toContain("list_accounts");
+
+    await s.admin.patch(`/api/agents/${created.agent.id}`, { disabled: true });
+    await expect(mcp.tools()).rejects.toThrow();
+    expect((await s.admin.post<AgentTestResult>(`/api/agents/${created.agent.id}/test`)).ok).toBe(false);
+    await s.admin.patch(`/api/agents/${created.agent.id}`, { disabled: false });
+    expect(await mcp.tools()).toContain("list_accounts");
+
+    const rotated = await s.admin.post<AgentWithKey>(`/api/agents/${created.agent.id}/rotate-key`);
+    expect(rotated.apiKey).not.toBe(created.apiKey);
+    await expect(mcp.tools()).rejects.toThrow();
+    const fresh = await s.agent(rotated.apiKey);
+    agents.push(fresh);
+    expect(await fresh.tools()).toContain("list_accounts");
+
+    await s.admin.del(`/api/agents/${created.agent.id}`);
+    await expect(fresh.tools()).rejects.toThrow();
+    expect((await s.admin.failure(s.admin.get(`/api/agents/${created.agent.id}`))).status).toBe(404);
+  });
+
+  it("only feeds an agent events from its own accounts and label scope; out-of-scope mail doesn't wake wait_for_events", async () => {
+    const mine = mailbox("feed-mine");
+    const theirs = mailbox("feed-theirs");
+    const accMine = await s.connectAccount(mine);
+    await s.connectAccount(theirs);
+    const label = s.fake.addLabel(mine, "Agent");
+    const { mcp } = await agentWith("isolated", { capabilities: ["read"], labelScope: [label] }, accMine);
+
+    s.fake.deliver(theirs, { from: "o@else.test", subject: "Other account", text: "x" });
+    s.fake.deliver(mine, { from: "o@else.test", subject: "Out of scope", text: "x" });
+    await s.waitForEvent((e) => e.message?.subject === "Out of scope");
+    await s.waitForEvent((e) => e.message?.subject === "Other account");
+    const quiet = await mcp.ok("wait_for_events", { timeout_seconds: 1 });
+    expect(quiet).toMatch(/^No new events in the last 1 s/);
+
+    const waiting = mcp.ok("wait_for_events", { timeout_seconds: 20 });
+    setTimeout(() => s.fake.deliver(mine, { from: "o@else.test", subject: "For the agent", text: "y", labelIds: ["INBOX", label] }), 200);
+    const out = await waiting;
+    expect(out).toMatch(/^1 event:/);
+    expect(out).toContain("For the agent");
+    expect(out).not.toContain("Out of scope");
+    expect(out).not.toContain("Other account");
+  });
+
+  it("truncates bodies to the operator's maxBodyChars", async () => {
+    const before = await s.admin.get<Settings>("/api/settings");
+    const msg = s.fake.deliver(email, { from: "long@else.test", subject: "Long one", text: "word ".repeat(200) });
+    const { mcp } = await agentWith("truncated", { capabilities: ["read"] });
+    try {
+      await s.admin.patch("/api/settings", { maxBodyChars: 100 });
+      const out = await mcp.ok("get_message", { message_id: msg.id });
+      expect(out).toMatch(/\[Body truncated at 100 of \d+ characters/);
+      const body = /untrusted>\n([\s\S]*?)\n<\/email_content>/.exec(out)![1]!;
+      expect(body.length).toBeLessThanOrEqual(100);
+    } finally {
+      await s.admin.patch("/api/settings", { maxBodyChars: before.maxBodyChars });
+    }
+  });
+
+  it("forward respects the allowlist before reading the original", async () => {
+    const msg = deliverOrder("Forward me");
+    const { id, mcp } = await agentWith("forwarder", { capabilities: ["read", "send"], sendMode: "direct", allowTo: ["*@partner.test"] });
+    const denied = await mcp.call("forward", { message_id: msg.id, to: "leak@evil.test" });
+    expect(denied.isError).toBe(true);
+    expect((await audit(id, "denied")).map((e) => [e.action, e.reason])).toEqual([["forward", "allow_to"]]);
+    const ok = await mcp.json<{ status: string; messageId: string }>("forward", { message_id: msg.id, to: "bob@partner.test", body: "FYI" });
+    expect(ok.status).toBe("sent");
+    const sent = s.fake.message(email, ok.messageId)!;
+    expect(gmailHeader(sent, "Subject")).toBe("Fwd: Forward me");
+    expect(gmailHeader(sent, "To")).toContain("bob@partner.test");
   });
 });
