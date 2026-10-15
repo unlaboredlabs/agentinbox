@@ -132,7 +132,10 @@ so subscribe to one or the other, not both.
 - **Agents without an HTTP endpoint** use the MCP tools `wait_for_events` (long poll), `list_events` and `ack_events`
   while a session runs; the server keeps each agent's position. To start an agent when mail arrives, use
   [`agentinbox listen`](listen.md), e.g. `npx agentinbox-cli listen --recipe claude-code` (new mail only by default;
-  `--types` adds the others).
+  `--types` adds the others). The listener skips Gmail's Promotions, Social and Forums tabs by default
+  (`--all-categories`), takes `--not-from` / `--not-label` exclusions, and `--batch 60s` runs a burst as one command.
+  With Hermes, `--recipe hermes` forwards each event to the Hermes gateway (`listen hermes --deliver <platform> --run`
+  creates the route), which triages it and messages you; `--recipe hermes-oneshot` runs Hermes once per email.
 - **Agents with an endpoint** get webhooks (**Webhooks** in the console), optionally with the cleaned message body. A
   delivery succeeds on a `2xx` within 10 seconds (redirects aren't followed); failures are retried 8 times with growing
   delays (30 s up to 12 h, about a day in total) before they're marked dead, and any delivery can be replayed.

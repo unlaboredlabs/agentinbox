@@ -160,7 +160,7 @@ Example:
     .option("--from-start", "a NEW consumer starts at the oldest stored event (no effect once it exists: use --backfill)")
     .option("--backfill", "run the mail from before this listener started through --exec/--forward once, oldest first, then exit; safe while the listener runs (own cursor)")
     .option("--until <seq>", "with --backfill: replay up to this event number instead of where the listener started", int("--until"))
-    .option("--print-recipe <tool>", `print the command --recipe <tool> runs, for ${RECIPE_NAMES.join(", ")} (with this machine's paths), and exit`)
+    .option("--print-recipe <name>", `print what --recipe <name> runs (hermes: its URL), for ${RECIPE_NAMES.join(", ")} (with this machine's paths), and exit`)
     .addHelpText("after", recipesHelp())
     .action(async (flags: ListenFlags & { printRecipe?: string }) => {
       if (flags.printRecipe !== undefined) {
