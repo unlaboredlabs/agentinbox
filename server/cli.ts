@@ -1,8 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
+// Must stay the first import: exits with a clear message on a too-old Node.
+import "./node-check.ts";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { Command, InvalidArgumentError } from "commander";
-import pc from "picocolors";
+import { join, resolve, sep } from "node:path";
+import type { Command as CommandType } from "commander";
+
+// Loaded after the Node check (static imports are hoisted above it in the bundle).
+const { Command, InvalidArgumentError } = await import("commander");
+const { default: pc } = await import("picocolors");
+
+process.title = "agentinbox";
 
 // node:sqlite is stable enough for us but still warns on Node 22. This runs before any server
 // module loads: everything that touches node:sqlite is imported dynamically below.
@@ -47,7 +54,7 @@ function portOption(flag: number | undefined): number | undefined {
   return Number(env);
 }
 
-const withServerOptions = (cmd: Command) =>
+const withServerOptions = (cmd: CommandType) =>
   cmd
     .option("-p, --port <port>", "port to listen on (default 8425, env PORT)", parsePort)
     .option("--host <host>", "bind address (default 0.0.0.0, env HOST)")
@@ -65,7 +72,10 @@ const program = new Command("agentinbox")
 withServerOptions(program.command("start", { isDefault: true }).description("run agentinbox in the foreground (default)"))
   .option("--no-open", "don't open a browser on first run")
   .option("--dev", "development: API only, the console runs on Vite (:5173)")
-  .action(async (o: ServerFlags & { open: boolean; dev?: boolean }) => {
+  // `agentinbox typo` lands here as an extra argument: report it as the unknown command it is.
+  .allowExcessArguments()
+  .action(async (o: ServerFlags & { open: boolean; dev?: boolean }, cmd: CommandType) => {
+    if (cmd.args.length) throw new Error(unknownCommand(cmd.args[0]!));
     const { runForeground } = await import("./server.ts");
     await runForeground({ ...configInput(o), dev: !!o.dev, open: o.open, version });
   });
@@ -104,17 +114,18 @@ skill
   .option("--url <url>", "agentinbox server URL to fill in (env AGENTINBOX_URL)")
   .action(async (o: { url?: string }) => {
     const { renderSkill } = await import("./skill/index.ts");
-    process.stdout.write(renderSkill(serverUrl(o.url)));
+    process.stdout.write(renderSkill(await serverUrl(o.url)));
   });
 
 skill
   .command("install")
   .description("install SKILL.md for an agent (no running server needed)")
-  .option("-t, --target <target>", "claude, codex, agents, or a skills directory", "claude")
+  .option("-t, --target <target>", "claude, codex, agents, or a skills directory path", "claude")
   .option("--url <url>", "agentinbox server URL agents connect to (env AGENTINBOX_URL)")
   .action(async (o: { target: string; url?: string }) => {
-    const { renderSkill, skillPath, writeSkill } = await import("./skill/index.ts");
-    const url = serverUrl(o.url);
+    const { renderSkill, SKILL_TARGETS, skillPath, writeSkill } = await import("./skill/index.ts");
+    checkSkillTarget(o.target, Object.keys(SKILL_TARGETS));
+    const url = await serverUrl(o.url);
     const path = skillPath(o.target);
     writeSkill(path, renderSkill(url));
     console.log(`Installed the agentinbox skill to ${pc.cyan(path)} (server ${url}).`);
@@ -123,7 +134,13 @@ skill
     }
   });
 
-withServerOptions(program.command("reset-password").description("remove the admin password and print a new setup link")).action(
+program
+  .command("reset-password")
+  .description("remove the admin password and print a new setup link")
+  .option("-d, --data <dir>", "data directory (default ~/.agentinbox, env AGENTINBOX_DATA)")
+  .option("-p, --port <port>", "port of the running instance, used for the printed link", parsePort)
+  .option("--host <host>", "host of the running instance, used for the printed link")
+  .action(
   async (o: ServerFlags) => {
     // Never create a data directory or master key here: a wrong --data (or a service running as
     // another user) must not silently produce a fresh instance.
@@ -171,9 +188,18 @@ withServerOptions(program.command("reset-password").description("remove the admi
   },
 );
 
-/** The URL written into SKILL.md: --url, AGENTINBOX_URL, or this machine's default. */
-function serverUrl(flag: string | undefined): string {
-  const raw = flag ?? process.env.AGENTINBOX_URL ?? `http://localhost:${process.env.PORT || 8425}`;
+/**
+ * The URL written into SKILL.md: --url, AGENTINBOX_URL, else the agentinbox running on this
+ * machine (its lock file), else http://localhost:8425.
+ */
+async function serverUrl(flag: string | undefined): Promise<string> {
+  let raw = flag ?? process.env.AGENTINBOX_URL;
+  if (!raw) {
+    const { runningInstance } = await import("./instance.ts");
+    const running = runningInstance(resolve(process.env.AGENTINBOX_DATA || join(homedir(), ".agentinbox")));
+    const host = running && !["0.0.0.0", "::", ""].includes(running.host) ? running.host : "localhost";
+    raw = `http://${host.includes(":") ? `[${host}]` : host}:${running?.port || process.env.PORT || 8425}`;
+  }
   let url: URL;
   try {
     url = new URL(raw);
@@ -182,6 +208,53 @@ function serverUrl(flag: string | undefined): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("--url must start with http:// or https://");
   return (url.origin + url.pathname).replace(/\/+$/, "");
+}
+
+/** A known agent name, or something that is clearly a path; typos like "claud" are refused. */
+function checkSkillTarget(target: string, known: string[]): void {
+  if (known.includes(target) || target.includes("/") || target.includes(sep) || target.startsWith(".") || isDir(target)) return;
+  const near = closest(target, known);
+  throw new Error(
+    `Unknown skill target "${target}".${near ? ` Did you mean ${near}?` : ""} Use ${known.join(", ")}, or a directory path such as ./skills.`,
+  );
+}
+
+function isDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+const COMMANDS = ["start", "service", "skill", "reset-password", "help"];
+
+function unknownCommand(name: string): string {
+  const near = closest(name, COMMANDS);
+  return `unknown command '${name}'${near ? `\n(Did you mean ${near}?)` : ""}\nRun agentinbox --help for the list of commands.`;
+}
+
+/** The candidate within edit distance 2 (or a prefix match), if any. */
+function closest(word: string, candidates: string[]): string | null {
+  const distance = (a: string, b: string) => {
+    const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      let prev = row[0]!;
+      row[0] = i;
+      for (let j = 1; j <= b.length; j++) {
+        const cur = row[j]!;
+        row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+        prev = cur;
+      }
+    }
+    return row[b.length]!;
+  };
+  let best: { name: string; d: number } | null = null;
+  for (const c of candidates) {
+    const d = c.startsWith(word) && word.length >= 3 ? 0 : distance(word.toLowerCase(), c);
+    if (d <= 2 && (!best || d < best.d)) best = { name: c, d };
+  }
+  return best?.name ?? null;
 }
 
 try {

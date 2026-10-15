@@ -22,6 +22,8 @@ export default defineConfig({
       "/mcp": { target: server, changeOrigin: false },
       "/oauth": { target: server, changeOrigin: false },
       "/skill": { target: server, changeOrigin: false },
+      "/agent": { target: server, changeOrigin: false },
+      "/health": { target: server, changeOrigin: false },
     },
   },
 });

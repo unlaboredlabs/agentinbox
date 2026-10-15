@@ -26,6 +26,8 @@ export interface InstanceInfo {
   bootId?: string | null;
   /** The process's own start time as the OS reports it, so a reused pid doesn't look alive. */
   processStart?: string | null;
+  /** Started by the background service (AGENTINBOX_SERVICE=1). */
+  service?: boolean;
 }
 
 export const lockPath = (dataDir: string) => join(dataDir, "agentinbox.lock");
@@ -120,6 +122,7 @@ export function acquireInstanceLock(config: Pick<Config, "dataDir" | "host" | "p
     startedAt: new Date().toISOString(),
     bootId: bootId(),
     processStart: processStartTime(process.pid),
+    service: process.env.AGENTINBOX_SERVICE === "1",
   };
   for (let attempt = 0; ; attempt++) {
     try {
@@ -129,9 +132,13 @@ export function acquireInstanceLock(config: Pick<Config, "dataDir" | "host" | "p
       if ((err as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) throw err;
       const other = runningInstance(dataDir);
       if (other) {
+        const where = `(pid ${other.pid}${other.port ? `, port ${other.port}` : ""})`;
         throw new Error(
-          `agentinbox is already running with the data directory ${dataDir} (pid ${other.pid}${other.port ? `, port ${other.port}` : ""}). ` +
-            `Stop it first, or use another --data directory. If no such process exists, delete ${file}.`,
+          other.service
+            ? `agentinbox is already running as a background service with the data directory ${dataDir} ${where}. ` +
+                `Use that one, stop it (\`${cliCommand("service uninstall")}\` keeps your data), or use another --data directory.`
+            : `agentinbox is already running with the data directory ${dataDir} ${where}. ` +
+                `Stop it first, or use another --data directory. If no such process exists, delete ${file}.`,
         );
       }
       rmSync(file, { force: true });

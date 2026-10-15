@@ -26,13 +26,6 @@ export const SERVICE_ENV_KEYS = ["AGENTINBOX_MASTER_KEY", "TRUST_PROXY", "TRUST_
 
 type ServiceConfig = Pick<Config, "dataDir" | "port" | "host" | "dbPath" | "masterKeyPath">;
 
-const run = (cmd: string, args: string[], quiet = false) => execFileSync(cmd, args, { stdio: quiet ? "ignore" : "inherit" });
-
-const isRoot = () => process.getuid?.() === 0;
-const systemctl = (...args: string[]) => run("systemctl", isRoot() ? args : ["--user", ...args]);
-const unitPath = () => (isRoot() ? `/etc/systemd/system/${SERVICE_NAME}.service` : join(homedir(), ".config/systemd/user", `${SERVICE_NAME}.service`));
-const plistPath = () => join(homedir(), "Library/LaunchAgents", `${LAUNCHD_LABEL}.plist`);
-const launchdTarget = () => `gui/${process.getuid?.()}`;
 export const serviceEnvPath = (dataDir: string) => join(dataDir, "service.env");
 
 // ───────────── Pure rendering (unit-tested) ─────────────
@@ -69,10 +62,10 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     .map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`)
     .join("\n");
   const envFile = Object.keys(spec.extraEnv).length ? `\nEnvironmentFile=${serviceEnvPath(spec.dataDir).replace(/%/g, "%%")}` : "";
+  // network-online.target only exists for system units; a user unit waiting on it never starts it.
+  const network = spec.system ? "\nAfter=network-online.target\nWants=network-online.target" : "";
   return `[Unit]
-Description=agentinbox (Gmail broker for AI agents)
-After=network-online.target
-Wants=network-online.target
+Description=agentinbox (Gmail broker for AI agents)${network}
 
 [Service]
 ExecStart=${sdQuote(spec.execPath)} ${sdQuote(spec.entry)} start --no-open
@@ -210,26 +203,84 @@ function stageApp(dataDir: string): string {
   return staging;
 }
 
-/** Replaces `<data>/app` with the staged install (call while the service is stopped). */
-function swapApp(dataDir: string, staging: string): string {
-  const app = join(dataDir, "app");
-  const old = join(dataDir, "app.old");
-  rmSync(old, { recursive: true, force: true });
-  if (existsSync(app)) renameSync(app, old);
-  renameSync(staging, app);
-  rmSync(old, { recursive: true, force: true });
-  return join(app, "node_modules", PACKAGE, "dist/cli.js");
+// ───────────── System integration (injectable for tests) ─────────────
+
+export interface ServiceOps {
+  platform: NodeJS.Platform;
+  /** systemd: install a system unit (running as root) rather than a user unit. */
+  root: boolean;
+  /** Runs a command, throwing on a non-zero exit. */
+  exec(cmd: string, args: string[], opts?: { quiet?: boolean }): void;
+  /** Installs the package into a staging directory and returns it (see stageApp). */
+  stage(dataDir: string): string;
+  /** Directory for the systemd unit or the launchd plist. */
+  unitDir(): string;
+  /** Waits for /api/health and prints the URLs. */
+  waitReady(config: ServiceConfig): Promise<void>;
+  uid: number;
+  user: string;
 }
 
-function assertSupported(): void {
-  if (process.platform !== "linux" && process.platform !== "darwin") {
-    throw new Error(`Service install supports Linux (systemd) and macOS (launchd). Elsewhere, run \`${cliCommand("start")}\` under your own supervisor.`);
+export const systemOps = (): ServiceOps => {
+  const root = process.getuid?.() === 0;
+  return {
+    platform: process.platform,
+    root,
+    exec: (cmd, args, opts) => void execFileSync(cmd, args, { stdio: opts?.quiet ? "ignore" : "inherit" }),
+    stage: stageApp,
+    unitDir: () =>
+      process.platform === "darwin"
+        ? join(homedir(), "Library/LaunchAgents")
+        : root
+          ? "/etc/systemd/system"
+          : // Where `systemctl --user` actually looks: $XDG_CONFIG_HOME/systemd/user.
+            join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "systemd/user"),
+    waitReady: printWhenReady,
+    uid: process.getuid?.() ?? 0,
+    user: userInfo().username,
+  };
+};
+
+const unitFile = (ops: ServiceOps) => join(ops.unitDir(), ops.platform === "darwin" ? `${LAUNCHD_LABEL}.plist` : `${SERVICE_NAME}.service`);
+const systemctl = (ops: ServiceOps, ...args: string[]) => ops.exec("systemctl", ops.root ? args : ["--user", ...args]);
+const launchdTarget = (ops: ServiceOps) => `gui/${ops.uid}`;
+
+function assertSupported(ops: ServiceOps): void {
+  if (ops.platform !== "linux" && ops.platform !== "darwin") {
+    throw new Error(
+      `Service install supports Linux (systemd) and macOS (launchd). Elsewhere, install the command (\`npm i -g ${PACKAGE}\`) and run \`agentinbox start\` under your own supervisor.`,
+    );
   }
 }
 
-export async function installService(config: ServiceConfig): Promise<void> {
-  assertSupported();
-  if (process.platform === "linux" && /\s/.test(config.dataDir)) {
+const readText = (file: string) => {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+};
+
+/** Where to look when the service doesn't start. */
+export function serviceHints(ops: ServiceOps, env: NodeJS.ProcessEnv = process.env): string[] {
+  if (ops.platform === "darwin") {
+    return [`launchctl print ${launchdTarget(ops)}/${LAUNCHD_LABEL}`, "and the log file agentinbox.log in the data directory"];
+  }
+  const scope = ops.root ? "" : " --user";
+  const hints = [`systemctl${scope} status ${SERVICE_NAME}`, `journalctl${scope} -u ${SERVICE_NAME} -e`];
+  if (!ops.root && !env.XDG_RUNTIME_DIR) {
+    hints.push(
+      "XDG_RUNTIME_DIR is not set, so there may be no systemd user session (common over `su` or `sudo -u`). " +
+        `Log in as ${ops.user} directly (e.g. over ssh), or run \`sudo loginctl enable-linger ${ops.user}\` and then ` +
+        `\`export XDG_RUNTIME_DIR=/run/user/${ops.uid}\` before installing.`,
+    );
+  }
+  return hints;
+}
+
+export async function installService(config: ServiceConfig, ops: ServiceOps = systemOps()): Promise<void> {
+  assertSupported(ops);
+  if (ops.platform === "linux" && /\s/.test(config.dataDir)) {
     throw new Error(`The data directory "${config.dataDir}" contains whitespace, which systemd can't load settings from. Choose another one with --data.`);
   }
   const extraEnv = mergeServiceEnv(readPreviousEnv(config.dataDir), process.env);
@@ -238,72 +289,133 @@ export async function installService(config: ServiceConfig): Promise<void> {
   assertMasterKeyUsable(config, extraEnv.AGENTINBOX_MASTER_KEY ?? "");
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 
-  const staging = stageApp(config.dataDir);
-  uninstallService(config, true);
-  const entry = swapApp(config.dataDir, staging);
-  writeServiceEnv(config.dataDir, extraEnv);
-  const spec: ServiceSpec = { execPath: process.execPath, entry, dataDir: config.dataDir, port: config.port, host: config.host, extraEnv, system: isRoot() };
+  const staging = ops.stage(config.dataDir);
+  const file = unitFile(ops);
+  const previousUnit = readText(file);
+  const previousEnv = readText(serviceEnvPath(config.dataDir));
+  uninstallService(config, ops, { quiet: true, keepApp: true });
 
-  if (process.platform === "linux") {
-    mkdirSync(dirname(unitPath()), { recursive: true });
-    writeFileSync(unitPath(), renderSystemdUnit(spec));
-    systemctl("daemon-reload");
-    systemctl("enable", "--now", SERVICE_NAME);
-    if (!isRoot()) {
-      // Keep user services running after logout and start them at boot.
-      const user = userInfo().username;
-      try {
-        run("loginctl", ["enable-linger", user], true);
-      } catch {
-        console.warn(`  Could not enable lingering. Run \`sudo loginctl enable-linger ${user}\` so the service starts at boot.`);
-      }
+  const app = join(config.dataDir, "app");
+  const old = join(config.dataDir, "app.old");
+  rmSync(old, { recursive: true, force: true });
+  if (existsSync(app)) renameSync(app, old);
+  renameSync(staging, app);
+  const entry = join(app, "node_modules", PACKAGE, "dist/cli.js");
+  const spec: ServiceSpec = { execPath: process.execPath, entry, dataDir: config.dataDir, port: config.port, host: config.host, extraEnv, system: ops.root };
+
+  try {
+    writeServiceEnv(config.dataDir, extraEnv);
+    mkdirSync(ops.unitDir(), { recursive: true });
+    if (ops.platform === "linux") {
+      writeFileSync(file, renderSystemdUnit(spec));
+      systemctl(ops, "daemon-reload");
+      systemctl(ops, "enable", "--now", SERVICE_NAME);
+    } else {
+      // 0600: the plist may carry AGENTINBOX_MASTER_KEY.
+      writeFileSync(file, renderLaunchdPlist(spec), { mode: 0o600 });
+      ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
     }
-  } else {
-    mkdirSync(dirname(plistPath()), { recursive: true });
-    writeFileSync(plistPath(), renderLaunchdPlist(spec), { mode: 0o600 });
-    run("launchctl", ["bootstrap", launchdTarget(), plistPath()]);
+  } catch (err) {
+    rollback();
+    const hints = serviceHints(ops).map((h) => `    ${h}`).join("\n");
+    throw new Error(
+      `Starting the service failed (${err instanceof Error ? err.message.split("\n")[0] : String(err)}). ` +
+        `Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
+    );
+  }
+  rmSync(old, { recursive: true, force: true });
+
+  function rollback(): void {
+    const quietly = (fn: () => void) => {
+      try {
+        fn();
+      } catch {
+        // Best effort: report the original failure.
+      }
+    };
+    quietly(() => uninstallService(config, ops, { quiet: true, keepApp: true }));
+    quietly(() => rmSync(file, { force: true }));
+    if (ops.platform === "linux") quietly(() => systemctl(ops, "daemon-reload"));
+    quietly(() => {
+      rmSync(app, { recursive: true, force: true });
+      if (existsSync(old)) renameSync(old, app);
+    });
+    quietly(() => (previousEnv === null ? rmSync(serviceEnvPath(config.dataDir), { force: true }) : writeFileSync(serviceEnvPath(config.dataDir), previousEnv, { mode: 0o600 })));
+    if (previousUnit !== null) {
+      quietly(() => {
+        writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 });
+        if (ops.platform === "linux") {
+          systemctl(ops, "daemon-reload");
+          systemctl(ops, "enable", "--now", SERVICE_NAME);
+        } else {
+          ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
+        }
+      });
+    }
+  }
+
+  if (ops.platform === "linux" && !ops.root) {
+    // Keep user services running after logout and start them at boot.
+    try {
+      ops.exec("loginctl", ["enable-linger", ops.user], { quiet: true });
+    } catch {
+      console.warn(`  Could not enable lingering. Run \`sudo loginctl enable-linger ${ops.user}\` so the service starts at boot.`);
+    }
   }
 
   const kept = Object.keys(extraEnv).filter((k) => !(k in process.env));
-  console.log(`\n  Installed ${SERVICE_NAME} as a ${process.platform === "linux" ? "systemd" : "launchd"} service.`);
+  console.log(`\n  Installed ${SERVICE_NAME} as a ${ops.platform === "linux" ? "systemd" : "launchd"} service.`);
+  console.log(
+    `  It runs the Node.js at ${process.execPath} (v${process.versions.node}). If you remove or replace that Node, run \`${cliCommand("service install")}\` again.`,
+  );
   if (kept.length) console.log(`  Kept ${kept.join(", ")} from the previous install.`);
-  await printWhenReady(config);
+  await ops.waitReady(config);
 }
 
-export function uninstallService(config: ServiceConfig, quiet = false): void {
-  assertSupported();
-  if (process.platform === "linux") {
-    if (!existsSync(unitPath())) {
-      if (!quiet) console.log("The agentinbox service is not installed.");
-      return;
-    }
-    try {
-      systemctl("disable", "--now", SERVICE_NAME);
-    } catch {
-      // Already stopped.
-    }
-    rmSync(unitPath());
-    systemctl("daemon-reload");
+export function uninstallService(
+  config: Pick<ServiceConfig, "dataDir">,
+  ops: ServiceOps = systemOps(),
+  opts: { quiet?: boolean; keepApp?: boolean } = {},
+): void {
+  assertSupported(ops);
+  const file = unitFile(ops);
+  if (!existsSync(file)) {
+    if (!opts.quiet) console.log("The agentinbox service is not installed.");
   } else {
-    if (!existsSync(plistPath())) {
-      if (!quiet) console.log("The agentinbox service is not installed.");
-      return;
+    if (ops.platform === "linux") {
+      try {
+        systemctl(ops, "disable", "--now", SERVICE_NAME);
+      } catch {
+        // Already stopped.
+      }
+      rmSync(file);
+      systemctl(ops, "daemon-reload");
+    } else {
+      try {
+        ops.exec("launchctl", ["bootout", `${launchdTarget(ops)}/${LAUNCHD_LABEL}`], { quiet: true });
+      } catch {
+        // Not loaded.
+      }
+      rmSync(file);
     }
-    try {
-      run("launchctl", ["bootout", `${launchdTarget()}/${LAUNCHD_LABEL}`], true);
-    } catch {
-      // Not loaded.
-    }
-    rmSync(plistPath());
+    if (!opts.quiet) console.log(`Removed the ${SERVICE_NAME} service. Your data in ${config.dataDir} was kept.`);
   }
-  if (!quiet) console.log(`Removed the ${SERVICE_NAME} service. Your data in ${config.dataDir} was kept.`);
+  if (!opts.keepApp) {
+    // The service's own install; the data (database, keys) stays.
+    for (const dir of ["app", "app.new", "app.old"]) rmSync(join(config.dataDir, dir), { recursive: true, force: true });
+  }
 }
 
-export function serviceStatus(): void {
-  assertSupported();
+export function serviceStatus(ops: ServiceOps = systemOps()): void {
+  assertSupported(ops);
+  if (!existsSync(unitFile(ops))) {
+    console.log(`The agentinbox service is not installed. Install it with \`${cliCommand("service install")}\`.`);
+    process.exitCode = 1;
+    return;
+  }
   try {
-    if (process.platform === "linux") systemctl("status", SERVICE_NAME, "--no-pager");
-    else run("launchctl", ["print", `${launchdTarget()}/${LAUNCHD_LABEL}`]);
+    if (ops.platform === "linux") systemctl(ops, "status", SERVICE_NAME, "--no-pager");
+    else ops.exec("launchctl", ["print", `${launchdTarget(ops)}/${LAUNCHD_LABEL}`]);
   } catch {
     process.exitCode = 1;
   }

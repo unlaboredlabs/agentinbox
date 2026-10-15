@@ -224,6 +224,27 @@ Only one agentinbox runs per data directory; a second one refuses to start.
 
 When a newer version is published, the console shows **Update available** with the exact command to run.
 
+The unit runs the Node.js binary you installed it with. If you remove or replace that Node, run `service install` again.
+If the service doesn't come up, `service install` rolls back and prints where to look (`systemctl --user status
+agentinbox`, `journalctl --user -u agentinbox`). Over `su` or `sudo -u` there is often no systemd user session: log
+in as that user directly, or enable lingering and set `XDG_RUNTIME_DIR=/run/user/$(id -u)` first.
+
+A service that hasn't been claimed yet doesn't print its setup token to the journal. Get the link with
+`npx agentinbox-cli reset-password --data <dir>`, or read the token from `<data>/setup-token`.
+
+### With your own supervisor
+
+On other systems, or to manage it yourself (Docker, runit, supervisord, pm2), install the command and run it in the
+foreground:
+
+```sh
+npm i -g agentinbox-cli
+agentinbox start --no-open --data /var/lib/agentinbox
+```
+
+Use the installed `agentinbox` binary rather than `npx`: npx doesn't pass stop signals on, so agentinbox wouldn't shut
+down cleanly.
+
 ### Behind a reverse proxy
 
 agentinbox serves plain HTTP. To expose it beyond your network, put it behind a TLS-terminating proxy (Caddy, nginx,

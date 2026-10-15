@@ -276,7 +276,8 @@ class Ingest implements IngestService {
         this.log.error("Ingest loop crashed", { error: this.lastError });
       });
       this.loop = { mode: s.ingestMode, interval: s.pollIntervalSeconds, fallback, ctrl, done };
-      this.log.info(`Ingest running in ${s.ingestMode} mode`);
+      // Nothing to report on a fresh install: say it once there is mail to ingest.
+      this.log[allRows(this.ctx).length ? "info" : "debug"](`Ingest running in ${s.ingestMode} mode`);
     });
     return this.restarting;
   }
