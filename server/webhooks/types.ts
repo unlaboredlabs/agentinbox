@@ -8,16 +8,25 @@ import type { StoredEvent } from "../events/types.ts";
 export interface WebhooksService extends Lifecycle {
   list(agentId?: string): Webhook[];
   get(id: string): Webhook | null;
-  /** Validates the URL against the SSRF guard. */
-  create(input: WebhookInput): WebhookWithSecret;
-  update(id: string, patch: Partial<WebhookInput>): Webhook;
+  /** Validates the input and checks the URL against the SSRF guard (resolving its host). Throws HttpError(400). */
+  create(input: WebhookInput): Promise<WebhookWithSecret>;
+  /** Re-checks the URL against the SSRF guard when it changes. Throws HttpError(400/404). */
+  update(id: string, patch: Partial<WebhookInput>): Promise<Webhook>;
   rotateSecret(id: string): WebhookWithSecret;
   remove(id: string): void;
-  /** Sends a synthetic event synchronously and returns the recorded delivery. */
+  /**
+   * Sends a synthetic message.received event (detail.test = true) synchronously and returns the
+   * recorded delivery. The synthetic event is stored with a negative seq: it never shows up in
+   * agent feeds, the console event list or the bus, and its delivery is not retried.
+   */
   test(id: string): Promise<Delivery>;
 
   listDeliveries(q: { webhookId?: string; status?: DeliveryStatus; cursor?: string | null; limit?: number }): Page<Delivery>;
-  /** Re-queues a delivery (any state) for immediate delivery. */
+  /**
+   * Re-queues a delivery (any state) and attempts it right away; resolves with the outcome. `attempts`
+   * keeps counting, so a replayed delivery that already used up the retry schedule goes back to dead
+   * if this attempt fails.
+   */
   replay(deliveryId: string): Promise<Delivery>;
 
   /**
