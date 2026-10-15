@@ -396,6 +396,12 @@ export interface ListenerInfo {
    */
   startSeq: number | null;
   ackedSeq: number;
+  /**
+   * Event types the listener's stream asked for when it last connected (every type when it named
+   * none). Events of other types are acknowledged without running its command. Null = unknown
+   * (recorded before this existed).
+   */
+  types: EventType[] | null;
   lastSeenAt: string | null;
   client: { hostname?: string; platform?: string; version?: string };
 }

@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { PageHeader, QueryError } from "@/components/common";
 import { useEffect } from "react";
-import { STEP_IDS, type StepId, startsVerify, updateDraft, useSetupProgress } from "@/components/setup/progress";
+import { STEP_IDS, type StepId, startsVerify, updateDraft, useSetupProgress, wizardStep } from "@/components/setup/progress";
 import { StepAccounts } from "@/components/setup/step-accounts";
 import { StepAgent } from "@/components/setup/step-agent";
 import { StepClient } from "@/components/setup/step-client";
@@ -39,12 +39,16 @@ const STEPS: Record<StepId, (p: StepProps) => React.ReactNode> = {
   verify: StepVerify,
 };
 
-/** Resumable setup wizard: opens at the first unfinished step; any step can be revisited. */
+/** Resumable setup wizard: opens at the first unfinished step (pinned in the URL); any step can be revisited. */
 function GetStarted() {
   const { step, from } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const progress = useSetupProgress();
-  const shown = step ?? progress.firstTodo ?? "verify";
+  const { shown, pin } = wizardStep(step, { loaded: progress.query.isSuccess, firstTodo: progress.firstTodo });
+  // Opened without ?step= (e.g. from the sidebar): keep showing this step even once it's finished.
+  useEffect(() => {
+    if (pin) void navigate({ search: (s) => ({ ...s, step: pin }), replace: true });
+  }, [pin, navigate]);
   const startVerify = progress.state !== undefined && startsVerify(shown, progress.statuses, progress.draft);
   useEffect(() => {
     if (startVerify) updateDraft({ verifyStarted: true });

@@ -138,7 +138,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
             <Guide>
               <GuideStep
                 title="Open Cloud Shell"
-                expect="a terminal at the bottom of the page. The first time, Google may ask you to pick your country and accept the terms."
+                expect="Cloud Shell in a new tab, filled by a terminal. The first time it can take a minute to start, and Google may ask you to pick your country and accept the terms."
               >
                 <p>A free terminal in your browser, already signed in to Google Cloud. Nothing to install.</p>
                 <CloudLink href={cloudUrl.cloudShell}>Open Cloud Shell</CloudLink>
@@ -154,7 +154,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 </div>
                 {command ? <CodeBlock code={command} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
                 <Expect>
-                  “Authorize Cloud Shell” (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
+                  maybe an “Authorize Cloud Shell” prompt (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
                   <code className="font-mono text-foreground">agentinbox: project {id || "…"} is ready</code>.
                 </Expect>
                 <Disclosure summary="The command printed an error?">
@@ -171,8 +171,13 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                       once, accept, then run the command again.
                     </li>
                     <li>
-                      <strong className="text-foreground">quota</strong> (too many projects): delete projects you no longer use, or use the console
-                      path.
+                      <strong className="text-foreground">quota</strong> (too many projects): Google limits how many projects you can create, and
+                      deleted projects still count for 30 days. Reuse a project you already have (
+                      <strong className="text-foreground">Use an existing project instead (advanced)</strong> below), or{" "}
+                      <a className="underline" href="https://support.google.com/code/contact/project_quota_increase" target="_blank" rel="noopener noreferrer">
+                        request more quota
+                      </a>
+                      {inOrg && " or your organization's Quotas page"}.
                     </li>
                     <li>
                       <strong className="text-foreground">--organization</strong> errors: untick the Workspace box above, or ask your Workspace

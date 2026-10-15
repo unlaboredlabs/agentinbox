@@ -86,3 +86,14 @@ export function startsVerify(step: StepId, statuses: Record<StepId, StepStatus>,
 export function allStepsDone(statuses: Record<StepId, StepStatus>): boolean {
   return STEP_IDS.every((id) => statuses[id] !== "todo" || STEP_META[id].optional);
 }
+
+/**
+ * The step /get-started shows: `?step=`, else the first unfinished one. Without `?step=`, `pin` is
+ * that choice once progress has loaded, for the page to write into the URL (a replace navigation):
+ * otherwise finishing the shown step's requirements would move the first unfinished step on, and
+ * the user with it, past Continue and the step's optional parts.
+ */
+export function wizardStep(step: StepId | undefined, progress: { loaded: boolean; firstTodo: StepId | undefined }): { shown: StepId; pin: StepId | null } {
+  const shown = step ?? progress.firstTodo ?? "verify";
+  return { shown, pin: step || !progress.loaded ? null : shown };
+}

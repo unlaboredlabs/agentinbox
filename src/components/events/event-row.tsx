@@ -12,7 +12,7 @@ import {
   TagIcon,
 } from "lucide-react";
 import { useState } from "react";
-import { listenerHandled } from "@/components/agents/agent-status";
+import { listenerHandled } from "@/components/agents/listener-handled";
 import { CodeBlock, TimeAgo } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
@@ -71,15 +71,16 @@ function grantSees(g: Grant, e: MailEvent): boolean {
 
 /**
  * `agentinbox listen` instances that got this event: their agent may see it (account and label
- * scope), it came after the listener started, and the listener acknowledged it (ran its command, or
- * skipped it by its own filter).
+ * scope), it is of a type the listener asked for, it came after the listener started, and the
+ * listener acknowledged it (ran its command, or skipped it by its own --from/--to/--label/--subject
+ * filter, which only the listener's machine knows).
  */
 function useListenerDelivery(e: MailEvent) {
   const agents = useQuery(queries.agents());
   const out: { name: string; host: string | null }[] = [];
   for (const a of agents.data ?? []) {
     if (!a.grants.some((g) => grantSees(g, e))) continue;
-    for (const l of a.listeners) if (listenerHandled(l, e.seq)) out.push({ name: a.name, host: l.client.hostname ?? null });
+    for (const l of a.listeners) if (listenerHandled(l, e)) out.push({ name: a.name, host: l.client.hostname ?? null });
   }
   return out;
 }

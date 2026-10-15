@@ -57,7 +57,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
           </div>
           <p className="text-muted-foreground">
             Uses Google Cloud Pub/Sub, Google's notification service, in your project. agentinbox sets it up for you in one click; works even when
-            this machine isn't reachable from the internet. Free for this use.
+            this machine isn't reachable from the internet. No cost at this volume, but Google may ask you to add a billing account first.
           </p>
         </div>
         <div className="space-y-1.5 rounded-lg border p-3 text-sm">
@@ -65,7 +65,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
             <TimerIcon className="size-4 text-muted-foreground" aria-hidden /> Every {interval} seconds
             {shared && <Badge variant="secondary">Recommended for a shared project</Badge>}
           </div>
-          <p className="text-muted-foreground">Called polling: agentinbox asks Gmail for changes on a timer. Nothing to set up, and the automatic fallback.</p>
+          <p className="text-muted-foreground">Called polling: agentinbox asks Gmail for changes on a timer. Nothing to set up, no billing account, and the automatic fallback.</p>
         </div>
       </div>
 

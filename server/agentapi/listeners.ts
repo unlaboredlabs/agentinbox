@@ -1,4 +1,4 @@
-import type { ListenerInfo } from "../../shared/types.ts";
+import { EVENT_TYPES, type EventType, type ListenerInfo } from "../../shared/types.ts";
 import { bool, type Db, json } from "../db/index.ts";
 import type { AppContext } from "../context.ts";
 import { EVENT_SELECT, type EventRow, toStoredEvent } from "../events/repo.ts";
@@ -26,14 +26,29 @@ export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
       "SELECT consumer, acked_seq, start_seq, client, connected, last_seen_at FROM listener_cursors WHERE agent_id = ? ORDER BY consumer",
       agentId,
     )
-    .map((r) => ({
-      consumer: r.consumer,
-      connected: r.connected > 0,
-      startSeq: r.start_seq,
-      ackedSeq: r.acked_seq,
-      lastSeenAt: r.last_seen_at,
-      client: json.parse(r.client, {}),
-    }));
+    .map((r) => {
+      // The stream's types live in the `client` JSON next to the client info (see streamEvents).
+      const { types, ...client } = json.parse<ListenerInfo["client"] & { types?: unknown }>(r.client, {});
+      return {
+        consumer: r.consumer,
+        connected: r.connected > 0,
+        startSeq: r.start_seq,
+        ackedSeq: r.acked_seq,
+        types: listenerTypes(types),
+        lastSeenAt: r.last_seen_at,
+        client,
+      };
+    });
+}
+
+/**
+ * The stored types list, or null when every type counts ("all": the stream named none) or the types
+ * are unknown (missing on cursors from before they were recorded, or malformed).
+ */
+function listenerTypes(raw: unknown): EventType[] | null {
+  if (!Array.isArray(raw)) return null;
+  const types = raw.filter((t): t is EventType => EVENT_TYPES.includes(t as EventType));
+  return types.length ? types : null;
 }
 
 /**
