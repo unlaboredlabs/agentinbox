@@ -17,6 +17,7 @@ describe("settings", () => {
     expect(s.update({ publicUrl: "https://mail.example.com/" }).publicUrl).toBe("https://mail.example.com");
     expect(() => s.update({ publicUrl: "not a url" })).toThrow(/full URL/);
     expect(() => s.update({ pollIntervalSeconds: 1 })).toThrow(/Poll interval/);
+    expect(s.update({ webhookAllowlist: [" 10.0.0.0/8 ", "10.0.0.0/8"] }).webhookAllowlist).toEqual(["10.0.0.0/8"]);
     s.setState("admin.passwordHash", "x");
     expect(s.getState("admin.passwordHash")).toBe("x");
   });

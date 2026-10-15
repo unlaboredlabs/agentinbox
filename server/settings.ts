@@ -43,6 +43,7 @@ export class SettingsStore {
       maxBodyChars: 20_000,
       retentionDays: 30,
       approvalTtlHours: 72,
+      webhookAllowlist: ["localhost", "127.0.0.0/8", "::1"],
     };
   }
 
@@ -102,6 +103,10 @@ function validate(s: Settings): Settings {
     return v;
   };
   if (!INGEST_MODES.includes(s.ingestMode)) throw badRequest("Ingest mode must be pubsub or poll");
+  const allowlist = Array.isArray(s.webhookAllowlist) ? s.webhookAllowlist.map((h) => String(h).trim()).filter(Boolean) : null;
+  if (!allowlist || allowlist.length > 100 || allowlist.some((h) => h.length > 253 || /\s/.test(h))) {
+    throw badRequest("Webhook allowlist must be a list of hostnames, IPs or CIDRs");
+  }
   return {
     publicUrl: url.origin + url.pathname.replace(/\/+$/, ""),
     ingestMode: s.ingestMode,
@@ -109,6 +114,7 @@ function validate(s: Settings): Settings {
     maxBodyChars: int(s.maxBodyChars, "Max body characters", 0, 1_000_000),
     retentionDays: int(s.retentionDays, "Retention", 1, 3650),
     approvalTtlHours: int(s.approvalTtlHours, "Approval expiry", 1, 24 * 30),
+    webhookAllowlist: [...new Set(allowlist)],
   };
 }
 

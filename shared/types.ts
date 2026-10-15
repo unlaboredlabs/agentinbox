@@ -120,6 +120,12 @@ export interface Settings {
   retentionDays: number;
   /** Approval requests auto-expire after this many hours. */
   approvalTtlHours: number;
+  /**
+   * SSRF guard: webhook targets that resolve to private, loopback or link-local addresses are refused
+   * unless their host matches one of these entries (hostnames, IPs or CIDRs, e.g. "127.0.0.0/8",
+   * "10.0.0.0/8", "n8n.internal"). Defaults to loopback only.
+   */
+  webhookAllowlist: string[];
 }
 
 export interface GoogleClientConfig {
