@@ -288,7 +288,7 @@ describe("connect", () => {
     const res = await routes.request(`${loc.pathname}${loc.search}`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("Already connected: rita@example.com.");
+    expect(html).toContain("<h1>Already connected: rita@example.com</h1>");
     expect(html).toContain("Back to the console");
     expect(html).not.toContain("Couldn&#39;t connect");
     const data = JSON.parse(/<script type="application\/json" id="oauth-result">([^<]*)<\/script>/.exec(html)![1]!) as Record<string, unknown>;

@@ -46,9 +46,7 @@ export function RedirectNotice({ className }: { className?: string }) {
       <AlertCircleIcon />
       <AlertTitle>{changed ? "Your address changed: add the new redirect URI to the OAuth client" : "The OAuth client is missing this redirect URI"}</AlertTitle>
       <AlertDescription className="space-y-2">
-        <p className="text-foreground/80">
-          {problem.message} Until it's added, Google shows "Error 400: redirect_uri_mismatch" when you connect an account.
-        </p>
+        <p className="text-foreground/80">{problem.message}</p>
         <p className="text-foreground/80">
           In Google Cloud: <strong>Google Auth Platform → Clients</strong> → your client → <strong>Authorized redirect URIs</strong> →{" "}
           <strong>Add URI</strong>, paste this, then <strong>Save</strong>. Changes can take a few minutes to apply at Google.

@@ -154,8 +154,8 @@ export function oauthRoutes(ctx: AppContext) {
             ok: true,
             already: true,
             email: err.email,
-            title: "Already connected",
-            message: `Already connected: ${err.email}. This sign-in was completed earlier, so there's nothing more to do here.`,
+            title: `Already connected: ${err.email}`,
+            message: "This sign-in was completed earlier, so there's nothing more to do here. You can close this window.",
             targetOrigin,
           }),
         );

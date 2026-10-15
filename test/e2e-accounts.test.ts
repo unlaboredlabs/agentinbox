@@ -55,7 +55,7 @@ describe("connect account", () => {
     // Reloading the callback says it's done, without exchanging anything again.
     const replay = await fetch(callback);
     expect(replay.status).toBe(200);
-    expect(await replay.text()).toContain(`Already connected: ${email}.`);
+    expect(await replay.text()).toContain(`Already connected: ${email}`);
     // The used state with another code (a forged replay) fails cleanly.
     const forged = new URL(callback);
     forged.searchParams.set("code", "forged");
