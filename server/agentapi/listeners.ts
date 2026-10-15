@@ -41,7 +41,10 @@ export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
     });
 }
 
-/** The stored types list, or null when missing (cursors from before it was recorded) or malformed. */
+/**
+ * The stored types list, or null when every type counts ("all": the stream named none) or the types
+ * are unknown (missing on cursors from before they were recorded, or malformed).
+ */
 function listenerTypes(raw: unknown): EventType[] | null {
   if (!Array.isArray(raw)) return null;
   const types = raw.filter((t): t is EventType => EVENT_TYPES.includes(t as EventType));

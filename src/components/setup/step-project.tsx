@@ -177,7 +177,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                       <a className="underline" href="https://support.google.com/code/contact/project_quota_increase" target="_blank" rel="noopener noreferrer">
                         request more quota
                       </a>
-                      .
+                      {inOrg && " or your organization's Quotas page"}.
                     </li>
                     <li>
                       <strong className="text-foreground">--organization</strong> errors: untick the Workspace box above, or ask your Workspace

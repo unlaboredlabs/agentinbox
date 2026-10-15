@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSelf } from "../shared/agent-api.ts";
-import { type Agent, EVENT_TYPES } from "../shared/types.ts";
+import type { Agent } from "../shared/types.ts";
 import { type AgentApiOptions, agentApi } from "../server/agentapi/index.ts";
 import { createApp } from "../server/app.ts";
 import { type RunningServer, startServer } from "../server/server.ts";
@@ -148,7 +148,8 @@ describe("GET /agent/v1/events/stream", () => {
         connected: true,
         startSeq: 0,
         ackedSeq: 0,
-        types: [...EVENT_TYPES],
+        // No types param: every type counts, including types added later.
+        types: null,
         lastSeenAt: expect.any(String),
         client: { hostname: "wynn-mbp", platform: "darwin", version: "1.2.3" },
       },
@@ -169,7 +170,12 @@ describe("GET /agent/v1/events/stream", () => {
     const b = await s.open("?consumer=laptop&types=message.received,message.sent");
     expect(typesOf("laptop")).toEqual(["message.received", "message.sent"]);
     b.cancel();
-    // Cursors recorded before types were: unknown.
+    // No types param: stored as "all" (not today's list), so every type counts.
+    const c = await s.open("?consumer=laptop");
+    expect(JSON.parse(s.ctx.db.get<{ client: string }>("SELECT client FROM listener_cursors WHERE consumer = ?", "laptop")!.client).types).toBe("all");
+    expect(typesOf("laptop")).toBeNull();
+    c.cancel();
+    // Cursors recorded before types were: unknown, which counts the same.
     s.ctx.db.run("UPDATE listener_cursors SET client = ? WHERE consumer = ?", JSON.stringify({ hostname: "old" }), "laptop");
     expect(typesOf("laptop")).toBeNull();
     expect(s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.client).toEqual({ hostname: "old" });

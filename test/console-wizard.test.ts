@@ -92,7 +92,14 @@ describe("listenerHandled", () => {
 
 describe("verifyChecks", () => {
   it("is all false before a test email is sent", () => {
-    expect(verifyChecks({ ...base, test: undefined })).toEqual({ sent: false, received: undefined, delivered: false, resendForListener: false, readIt: false });
+    expect(verifyChecks({ ...base, test: undefined })).toEqual({
+      sent: false,
+      received: undefined,
+      delivered: false,
+      resendForListener: false,
+      readIt: false,
+      typesExcludeIt: null,
+    });
   });
 
   it("matches the test by message id and prefers message.received over message.sent", () => {
@@ -133,6 +140,19 @@ describe("verifyChecks", () => {
     expect(verifyChecks({ ...base, test: test0, events: [event(8, "message.received"), event(7, "message.sent")], listeners: onlyReceived }).delivered).toBe(true);
     const onlySent = [listener("host-default", 9, true, null, ["message.sent"])];
     expect(verifyChecks({ ...base, test: test0, events: [event(8, "message.received"), event(7, "message.sent")], listeners: onlySent }).delivered).toBe(false);
+  });
+
+  it("says when every listener known at send time asked for types without message.received", () => {
+    const events = [event(8, "message.received"), event(7, "message.sent")];
+    const replies = listener("host-default", 9, true, null, ["thread.reply_received"]);
+    expect(verifyChecks({ ...base, test: test0, events, listeners: [replies] }).typesExcludeIt).toEqual(["thread.reply_received"]);
+    // Not while one of them takes it, its types are unknown, or the received event hasn't arrived yet.
+    const both = [replies, listener("laptop-default", 7, true, null, ["message.received"])];
+    expect(verifyChecks({ ...base, test: { ...test0, listenersAtSend: ["host-default", "laptop-default"] }, events, listeners: both }).typesExcludeIt).toBeNull();
+    expect(verifyChecks({ ...base, test: test0, events, listeners: [listener("host-default", 7)] }).typesExcludeIt).toBeNull();
+    expect(verifyChecks({ ...base, test: test0, events: [event(7, "message.sent")], listeners: [replies] }).typesExcludeIt).toBeNull();
+    // Only listeners recorded at send time count.
+    expect(verifyChecks({ ...base, test: { ...test0, listenersAtSend: [] }, events, listeners: [replies] }).typesExcludeIt).toBeNull();
   });
 
   it("does not count a listener whose cursor started at or after the event", () => {

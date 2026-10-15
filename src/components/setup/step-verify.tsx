@@ -237,7 +237,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
 
   const mcpDone = useLatch(!!mcp.seenAt);
   const listenDone = useLatch(agent.listeners.some((l) => l.connected));
-  const { sent, received, delivered, resendForListener, readIt } = verifyChecks({
+  const { sent, received, delivered, resendForListener, readIt, typesExcludeIt } = verifyChecks({
     test,
     events: events.data?.items ?? [],
     listeners: agent.listeners,
@@ -443,7 +443,15 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
             delivered
               ? "Its terminal shows one ✓ line for the email."
               : !skipListen && receivedDone
-                ? resendForListener
+                ? typesExcludeIt
+                  ? (
+                    <>
+                      Your listener only runs its command for {typesExcludeIt.join(", ")}, so it skipped this email. Stop it and start it again
+                      with the default types (no <code className="font-mono text-foreground">--types</code>) or with{" "}
+                      <code className="font-mono text-foreground">--types message.received</code>, then send another test email.
+                    </>
+                  )
+                  : resendForListener
                   ? "The listener wasn't running when this email was sent, so it starts after it. Send another test email now that the listener is running."
                   : "Look for one ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
                 : undefined
