@@ -680,6 +680,7 @@ export interface ApiError {
 //   GET    /api/health                                → HealthResponse
 //   GET    /api/setup/status                          → SetupStatus
 //   POST   /api/setup/claim {token,password}          → 204 + session cookie (only while unclaimed)
+//   POST   /api/setup/verify-token {token}            → 204 when the setup token is right (same limiter as claim)
 //   POST   /api/auth/login {password}                 → 204 + session cookie (5 failures/IP → 15 min lockout)
 //   POST   /api/auth/logout                           → 204
 //   GET    /oauth/callback?code&state                 → HTML result page; posts an OAuthCallbackMessage (ok/email or error/code/hint)

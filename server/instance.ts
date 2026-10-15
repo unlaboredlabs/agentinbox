@@ -153,7 +153,8 @@ export function acquireInstanceLock(config: Pick<Config, "dataDir" | "host" | "p
             ? `agentinbox is already running as a background service with the data directory ${dataDir} ${where}. ` +
                 `Use that one, stop it (\`${cliCommand("service uninstall")}\` keeps your data), or use another --data directory.`
             : `agentinbox is already running with the data directory ${dataDir} ${where}. ` +
-                `Stop it first, or use another --data directory. If no such process exists, delete ${file}.`,
+                `Stop it first, or use another --data directory. If no such process exists, delete ${file}.` +
+                (existsSync(join(dataDir, "setup-token")) ? ` Lost its setup link? \`${cliCommand("reset-password")}\` prints it again.` : ""),
         );
       }
       rmSync(file, { force: true });

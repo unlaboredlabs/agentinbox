@@ -1,3 +1,4 @@
+import type { Context } from "hono";
 import { z } from "zod";
 import type { GoogleClientView, PubsubState, SetupState, SetupStatus } from "../../shared/types.ts";
 import {
@@ -20,10 +21,21 @@ import { hashPasswordAsync, safeEqual } from "../crypto.ts";
 import { badRequest, conflict, HttpError } from "../util/errors.ts";
 import { readBody, router } from "./util.ts";
 
+const TokenField = z.string().trim().min(1, "Setup token is required").max(200);
+
 const ClaimBody = z.object({
-  token: z.string().trim().min(1, "Setup token is required").max(200),
+  token: TokenField,
   password: z.string().max(MAX_PASSWORD_LENGTH, `Password must be at most ${MAX_PASSWORD_LENGTH} characters`),
 });
+
+const VerifyBody = z.object({ token: TokenField });
+
+/** How to get a working setup link again (the token file is only readable on the server). */
+const lostLinkHint = () =>
+  `On the server, run \`${cliCommand("reset-password")}\`: it prints the setup link again (nothing is reset while the instance isn't set up yet). ` +
+  "Restarting agentinbox prints it too.";
+
+const ALREADY_CLAIMED = () => conflict("This instance is already set up", "Sign in with the admin password instead.");
 
 /** Unauthenticated: first-run status and the one-time claim. Mounted before the admin guard. */
 export function setupPublicApi(ctx: AppContext) {
@@ -33,27 +45,28 @@ export function setupPublicApi(ctx: AppContext) {
       c.header("Cache-Control", "no-store");
       return c.json<SetupStatus>({ claimed: isClaimed(ctx), authenticated: hasSession(c, ctx) });
     })
+    // Checks the setup token before the password form is filled in. Same limiter and secret key as
+    // the claim: a wrong token counts once whichever endpoint sees it, and a correct one clears it.
+    .post("/setup/verify-token", async (c) => {
+      const ip = clientIp(c, ctx.config.trustProxy);
+      const banned = auth.limiter.bannedMinutes(ip);
+      if (banned) return lockedOut(c, banned);
+      const body = await readBody(c, VerifyBody);
+      const rejected = await verifyToken(c, ip, body.token);
+      if (rejected) return rejected;
+      return c.body(null, 204);
+    })
     .post("/setup/claim", async (c) => {
       const ip = clientIp(c, ctx.config.trustProxy);
       const banned = auth.limiter.bannedMinutes(ip);
       if (banned) return lockedOut(c, banned);
       const body = await readBody(c, ClaimBody);
-      if (isClaimed(ctx)) throw conflict("This instance is already claimed", "Sign in with the admin password instead.");
-      const expected = readSetupToken(ctx.config.dataDir);
-      if (!expected) {
-        throw new HttpError(403, "invalid_token", "The setup link has expired", `Restart agentinbox or run \`${cliCommand("reset-password")}\` for a new link.`);
-      }
-      const check = await checkSecret(ctx, ip, `claim:${body.token}`, () => safeEqual(body.token, expected), { global: false });
-      if (!check.ok) {
-        const rejected = rejection(c, check);
-        if (rejected) return rejected;
-        ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "denied", reason: check.nowBanned ? "lockout" : "invalid_token", detail: { ip } });
-        throw new HttpError(403, "invalid_token", "Invalid setup token", "Use the exact setup link printed by agentinbox on startup.");
-      }
+      const rejected = await verifyToken(c, ip, body.token);
+      if (rejected) return rejected;
       checkPassword(body.password);
       const hash = await hashPasswordAsync(body.password);
       // A concurrent claim may have won while hashing.
-      if (isClaimed(ctx)) throw conflict("This instance is already claimed", "Sign in with the admin password instead.");
+      if (isClaimed(ctx)) throw ALREADY_CLAIMED();
       ctx.settings.setState("admin.passwordHash", hash);
       deleteSetupToken(ctx.config.dataDir);
       auth.limiter.reset();
@@ -61,6 +74,24 @@ export function setupPublicApi(ctx: AppContext) {
       ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "ok", detail: { ip } });
       return c.body(null, 204);
     });
+
+  /** Rate-limited setup token check: null when it matches, a 429 response, or throws 403/409. */
+  async function verifyToken(c: Context, ip: string, token: string): Promise<Response | null> {
+    if (isClaimed(ctx)) throw ALREADY_CLAIMED();
+    const expected = readSetupToken(ctx.config.dataDir);
+    if (!expected) throw new HttpError(403, "setup_token_expired", "This setup link is no longer valid", lostLinkHint());
+    const check = await checkSecret(ctx, ip, `claim:${token}`, () => safeEqual(token, expected), { global: false });
+    if (check.ok) return null;
+    const rejected = rejection(c, check);
+    if (rejected) return rejected;
+    ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "denied", reason: check.nowBanned ? "lockout" : "invalid_token", detail: { ip } });
+    throw new HttpError(
+      403,
+      "invalid_token",
+      "This setup token isn't valid",
+      `Copy the whole setup link from the terminal (an older link stops working after \`reset-password\`). Lost it? ${lostLinkHint()}`,
+    );
+  }
 }
 
 /** Authenticated: the setup checklist. */

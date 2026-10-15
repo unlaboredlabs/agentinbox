@@ -28,7 +28,7 @@ export interface RequestOptions {
 export const UNAUTHORIZED_EVENT = "agentinbox:unauthorized";
 
 // Auth endpoints answer 401/403 for wrong passwords and tokens; those are form errors, not session expiry.
-const AUTH_PATHS = ["/api/auth/login", "/api/setup/claim", "/api/auth/password", "/api/setup/status"];
+const AUTH_PATHS = ["/api/auth/login", "/api/setup/claim", "/api/setup/verify-token", "/api/auth/password", "/api/setup/status"];
 
 function isApiErrorBody(v: unknown): v is ApiErrorBody {
   return !!v && typeof v === "object" && "error" in v && !!(v as ApiErrorBody).error && typeof (v as ApiErrorBody).error.message === "string";
