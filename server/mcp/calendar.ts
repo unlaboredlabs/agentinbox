@@ -101,6 +101,9 @@ function windowOf(timeMin: string, timeMax: string, maxDays: number): { timeMin:
  * last day). Timed: both date-times; a time without UTC offset needs time_zone (Google rejects it otherwise).
  */
 function eventTimes(p: { start: string; end: string; all_day?: boolean; time_zone?: string }): Pick<CalendarEventInput, "start" | "end" | "allDay" | "timeZone"> {
+  if (p.all_day === undefined && isDate(p.start) !== isDate(p.end)) {
+    throw new ToolError("invalid_arguments", "Pass date-times for both start and end (or dates for both, for an all-day event).");
+  }
   const allDay = p.all_day ?? isDate(p.start);
   if (allDay) {
     if (!isDate(p.start) || !isDate(p.end)) {

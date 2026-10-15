@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
-import { type Agent, type AgentTestResult, type AgentWithKey, type Approval, type Grant, isMcpToolAction } from "../shared/types.ts";
+import { type Agent, type AgentTestResult, type AgentWithKey, type Approval, CALENDAR_CAPABILITIES, type Grant, isMcpToolAction } from "../shared/types.ts";
 import { agentsApi } from "../server/api/agents.ts";
 import { approvalsApi } from "../server/api/approvals.ts";
 import type { AppContext } from "../server/context.ts";
@@ -234,10 +234,13 @@ describe("rejected tool calls", () => {
 
   it("the catalog is every tool a fully granted agent gets", async () => {
     const { http, addAgent } = setup();
-    const full = addAgent("full", [grantInput("acc_a", { capabilities: ALL_CAPS })]);
+    const full = addAgent("full", [grantInput("acc_a", { capabilities: [...ALL_CAPS, ...CALENDAR_CAPABILITIES] })]);
     const names = (await (await mcpClient(http, full.apiKey)).listTools()).tools.map((t) => t.name).sort();
-    // Calendar workstream C: grant calendar.read + calendar.write too and expect all of TOOL_NAMES.
-    expect(names).toEqual(TOOL_NAMES.filter((n) => !CALENDAR_TOOL_NAMES.includes(n)).sort());
+    expect(names).toEqual([...TOOL_NAMES].sort());
+    // And without the calendar capabilities, none of the calendar tools.
+    const mail = addAgent("mail", [grantInput("acc_a", { capabilities: ALL_CAPS })]);
+    const mailNames = (await (await mcpClient(http, mail.apiKey)).listTools()).tools.map((t) => t.name).sort();
+    expect(mailNames).toEqual(TOOL_NAMES.filter((n) => !CALENDAR_TOOL_NAMES.includes(n)).sort());
   });
 
   it("rejected calls alone don't verify setup", async () => {
