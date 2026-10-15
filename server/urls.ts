@@ -21,3 +21,9 @@ export function loopbackUrl(host: string, port: number): string {
   if (isWildcardHost(host)) return `http://127.0.0.1:${port}`;
   return `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
 }
+
+/** RFC 1918, CGNAT, link-local and loopback IPv4: not reachable from the internet. */
+export function isPrivateIPv4(ip: string): boolean {
+  const [a = -1, b = -1] = ip.split(".").map(Number);
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
+}

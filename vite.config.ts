@@ -22,6 +22,9 @@ export default defineConfig({
       "/mcp": { target: server, changeOrigin: false },
       "/oauth": { target: server, changeOrigin: false },
       "/skill": { target: server, changeOrigin: false },
+      // Not "/agent": that prefix would also catch the console's /agents routes.
+      "^/agent(/|$)": { target: server, changeOrigin: false },
+      "/health": { target: server, changeOrigin: false },
     },
   },
 });

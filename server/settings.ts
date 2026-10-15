@@ -37,7 +37,7 @@ export class SettingsStore {
 
   defaults(): Settings {
     return {
-      publicUrl: `http://localhost:${this.config.port}`,
+      publicUrl: defaultPublicUrl(this.config.host, this.config.port),
       ingestMode: "poll",
       pollIntervalSeconds: 30,
       maxBodyChars: 20_000,
@@ -120,4 +120,15 @@ function validate(s: Settings): Settings {
 
 function stripUndefined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+/**
+ * localhost when bound to all interfaces or to 127.0.0.1/::1 (Google accepts http://localhost redirects);
+ * otherwise the specific address or name the operator chose with --host.
+ */
+export function defaultPublicUrl(host: string, port: number): string {
+  const h = host.trim().toLowerCase();
+  const local = !h || h === "0.0.0.0" || h === "::" || h === "localhost" || h === "::1" || h === "127.0.0.1";
+  if (local) return `http://localhost:${port}`;
+  return `http://${h.includes(":") ? `[${h}]` : h}:${port}`;
 }

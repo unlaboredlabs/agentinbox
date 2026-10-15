@@ -137,8 +137,11 @@ export class TokenManager {
     const error = rapt
       ? `Google requires ${row.email} to sign in again (invalid_rapt): your Workspace admin requires periodic re-authentication ` +
         "for apps using Google Cloud scopes (Google Cloud session control). Reconnect the account, or ask the admin to exempt this app."
-      : `Google rejected the saved sign-in for ${row.email} (${description || "invalid_grant"}). Reconnect the account. ` +
-        "If this keeps happening about every 7 days, your OAuth app is External and still in Testing: publish it (In production).";
+      : `Google rejected the saved sign-in for ${row.email} (${description || "invalid_grant"}). Reconnect the account.` +
+        // The 7-day expiry only happens to External apps left in Testing.
+        (this.ctx.settings.getState("google.client")?.appType === "external"
+          ? " If this keeps happening about every 7 days, your OAuth app is still in Testing: publish it (In production)."
+          : "");
     this.ctx.log.child("google").warn("Refresh token rejected; account needs re-auth", { email: row.email });
     this.ctx.accounts.setStatus(row.id, "needs_reauth", error);
     try {

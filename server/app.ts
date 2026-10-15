@@ -55,6 +55,11 @@ const ASSET_EXTENSIONS = new Set([
 const SERVER_PREFIXES = ["/api", "/mcp", "/oauth", "/skill.md", "/health"];
 const isServerPath = (path: string) => SERVER_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
 
+const withMcp = new WeakSet<object>();
+
+/** Whether the MCP endpoint is implemented (the placeholder router has no routes). */
+export const hasMcp = (app: object): boolean => withMcp.has(app);
+
 export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   // Make sure the setup link exists before anyone needs it.
@@ -98,7 +103,9 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
     return c.body(renderSkill(ctx.settings.publicUrl()));
   });
   app.route("/", oauthRoutes(ctx));
-  app.route("/", mcpRoutes(ctx));
+  const mcp = mcpRoutes(ctx);
+  if (mcp.routes.length) withMcp.add(app);
+  app.route("/", mcp);
 
   // ── Admin console API ──
   app.use("/api/*", requireAdmin(ctx));

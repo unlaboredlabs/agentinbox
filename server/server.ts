@@ -1,15 +1,18 @@
+import { existsSync, rmdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { type ServerType, serve } from "@hono/node-server";
 import open from "open";
 import pc from "picocolors";
-import { createApp } from "./app.ts";
+import { createApp, hasMcp } from "./app.ts";
 import { currentSetupToken } from "./auth/index.ts";
 import { type Config, type ConfigInput, loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
-import { acquireInstanceLock, assertMasterKeyUsable, cliCommand } from "./instance.ts";
+import { acquireInstanceLock, assertMasterKeyUsable, cliCommand, type InstanceLock } from "./instance.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { setupTokenPath } from "./auth/setup-token.ts";
-import { consoleUrls, loopbackUrl } from "./urls.ts";
+import { consoleUrls, isPrivateIPv4, isWildcardHost, loopbackUrl, networkAddresses } from "./urls.ts";
 import { errorMessage } from "./util/errors.ts";
 import { createAppContext, type ServiceOverrides, startServices, stopServices } from "./wire.ts";
 
@@ -19,6 +22,8 @@ export interface StartOptions {
   overrides?: ServiceOverrides;
   /** Console build directory (defaults to dist/web). */
   webDir?: string;
+  /** Called once the port is bound and the app is serving, before services start (prints the banner). */
+  onReady?: (ctx: AppContext, info: { mcp: boolean }) => void;
 }
 
 export interface RunningServer {
@@ -33,43 +38,63 @@ export interface RunningServer {
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /**
- * Takes the data directory's instance lock, checks the master key against stored secrets, builds
- * the context, binds the port, then starts services (so a second instance never runs ingest
- * against the same data). Use `port: 0` in tests; `config.port` is updated to the bound port.
+ * Binds the port first (so a busy port leaves nothing behind), then takes the data directory's
+ * instance lock, checks the master key against stored secrets, builds the context and the app,
+ * and finally starts services (so a second instance never runs ingest against the same data).
+ * Use `port: 0` in tests; `config.port` is updated to the bound port.
  */
 export async function startServer(opts: StartOptions): Promise<RunningServer> {
   const { config } = opts;
-  const lock = acquireInstanceLock(config);
-  let ctx: AppContext;
+  type Fetch = Parameters<typeof serve>[0]["fetch"];
+  // Distinguishable from a real HealthResponse, so `service install` keeps waiting.
+  let handler: Fetch = () => Response.json({ status: "starting" }, { status: 503, headers: { "retry-after": "1" } });
   let server: ServerType;
   try {
-    assertMasterKeyUsable(config);
-    ctx = createAppContext(config, opts.overrides);
+    server = await listen((req, env) => handler(req, env), config.host, config.port);
   } catch (err) {
-    lock.release();
-    throw err;
-  }
-  try {
-    const app = createApp(ctx, { webDir: opts.webDir });
-    server = await listen(app.fetch, config.host, config.port);
-  } catch (err) {
-    ctx.db.close();
-    lock.release();
     throw friendlyListenError(err, config.port);
   }
   config.port = (server.address() as AddressInfo).port;
-  lock.update(config.port);
+  const closeServer = () =>
+    new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      // SSE streams and long polls would otherwise hold the server open.
+      (server as { closeAllConnections?: () => void }).closeAllConnections?.();
+    });
+
+  let lock: InstanceLock;
+  let ctx: AppContext;
+  let mcp: boolean;
+  try {
+    lock = acquireInstanceLock(config);
+    try {
+      assertMasterKeyUsable(config);
+      ctx = createAppContext(config, opts.overrides);
+    } catch (err) {
+      lock.release();
+      throw err;
+    }
+    try {
+      const app = createApp(ctx, { webDir: opts.webDir });
+      mcp = hasMcp(app);
+      handler = (req, env) => app.fetch(req, env);
+    } catch (err) {
+      ctx.db.close();
+      lock.release();
+      throw err;
+    }
+  } catch (err) {
+    await closeServer();
+    throw err;
+  }
+  opts.onReady?.(ctx, { mcp });
 
   let stopMaintenance = () => {};
   let closing: Promise<void> | undefined;
   const close = () =>
     (closing ??= (async () => {
       stopMaintenance();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        // SSE streams and long polls would otherwise hold the server open.
-        (server as { closeAllConnections?: () => void }).closeAllConnections?.();
-      });
+      await closeServer();
       await stopServices(ctx);
       lock.release();
     })());
@@ -110,9 +135,23 @@ export interface RunOptions extends ConfigInput {
 
 /** `agentinbox start`: runs in the foreground until SIGINT/SIGTERM. */
 export async function runForeground(opts: RunOptions): Promise<void> {
+  const dataDir = resolve(opts.dataDir ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
+  const existed = existsSync(dataDir);
   const config = loadConfig(opts, opts.version);
-  const running = await startServer({ config });
-  printBanner(running.ctx);
+  let running: RunningServer;
+  try {
+    running = await startServer({ config, onReady: (ctx, info) => printBanner(ctx, info) });
+  } catch (err) {
+    // Don't leave an empty data directory behind when we never got going (e.g. the port was busy).
+    if (!existed) {
+      try {
+        rmdirSync(dataDir);
+      } catch {
+        // Not empty: keep it.
+      }
+    }
+    throw err;
+  }
 
   const token = currentSetupToken(running.ctx);
   if (token && opts.open && process.stdout.isTTY && !config.dev && !config.service) {
@@ -137,7 +176,7 @@ export async function runForeground(opts: RunOptions): Promise<void> {
   }
 }
 
-function printBanner(ctx: AppContext): void {
+function printBanner(ctx: AppContext, info: { mcp: boolean }): void {
   const { config } = ctx;
   const urls = config.dev ? ["http://localhost:5173"] : consoleUrls(config.host, config.port);
   const token = currentSetupToken(ctx);
@@ -145,8 +184,8 @@ function printBanner(ctx: AppContext): void {
   if (token && config.service) {
     // Service logs are often readable by others (journal, log files): never print the token there.
     out.push(
-      `  ${pc.yellow("Not claimed yet.")} The setup link is ${urls[0]}/setup?token=<token>, with the token in ${setupTokenPath(config.dataDir)}.`,
-      `  ${pc.dim(`\`${cliCommand("service install")}\` prints the full link.`)}`,
+      `  ${pc.yellow("Not claimed yet.")} Print the setup link with \`${cliCommand(`reset-password --data ${config.dataDir}`)}\`,`,
+      `  or open ${urls[0]}/setup?token=<token> with the token from \`cat ${setupTokenPath(config.dataDir)}\`.`,
     );
   } else if (token) {
     out.push(`  ${pc.yellow("First run:")} open this link to claim the instance and finish setup:`, "");
@@ -154,7 +193,15 @@ function printBanner(ctx: AppContext): void {
   } else {
     out.push(`  ${pc.dim("Console")}  ${pc.cyan(urls[0]!)}`);
     for (const url of urls.slice(1)) out.push(`           ${pc.cyan(url)}`);
-    out.push(`  ${pc.dim("MCP")}      ${pc.cyan(`${ctx.settings.publicUrl()}/mcp`)}`);
+    if (info.mcp) out.push(`  ${pc.dim("MCP")}      ${pc.cyan(`${ctx.settings.publicUrl()}/mcp`)}`);
+  }
+  const exposed = token && isWildcardHost(config.host) ? networkAddresses().filter((a) => !isPrivateIPv4(a)) : [];
+  if (exposed.length) {
+    out.push(
+      "",
+      `  ${pc.yellow("Heads up:")} port ${config.port} is reachable on the public address ${exposed.join(", ")}.`,
+      `  Claim the instance now, or restart with --host 127.0.0.1 (or firewall the port) until you have.`,
+    );
   }
   if (config.dev) out.push("", pc.dim(`  Dev mode: API on :${config.port}, console via Vite on :5173.`));
   console.log(out.join("\n") + "\n");
