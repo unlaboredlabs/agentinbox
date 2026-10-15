@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type BannerEnv, bannerLines, startServer, tunnelCommand } from "../server/server.ts";
+import { type BannerEnv, bannerLines, sameLoopbackServer, startServer, tunnelCommand } from "../server/server.ts";
 import { fakeGoogle, fakeIngest, harness, json } from "./platform-helpers.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -163,7 +163,24 @@ describe("startup banner", () => {
       h.ctx.settings.update({ publicUrl: "http://localhost:9000" });
       out = text(bannerLines(h.ctx, { mcp: true }, desktop));
       expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425\n\s+http:\/\/localhost:9000\n/);
+      // Bound to 127.0.0.1, saved as [::1]: another IP family, not the same server. Both lines stay.
+      h.ctx.settings.update({ publicUrl: "http://[::1]:8425" });
+      out = text(bannerLines(h.ctx, { mcp: true }, desktop));
+      expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425\n\s+http:\/\/\[::1\]:8425\n/);
     }));
+
+  it("sameLoopbackServer: the same host, or localhost and an IP; never 127.0.0.1 and [::1]", () => {
+    expect(sameLoopbackServer("http://127.0.0.1:8425", "http://localhost:8425")).toBe(true);
+    expect(sameLoopbackServer("http://localhost:8425", "http://127.0.0.1:8425")).toBe(true);
+    expect(sameLoopbackServer("http://[::1]:8425", "http://localhost:8425")).toBe(true);
+    expect(sameLoopbackServer("http://127.0.0.1:8425", "http://127.0.0.1:8425")).toBe(true);
+    expect(sameLoopbackServer("http://127.0.0.1:8425", "http://[::1]:8425")).toBe(false);
+    expect(sameLoopbackServer("http://[::1]:8425", "http://127.0.0.1:8425")).toBe(false);
+    expect(sameLoopbackServer("http://127.0.0.1:8425", "http://localhost:9000")).toBe(false);
+    expect(sameLoopbackServer("http://127.0.0.1:8425", "https://localhost:8425")).toBe(false);
+    expect(sameLoopbackServer("http://127.0.0.1:8425", "http://localhost:8425/inbox")).toBe(false);
+    expect(sameLoopbackServer("http://192.168.1.5:8425", "http://localhost:8425")).toBe(false);
+  });
 
   it("as a service: never prints the setup token, points at reset-password", () =>
     withHarness((h) => {

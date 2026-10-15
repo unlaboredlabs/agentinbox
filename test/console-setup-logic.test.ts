@@ -70,9 +70,13 @@ describe("address verdicts match the server", () => {
     expect(localConsoleUrl("http://127.0.0.1:8425", "8425")).toEqual({ url: "http://127.0.0.1:8425", fromBrowser: true });
     expect(localConsoleUrl("http://localhost:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: true });
     expect(localConsoleUrl("http://[::1]:8425", "8425")).toEqual({ url: "http://[::1]:8425", fromBrowser: true });
-    expect(localConsoleUrl("https://localhost:8443", "8425")).toEqual({ url: "https://localhost:8443", fromBrowser: true });
+    expect(localConsoleUrl("https://localhost:8443", "8443")).toEqual({ url: "https://localhost:8443", fromBrowser: true });
     // Each of those is a direct callback on the server too.
     for (const o of ["http://127.0.0.1:8425", "http://localhost:8425", "http://[::1]:8425"]) expect(serverCallback(localConsoleUrl(o, "8425").url)).toBe("direct");
+    // A loopback origin on another port is an SSH tunnel's (or a proxy's) local port, not the server's.
+    expect(localConsoleUrl("http://localhost:18425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
+    expect(localConsoleUrl("http://127.0.0.1:9000", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
+    expect(localConsoleUrl("https://localhost:8443", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
     // Loopback names the server doesn't call back to directly, and remote browsers: localhost on the server's port.
     expect(localConsoleUrl("http://127.0.0.2:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
     expect(localConsoleUrl("http://inbox.localhost:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });

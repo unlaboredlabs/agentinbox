@@ -3,7 +3,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentTool } from "../shared/agent-api.ts";
-import type { AuditEntry, ListenerInfo, MailEvent, PairingRequest, SetupState } from "../shared/types.ts";
+import { type AuditEntry, isMcpToolAction, type ListenerInfo, type MailEvent, type PairingRequest, type SetupState } from "../shared/types.ts";
 import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
@@ -404,6 +404,13 @@ describe("fmtAgo", () => {
   });
 });
 
+describe("isMcpToolAction (the console's side of mcpToolCallSql)", () => {
+  it("counts tool names, not dotted console or pairing actions", () => {
+    for (const a of ["send_message", "search_threads", "list_accounts"]) expect(isMcpToolAction(a)).toBe(true);
+    for (const a of ["pairing.key_delivered", "agent.create", "account.connect"]) expect(isMcpToolAction(a)).toBe(false);
+  });
+});
+
 describe("agentOnHost", () => {
   it("adds the host only when the agent's name doesn't already end with it", () => {
     expect(agentOnHost("Claude Code on anvil", "anvil")).toBe("Claude Code on anvil");
@@ -412,6 +419,12 @@ describe("agentOnHost", () => {
     expect(agentOnHost("Claude Code on anvil", "forge")).toBe("Claude Code on anvil on forge");
     expect(agentOnHost("Inbox bot", "anvil")).toBe("Inbox bot on anvil");
     expect(agentOnHost("Inbox bot", null)).toBe("Inbox bot");
+    // A name that is just the host, with or without .local/.lan/.home on either side.
+    expect(agentOnHost("anvil", "anvil")).toBe("anvil");
+    expect(agentOnHost("anvil", "anvil.local")).toBe("anvil");
+    expect(agentOnHost("anvil.lan", "anvil")).toBe("anvil.lan");
+    expect(agentOnHost("Claude Code on anvil.local", "anvil")).toBe("Claude Code on anvil.local");
+    expect(agentOnHost("Claude Code on anvil.home", "anvil.local")).toBe("Claude Code on anvil.home");
     // Not a suffix match on a longer word.
     expect(agentOnHost("Claude Code on xanvil", "anvil")).toBe("Claude Code on xanvil on anvil");
   });

@@ -6,7 +6,7 @@ import { useState } from "react";
 import { ApprovalCard } from "@/components/approvals/approval-card";
 import { ApprovalHistory } from "@/components/approvals/approval-history";
 import { FindByCode, PairingApproveDialog, PairingCard, RecentPairings } from "@/components/approvals/pairing";
-import { linkedPairing } from "@/components/approvals/pairing-link";
+import { deniedDescription, linkedPairing } from "@/components/approvals/pairing-link";
 import { Visible } from "@/components/hidden-chars";
 import { PageHeader, QueryError } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -121,8 +121,7 @@ function ApprovalsPage() {
                 You denied <Visible text={link.p.name} />
               </AlertTitle>
               <AlertDescription>
-                {link.p.decisionNote ? "Its terminal shows that it was denied, with your note." : "Its terminal shows that it was denied."} Changed
-                your mind? Run connect again for a new request.
+                {deniedDescription(link.p.decisionNote)} Changed your mind? Run connect again for a new request.
               </AlertDescription>
             </Alert>
           ) : link?.kind === "approved" ? (
@@ -133,7 +132,7 @@ function ApprovalsPage() {
               </AlertTitle>
               <AlertDescription>
                 <p>
-                  Its key went to the agent's terminal.{" "}
+                  Its key is ready for the agent's terminal.{" "}
                   {link.p.agentId && (
                     <Link to="/agents/$agentId" params={{ agentId: link.p.agentId }} className="font-medium text-foreground underline underline-offset-4">
                       Open agent

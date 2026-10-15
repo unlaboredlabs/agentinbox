@@ -238,11 +238,16 @@ const shellQuote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replac
 
 const LOOPBACK_NAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-/** Two loopback spellings of the same server (localhost vs 127.0.0.1 vs [::1], same scheme and port). */
+/**
+ * Two loopback spellings of the same server: same scheme and port, and the same host or one of them
+ * localhost (which reaches either family). 127.0.0.1 and [::1] are different IP families, so a server
+ * bound to one isn't reachable at the other: never the same.
+ */
 export function sameLoopbackServer(a: string, b: string): boolean {
   try {
     const [x, y] = [new URL(a), new URL(b)];
-    return LOOPBACK_NAMES.has(x.hostname) && LOOPBACK_NAMES.has(y.hostname) && x.protocol === y.protocol && x.port === y.port && (y.pathname === "/" || y.pathname === "");
+    const hosts = LOOPBACK_NAMES.has(x.hostname) && LOOPBACK_NAMES.has(y.hostname) && (x.hostname === y.hostname || x.hostname === "localhost" || y.hostname === "localhost");
+    return hosts && x.protocol === y.protocol && x.port === y.port && (y.pathname === "/" || y.pathname === "");
   } catch {
     return false;
   }
