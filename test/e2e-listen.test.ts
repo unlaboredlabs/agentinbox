@@ -346,7 +346,7 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     expect(content!.body).toMatch(/^<email_content from="attacker@evil\.test" untrusted>/);
 
     // Environment: only safe ids (plus the event file path), never text, never the planted variable.
-    const allowed = ["AGENTINBOX_EVENT_ID", "AGENTINBOX_EVENT_TYPE", "AGENTINBOX_EVENT_SEQ", "AGENTINBOX_ACCOUNT", "AGENTINBOX_THREAD_ID", "AGENTINBOX_MESSAGE_ID", "AGENTINBOX_EVENT_FILE"];
+    const allowed = ["AGENTINBOX_EVENT_ID", "AGENTINBOX_EVENT_TYPE", "AGENTINBOX_EVENT_SEQ", "AGENTINBOX_ACCOUNT", "AGENTINBOX_THREAD_ID", "AGENTINBOX_MESSAGE_ID", "AGENTINBOX_EVENT_FILE", "AGENTINBOX_EVENT_COUNT"];
     expect(Object.keys(call1.env).filter((k) => !allowed.includes(k))).toEqual([]);
     expect(call1.env).toMatchObject({ AGENTINBOX_EVENT_ID: ev.id, AGENTINBOX_EVENT_TYPE: "message.received", AGENTINBOX_EVENT_SEQ: String(ev.seq), AGENTINBOX_MESSAGE_ID: msg.id });
     for (const v of Object.values(call1.env)) expect(v).not.toMatch(/touch|\$\(|`/);

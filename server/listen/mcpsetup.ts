@@ -230,7 +230,62 @@ function setupCursor(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
 
 // ───────────── Hermes (~/.hermes/config.yaml + ~/.hermes/.env) ─────────────
 
-export const hermesHome = () => process.env.HERMES_HOME || join(homedir(), ".hermes");
+/**
+ * The Hermes home a bare `hermes` uses (hermes_constants.py / hermes_cli/profiles.py): $HERMES_HOME, else
+ * ~/.hermes (plus HERMES_DATA_DIR_SUFFIX), switched to profiles/<name> by the sticky `active_profile` file.
+ * Commands agentinbox runs get HERMES_HOME set to this, so they edit the same files.
+ */
+export function hermesHome(env: NodeJS.ProcessEnv = process.env): string {
+  const set = env.HERMES_HOME?.trim();
+  if (set) return set.replace(/^~(?=\/|$)/, homedir());
+  const root = join(homedir(), `.hermes${env.HERMES_DATA_DIR_SUFFIX ?? ""}`);
+  let active = "";
+  try {
+    active = readFileSync(join(root, "active_profile"), "utf8").replace(/^\uFEFF/, "").trim().toLowerCase();
+  } catch {
+    // No sticky profile.
+  }
+  return active && active !== "default" && /^[a-z0-9][a-z0-9_-]*$/.test(active) ? join(root, "profiles", active) : root;
+}
+
+/**
+ * Whether `mcp_servers.<name>` is on in a Hermes config.yaml ("enabled" absent, null or not a false word
+ * is on, like Hermes' mcp_server_enabled). "unknown" for layouts this small block-YAML reader won't judge:
+ * callers that need it on treat that as not on.
+ */
+export function yamlMcpServerState(yaml: string, name: string): "enabled" | "disabled" | "missing" | "unknown" {
+  const lines = yaml.replace(/^\uFEFF/, "").split("\n");
+  const tops = lines.flatMap((l, i) => (/^mcp_servers\s*:/.test(l) ? [i] : []));
+  if (tops.length === 0) return "missing";
+  if (tops.length > 1) return "unknown";
+  const top = tops[0]!;
+  const rest = lines[top]!.replace(/^mcp_servers\s*:/, "").replace(/\s#.*$/, "").trim();
+  if (rest) return rest === "{}" || rest === "null" || rest === "~" ? "missing" : "unknown";
+  let end = top + 1;
+  while (end < lines.length && (lines[end]!.trim() === "" || /^\s/.test(lines[end]!) || lines[end]!.startsWith("#"))) end++;
+  const body = lines.slice(top + 1, end).filter((l) => l.trim() && !l.trimStart().startsWith("#"));
+  if (!body.length) return "missing";
+  const indent = body[0]!.match(/^(\s*)/)![1]!;
+  if (!indent || /\t/.test(indent) || body.some((l) => /[&*]|<</.test(l.split("#")[0]!))) return "unknown";
+  const key = new RegExp(`^${indent}(["']?)${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\1\\s*:(.*)$`);
+  const starts = body.flatMap((l, i) => (key.test(l) ? [i] : []));
+  if (starts.length === 0) return "missing";
+  if (starts.length > 1) return "unknown";
+  const inline = key.exec(body[starts[0]!]!)![2]!.replace(/\s#.*$/, "").trim();
+  if (inline) return "unknown"; // flow style ({ url: … })
+  const own: string[] = [];
+  for (const l of body.slice(starts[0]! + 1)) {
+    if (l.match(/^(\s*)/)![1]!.length <= indent.length) break;
+    own.push(l);
+  }
+  if (!own.length) return "unknown";
+  const childIndent = own[0]!.match(/^(\s*)/)![1]!.length;
+  const enabled = own.filter((l) => l.match(/^(\s*)/)![1]!.length === childIndent && /^\s*["']?enabled["']?\s*:/.test(l));
+  if (enabled.length > 1) return "unknown";
+  if (!enabled.length) return "enabled";
+  const value = enabled[0]!.replace(/^\s*["']?enabled["']?\s*:/, "").replace(/\s#.*$/, "").trim().replace(/^["']|["']$/g, "").toLowerCase();
+  return ["false", "0", "no", "off"].includes(value) ? "disabled" : "enabled";
+}
 export const hermesEnvVar = (name: string) => name.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_API_KEY";
 
 /**

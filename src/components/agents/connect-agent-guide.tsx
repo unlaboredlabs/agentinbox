@@ -133,6 +133,15 @@ export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentToo
   const label = toolName(tool);
   return (
     <ol className="space-y-3 text-sm">
+      {c.hermesRoute && (
+        <li className="space-y-1.5">
+          <p>
+            <span className="font-medium">0. Create the Hermes route.</span>{" "}
+            <span className="text-muted-foreground">Once, with your Hermes gateway's webhook platform on. Use the platform Hermes should tell you on.</span>
+          </p>
+          <Command code={c.hermesRoute} label="hermes route command" />
+        </li>
+      )}
       <li className="space-y-1.5">
         <p>
           <span className="font-medium">1. Try it.</span> <span className="text-muted-foreground">Runs in this terminal until you press Ctrl-C.</span>
@@ -141,7 +150,7 @@ export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentToo
         <p className="text-xs text-muted-foreground">
           {tool === "other"
             ? "This test command only confirms each email (a ✓ line per email). Swap in your own script for the service."
-            : `Starts ${label} for each new email you receive (not mail you send; --types adds other events). ${RECIPES[tool].note}`}
+            : `${tool === "hermes" ? `Forwards each new email you receive to ${label}` : `Starts ${label} for each new email you receive`} (not mail you send; Promotions, Social and Forums are skipped). ${RECIPES[tool].note}`}
         </p>
       </li>
       <li className="space-y-1.5">

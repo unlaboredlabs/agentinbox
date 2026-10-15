@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { MIN_NODE, nodeVersionError } from "../node-check.ts";
 import { writePrivateFile } from "./fsutil.ts";
 import { configDir, profilePath, validProfileName } from "./paths.ts";
 import { loadProfile } from "./profile.ts";
@@ -71,6 +72,74 @@ export function helperNode(execPath = process.execPath, works: (path: string) =>
   candidates.push("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node");
   const stable = candidates.find((c) => c !== execPath && !VERSIONED_NODE.test(c) && works(c));
   return stable ? { path: stable, versioned: false } : { path: execPath, versioned: true };
+}
+
+/** `node --version` of a binary ("22.20.0"), or null when it doesn't run. */
+export function nodeVersionOf(path: string): string | null {
+  if (!existsSync(path)) return null;
+  const r = spawnSync(path, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+  const v = /^v(\d+\.\d+\.\d+)/.exec(r.stdout ?? "")?.[1];
+  return r.status === 0 && v ? v : null;
+}
+
+/**
+ * A node binary the service may run: the real file, and every directory above both the path as given and
+ * the real file, are owned by root or by this user and not writable by group or others (a sticky
+ * directory such as /tmp excepted). Otherwise someone else could replace what the service runs at every login.
+ */
+export function trustedNodeFile(path: string, uid = process.getuid?.() ?? 0): boolean {
+  const owned = (st: { uid: number }) => st.uid === 0 || st.uid === uid;
+  const dirsOk = (p: string) => {
+    for (let d = dirname(p); ; d = dirname(d)) {
+      const st = statSync(d);
+      if (!owned(st) || ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0)) return false;
+      if (d === dirname(d)) return true;
+    }
+  };
+  try {
+    const real = realpathSync(path);
+    const st = statSync(real);
+    return owned(st) && (st.mode & 0o022) === 0 && dirsOk(path) && dirsOk(real);
+  } catch {
+    return false;
+  }
+}
+
+export interface ServiceNodeChoice extends NodeChoice {
+  version: string;
+  /** Why this node, in words (printed by `listen service install`). */
+  why: string;
+}
+
+/**
+ * The node the listener service runs on: the same stable-path preference as the header helper (a path
+ * that survives fnm/nvm/Homebrew upgrades), but only a candidate that is trusted (trustedNodeFile) and new
+ * enough for agentinbox (MIN_NODE); else this shell's node, reported as version-specific.
+ */
+export function serviceNode(
+  execPath = process.execPath,
+  versionOf: (path: string) => string | null = nodeVersionOf,
+  current = process.versions.node,
+  trusted: (path: string) => boolean = trustedNodeFile,
+): ServiceNodeChoice {
+  const versions = new Map<string, string | null>();
+  const okVersion = (p: string) => {
+    if (!trusted(p)) return false;
+    if (!versions.has(p)) versions.set(p, versionOf(p));
+    const v = versions.get(p);
+    return !!v && nodeVersionError(v) === null;
+  };
+  const choice = helperNode(execPath, okVersion);
+  if (choice.path !== execPath) {
+    return { ...choice, version: versions.get(choice.path)!, why: `a stable path that survives fnm/nvm upgrades (this shell's is ${execPath}, v${current})` };
+  }
+  return {
+    ...choice,
+    version: current,
+    why: choice.versioned
+      ? `this shell's node; its path belongs to one Node version (no stable node ${MIN_NODE}+ found in the usual places), so re-run install after upgrading or removing it`
+      : "this shell's node",
+  };
 }
 
 let chosenNode: NodeChoice | undefined;

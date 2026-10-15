@@ -3,17 +3,18 @@ import pc from "picocolors";
 import type { WebhookPayload } from "../../shared/types.ts";
 import { ackEvents, ApiError, getSelf } from "./api.ts";
 import { Dispatcher, type Job, type Target } from "./dispatcher.ts";
-import { matchesLocal, parsePayload } from "./event.ts";
+import { parsePayload, skipReason } from "./event.ts";
 import { killAllRuns, runCommand } from "./exec.ts";
 import { existsSync } from "node:fs";
 import { ensurePrivateDir } from "./fsutil.ts";
 import { claudeMcpConfigPath, writeClaudeMcpConfig } from "./mcpheader.ts";
 import { forwardEvent } from "./forward.ts";
 import { createListenLogger, type ListenLogger } from "./logfile.ts";
-import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
+import { describeFilter, type EffectiveConfig, type ListenFlags, MAX_BATCH, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { describeGrants, grantsKey } from "./grants.ts";
-import { recipeToolFor, shellQuote } from "./recipes.ts";
+import { gatewayWarning } from "./hermes.ts";
+import { hermesChangeNote, isHermesRoute, recipeOf, recipeToolFor, shellQuote, SILENT_MARKER, TOOL_LABELS } from "./recipes.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
 import { acquireBackfillLock, acquireProfileLock } from "./lock.ts";
 import { appendDead, knownConsumers, rememberConsumer, StatusWriter } from "./state.ts";
@@ -109,6 +110,23 @@ const describeEvent = (p: WebhookPayload) => {
   return `#${p.data.seq} ${p.type}${who}${subject}`;
 };
 
+/** A finished job in the log: the event, or "batch of N (#a–#b)". */
+const describeJob = (job: Job) =>
+  job.payloads.length === 1 ? describeEvent(job.payload) : `batch of ${job.payloads.length} events (#${job.seq}–#${job.lastSeq})`;
+
+/** The last few non-empty lines of a command's output, for the log (sanitized: it may echo email content). */
+const lastLines = (t: string, n = 3) =>
+  t
+    .trim()
+    .split("\n")
+    .filter((l) => l.trim())
+    .slice(-n)
+    .map((l) => `  │ ${safeText(l, 300)}`)
+    .join("\n");
+
+/** The agent's whole reply was the triage prompt's "nothing to do" (anything more is shown). */
+export const isSilent = (stdout: string) => stdout.trim() === SILENT_MARKER;
+
 export async function runListener(opts: RunListenerOptions): Promise<number> {
   const profileName = validProfileName(opts.flags.profile ?? DEFAULT_PROFILE);
   let profile: Profile = loadProfile(profileName);
@@ -180,6 +198,11 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     const notes = typesNotes(config);
     for (const m of notes.info) log.info(m);
     for (const m of notes.warn) log.warn(m);
+    const change = hermesChangeNote(opts.flags.recipe, config.exec);
+    if (change) log.info(change);
+    if (config.forward && isHermesRoute(config.forward.url) && !dryRun) {
+      void gatewayWarning(config.forward.url).then((w) => w && log.warn(w));
+    }
     if (backfill && backfillHead === 0) {
       log.info(`Nothing to backfill: the listener (consumer "${config.consumer}") started with the oldest stored mail, so it handles all of it.`);
       return EXIT.ok;
@@ -220,6 +243,9 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       exitReason: null,
       exec: config.exec,
       forward: config.forward?.url ?? null,
+      filters: describeFilter(config),
+      batchSeconds: config.batchSeconds,
+      skipped: 0,
     }, !oneOff);
     status.flush();
 
@@ -265,44 +291,57 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     }, log);
     const timeoutMs = config.timeoutSeconds * 1000;
 
+    const batched = config.batchSeconds > 0 && !!config.exec;
+    // The Hermes route reads the body as prompt text: send it the cleaned, notice-first form.
+    const wrapForward = !!config.forward && isHermesRoute(config.forward.url);
     const runTargets = async (job: Job, signal: AbortSignal): Promise<string[]> => {
       const errors: string[] = [];
-      const tag = `#${job.seq}`;
+      const tag = job.payloads.length === 1 ? `#${job.seq}` : `batch #${job.seq}–#${job.lastSeq} (${job.payloads.length} events)`;
+      const ids = job.payloads.map((p) => p.data.id);
       if (job.remaining.has("exec") && config.exec) {
-        const r = await runCommand(config.exec, job.payload, { timeoutMs, signal, cwd: config.cwd });
-        const meta = { seq: job.seq, id: job.payload.data.id, attempt: job.attempts, exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs, stdoutTail: r.stdoutTail, stderrTail: r.stderrTail };
+        const r = await runCommand(config.exec, batched ? job.payloads : job.payload, { timeoutMs, signal, cwd: config.cwd });
+        const meta = { seq: job.seq, lastSeq: job.lastSeq, ids, attempt: job.attempts, exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs, stdoutTail: r.stdoutTail, stderrTail: r.stderrTail };
         if (signal.aborted) {
           errors.push("stopped");
           log.debug(`${tag} command stopped by shutdown`, meta);
         } else if (r.ok) {
           job.remaining.delete("exec");
           log.debug(`${tag} command finished in ${formatDuration(r.durationMs)}`, meta);
+          // What the agent said goes to the log (and the foreground console): the triage's only output channel.
+          if (isSilent(r.stdoutTail)) log.info(pc.gray(`  ${tag}: nothing to do`));
+          else if (!r.stdoutTail.trim()) log.info(pc.gray(`  ${tag}: no output`));
+          else log.info(`  ${tag} output:\n${lastLines(r.stdoutTail, 6)}`);
         } else {
           errors.push(`command: ${r.error}`);
-          const lastLines = (t: string) =>
-            t
-              .trim()
-              .split("\n")
-              .filter((l) => l.trim())
-              .slice(-3)
-              .map((l) => `  │ ${safeText(l, 300)}`)
-              .join("\n");
           const tail = lastLines(r.stderrTail) || lastLines(r.stdoutTail);
           log.warn(`${tag} command failed (attempt ${job.attempts}/${config.maxAttempts}): ${r.error}${tail ? `\n${tail}` : ""}`, meta);
         }
       }
       if (job.remaining.has("forward") && config.forward) {
-        const r = await forwardEvent(config.forward.url, config.forward.secret, job.payload, { timeoutMs: Math.min(timeoutMs, 30_000), signal });
-        const meta = { seq: job.seq, id: job.payload.data.id, attempt: job.attempts, statusCode: r.statusCode, durationMs: r.durationMs, response: r.response };
-        if (signal.aborted) {
-          errors.push("stopped");
-        } else if (r.ok) {
-          job.remaining.delete("forward");
-          log.debug(`${tag} forwarded (${r.statusCode}) in ${formatDuration(r.durationMs)}`, meta);
-        } else {
-          errors.push(`forward: ${r.error}`);
-          log.warn(`${tag} forward failed (attempt ${job.attempts}/${config.maxAttempts}): ${r.error}`, meta);
+        // One POST per event, also in a batch (receivers such as Hermes take one event per request).
+        let failed = false;
+        for (const p of job.payloads) {
+          if (job.forwarded.has(p.data.seq)) continue;
+          const r = await forwardEvent(config.forward.url, config.forward.secret, p, { timeoutMs: Math.min(timeoutMs, 30_000), signal, wrap: wrapForward });
+          const meta = { seq: p.data.seq, id: p.data.id, attempt: job.attempts, statusCode: r.statusCode, durationMs: r.durationMs, response: r.response };
+          if (signal.aborted) {
+            errors.push("stopped");
+            failed = true;
+            break;
+          } else if (r.ok) {
+            job.forwarded.add(p.data.seq);
+            log.debug(`#${p.data.seq} forwarded (${r.statusCode}) in ${formatDuration(r.durationMs)}`, meta);
+          } else {
+            errors.push(`forward: ${r.error}`);
+            failed = true;
+            if (r.retryAfterMs !== undefined) {
+              job.retryAfterMs = r.retryAfterMs;
+              log.info(`#${p.data.seq} forward: the receiver is rate-limiting (429); trying again in ${formatDuration(r.retryAfterMs)} (doesn't count as a failed attempt)`, meta);
+            } else log.warn(`#${p.data.seq} forward failed (attempt ${job.attempts}/${config.maxAttempts}): ${r.error}`, meta);
+            break;
+          }
         }
+        if (!failed) job.remaining.delete("forward");
       }
       return errors;
     };
@@ -312,6 +351,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       concurrency: config.concurrency,
       maxAttempts: config.maxAttempts,
       retryDelayMs: opts.retryDelayMs,
+      batch: batched && !dryRun ? { windowMs: config.batchSeconds * 1000, max: MAX_BATCH } : undefined,
       run: runTargets,
       onAdvance: (seq) => {
         // Dry runs and backfills never move a server cursor.
@@ -319,30 +359,25 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         acker.request(seq);
       },
       onRetry: (job, delay) => {
-        log.info(`${describeEvent(job.payload)}: retrying in ${formatDuration(delay)}`);
-        status.addRecent({ seq: job.seq, id: job.payload.data.id, type: job.payload.type, outcome: "retrying", attempts: job.attempts, at: new Date().toISOString(), error: job.lastError });
+        log.info(`${describeJob(job)}: retrying in ${formatDuration(delay)}`);
+        for (const p of job.payloads) status.addRecent({ seq: p.data.seq, id: p.data.id, type: p.type, outcome: "retrying", attempts: job.attempts, at: new Date().toISOString(), error: job.lastError });
       },
       onDead: (job) => {
-        failed++;
-        appendDead(profileName, {
-          deadAt: new Date().toISOString(),
+        // Dead letters stay per event, so `listen dead --replay` works the same with or without --batch.
+        failed += job.payloads.length;
+        for (const p of job.payloads) {
+          const targets = [...job.remaining].filter((t) => t !== "forward" || !job.forwarded.has(p.data.seq));
+          appendDead(profileName, { deadAt: new Date().toISOString(), seq: p.data.seq, id: p.data.id, type: p.type, attempts: job.attempts, error: job.lastError ?? "failed", targets, payload: p });
+        }
+        log.error(`${describeJob(job)}: gave up after ${job.attempts} attempts (${job.lastError}). Saved to dead letters: ${NPX} listen dead${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`}`, {
           seq: job.seq,
-          id: job.payload.data.id,
-          type: job.payload.type,
-          attempts: job.attempts,
-          error: job.lastError ?? "failed",
-          targets: [...job.remaining],
-          payload: job.payload,
-        });
-        log.error(`${describeEvent(job.payload)}: gave up after ${job.attempts} attempts (${job.lastError}). Saved to dead letters: ${NPX} listen dead${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`}`, {
-          seq: job.seq,
-          id: job.payload.data.id,
+          ids: job.payloads.map((p) => p.data.id),
         });
       },
       onFinished: (job) => {
-        if (job.outcome === "succeeded") handled++;
-        if (job.outcome === "succeeded") log.info(`${pc.green("✓")} ${describeEvent(job.payload)} ${pc.gray(`(${formatDuration(Date.now() - job.firstSeenAt)})`)}`, { seq: job.seq, id: job.payload.data.id, attempts: job.attempts });
-        status.addRecent({ seq: job.seq, id: job.payload.data.id, type: job.payload.type, outcome: job.outcome === "dead" ? "dead" : "succeeded", attempts: job.attempts, at: new Date().toISOString(), error: job.lastError });
+        if (job.outcome === "succeeded") handled += job.payloads.length;
+        if (job.outcome === "succeeded") log.info(`${pc.green("✓")} ${describeJob(job)} ${pc.gray(`(${formatDuration(Date.now() - job.firstSeenAt)})`)}`, { seq: job.seq, ids: job.payloads.map((p) => p.data.id), attempts: job.attempts });
+        for (const p of job.payloads) status.addRecent({ seq: p.data.seq, id: p.data.id, type: p.type, outcome: job.outcome === "dead" ? "dead" : "succeeded", attempts: job.attempts, at: new Date().toISOString(), error: job.lastError });
         status.update({ running: dispatcher.inFlight });
       },
     });
@@ -414,13 +449,19 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
           return;
         }
         lastActivity = Date.now();
-        const match = matchesLocal(payload, config);
+        const skip = skipReason(payload, config);
+        const match = skip === null;
         if (dryRun && match) {
           log.info(`${pc.cyan("→")} ${describeEvent(payload)} ${pc.gray("(dry run: nothing executed, cursor not advanced)")}`);
         } else if (match) {
-          log.info(`${pc.cyan("→")} ${describeEvent(payload)}`, { seq: payload.data.seq, id: payload.data.id, type: payload.type });
+          const waits = batched && dispatcher.lastSeq < payload.data.seq ? pc.gray(` (batching for up to ${formatDuration(config.batchSeconds * 1000)})`) : "";
+          log.info(`${pc.cyan("→")} ${describeEvent(payload)}${waits}`, { seq: payload.data.seq, id: payload.data.id, type: payload.type });
         } else {
-          log.debug(`skip ${describeEvent(payload)} (filter)`);
+          // Dry runs show what the filters skip, to check them; a real listener keeps that in the debug log.
+          const line = `skip ${describeEvent(payload)} (${safeText(skip, 120)})`;
+          if (dryRun) log.info(pc.gray(`  ${line}`));
+          else log.debug(line, { seq: payload.data.seq, id: payload.data.id });
+          if (dispatcher.lastSeq < payload.data.seq) status.update({ skipped: (status.status.skipped ?? 0) + 1 });
         }
         const accepted = dispatcher.push(payload, { skip: !match });
         if (!accepted) log.debug(`duplicate #${payload.data.seq} ignored`);
@@ -598,11 +639,28 @@ export function backfillCommand(profileName: string, profile: Profile, c: Effect
   const savedForward = profile.forward?.url ?? null;
   if (c.exec !== savedExec || (c.forward?.url ?? null) !== savedForward) {
     const tool = recipeToolFor(c.exec, profileName);
+    const fwdTool = c.exec ? null : recipeToolFor(null, profileName, c.forward?.url ?? null);
     if (tool) parts.push(`--recipe ${tool}`);
     else if (c.exec) parts.push(`--exec ${shellQuote(c.exec)}`);
-    if (c.forward) parts.push(`--forward ${shellQuote(c.forward.url)}`);
+    if (fwdTool) parts.push(`--recipe ${fwdTool}`);
+    else if (c.forward) parts.push(`--forward ${shellQuote(c.forward.url)}`);
   }
   return parts.join(" ");
+}
+
+/** Where the agent's output ends up, said plainly at start (and in `listen status`). */
+export function outputLine(profileName: string, c: { exec: string | null; forward: { url: string } | null }, log: string): string {
+  const r = recipeOf(c, profileName);
+  const parts: string[] = [];
+  if (c.exec) {
+    parts.push(
+      r?.exec
+        ? `${TOOL_LABELS[r.tool]}'s reply only goes to the listener's log (${log}, and the console when run in the foreground); it can't notify you by itself (--recipe hermes can, see docs)`
+        : `your command's last output lines go to the listener's log (${log}, and the console when run in the foreground)`,
+    );
+  }
+  if (c.forward) parts.push(r?.forward ? "Hermes delivers its triage where its route says (listen hermes); this listener only sees the HTTP status" : "the receiver at --forward handles it; this listener only sees the HTTP status");
+  return parts.join(" · ");
 }
 
 function printBanner(log: ListenLogger, name: string, profile: Profile, c: EffectiveConfig, dryRun: boolean, backfill = false): void {
@@ -615,7 +673,15 @@ function printBanner(log: ListenLogger, name: string, profile: Profile, c: Effec
   if (c.exec) lines.push(`  exec      ${safeText(c.exec, 300)}`, `  cwd       ${c.cwd}${c.cwdIsDefault ? pc.gray(" (private; --cwd to change)") : ""}`);
   if (c.forward) lines.push(`  forward   ${c.forward.url} ${pc.gray(`(signed, see \`${NPX} listen secret\`)`)}`);
   lines.push(`  events    ${describeFilter(c)}${c.includeBody ? " · with bodies" : ""}`);
+  if (c.batchSeconds) {
+    lines.push(
+      c.exec
+        ? `  batch     up to ${MAX_BATCH} events per run, collected for ${formatDuration(c.batchSeconds * 1000)} after the first${c.forward ? pc.gray(" (forward stays one POST per event)") : ""}`
+        : pc.gray(`  batch     ${formatDuration(c.batchSeconds * 1000)} ignored: --batch applies to --exec; forward is one POST per event`),
+    );
+  }
   lines.push(`  limits    concurrency ${c.concurrency} · timeout ${c.timeoutSeconds}s · ${c.maxAttempts} attempts`);
+  lines.push(`  output    ${outputLine(name, c, backfill || dryRun ? oneOffLogPath(name) : logPath(name))}`);
   lines.push(pc.gray(`  log       ${backfill || dryRun ? oneOffLogPath(name) : logPath(name)}`));
   for (const l of lines) process.stdout.write(`${l}\n`);
   log.debug("listener starting", { profile: name, url: profile.url, consumer: c.consumer, exec: c.exec, forward: c.forward?.url, types: c.types, filter: c.filter });
