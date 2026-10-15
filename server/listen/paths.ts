@@ -23,6 +23,8 @@ export const profilesDir = () => join(configDir(), "profiles");
 export const profilePath = (name: string) => join(profilesDir(), `${name}.json`);
 export const profileStateDir = (name: string) => join(stateDir(), "listen", name);
 export const logPath = (name: string) => join(profileStateDir(name), "listen.log");
+/** `listen --backfill` and `--dry-run` log separately, so they can run next to the listener without both rotating one file. */
+export const oneOffLogPath = (name: string) => join(profileStateDir(name), "one-off.log");
 export const deadPath = (name: string) => join(profileStateDir(name), "dead.jsonl");
 export const statusPath = (name: string) => join(profileStateDir(name), "status.json");
 /** Default working directory for --exec commands: private (0700), so no planted CLAUDE.md, .mcp.json or hooks apply. */

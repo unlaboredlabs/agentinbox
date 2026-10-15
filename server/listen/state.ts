@@ -121,6 +121,8 @@ export class StatusWriter {
   constructor(
     private readonly profile: string,
     readonly status: ListenStatus,
+    /** false: keep the status in memory only (a one-off backfill must not overwrite the listener's status.json). */
+    private readonly persist = true,
   ) {}
 
   update(patch: Partial<ListenStatus>): void {
@@ -138,6 +140,7 @@ export class StatusWriter {
   flush(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (!this.persist) return;
     try {
       writePrivateFile(statusPath(this.profile), JSON.stringify(this.status, null, 2) + "\n");
     } catch {

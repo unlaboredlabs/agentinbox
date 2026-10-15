@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -33,8 +33,10 @@ export const DEFAULT_PORT = 8425;
 
 export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
   const dataDir = resolve(input.dataDir ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
+  // Only a directory that already had files in it can have exposed anything.
+  const existed = hasFiles(dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  restrictDir(dataDir);
+  restrictDir(dataDir, existed);
   return {
     dataDir,
     dbPath: join(dataDir, "agentinbox.db"),
@@ -54,12 +56,23 @@ export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
   };
 }
 
-/** An existing data dir may be group/world accessible (umask, manual mkdir): tighten it to owner-only. */
-function restrictDir(dir: string): void {
+const hasFiles = (dir: string) => {
+  try {
+    return readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * An existing data dir may be group/world accessible (umask, manual mkdir): tighten it to owner-only.
+ * Only a directory that already held files gets a notice; a new (or empty) one is tightened silently.
+ */
+function restrictDir(dir: string, existed: boolean): void {
   try {
     if (process.platform !== "win32" && statSync(dir).mode & 0o077) {
       chmodSync(dir, 0o700);
-      process.stderr.write(`agentinbox: restricted ${dir} to owner-only access (it was readable by other users).\n`);
+      if (existed) process.stderr.write(`agentinbox: made ${dir} private to your user (it was readable by other users).\n`);
     }
   } catch {
     // Not ours to change; the files inside are still created owner-only.

@@ -72,10 +72,17 @@ export async function checkTransport(rawUrl: string, opts: { insecure?: boolean;
   if (isTailnetIp(host)) return { ok: true, kind: "tailscale" };
   // Names are checked by what they resolve to right now. The listener re-checks before every
   // reconnect and ack, so a record that later changes is caught (only a race inside one connect remains).
+  let resolvedNote = "";
   if (host.endsWith(".localhost") || host.endsWith(".ts.net")) {
     const addresses = await (opts.resolve ?? defaultResolver)(host).catch(() => [] as string[]);
-    const want = host.endsWith(".localhost") ? isLoopbackIp : isTailnetIp;
-    if (addresses.length && addresses.every(want)) return { ok: true, kind: host.endsWith(".localhost") ? "loopback" : "tailscale" };
+    const tailscale = host.endsWith(".ts.net");
+    const want = tailscale ? isTailnetIp : isLoopbackIp;
+    if (addresses.length && addresses.every(want)) return { ok: true, kind: tailscale ? "tailscale" : "loopback" };
+    const what = tailscale ? "a Tailscale address (100.64.0.0/10 or fd7a:115c:a1e0::/48)" : "a loopback address";
+    const bad = addresses.filter((a) => !want(a));
+    resolvedNote = addresses.length
+      ? `  ${host} resolved to ${bad.slice(0, 3).join(", ")}${bad.length > 3 ? ", …" : ""}, which is not ${what}${tailscale ? " (is Tailscale running and connected on this machine?)" : ""}.\n`
+      : `  ${host} could not be resolved here${tailscale ? " (is Tailscale running and connected on this machine, with MagicDNS on?)" : ""}.\n`;
   }
   if (opts.insecure) {
     return {
@@ -84,9 +91,17 @@ export async function checkTransport(rawUrl: string, opts: { insecure?: boolean;
       warning: `INSECURE: talking to ${url.host} over plain http. The agent's API key and every email event cross the network unencrypted and can be read or altered by anyone on the path. Use https or Tailscale.`,
     };
   }
+  const port = url.port || "80";
+  const base = `${url.pathname}`.replace(/\/+$/, "");
   throw new TransportError(
     `Refusing plain http to ${url.host}: the API key would cross the network unencrypted.\n` +
-      `  Use https://, a loopback address, or a Tailscale address (100.64.0.0/10 or a *.ts.net name).\n` +
+      resolvedNote +
+      `  Options:\n` +
+      `  - SSH tunnel (works with any server you can ssh to): in another terminal run\n` +
+      `      ssh -N -L ${port}:localhost:${port} <user>@${bare(url.hostname)}\n` +
+      `    then use http://localhost:${port}${base} instead.\n` +
+      `  - https:// (a reverse proxy, or \`tailscale serve --bg ${port}\` on the daemon's machine for https://<name>.ts.net).\n` +
+      `  - A Tailscale address: 100.64.0.0/10, fd7a:115c:a1e0::/48, or a *.ts.net name that resolves to one.\n` +
       `  To accept the risk anyway (e.g. an isolated lab network), add --insecure.`,
   );
 }

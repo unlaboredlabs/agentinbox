@@ -28,6 +28,8 @@ export interface ListenFlags {
   dryRun?: boolean;
   /** A new consumer starts at the oldest stored event instead of now (never saved). */
   fromStart?: boolean;
+  /** One-off: run every stored event up to now through the targets (own throwaway cursor and lock), then exit. */
+  backfill?: boolean;
 }
 
 export interface EffectiveConfig {

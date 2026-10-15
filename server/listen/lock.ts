@@ -82,3 +82,16 @@ export function acquireFileLock(path: string, busy: (holder: LockInfo) => Error)
 export function acquireProfileLock(profile: string): () => void {
   return acquireFileLock(lockPath(profile), (holder) => new ProfileLockedError(holder, profile));
 }
+
+/**
+ * `listen --backfill` has its own lock: it uses its own cursor, so it runs fine next to the profile's
+ * listener (or its service), but two backfills at once would run every stored event twice.
+ */
+export const backfillLockPath = (profile: string) => join(profileStateDir(profile), "backfill.lock");
+
+export function acquireBackfillLock(profile: string): () => void {
+  return acquireFileLock(
+    backfillLockPath(profile),
+    (holder) => new Error(`A backfill is already running for profile "${profile}" (pid ${holder.pid}, since ${holder.startedAt}). Let it finish, or stop it first.`),
+  );
+}

@@ -11,9 +11,11 @@ import { claudeMcpConfigPath, writeClaudeMcpConfig } from "./mcpheader.ts";
 import { forwardEvent } from "./forward.ts";
 import { createListenLogger, type ListenLogger } from "./logfile.ts";
 import { describeFilter, type EffectiveConfig, type ListenFlags, resolveListen } from "./options.ts";
-import { DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
+import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
+import { describeGrants, grantsKey } from "./grants.ts";
+import { shellQuote } from "./recipes.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
-import { acquireProfileLock } from "./lock.ts";
+import { acquireBackfillLock, acquireProfileLock } from "./lock.ts";
 import { appendDead, knownConsumers, rememberConsumer, StatusWriter } from "./state.ts";
 import { EventStream } from "./stream.ts";
 import { checkTransport, insecureBanner } from "./transport.ts";
@@ -37,6 +39,10 @@ export interface RunListenerOptions {
   blockedRetryMs?: number;
   /** Time a service waits before exiting after revocation where the supervisor can't be told not to restart (launchd). */
   revokedExitDelayMs?: number;
+  /** How often the agent's access (GET /me) is re-read, so the log shows grant changes. Default 5 min. */
+  grantsRefreshMs?: number;
+  /** --backfill: quiet time (nothing received, nothing running) after which the stored events are done. Default 5 s. */
+  backfillIdleMs?: number;
 }
 
 /** Acknowledges the finished prefix, coalescing and retrying in the background. */
@@ -108,7 +114,9 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
   }
   // Under launchd, stdout goes to a file nobody rotates; the rotated listen.log already has everything.
   const quietConsole = process.env.AGENTINBOX_SERVICE === "1" && process.platform === "darwin";
-  const log = opts.log ?? createListenLogger({ path: logPath(profileName), debug: !!process.env.AGENTINBOX_DEBUG, console: !quietConsole });
+  const backfill = !!opts.flags.backfill;
+  const oneOff = backfill || !!opts.flags.dryRun;
+  const log = opts.log ?? createListenLogger({ path: oneOff ? oneOffLogPath(profileName) : logPath(profileName), debug: !!process.env.AGENTINBOX_DEBUG, console: !quietConsole });
   if (opts.flags.save) log.info(`Saved these settings to profile "${profileName}".`);
 
   const verdict = await checkTransport(profile.url, { insecure: config.insecure });
@@ -132,38 +140,56 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     throw new Error("--exec needs a POSIX shell (/bin/sh) and isn't supported on Windows. Use --forward to a local HTTP handler instead.");
   }
 
-  // One listener per profile (they would share the cursor and run every event twice).
-  const releaseLock = acquireProfileLock(profileName);
+  // One listener per profile (they would share the cursor and run every event twice). A backfill has
+  // its own throwaway cursor and lock, so it runs next to the listener; a dry run changes nothing.
+  const releaseLock = dryRun ? () => {} : backfill ? acquireBackfillLock(profileName) : acquireProfileLock(profileName);
   try {
     // The daemon creates a consumer's cursor on its first connection (at the head, or at the oldest
-    // event with --from-start); after that --from-start has no effect. Dry runs use their own
-    // throwaway consumer that starts at the head and is never advanced, so they create nothing here.
+    // event with --from-start); after that --from-start has no effect. Dry runs and backfills use their
+    // own throwaway consumers that are never advanced, so they create nothing for the real listener.
+    const fromStart = !!opts.flags.fromStart || backfill;
     const known = knownConsumers(profileName).includes(config.consumer);
-    const streamConsumer = dryRun ? `${config.consumer.slice(0, 92)}-dry-run` : config.consumer;
+    const streamConsumer = dryRun ? `${config.consumer.slice(0, 92)}-dry-run` : backfill ? `${config.consumer.slice(0, 93)}-replay` : config.consumer;
     let streamAfter = 0;
-    if (dryRun && !opts.flags.fromStart) {
+    if (dryRun && !fromStart) {
       streamAfter = await getSelf(profile.url, profile.apiKey, 8000).then(
         (s) => s.headSeq ?? 0,
         () => 0,
       );
     }
-    const backfill = `${NPX} listen${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`} --from-start --consumer ${config.consumer.slice(0, 91)}-backfill`;
+    // --backfill stops at the newest event that exists now; newer mail is the listener's job.
+    let backfillHead = 0;
+    if (backfill) {
+      backfillHead = await getSelf(profile.url, profile.apiKey, 8000).then(
+        (s) => s.headSeq ?? 0,
+        (err: unknown) => {
+          throw new Error(`Couldn't ask the daemon how far stored mail goes: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        },
+      );
+    }
+    const backfillHint = backfillCommand(profileName, profile, config);
 
     if (config.cwdIsDefault) ensurePrivateDir(config.cwd);
     // The Claude Code recipe loads this (keyless) MCP config; recreate it if it's missing.
     if (!existsSync(claudeMcpConfigPath(profileName))) writeClaudeMcpConfig(profileName, `${profile.url}/mcp`);
-    if (!quietConsole) printBanner(log, profileName, profile, config, dryRun);
-    if (dryRun) {
-      log.info(opts.flags.fromStart ? "Dry run from the oldest stored event." : "Dry run: showing new events from now on.");
-    } else if (opts.flags.fromStart && known) {
+    if (!quietConsole) printBanner(log, profileName, profile, config, dryRun, backfill);
+    if (backfill && backfillHead === 0) {
+      log.info("No stored events to backfill yet: nothing to do.");
+      return EXIT.ok;
+    }
+    if (backfill) {
+      log.info(`Backfill: handling stored events up to #${backfillHead}, oldest first, then exiting${dryRun ? " (dry run: nothing executed)" : ""}. Mail that arrives meanwhile is left to the listener.`);
+    } else if (dryRun) {
+      log.info(fromStart ? "Dry run from the oldest stored event." : "Dry run: showing new events from now on.");
+    } else if (fromStart && known) {
       log.warn(
         `This listener (consumer "${config.consumer}") already has a position on the daemon, so --from-start does nothing.\n` +
-          `--from-start only applies to a new consumer. To process existing mail once: ${backfill}`,
+          `--from-start only applies to a new consumer. To run the mail that's already stored through it once (fine while this listener runs): ${backfillHint}`,
       );
-    } else if (opts.flags.fromStart) {
+    } else if (fromStart) {
       log.info("Processing every stored event this agent can see, from the oldest (--from-start).");
     } else if (!known) {
-      log.info(`Listening for new events from now on. To process existing mail once, run: ${backfill}`);
+      log.info(`Listening for new events from now on. To also run the mail that's already stored once (in another terminal, while this keeps running): ${backfillHint}`);
     }
 
     const status = new StatusWriter(profileName, {
@@ -185,20 +211,8 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       exitReason: null,
       exec: config.exec,
       forward: config.forward?.url ?? null,
-    });
+    }, !oneOff);
     status.flush();
-
-    // Who am I? Informational and not awaited: the stream itself decides whether the key is valid.
-    void getSelf(profile.url, profile.apiKey, 8000).then(
-      (self) => {
-        const scopes = self.grants.map((g) => `${g.accountEmail} (${g.capabilities.join(", ")}; ${g.sendMode})`);
-        log.info(`Signed in as agent "${safeText(self.name)}"${scopes.length ? `: ${scopes.join(", ")}` : pc.yellow(": no mailbox grants yet, ask the operator to add one")}`);
-      },
-      (err: unknown) => {
-        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return; // The stream reports it.
-        log.debug(`identity check failed: ${err instanceof Error ? err.message : String(err)}`);
-      },
-    );
 
     // Re-checked before every reconnect and ack: a *.ts.net / *.localhost name could start resolving elsewhere.
     const transportOk = () =>
@@ -206,6 +220,32 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         () => null,
         (err: unknown) => (err instanceof Error ? err.message.split("\n")[0]! : String(err)),
       );
+
+    // Who am I, and what may I do? Informational and not awaited: the stream itself decides whether the
+    // key is valid. Re-read on reconnects and every few minutes, so a grant changed in the console shows up.
+    let grantsSeen: string | null = null;
+    let grantsBusy = false;
+    const checkGrants = async () => {
+      if (grantsBusy || (await transportOk())) return;
+      grantsBusy = true;
+      try {
+        const self = await getSelf(profile.url, profile.apiKey, 8000);
+        const key = grantsKey(self.grants);
+        if (key === grantsSeen) return;
+        const first = grantsSeen === null;
+        grantsSeen = key;
+        const lines = describeGrants(self.grants).map((l) => `  ${self.grants.length ? l : pc.yellow(l)}`);
+        log.info(`${first ? `Signed in as agent "${safeText(self.name)}". Access` : "Access changed in the console. Now"}:\n${lines.join("\n")}`);
+      } catch (err) {
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return; // The stream reports it.
+        log.debug(`identity check failed: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        grantsBusy = false;
+      }
+    };
+    void checkGrants();
+    const grantsTimer = setInterval(() => void checkGrants(), opts.grantsRefreshMs ?? 5 * 60_000);
+    grantsTimer.unref();
     const acker = new Acker(async (seq) => {
       const refused = await transportOk();
       if (refused) throw new Error(refused);
@@ -265,7 +305,8 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       retryDelayMs: opts.retryDelayMs,
       run: runTargets,
       onAdvance: (seq) => {
-        if (dryRun) return;
+        // Dry runs and backfills never move a server cursor.
+        if (dryRun || backfill) return;
         acker.request(seq);
       },
       onRetry: (job, delay) => {
@@ -273,6 +314,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         status.addRecent({ seq: job.seq, id: job.payload.data.id, type: job.payload.type, outcome: "retrying", attempts: job.attempts, at: new Date().toISOString(), error: job.lastError });
       },
       onDead: (job) => {
+        failed++;
         appendDead(profileName, {
           deadAt: new Date().toISOString(),
           seq: job.seq,
@@ -289,6 +331,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         });
       },
       onFinished: (job) => {
+        if (job.outcome === "succeeded") handled++;
         if (job.outcome === "succeeded") log.info(`${pc.green("✓")} ${describeEvent(job.payload)} ${pc.gray(`(${formatDuration(Date.now() - job.firstSeenAt)})`)}`, { seq: job.seq, id: job.payload.data.id, attempts: job.attempts });
         status.addRecent({ seq: job.seq, id: job.payload.data.id, type: job.payload.type, outcome: job.outcome === "dead" ? "dead" : "succeeded", attempts: job.attempts, at: new Date().toISOString(), error: job.lastError });
         status.update({ running: dispatcher.inFlight });
@@ -296,6 +339,10 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     });
 
     let downSince: number | null = null;
+    let connectedNow = false;
+    /** --backfill: last time something arrived or ran; and whether an event past the end was seen. */
+    let lastActivity = Date.now();
+    let pastHead = false;
     /** Reversible refusal currently in effect (logged once per change). */
     let blocked: string | null = null;
     const stream = new EventStream({
@@ -308,7 +355,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       lastEventId: () => dispatcher.lastSeq,
       stallMs: opts.stallMs,
       beforeConnect: transportOk,
-      fromStart: !!opts.flags.fromStart,
+      fromStart,
       blockedRetryMs: opts.blockedRetryMs,
       onBlocked: (code, text) => {
         downSince ??= Date.now();
@@ -322,14 +369,18 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       onOpen: () => {
         const after = downSince ? ` after ${formatDuration(Date.now() - downSince)}` : "";
         if (blocked) log.info("Access restored.");
+        // A grant may have changed while we were away (or blocked).
+        if (blocked || downSince) void checkGrants();
         blocked = null;
-        log.info(`${pc.green("●")} Connected${after}. Waiting for events…`);
-        if (!dryRun) rememberConsumer(profileName, config.consumer);
+        connectedNow = true;
+        log.info(`${pc.green("●")} Connected${after}. ${backfill ? "Receiving stored events…" : "Waiting for events…"}`);
+        if (!dryRun && !backfill) rememberConsumer(profileName, config.consumer);
         downSince = null;
         status.update({ connected: true, connectedSince: new Date().toISOString() });
       },
       onDisconnect: (reason, retryInMs, { serious }) => {
         downSince ??= Date.now();
+        connectedNow = false;
         const msg = `${pc.yellow("○")} Disconnected: ${reason}. Reconnecting${retryInMs ? ` in ${formatDuration(retryInMs)}` : ""}…`;
         if (serious) log.warn(msg);
         else log.info(msg);
@@ -347,6 +398,12 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
           log.warn(`Ignoring a malformed event from the stream: ${(err as Error).message}`, { id: m.id });
           return;
         }
+        if (backfill && payload.data.seq > backfillHead) {
+          // Newer than the backfill's end: the listener handles it. Stop receiving.
+          pastHead = true;
+          return;
+        }
+        lastActivity = Date.now();
         const match = matchesLocal(payload, config);
         if (dryRun && match) {
           log.info(`${pc.cyan("→")} ${describeEvent(payload)} ${pc.gray("(dry run: nothing executed, cursor not advanced)")}`);
@@ -382,7 +439,25 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       process.on("SIGTERM", onSignal);
     }
 
+    // --backfill ends once everything up to the head arrived (or the stream went quiet) and finished.
+    let handled = 0;
+    let failed = 0;
+    let backfillTimer: NodeJS.Timeout | null = null;
+    if (backfill) {
+      const idleMs = opts.backfillIdleMs ?? 5000;
+      backfillTimer = setInterval(() => {
+        if (dispatcher.inFlight > 0) {
+          lastActivity = Date.now();
+          return;
+        }
+        const received = pastHead || dispatcher.lastSeq >= backfillHead || (connectedNow && Date.now() - lastActivity >= idleMs);
+        if (received) stop("backfill complete");
+      }, 100);
+    }
+
     const end = await stream.run();
+    if (backfillTimer) clearInterval(backfillTimer);
+    clearInterval(grantsTimer);
     await dispatcher.stop();
     if (!dryRun) await acker.flush();
     if (opts.handleSignals) {
@@ -399,6 +474,13 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     }
     status.update({ connected: false, stoppedAt: new Date().toISOString(), exitReason: stopReason ?? "stopped" });
     status.flush();
+    if (backfill && stopReason === "backfill complete") {
+      const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
+      log.info(
+        `${failed ? pc.yellow("Backfill done") : `${pc.green("✔")} Backfill done`}: ${handled} event${handled === 1 ? "" : "s"} handled${failed ? `, ${failed} failed (see ${NPX} listen dead${p})` : ""}.`,
+      );
+      return failed ? EXIT.error : EXIT.ok;
+    }
     log.info("Stopped.");
     return EXIT.ok;
   } finally {
@@ -422,17 +504,35 @@ async function revokedExit(log: ListenLogger, status: StatusWriter, profileName:
   return EXIT.revoked;
 }
 
-function printBanner(log: ListenLogger, name: string, profile: Profile, c: EffectiveConfig, dryRun: boolean): void {
+/**
+ * The one-off backfill command for this listener: `listen --backfill`, plus the targets when they came
+ * from flags rather than the profile (the backfill must run the same thing).
+ */
+export function backfillCommand(profileName: string, profile: Profile, c: EffectiveConfig): string {
+  const parts = [`${NPX} listen`];
+  if (profileName !== DEFAULT_PROFILE) parts.push(`--profile ${profileName}`);
+  parts.push("--backfill");
+  const savedExec = profile.exec ?? null;
+  const savedForward = profile.forward?.url ?? null;
+  if (c.exec !== savedExec || (c.forward?.url ?? null) !== savedForward) {
+    if (c.exec) parts.push(`--exec ${shellQuote(c.exec)}`);
+    if (c.forward) parts.push(`--forward ${shellQuote(c.forward.url)}`);
+  }
+  return parts.join(" ");
+}
+
+function printBanner(log: ListenLogger, name: string, profile: Profile, c: EffectiveConfig, dryRun: boolean, backfill = false): void {
   const lines = [
     `${pc.bold("agentinbox listen")} ${pc.gray(`v${version}`)} · profile ${pc.cyan(name)} · agent ${pc.cyan(safeText(profile.agentName))}`,
     `  daemon    ${profile.url}  ${pc.gray(`(consumer ${c.consumer} on ${hostname()})`)}`,
   ];
   if (dryRun) lines.push(`  mode      ${pc.yellow("dry run")}: matching events are printed; nothing runs and the cursor is not advanced`);
+  if (backfill) lines.push(`  mode      ${pc.yellow("backfill")}: stored events up to now, then exit (own cursor; the listener is not affected)`);
   if (c.exec) lines.push(`  exec      ${safeText(c.exec, 300)}`, `  cwd       ${c.cwd}${c.cwdIsDefault ? pc.gray(" (private; --cwd to change)") : ""}`);
   if (c.forward) lines.push(`  forward   ${c.forward.url} ${pc.gray(`(signed, see \`${NPX} listen secret\`)`)}`);
   lines.push(`  events    ${describeFilter(c)}${c.includeBody ? " · with bodies" : ""}`);
   lines.push(`  limits    concurrency ${c.concurrency} · timeout ${c.timeoutSeconds}s · ${c.maxAttempts} attempts`);
-  lines.push(pc.gray(`  log       ${logPath(name)}`));
+  lines.push(pc.gray(`  log       ${backfill || dryRun ? oneOffLogPath(name) : logPath(name)}`));
   for (const l of lines) process.stdout.write(`${l}\n`);
   log.debug("listener starting", { profile: name, url: profile.url, consumer: c.consumer, exec: c.exec, forward: c.forward?.url, types: c.types, filter: c.filter });
 }

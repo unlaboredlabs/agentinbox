@@ -31,18 +31,20 @@ process.stdout.write(JSON.stringify({ Authorization: "Bearer " + profile.apiKey 
 `;
 }
 
+/** The shell command Claude Code runs as headersHelper (nothing is written). */
+export const headerHelperCommand = (profile: string) => `${sq(process.execPath)} ${sq(helperScriptPath())} ${validProfileName(profile)}`;
+
 /** Writes (or refreshes) the helper script, 0700. Returns the shell command for headersHelper. */
 export function installHeaderHelper(profile: string): string {
-  const name = validProfileName(profile);
-  const path = helperScriptPath();
-  writePrivateFile(path, helperScript(join(configDir(), "profiles")));
+  const command = headerHelperCommand(profile);
+  writePrivateFile(helperScriptPath(), helperScript(join(configDir(), "profiles")));
   // writePrivateFile leaves 0600; the script itself is run through node, so it needn't be executable.
-  return `${sq(process.execPath)} ${sq(path)} ${name}`;
+  return command;
 }
 
-/** Claude Code MCP server entry: URL plus the helper, no secret. */
-export function claudeServerEntry(url: string, profile: string): { type: "http"; url: string; headersHelper: string } {
-  return { type: "http", url, headersHelper: installHeaderHelper(profile) };
+/** Claude Code MCP server entry: URL plus the helper, no secret. `install: false` (dry runs) doesn't write the helper. */
+export function claudeServerEntry(url: string, profile: string, opts: { install?: boolean } = {}): { type: "http"; url: string; headersHelper: string } {
+  return { type: "http", url, headersHelper: opts.install === false ? headerHelperCommand(profile) : installHeaderHelper(profile) };
 }
 
 /** Writes the per-profile MCP config the Claude Code listener recipe uses. Returns its path. */

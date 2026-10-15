@@ -78,6 +78,12 @@ export class FakeAgentApi {
   keyValid = true;
   /** Reversible refusal: the stream answers 403 with this code. */
   blockedCode: string | null = null;
+  /** What GET /me reports as the agent's grants (the console's choice at approval). */
+  grants: AgentSelf["grants"] = [{ accountId: "acc_1", accountEmail: "me@example.com", capabilities: ["read", "draft"], labelScope: null, sendMode: "draft_only" }];
+  /** headSeq reported by GET /me; default: the newest event. */
+  headSeq: number | null = null;
+  /** Base the approve link is built on (the daemon's publicUrl setting); default: this server's own URL. */
+  publicUrl: string | null = null;
   /** Every request's method, path and content-type (contract checks). */
   requests: { method: string; path: string; contentType: string | null; origin: string | null }[] = [];
 
@@ -163,7 +169,7 @@ export class FakeAgentApi {
       const start: PairingStart = {
         deviceCode: "dev_secret",
         userCode: "K7QM-2XPD",
-        verificationUrl: `${this.url}/pairings?code=K7QM-2XPD`,
+        verificationUrl: `${this.publicUrl ?? this.url}/approvals?pairing=K7QM-2XPD`,
         expiresAt: new Date(Date.now() + 600_000).toISOString(),
         interval: this.interval,
       };
@@ -180,10 +186,10 @@ export class FakeAgentApi {
       const self: AgentSelf = {
         id: "agt_1",
         name: "Test agent",
-        grants: [{ accountId: "acc_1", accountEmail: "me@example.com", capabilities: ["read", "draft"], labelScope: null, sendMode: "draft_only" }],
+        grants: this.grants,
         mcpUrl: `${this.url}/mcp`,
         skillUrl: `${this.url}/skill.md`,
-        headSeq: this.events.at(-1)?.data.seq ?? 0,
+        headSeq: this.headSeq ?? this.events.at(-1)?.data.seq ?? 0,
       };
       return this.json(res, 200, self);
     }
