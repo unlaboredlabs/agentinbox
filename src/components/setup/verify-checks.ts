@@ -92,3 +92,68 @@ export interface ChecksState {
 export function checksComplete({ mcpDone, listenDone, skipListen, sent, received, delivered }: ChecksState): boolean {
   return mcpDone && (listenDone || skipListen) && sent && received && (delivered || skipListen);
 }
+
+// ───────────── Revisiting a finished step ─────────────
+
+/**
+ * What step 8 shows. Done when it was opened (SetupDraft.verified, or the server's SetupState.verified):
+ * its completed state, since this browser's test email may be gone (another browser, or older than
+ * TEST_TTL_MS) and re-running every check would look like setup came undone. "Run the checks again"
+ * (`recheck`) shows the live checks without un-completing anything. A step that turns done while open
+ * keeps showing the checks (and their "Setup complete" panel).
+ */
+export function verifyMode(doneWhenOpened: boolean, recheck: boolean): "complete" | "checks" {
+  return doneWhenOpened && !recheck ? "complete" : "checks";
+}
+
+/** Step 8's footer. "Finish setup" is never disabled once the step is done: the stepper shows it ✓. */
+export function verifyFooter(stepDone: boolean, checksGreen: boolean): { nextDisabled: boolean; hint: string | null; skip: boolean } {
+  if (stepDone || checksGreen) return { nextDisabled: false, hint: null, skip: false };
+  return { nextDisabled: true, hint: "Finish turns on when every check is green", skip: true };
+}
+
+export interface DoneSummaryInput {
+  /** SetupState.verified: some agent made a successful tool call, or a listener acked an event. */
+  serverVerified: boolean;
+  /** This browser's last test email, however old (not activeTest). */
+  test: VerifyTest | undefined;
+  /** The checked agent's recent tool calls (audit entries), newest first. */
+  calls: AuditEntry[];
+  /** Agent.lastMcpAt. */
+  connectedAt: string | null;
+  listeners: ListenerInfo[];
+  /** No listener expected ("MCP only", or an agent that can't run one). */
+  skipListen: boolean;
+  /** SetupDraft.verifiedBy: how this browser finished the step; undefined when unknown (another browser, older drafts). */
+  verifiedBy?: "checks" | "skip";
+}
+
+export type DoneLine =
+  /** Every check went green in this browser. */
+  | { id: "checked" }
+  /** Finished with "Finish without checking". */
+  | { id: "skipped" }
+  /** The agent reached agentinbox: its last successful tool call, else when it last connected. */
+  | { id: "mcp"; at: string; action: string | null }
+  | { id: "listener"; connected: boolean; hostname: string | null; at: string | null }
+  | { id: "mcpOnly" }
+  /** A test email was sent from this browser. */
+  | { id: "test"; at: string }
+  /** How it was finished is unknown here, and agentinbox has no record of any agent working. */
+  | { id: "unchecked" };
+
+/** The completed step's summary of what was verified, from what is still known now. */
+export function doneSummary({ serverVerified, test, calls, connectedAt, listeners, skipListen, verifiedBy }: DoneSummaryInput): DoneLine[] {
+  const lines: DoneLine[] = [];
+  if (verifiedBy === "checks") lines.push({ id: "checked" });
+  const ok = calls.find((e) => e.outcome === "ok");
+  if (ok || connectedAt) lines.push({ id: "mcp", at: ok?.ts ?? connectedAt!, action: ok?.action ?? null });
+  const listener =
+    listeners.find((l) => l.connected) ?? [...listeners].sort((a, b) => (b.lastSeenAt ?? "").localeCompare(a.lastSeenAt ?? ""))[0];
+  if (listener) lines.push({ id: "listener", connected: listener.connected, hostname: listener.client.hostname ?? null, at: listener.lastSeenAt });
+  else if (skipListen) lines.push({ id: "mcpOnly" });
+  if (test) lines.push({ id: "test", at: test.sentAt });
+  if (verifiedBy === "skip") lines.push({ id: "skipped" });
+  else if (!verifiedBy && !serverVerified) lines.push({ id: "unchecked" });
+  return lines;
+}

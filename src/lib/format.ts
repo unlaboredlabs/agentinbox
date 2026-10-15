@@ -1,5 +1,5 @@
 // Relative (not @shared): unit tests type-check this file under the server config.
-import type { Address } from "../../shared/types.ts";
+import type { Address, OverviewStats } from "../../shared/types.ts";
 import { formatDistanceStrict } from "date-fns";
 
 const full = new Intl.NumberFormat("en");
@@ -94,4 +94,16 @@ export function agentOnHost(name: string, host: string | null | undefined): stri
   const n = bare(name);
   const short = bare(host);
   return n === short || n.endsWith(` on ${short}`) ? name : `${name} on ${host}`;
+}
+
+/**
+ * The Overview's Accounts tile: "2" / "2 of 3", and its hint. With no account there is nothing to be
+ * "all active" about: the hint is a link to connect one (`connect`). Paused accounts are said as such.
+ */
+export function accountsStat(a: OverviewStats["accounts"]): { value: string; hint: string; tone?: "critical"; connect?: boolean } {
+  const value = a.active === a.total ? fmtNumber(a.total) : `${fmtNumber(a.active)} of ${fmtNumber(a.total)}`;
+  if (!a.total) return { value, hint: "Connect Gmail", connect: true };
+  if (a.needsAttention) return { value, hint: a.needsAttention === 1 ? "1 needs attention" : `${a.needsAttention} need attention`, tone: "critical" };
+  const paused = a.total - a.active;
+  return { value, hint: paused ? `${paused} paused` : a.total === 1 ? "active" : "all active" };
 }

@@ -339,7 +339,8 @@ export function listenServiceStatus(profileName: string, deps: ListenServiceDeps
   assertSupported(ops);
   const name = validProfileName(profileName);
   if (!isServiceInstalled(name, ops)) {
-    console.log(`No listener service is installed for profile "${name}". Install one with \`${NPX} listen service install\`.`);
+    const p = name === DEFAULT_PROFILE ? "" : ` --profile ${name}`;
+    console.log(`No listener service is installed for profile "${name}". Install one with \`${NPX} listen service install${p}\`.`);
     process.exitCode = 1;
     return;
   }

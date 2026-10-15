@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -6,7 +7,7 @@ import { NPM_PACKAGE as PACKAGE } from "../shared/types.ts";
 import { readSetupToken } from "./auth/setup-token.ts";
 import type { Config } from "./config.ts";
 import { Crypto } from "./crypto.ts";
-import { assertMasterKeyUsable, cliCommand } from "./instance.ts";
+import { assertMasterKeyUsable, cliCommand, type InstanceInfo, runningInstance, serviceInstallCommand } from "./instance.ts";
 import { consoleUrls, loopbackUrl } from "./urls.ts";
 
 /** Installs agentinbox as a background service: systemd on Linux, launchd on macOS. */
@@ -260,6 +261,10 @@ export interface ServiceOps {
   unitDir(): string;
   /** Resolves true once /api/health returns a real HealthResponse, false if it never does. */
   waitReady(config: ServiceConfig): Promise<boolean>;
+  /** The live process holding the data directory's instance lock (runningInstance), if any. */
+  instance(dataDir: string): InstanceInfo | null;
+  /** Whether something already listens on host:port (port 0 never is). */
+  portInUse(host: string, port: number): Promise<boolean>;
   uid: number;
   user: string;
 }
@@ -279,6 +284,8 @@ export const systemOps = (): ServiceOps => {
       return unitDirCache;
     },
     waitReady: waitForHealth,
+    instance: runningInstance,
+    portInUse,
     uid: process.getuid?.() ?? 0,
     user: userInfo().username,
   };
@@ -349,6 +356,70 @@ export function preflight(ops: ServiceOps): void {
   }
 }
 
+/** Whether host:port can't be bound because something already listens there. */
+function portInUse(host: string, port: number): Promise<boolean> {
+  if (!port) return Promise.resolve(false);
+  return new Promise((done) => {
+    const probe = createServer();
+    probe.once("error", (err: NodeJS.ErrnoException) => done(err.code === "EADDRINUSE"));
+    probe.listen({ host, port, exclusive: true }, () => probe.close(() => done(false)));
+  });
+}
+
+/** The service manager's main pid for the agentinbox service; null when it isn't running or can't be asked. */
+export function serviceMainPid(ops: ServiceOps): number | null {
+  try {
+    const out =
+      ops.platform === "darwin"
+        ? (/^\s*pid = (\d+)/m.exec(ops.capture("launchctl", ["print", `${launchdTarget(ops)}/${LAUNCHD_LABEL}`]))?.[1] ?? "")
+        : ops.capture("systemctl", [...(ops.root ? [] : ["--user"]), "show", "-p", "MainPID", "--value", SERVICE_NAME]).trim();
+    const pid = Number(out);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refuses (before anything is touched) while agentinbox already runs outside the service: in a
+ * terminal on this data directory (its instance lock), or anything on the port while the service
+ * isn't running. The service could only fail to start, and the health check would hear the other one.
+ * A lock holder is the service when its lock says so, or (early nightlies didn't write that flag)
+ * when, with a unit installed, it is the service manager's main process.
+ */
+export async function assertNothingElseRunning(config: Pick<ServiceConfig, "dataDir" | "host" | "port">, ops: ServiceOps, unitInstalled: boolean): Promise<void> {
+  const other = ops.instance(config.dataDir);
+  const mainPid = unitInstalled ? serviceMainPid(ops) : null;
+  if (other && !other.service && other.pid !== mainPid) {
+    throw new Error(
+      `agentinbox is already running in a terminal (pid ${other.pid}${other.port ? `, port ${other.port}` : ""}): stop it with Ctrl-C, then run this again. ` +
+        `The service uses the same data directory (${config.dataDir}), and only one agentinbox can use it at a time. Nothing was changed.`,
+    );
+  }
+  // A running service (on whatever data directory) may hold the port; reinstalling stops it first.
+  if (!other && mainPid === null && (await ops.portInUse(config.host, config.port))) {
+    throw new Error(
+      `Port ${config.port} is already in use: by agentinbox running in a terminal with another --data directory, or by another program. ` +
+        `Stop it (Ctrl-C in its terminal), or choose another port with --port. Nothing was changed.`,
+    );
+  }
+}
+
+/**
+ * After the health check answered: whether the data directory's lock holder is the new service's own
+ * process. It must be the service manager's main process (or, when that pid is unknown, say in its lock
+ * that it is the service), and not the process that held the lock before the install. This checks the
+ * lock holder, not who answered: agentinbox binds its port before taking the lock and exits when the
+ * port is taken, so a service that holds the lock is the one listening. Null when it is; else why not.
+ */
+export function notTheService(owner: InstanceInfo | null, before: InstanceInfo | null, mainPid: number | null): string | null {
+  if (!owner) return "no agentinbox holds the data directory";
+  const same = before && owner.pid === before.pid && owner.startedAt === before.startedAt;
+  const isService = mainPid !== null ? owner.pid === mainPid : !!owner.service;
+  if (same || !isService) return `the agentinbox holding the data directory (pid ${owner.pid}) is not the service${mainPid ? ` (pid ${mainPid})` : ""}`;
+  return null;
+}
+
 export async function installService(config: ServiceConfig, ops: ServiceOps = systemOps()): Promise<void> {
   assertSupported(ops);
   if (ops.platform === "linux" && /\s/.test(config.dataDir)) {
@@ -359,11 +430,13 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
   // The service must be able to read what's already stored, with exactly the key it will get.
   assertMasterKeyUsable(config, extraEnv.AGENTINBOX_MASTER_KEY ?? "");
   preflight(ops);
+  const file = unitFile(ops);
+  const previousUnit = readText(file);
+  await assertNothingElseRunning(config, ops, previousUnit !== null);
+  const before = ops.instance(config.dataDir);
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 
   const staging = ops.stage(config.dataDir);
-  const file = unitFile(ops);
-  const previousUnit = readText(file);
   const previousEnv = readText(serviceEnvPath(config.dataDir));
   const app = join(config.dataDir, "app");
   const entry = installedEntry(app);
@@ -385,6 +458,9 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
       ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
     }
     if (!(await ops.waitReady(config))) throw new Error(`it did not answer on port ${config.port}`);
+    // Something else (a foreground agentinbox started meanwhile) may have answered instead.
+    const wrong = notTheService(ops.instance(config.dataDir), before, serviceMainPid(ops));
+    if (wrong) throw new Error(wrong);
   } catch (err) {
     rollback();
     const hints = serviceHints(ops).map((h) => `    ${h}`).join("\n");
@@ -426,7 +502,7 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
   const kept = Object.keys(extraEnv).filter((k) => !(k in process.env));
   console.log(`\n  Installed ${SERVICE_NAME} as a ${ops.platform === "linux" ? "systemd" : "launchd"} service.`);
   console.log(
-    `  It runs the Node.js at ${process.execPath} (v${process.versions.node}). If you remove or replace that Node, run \`${cliCommand("service install")}\` again.`,
+    `  It runs the Node.js at ${process.execPath} (v${process.versions.node}). If you remove or replace that Node, run \`${serviceInstallCommand(config)}\` again.`,
   );
   if (kept.length) console.log(`  Kept ${kept.join(", ")} from the previous install.`);
   printLinks(config);

@@ -24,6 +24,7 @@ export function overviewStats(ctx: AppContext, at = new Date()): OverviewStats {
     since,
   )!;
   // MCP tool calls only (the same rule as anyAgentVerified): not pairing.key_delivered and the like.
+  // Every outcome, including calls rejected for invalid arguments or an unknown tool (outcome "error").
   const agentCalls = db.get<{ calls: number; denied: number | null }>(
     `SELECT COUNT(*) AS calls, SUM(outcome = 'denied') AS denied FROM audit_log WHERE ${mcpToolCallSql()} AND ts >= ?`,
     since,

@@ -39,6 +39,7 @@ export function SystemCard() {
                     Closing its terminal stops everything. To keep it running and start it at login, run this on the server:
                   </span>
                   <Command code={s.serviceCommand} label="service install command" />
+                  <span className="block text-xs text-muted-foreground">Stop the one in your terminal first (Ctrl-C): the service can't start while it runs.</span>
                 </>
               )}
             </dd>

@@ -1,26 +1,31 @@
 import type { AgentTool } from "@shared/agent-api";
 import type { Agent } from "@shared/types";
-import { CheckCircle2Icon, CircleDashedIcon } from "lucide-react";
+import { CheckCircle2Icon, CircleDashedIcon, TriangleAlertIcon } from "lucide-react";
 import { useState } from "react";
 import { TimeAgo } from "@/components/common";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { connectCommands } from "@/lib/cli";
 import { useAgentOrigin, useMcpActivity } from "./agent-status";
+import { lastCallShown } from "./last-call";
 import { Command } from "./command";
 import { ConnectSnippets } from "./connect-snippets";
 import { ProfileHint, ToolTabs, toolName, usePublicUrl } from "./connect-agent-guide";
 import { TestConnection } from "./test-connection";
+import { explainReason } from "@/lib/labels";
 
 /** "Not called yet" / "Last tool call 2 minutes ago": whether the agent's own tool reaches agentinbox. */
 export function McpStatus({ agent, label }: { agent: Agent; label: string }) {
-  const { lastToolCall, connectedAt } = useMcpActivity(agent);
+  const { calls, connectedAt } = useMcpActivity(agent);
+  // The last successful call; without one, the last call marked with what went wrong (no tick).
+  const last = lastCallShown(calls, explainReason);
   return (
     <p role="status" className="flex items-center gap-2 text-sm">
-      {lastToolCall ? (
+      {last ? (
         <>
-          <CheckCircle2Icon className="size-4 shrink-0 text-success" />
+          {last.ok ? <CheckCircle2Icon className="size-4 shrink-0 text-success" /> : <TriangleAlertIcon className="size-4 shrink-0 text-warning" />}
           <span>
-            Last tool call <TimeAgo date={lastToolCall.ts} /> <span className="font-mono text-xs text-muted-foreground">({lastToolCall.action})</span>
+            Last tool call <TimeAgo date={last.call.ts} /> <span className="font-mono text-xs text-muted-foreground">({last.call.action})</span>
+            {last.note && <span className="text-warning">, {last.note}</span>}
           </span>
         </>
       ) : connectedAt ? (

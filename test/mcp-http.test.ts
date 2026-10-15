@@ -2,11 +2,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Agent, AgentTestResult, AgentWithKey, Approval, Grant } from "../shared/types.ts";
+import { type Agent, type AgentTestResult, type AgentWithKey, type Approval, type Grant, isMcpToolAction } from "../shared/types.ts";
 import { agentsApi } from "../server/api/agents.ts";
 import { approvalsApi } from "../server/api/approvals.ts";
 import type { AppContext } from "../server/context.ts";
-import { INSTRUCTIONS } from "../server/mcp/server.ts";
+import { anyAgentVerified } from "../server/agentapi/listeners.ts";
+import { overviewStats } from "../server/api/overview.ts";
+import { INSTRUCTIONS, rejectedCall, TOOL_NAMES } from "../server/mcp/server.ts";
 import { mcpRoutes } from "../server/mcp/index.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { ALL_CAPS, grantInput, mailTestContext } from "./mail-fakes.ts";
@@ -174,6 +176,84 @@ describe("MCP over HTTP", () => {
     ]);
     expect(entries[0]).toMatchObject({ actorType: "agent", actorName: "bot", accountId: "acc_a", durationMs: expect.any(Number) });
     expect(JSON.stringify(entries)).not.toContain("Hello");
+  });
+});
+
+describe("rejected tool calls", () => {
+  it("audits unknown tools, invalid arguments and malformed calls as errors, without argument values", async () => {
+    const { http, ctx, addAgent } = setup();
+    const { agent, apiKey } = addAgent("sloppy", [grantInput("acc_a", { capabilities: ["read"] })]);
+    const client = await mcpClient(http, apiKey);
+
+    const bad = await client.callTool({ name: "get_message", arguments: { message_id: 42, account: "secret subject line" } });
+    expect(bad.isError).toBe(true);
+    const unknown = await client.callTool({ name: "send_message", arguments: { to: "x@y.com", body: "private body" } });
+    expect(unknown.isError).toBe(true);
+    const dotted = await client.callTool({ name: "gmail.send", arguments: {} });
+    expect(dotted.isError).toBe(true);
+    // Not in the catalog: never the action itself.
+    expect((await client.callTool({ name: "send_email", arguments: {} })).isError).toBe(true);
+    // A tools/call without a name never reaches McpServer: the SDK answers with a JSON-RPC error.
+    const raw = await http.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { arguments: { q: "x" } } }),
+    });
+    const code = ((await raw.json()) as { error?: { code: number } }).error?.code;
+    expect(code).toBeLessThan(0);
+    // A good call is audited once, by the tool itself.
+    expect((await client.callTool({ name: "list_accounts", arguments: {} })).isError).toBeFalsy();
+
+    const rows = ctx.audit.list({ agentId: agent.id }).items.reverse();
+    expect(rows.map((e) => [e.action, e.outcome, e.reason, e.detail])).toEqual([
+      ["get_message", "error", "invalid_arguments", { fields: ["message_id"] }],
+      ["send_message", "error", "unknown_tool", null],
+      ["unknown_tool", "error", "unknown_tool", { tool: "gmail.send" }],
+      ["unknown_tool", "error", "unknown_tool", { tool: "send_email" }],
+      ["invalid_request", "error", "invalid_request", { code }],
+      ["list_accounts", "ok", null, null],
+    ]);
+    const stored = JSON.stringify(rows);
+    expect(stored).not.toContain("secret subject line");
+    expect(stored).not.toContain("private body");
+    expect(rows.every((e) => e.actorType === "agent" && isMcpToolAction(e.action))).toBe(true);
+    // The Overview counts every call; only the successful one proves the agent works.
+    expect(overviewStats(ctx).toolCalls24h).toBe(6);
+  });
+
+  it("a tool that ran and failed (isError) is audited once, by the tool", async () => {
+    const { http, ctx, addAgent } = setup();
+    const { agent, apiKey } = addAgent("reader", [grantInput("acc_a", { capabilities: ["read"] })]);
+    const client = await mcpClient(http, apiKey);
+    const r = await client.callTool({ name: "get_message", arguments: { message_id: "nope" } });
+    expect(r.isError).toBe(true);
+    const rows = ctx.audit.list({ agentId: agent.id }).items;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: "get_message", outcome: "error", reason: "not_found" });
+  });
+
+  it("the catalog is every tool a fully granted agent gets", async () => {
+    const { http, addAgent } = setup();
+    const full = addAgent("full", [grantInput("acc_a", { capabilities: ALL_CAPS })]);
+    const names = (await (await mcpClient(http, full.apiKey)).listTools()).tools.map((t) => t.name).sort();
+    expect(names).toEqual([...TOOL_NAMES].sort());
+  });
+
+  it("rejected calls alone don't verify setup", async () => {
+    const { http, ctx, addAgent } = setup();
+    const { apiKey } = addAgent("sloppy", [grantInput("acc_a", { capabilities: ["read"] })]);
+    const client = await mcpClient(http, apiKey);
+    await client.callTool({ name: "nope", arguments: {} });
+    await client.callTool({ name: "get_message", arguments: {} });
+    expect(overviewStats(ctx).toolCalls24h).toBe(2);
+    expect(anyAgentVerified(ctx.db)).toBe(false);
+  });
+
+  it("rejectedCall ignores successes", () => {
+    expect(rejectedCall({ name: "x" }, { result: { content: [] } }, new Map())).toBeNull();
+    expect(rejectedCall({ name: "x" }, { result: { content: [], isError: true } }, new Map())).toEqual({ action: "unknown_tool", reason: "unknown_tool", detail: { tool: "x" } });
+    // In the catalog but not granted to this agent: the name is the action.
+    expect(rejectedCall({ name: "trash" }, { result: { content: [], isError: true } }, new Map())).toEqual({ action: "trash", reason: "unknown_tool", detail: null });
   });
 });
 

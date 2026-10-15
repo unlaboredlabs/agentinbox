@@ -21,6 +21,11 @@ export interface AuditInput {
  * SQL condition for an MCP tool call in audit_log: an agent actor and an action without a "." (tool
  * names are like "send_message"; "pairing.key_delivered" and console actions have a dot). The same
  * rule as isMcpToolAction in shared/types.ts (used by the console). `t` is the table alias, if any.
+ *
+ * Every outcome counts, including calls rejected before a tool ran (unknown tool, invalid arguments,
+ * a malformed tools/call): those are recorded with outcome "error" (see rejectedCall in
+ * server/mcp/server.ts), so the Overview's "Tool calls" counts them. Anything that needs proof that
+ * an agent works (anyAgentVerified, the wizard's checks) adds `outcome = 'ok'`.
  */
 export function mcpToolCallSql(t?: string): string {
   const c = t ? `${t}.` : "";

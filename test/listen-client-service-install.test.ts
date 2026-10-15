@@ -38,6 +38,8 @@ function fakeOps(failOn?: (cmd: string, args: string[]) => boolean): ServiceOps 
     },
     unitDir: () => join(env.root, "units"),
     waitReady: async () => true,
+    instance: () => null,
+    portInUse: async () => false,
   };
 }
 

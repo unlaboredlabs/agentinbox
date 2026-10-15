@@ -10,10 +10,11 @@ import { recipe } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
 import { deniedDescription, linkedPairing } from "../src/components/approvals/pairing-link.ts";
 import { listenerHandled } from "../src/components/agents/listener-handled.ts";
-import { allStepsDone, type SetupDraft, showsSetupLink, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, wizardStep } from "../src/components/setup/steps.ts";
-import { activeTest, checksComplete, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
+import { allStepsDone, type SetupDraft, showsSetupLink, skippedPatch, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, verifyDoneHeading, wizardStep } from "../src/components/setup/steps.ts";
+import { lastCallShown } from "../src/components/agents/last-call.ts";
+import { activeTest, checksComplete, doneSummary, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks, verifyFooter, verifyMode } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
-import { agentOnHost, fmtAgo } from "../src/lib/format.ts";
+import { accountsStat, agentOnHost, fmtAgo } from "../src/lib/format.ts";
 
 // ───────────── Verify checks ─────────────
 
@@ -373,12 +374,101 @@ describe("stepStatuses: the verify step", () => {
     expect(verifiedPatch(false, draft)).toBeNull();
     const patched = { ...draft, ...verifiedPatch(checksComplete(green), draft) };
     expect(patched.verified).toBe(true);
+    expect(patched.verifiedBy).toBe("checks");
     const statuses = stepStatuses(state(true), patched);
     expect(statuses.verify).toBe("done");
     expect(allStepsDone(statuses)).toBe(true);
     expect(STEP_IDS.filter((id) => statuses[id] !== "todo")).toHaveLength(STEP_IDS.length);
     // Already done: nothing to write.
     expect(verifiedPatch(true, patched)).toBeNull();
+  });
+
+  it("shows a done step as complete when revisited, even with this browser's test email gone", () => {
+    // An hour later (test past TEST_TTL_MS), or another browser (no draft): the step is still done.
+    expect(activeTest(test0, Date.parse(SENT_AT) + TEST_TTL_MS + 1)).toBeUndefined();
+    for (const draft of [{ verifyStarted: true, verified: true }, {}] as SetupDraft[]) {
+      const done = stepStatuses(state(true), draft).verify === "done";
+      expect(done).toBe(true);
+      expect(verifyMode(done, false)).toBe("complete");
+      // Never a disabled Finish next to a ✓ in the stepper, even while the checks run again.
+      expect(verifyFooter(done, false)).toEqual({ nextDisabled: false, hint: null, skip: false });
+    }
+    // "Run the checks again": the live checks, and the step stays done.
+    expect(verifyMode(true, true)).toBe("checks");
+    // Opened before it was done: the checks, which stay up when they turn green.
+    expect(verifyMode(false, false)).toBe("checks");
+    expect(verifyFooter(false, false)).toEqual({ nextDisabled: true, hint: "Finish turns on when every check is green", skip: true });
+    expect(verifyFooter(false, true).nextDisabled).toBe(false);
+  });
+
+  it("records how step 8 was finished", () => {
+    expect(skippedPatch({ verifyStarted: true })).toEqual({ verified: true, verifiedBy: "skip" });
+    // Skipping after the checks passed doesn't forget that they did.
+    expect(skippedPatch({ verified: true, verifiedBy: "checks" })).toEqual({ verified: true, verifiedBy: "checks" });
+    // Checks that pass later (Run the checks again) replace a skip, and an older draft without verifiedBy.
+    expect(verifiedPatch(true, { verified: true, verifiedBy: "skip" })).toEqual({ verified: true, verifiedBy: "checks" });
+    expect(verifiedPatch(true, { verified: true })).toEqual({ verified: true, verifiedBy: "checks" });
+    expect(verifiedPatch(true, { verified: true, verifiedBy: "checks" })).toBeNull();
+  });
+
+  it("says 'Setup complete' only when every required step is done", () => {
+    const all = stepStatuses(state(true), { verified: true, pubsubSkipped: true });
+    expect(verifyDoneHeading(all)).toEqual({ title: "Setup complete", nextStep: null });
+    // Optional real-time delivery left to do doesn't matter; step 8 itself (about to be marked) neither.
+    expect(verifyDoneHeading({ ...all, pubsub: "todo", verify: "todo" })).toEqual({ title: "Setup complete", nextStep: null });
+    // A required step is still to do: the first one is linked.
+    expect(verifyDoneHeading({ ...all, consent: "todo", accounts: "todo" })).toEqual({ title: "This check is done", nextStep: "consent" });
+    expect(verifyDoneHeading({ ...all, url: "todo", pubsub: "todo" })).toEqual({ title: "This check is done", nextStep: "url" });
+  });
+
+  it("shows the last successful tool call, or marks a failed one", () => {
+    expect(lastCallShown([])).toBeNull();
+    const rejected = { ...call("get_message", "error", later(9)), reason: "invalid_arguments" };
+    const ok = call("search_threads", "ok", later(5));
+    expect(lastCallShown([rejected, ok])).toEqual({ call: ok, ok: true, note: null });
+    expect(lastCallShown([rejected])).toEqual({ call: rejected, ok: false, note: "rejected: invalid_arguments" });
+    expect(lastCallShown([{ ...call("send_message", "denied", later(1)), reason: "allow_to" }])?.note).toBe("denied: allow_to");
+    expect(lastCallShown([{ ...call("get_thread", "error", later(1)), reason: "gmail_error" }])?.note).toBe("failed: gmail_error");
+    // The console passes a plain-words explainer; unknown codes fall back to the code.
+    const words = (r: string) => (r === "allow_to" ? "a recipient isn't on the grant's allowlist" : r);
+    expect(lastCallShown([{ ...call("send_message", "denied", later(1)), reason: "allow_to" }], words)?.note).toBe(
+      "denied: a recipient isn't on the grant's allowlist",
+    );
+  });
+
+  it("summarizes what was verified from what is still known", () => {
+    const old = { ...listener("host-default", 9, false), lastSeenAt: later(60), client: { hostname: "anvil" } };
+    expect(
+      doneSummary({
+        serverVerified: true,
+        test: test0,
+        calls: [call("get_message", "error", later(90)), call("get_message", "ok", later(30))],
+        connectedAt: later(90),
+        listeners: [old],
+        skipListen: false,
+        verifiedBy: "checks",
+      }),
+    ).toEqual([
+      { id: "checked" },
+      // The last successful call, not the newer rejected one.
+      { id: "mcp", at: later(30), action: "get_message" },
+      { id: "listener", connected: false, hostname: "anvil", at: later(60) },
+      { id: "test", at: SENT_AT },
+    ]);
+    // Another browser, MCP only: no test email known here; the connection alone still shows.
+    expect(doneSummary({ serverVerified: true, test: undefined, calls: [], connectedAt: later(5), listeners: [], skipListen: true })).toEqual([
+      { id: "mcp", at: later(5), action: null },
+      { id: "mcpOnly" },
+    ]);
+    // Skipped: said so, whatever the server knows; nothing claims checks passed.
+    expect(doneSummary({ serverVerified: true, test: undefined, calls: [], connectedAt: null, listeners: [], skipListen: true, verifiedBy: "skip" })).toEqual([
+      { id: "mcpOnly" },
+      { id: "skipped" },
+    ]);
+    // A connected listener wins over an older one; unknown how it finished, and no evidence: said so.
+    expect(
+      doneSummary({ serverVerified: false, test: undefined, calls: [], connectedAt: null, listeners: [old, { ...listener("b", 0), client: {} }], skipListen: false }),
+    ).toEqual([{ id: "listener", connected: true, hostname: null, at: null }, { id: "unchecked" }]);
   });
 
   it("keeps the sidebar entry while on /get-started, and drops it on navigation once done", () => {
@@ -396,6 +486,16 @@ describe("stepStatuses: the verify step", () => {
 });
 
 // ───────────── Relative times ─────────────
+
+describe("accountsStat (Overview's Accounts tile)", () => {
+  it("asks to connect Gmail instead of saying 'all active' about no accounts", () => {
+    expect(accountsStat({ total: 0, active: 0, needsAttention: 0 })).toEqual({ value: "0", hint: "Connect Gmail", connect: true });
+    expect(accountsStat({ total: 1, active: 1, needsAttention: 0 })).toEqual({ value: "1", hint: "active" });
+    expect(accountsStat({ total: 3, active: 3, needsAttention: 0 })).toEqual({ value: "3", hint: "all active" });
+    expect(accountsStat({ total: 3, active: 2, needsAttention: 0 })).toEqual({ value: "2 of 3", hint: "1 paused" });
+    expect(accountsStat({ total: 3, active: 1, needsAttention: 2 })).toEqual({ value: "1 of 3", hint: "2 need attention", tone: "critical" });
+  });
+});
 
 describe("fmtAgo", () => {
   const now = Date.parse(SENT_AT);

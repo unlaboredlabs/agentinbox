@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { PageHeader, QueryError } from "@/components/common";
 import { useEffect } from "react";
-import { STEP_IDS, type StepId, startsVerify, updateDraft, useSetupProgress, wizardStep } from "@/components/setup/progress";
+import { STEP_IDS, type StepId, startsVerify, updateDraft, useSetupProgress, verifyDoneHeading, wizardStep } from "@/components/setup/progress";
 import { StepAccounts } from "@/components/setup/step-accounts";
 import { StepAgent } from "@/components/setup/step-agent";
 import { StepClient } from "@/components/setup/step-client";
@@ -83,7 +83,10 @@ function GetStarted() {
   const returnTo = from && STEP_IDS.indexOf(from) > index ? from : undefined;
   const onNext = () => {
     const nextId = returnTo ?? STEP_IDS[index + 1];
+    // Leaving the last step with a required one still to do: go there, not to a "Setup complete" toast.
+    const todo = verifyDoneHeading({ ...progress.statuses, [current]: "done" }).nextStep;
     if (nextId) go(nextId);
+    else if (todo) go(todo);
     else {
       toast.success("Setup complete", { description: "Your agents can use Gmail now. The overview shows what they're up to." });
       void navigate({ to: "/" });
