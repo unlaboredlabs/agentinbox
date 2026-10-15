@@ -1,6 +1,9 @@
 import { HttpError } from "../util/errors.ts";
 import { AccountNeedsReauthError, GoogleApiError, type GoogleErrorDetails } from "./types.ts";
 
+/** Per-attempt timeout for Google API calls. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
 /** Attempts per request (first try included) for 429, 5xx, 403 rate limits and network errors. */
 export const MAX_ATTEMPTS = 5;
 
@@ -79,6 +82,8 @@ export function googleErrorFromBody(status: number, body: unknown, fallback: str
     // OAuth endpoints: { error: "invalid_grant", error_description: "…" }
     details.status = body.error as string;
     details.reasons!.push(body.error as string);
+    // Workspace session control: { error: "invalid_grant", error_subtype: "invalid_rapt" }
+    if (str(body.error_subtype)) details.reasons!.push(body.error_subtype as string);
     reason = body.error as string;
     message = str(body.error_description) ?? (body.error as string);
   }
@@ -101,6 +106,26 @@ const RATE_REASONS = new Set(["rateLimitExceeded", "userRateLimitExceeded", "RAT
 
 export function isRetryable(err: GoogleApiError): boolean {
   if (err.status === 0 || err.status === 429 || err.status >= 500) return true;
+  return err.status === 403 && (err.details.reasons ?? []).some((r) => RATE_REASONS.has(r));
+}
+
+/** Connection-level failures where the request never reached Google. */
+const NOT_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"]);
+
+export function networkError(e: unknown, host: string): GoogleApiError {
+  const code = (e as { cause?: { code?: unknown } })?.cause?.code;
+  const cause = typeof code === "string" ? code : null;
+  const detail = e instanceof Error ? (cause ?? (e.cause instanceof Error ? e.cause.message : e.message)) : String(e);
+  return new GoogleApiError(0, `Could not reach Google (${host}): ${detail}`, "network", { reasons: cause ? [cause] : [] });
+}
+
+/**
+ * Safe-to-retry signals for non-idempotent requests: Google refused the request without acting on it
+ * (quota/rate limit), or it never left this machine. A 5xx, timeout or reset may have been processed.
+ */
+export function rejectedBeforeProcessing(err: GoogleApiError): boolean {
+  if (err.status === 429) return true;
+  if (err.status === 0) return (err.details.reasons ?? []).some((r) => NOT_SENT.has(r));
   return err.status === 403 && (err.details.reasons ?? []).some((r) => RATE_REASONS.has(r));
 }
 

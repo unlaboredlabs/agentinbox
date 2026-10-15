@@ -130,6 +130,48 @@ describe("history sync", () => {
     expect(freshEv.message!.labelIds).toContain(label);
   });
 
+  it("reports a message rescued from spam as received, and drops auto-classification label noise", async () => {
+    const spam = fake.deliver(ME, { from: CLIENT, subject: "Not spam", text: "x", labelIds: ["SPAM", "UNREAD"] });
+    await sync();
+    expect(rec.events).toHaveLength(0);
+    fake.setLabels(ME, spam.id, ["INBOX"], ["SPAM"]);
+    await sync();
+    expect(subjects("message.received")).toEqual(["Not spam"]);
+    expect(rec.ofType("label.added").map((e) => e.labelIds)).toEqual([["INBOX"]]);
+    expect(rec.ofType("label.removed").map((e) => e.labelIds)).toEqual([["SPAM"]]);
+    // Archiving and moving back to the inbox doesn't re-announce it (dedupe key).
+    fake.setLabels(ME, spam.id, [], ["INBOX"]);
+    fake.setLabels(ME, spam.id, ["INBOX"], []);
+    await sync();
+    expect(rec.ofType("message.received")).toHaveLength(1);
+
+    const before = rec.events.length;
+    fake.setLabels(ME, spam.id, ["IMPORTANT", "CATEGORY_UPDATES"], []);
+    await sync();
+    expect(rec.events.length).toBe(before);
+    fake.setLabels(ME, spam.id, ["STARRED", "CATEGORY_PROMOTIONS"], ["UNREAD", "IMPORTANT"]);
+    await sync();
+    expect(rec.events.slice(before).map((e) => [e.type, e.labelIds])).toEqual([
+      ["label.added", ["STARRED"]],
+      ["label.removed", ["UNREAD"]],
+    ]);
+  });
+
+  it("advances the cursor to the last fully processed record when a sync fails midway", async () => {
+    const first = fake.deliver(ME, { from: CLIENT, subject: "First", text: "1" });
+    const second = fake.deliver(ME, { from: CLIENT, subject: "Second", text: "2" });
+    fake.failNext({ method: "GET", path: `/messages/${second.id}`, status: 400, message: "boom" });
+    await expect(sync()).rejects.toMatchObject({ status: 400 });
+    expect(subjects("message.received")).toEqual(["First"]);
+    expect(ctx.accounts.get(accountId)!.historyId).toBe(first.historyId);
+    const fetchesOfFirst = () => fake.requests.filter((r) => r.path.endsWith(`/messages/${first.id}`)).length;
+    const n = fetchesOfFirst();
+    await sync();
+    expect(subjects("message.received")).toEqual(["First", "Second"]);
+    expect(fetchesOfFirst()).toBe(n);
+    expect(ctx.accounts.get(accountId)!.historyId).toBe((await ctx.google.gmail(accountId).getProfile()).historyId);
+  });
+
   it("ignores drafts, then reports the sent draft once", async () => {
     const gmail = ctx.google.gmail(accountId);
     const raw = await ctx.google.mime.compose({ from: { name: null, email: ME }, to: [{ name: null, email: "x@y.test" }], subject: "Draft", text: "wip" });
@@ -195,6 +237,13 @@ describe("history sync", () => {
     expect((await call("resume")).status).toBe("active");
     await waitFor(() => rec.events.length > 0);
     expect(subjects("message.received")).toEqual(["While paused"]);
+  });
+
+  it("refuses to pause an account that needs reauth", async () => {
+    ctx.accounts.setStatus(accountId, "needs_reauth", "revoked");
+    await expect(ctx.ingest.pause(accountId)).rejects.toThrow(/needs to be reconnected/);
+    await expect(ctx.ingest.resume(accountId)).rejects.toThrow(/needs to be reconnected/);
+    expect(ctx.accounts.get(accountId)!.status).toBe("needs_reauth");
   });
 
   it("stops syncing an account whose refresh token was revoked", async () => {

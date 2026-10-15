@@ -7,13 +7,18 @@ import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { type AccountRow, getRow, toAccount } from "./accounts.ts";
 import { callbackMode, clientCredentials } from "./client.ts";
-import { buildUrl } from "./http.ts";
+import { buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
+import { pubsubPrincipal } from "./pubsub.ts";
 import { postToken, type TokenResponse } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
 
 export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 export const PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
-export const SCOPES = [GMAIL_SCOPE, PUBSUB_SCOPE, "openid", "email", "profile"];
+/** Every account: Gmail plus identity (for the display name). */
+export const BASE_SCOPES = [GMAIL_SCOPE, "openid", "email", "profile"];
+/** Optional extra scopes, requested incrementally (include_granted_scopes) only when needed. */
+export const EXTRA_SCOPES = { pubsub: PUBSUB_SCOPE } as const;
+export type ExtraScope = keyof typeof EXTRA_SCOPES;
 
 const STATE_TTL_MS = 15 * 60_000;
 
@@ -63,9 +68,20 @@ const oauthError = (code: string, description?: string | null) => {
   return new HttpError(400, `oauth_${code}`, description && !message.includes(description) ? `${message} (${description})` : message, hint);
 };
 
-export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string } = {}): ConnectAccountResponse {
+/**
+ * Starts a consent flow. `scopes: ["pubsub"]` adds the Pub/Sub scope for the provisioning account
+ * (without `reauthAccountId` it targets the account provisioning would use).
+ */
+export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string; scopes?: ExtraScope[] } = {}): ConnectAccountResponse {
   const { clientId } = clientCredentials(ctx);
-  const reauth = opts.reauthAccountId ? ctx.accounts.require(opts.reauthAccountId) : null;
+  const extra = [...new Set(opts.scopes ?? [])];
+  let reauthId = opts.reauthAccountId;
+  if (!reauthId && extra.includes("pubsub")) {
+    reauthId = pubsubPrincipal(ctx)?.id;
+    if (!reauthId) throw badRequest("Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
+  }
+  const reauth = reauthId ? ctx.accounts.require(reauthId) : null;
+  const scopes = [...BASE_SCOPES, ...extra.map((x) => EXTRA_SCOPES[x])];
   const { mode, redirectUri } = callbackMode(ctx);
   const state = randomToken(32);
   const verifier = b64url(randomBytes(48));
@@ -83,7 +99,7 @@ export function startConnect(ctx: AppContext, opts: { reauthAccountId?: string }
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope: SCOPES.join(" "),
+    scope: scopes.join(" "),
     access_type: "offline",
     prompt: "consent",
     include_granted_scopes: "true",
@@ -132,6 +148,7 @@ function idTokenClaims(idToken: string | undefined): { email?: string; name?: st
 async function fetchProfile(ctx: AppContext, accessToken: string): Promise<{ emailAddress: string; historyId: string }> {
   const res = await fetch(buildUrl(ctx.config.google.gmailBase, "/gmail/v1/users/me/profile"), {
     headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const body = (await res.json().catch(() => null)) as { emailAddress?: string; historyId?: string; error?: { message?: string } } | null;
   if (!res.ok || !body?.emailAddress) {
@@ -151,8 +168,38 @@ async function revokeToken(ctx: AppContext, token: string): Promise<void> {
   await fetch(buildUrl(ctx.config.google.oauthBase, "/revoke", { token }), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   }).catch(() => undefined);
 }
+
+const byEmail = (ctx: AppContext, email: string) =>
+  ctx.db.get<AccountRow>("SELECT * FROM accounts WHERE email = ? COLLATE NOCASE", email.trim());
+
+/**
+ * Discards tokens we won't keep. Revocation kills the user's whole grant for this OAuth client, so it
+ * only happens when the Google account is not connected here (otherwise it would break that account).
+ */
+async function discardTokens(ctx: AppContext, tokens: TokenResponse, email: string | null | undefined): Promise<void> {
+  if (!email || byEmail(ctx, email)) return;
+  await revokeToken(ctx, tokens.refresh_token ?? tokens.access_token);
+}
+
+/** Saves fresh tokens on an existing account. needs_reauth/error become active; paused stays paused. */
+function storeTokens(ctx: AppContext, row: AccountRow, tokens: TokenResponse & { refresh_token: string }, granted: string[], name?: string): void {
+  ctx.db.run(
+    `UPDATE accounts SET display_name = ?, status = ?, last_error = NULL, refresh_token_enc = ?, access_token_enc = ?,
+       access_expires_at = ?, scopes = ? WHERE id = ?`,
+    name ?? row.display_name,
+    row.status === "paused" ? "paused" : "active",
+    ctx.crypto.encrypt(tokens.refresh_token),
+    ctx.crypto.encrypt(tokens.access_token),
+    expiry(tokens),
+    JSON.stringify(granted),
+    row.id,
+  );
+}
+
+const expiry = (t: TokenResponse) => new Date(Date.now() + (t.expires_in ?? 3600) * 1000).toISOString();
 
 export async function completeConnect(ctx: AppContext, code: string, state: string): Promise<Account> {
   const st = takeState(ctx, state);
@@ -173,9 +220,10 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     throw err;
   }
 
+  const claims = idTokenClaims(tokens.id_token);
   const granted = (tokens.scope ?? "").split(/\s+/).filter(Boolean);
   if (granted.length && !granted.includes(GMAIL_SCOPE)) {
-    await revokeToken(ctx, tokens.refresh_token ?? tokens.access_token);
+    await discardTokens(ctx, tokens, claims.email);
     throw badRequest(
       "Gmail access wasn't granted.",
       "Connect again and keep the \"Read, compose, and send emails\" permission checked on Google's consent screen.",
@@ -183,14 +231,24 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
   }
   const profile = await fetchProfile(ctx, tokens.access_token);
   const email = profile.emailAddress;
-  const claims = idTokenClaims(tokens.id_token);
+  const existing = byEmail(ctx, email);
+  const scopes = granted.length ? granted : BASE_SCOPES;
+  const refreshed = existing && tokens.refresh_token ? " Its saved sign-in in agentinbox was refreshed." : "";
 
   if (st.reauth_account_id) {
     const target = getRow(ctx, st.reauth_account_id);
-    if (target && target.email.toLowerCase() !== email.toLowerCase()) {
-      await revokeToken(ctx, tokens.refresh_token ?? tokens.access_token);
+    if (!target || target.email.toLowerCase() !== email.toLowerCase()) {
+      // Keep the tokens if they belong to another connected account; never revoke them (that would break it).
+      if (existing && tokens.refresh_token) storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims.name);
+      else await discardTokens(ctx, tokens, email);
+      if (!target) {
+        throw badRequest(
+          `The account you were reconnecting was removed from agentinbox meanwhile.${refreshed}`,
+          "Use Connect account to add it again.",
+        );
+      }
       throw badRequest(
-        `You signed in as ${email}, but this reconnect is for ${target.email}.`,
+        `You signed in as ${email}, but this reconnect is for ${target.email}.${refreshed}`,
         `Start the reconnect again and choose ${target.email} in Google's account picker.`,
       );
     }
@@ -202,31 +260,20 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     );
   }
 
-  const existing = ctx.db.get<AccountRow>("SELECT * FROM accounts WHERE email = ? COLLATE NOCASE", email);
-  const cols = {
-    display_name: claims.name ?? existing?.display_name ?? null,
-    status: "active",
-    last_error: null,
-    refresh_token_enc: ctx.crypto.encrypt(tokens.refresh_token),
-    access_token_enc: ctx.crypto.encrypt(tokens.access_token),
-    access_expires_at: new Date(Date.now() + (tokens.expires_in ?? 3600) * 1000).toISOString(),
-    scopes: JSON.stringify(granted.length ? granted : SCOPES),
-  };
   const id = existing?.id ?? newId("acc");
   if (existing) {
-    ctx.db.run(
-      `UPDATE accounts SET display_name = ?, status = ?, last_error = ?, refresh_token_enc = ?, access_token_enc = ?,
-         access_expires_at = ?, scopes = ? WHERE id = ?`,
-      ...Object.values(cols),
-      id,
-    );
+    storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims.name);
   } else {
     ctx.db.run(
       `INSERT INTO accounts (id, email, display_name, status, last_error, refresh_token_enc, access_token_enc, access_expires_at, scopes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, 'active', NULL, ?, ?, ?, ?, ?)`,
       id,
       email,
-      ...Object.values(cols),
+      claims.name ?? null,
+      ctx.crypto.encrypt(tokens.refresh_token),
+      ctx.crypto.encrypt(tokens.access_token),
+      expiry(tokens),
+      JSON.stringify(scopes),
       now(),
     );
   }
@@ -235,7 +282,7 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     action: existing ? "account.reconnect" : "account.connect",
     accountId: id,
     outcome: "ok",
-    detail: { email, scopes: granted },
+    detail: { email, scopes },
   });
   const log = ctx.log.child("google");
   log.info(existing ? "Account reconnected" : "Account connected", { email });
@@ -284,6 +331,7 @@ export async function revokeAccount(ctx: AppContext, accountId: string): Promise
   const res = await fetch(buildUrl(ctx.config.google.oauthBase, "/revoke", { token: ctx.crypto.decrypt(row.refresh_token_enc) }), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   // 400 invalid_token means it was already revoked.
   if (!res.ok && res.status !== 400) throw new GoogleApiError(res.status, `Token revocation failed (HTTP ${res.status})`);

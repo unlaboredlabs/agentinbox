@@ -7,7 +7,7 @@ import { ackPubsub, explainPubsubError, type PulledMessage, pullPubsub, readPubs
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import { conflict, errorMessage } from "../util/errors.ts";
 import type { IngestService } from "./types.ts";
-import { boundedResync, readHistory, SyncPass } from "./sync.ts";
+import { boundedResync, syncHistory } from "./sync.ts";
 import { ensureWatches, startWatch, stopAllWatches, stopWatch } from "./watch.ts";
 
 /** Pub/Sub mode still syncs every account this often, in case a notification was lost. */
@@ -24,6 +24,19 @@ function historyGte(a: string | null, b: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Resolves when `p` settles or the signal aborts, whichever comes first (p keeps running). */
+function untilAborted(p: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    signal.addEventListener("abort", done, { once: true });
+    p.then(done, done);
+  });
 }
 
 export function createIngestService(ctx: AppContext): IngestService {
@@ -48,6 +61,8 @@ class Ingest implements IngestService {
   private readonly chains = new Map<string, Promise<void>>();
   /** A queued, not yet started sync per account; further requests coalesce into it. */
   private readonly pendingSync = new Map<string, Promise<void>>();
+  /** Aborted by stop(): in-flight syncs end after the current Gmail request. */
+  private life = new AbortController();
   private lastPullAt: string | null = null;
   private lastError: string | null = null;
 
@@ -65,12 +80,14 @@ class Ingest implements IngestService {
 
   start(): void {
     this.stopped = false;
+    if (this.life.signal.aborted) this.life = new AbortController();
     this.ctx.bus.on("settings", this.onSettings);
     void this.restart();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.life.abort();
     this.ctx.bus.off("settings", this.onSettings);
     await this.restarting;
     await this.stopLoop();
@@ -100,6 +117,8 @@ class Ingest implements IngestService {
     if (!row) return;
     const hadCursor = Boolean(row.history_id);
     if (!hadCursor) await this.enqueue(accountId, () => this.baseline(accountId));
+    // A paused account stays paused (no watch, no sync) until it is resumed.
+    if (row.status === "paused") return;
     const topic = readPubsub(this.ctx).topic;
     if (this.ctx.settings.get().ingestMode === "pubsub" && topic) await startWatch(this.ctx, accountId, topic);
     // A reconnected account continues from its old cursor (or resyncs if that has expired).
@@ -114,13 +133,16 @@ class Ingest implements IngestService {
     if (account.status === "paused") throw conflict(`${account.email} is paused.`, "Resume it first.");
     await this.enqueue(accountId, async () => {
       const row = getRow(this.ctx, accountId);
-      if (row) await this.guard(row, () => boundedResync(this.ctx, row, "manual"), true);
+      if (row) await this.guard(row, () => boundedResync(this.ctx, row, "manual", this.life.signal), true);
     });
     return this.ctx.accounts.require(accountId);
   }
 
   async pause(accountId: string): Promise<Account> {
-    this.ctx.accounts.require(accountId);
+    const account = this.ctx.accounts.require(accountId);
+    if (account.status === "needs_reauth") {
+      throw conflict(`${account.email} needs to be reconnected; it isn't syncing anyway.`, "Reconnect it on the Accounts page.");
+    }
     this.ctx.accounts.setStatus(accountId, "paused", null);
     await stopWatch(this.ctx, accountId);
     return this.ctx.accounts.require(accountId);
@@ -172,22 +194,16 @@ class Ingest implements IngestService {
     const row = getRow(this.ctx, accountId);
     if (!row || !syncable(row) || this.stopped) return;
     if (!row.history_id) return this.guard(row, () => this.baseline(accountId));
+    const signal = this.life.signal;
     await this.guard(row, async () => {
-      let history;
       try {
-        history = await readHistory(this.ctx.google.gmail(accountId), row.history_id!);
+        await syncHistory(this.ctx, row, signal);
       } catch (err) {
-        if (err instanceof GoogleApiError && err.status === 404) {
-          this.log.warn("History cursor expired; running a bounded resync", { email: row.email });
-          await boundedResync(this.ctx, row, "history_expired");
-          return;
-        }
-        throw err;
+        if (!(err instanceof GoogleApiError && err.status === 404)) throw err;
+        this.log.warn("History cursor expired; running a bounded resync", { email: row.email });
+        const fresh = getRow(this.ctx, accountId);
+        if (fresh) await boundedResync(this.ctx, fresh, "history_expired", signal);
       }
-      const pass = new SyncPass(this.ctx, row);
-      await pass.process(history.records);
-      const historyId = historyGte(row.history_id, history.historyId) ? row.history_id! : history.historyId;
-      updateRow(this.ctx, accountId, { history_id: historyId, last_sync_at: now() }, pass.emitted > 0);
     });
   }
 
@@ -202,6 +218,8 @@ class Ingest implements IngestService {
       if (fresh?.status === "error") this.ctx.accounts.setStatus(row.id, "active", null);
       else if (fresh?.last_error?.startsWith("Sync failed")) updateRow(this.ctx, row.id, { last_error: null }, true);
     } catch (err) {
+      // Stopped mid-sync: the cursor already points at the last fully processed record.
+      if (isAbortError(err) && this.stopped) return;
       if (err instanceof AccountNeedsReauthError) {
         if (rethrowAuth) throw conflict(err.message, "Reconnect it on the Accounts page.");
         return;
@@ -256,7 +274,12 @@ class Ingest implements IngestService {
   private async pollLoop(signal: AbortSignal, intervalSeconds: number, note: string | null = null): Promise<void> {
     if (!note && allRows(this.ctx).some((r) => r.watch_expires_at)) await stopAllWatches(this.ctx);
     while (!signal.aborted) {
-      const err = await this.syncAll();
+      let err: string | null = null;
+      await untilAborted(
+        this.syncAll().then((e) => (err = e)),
+        signal,
+      );
+      if (signal.aborted) break;
       this.lastPullAt = now();
       this.lastError = note ?? err;
       await sleep(intervalSeconds * 1000, signal);
@@ -269,7 +292,8 @@ class Ingest implements IngestService {
       return this.pollLoop(signal, interval, "Pub/Sub isn't provisioned yet, so ingest is polling instead.");
     }
     const background = [
-      this.every(signal, WATCH_CHECK_MS, () => ensureWatches(this.ctx), true),
+      // Also re-arms watches that expired while the daemon was offline.
+      this.every(signal, WATCH_CHECK_MS, () => ensureWatches(this.ctx, { signal }), true),
       this.every(signal, SAFETY_NET_MS, () => this.syncAll(), true),
     ];
     let failures = 0;
@@ -289,7 +313,7 @@ class Ingest implements IngestService {
         writePubsub(this.ctx, { lastError: this.lastError });
         if (failures === 1) this.log.warn("Pub/Sub pull failed; polling until it recovers", { error: errorMessage(err) });
         // Keep mail flowing while the pull is broken.
-        await this.syncAll();
+        await untilAborted(this.syncAll(), signal);
         await sleep(Math.min(MAX_PULL_BACKOFF_MS, 1000 * 2 ** failures), signal);
       }
     }
@@ -300,11 +324,10 @@ class Ingest implements IngestService {
   private async every(signal: AbortSignal, ms: number, fn: () => Promise<unknown>, immediately = false): Promise<void> {
     if (!immediately) await sleep(ms, signal);
     while (!signal.aborted) {
-      try {
-        await fn();
-      } catch (err) {
-        this.log.warn("Background ingest task failed", { error: errorMessage(err) });
-      }
+      await untilAborted(
+        fn().catch((err: unknown) => this.log.warn("Background ingest task failed", { error: errorMessage(err) })),
+        signal,
+      );
       await sleep(ms, signal);
     }
   }

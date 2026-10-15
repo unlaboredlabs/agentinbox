@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ConnectAccountResponse } from "../shared/types.ts";
+import { accountsApi } from "../server/api/accounts.ts";
 import type { AppContext } from "../server/context.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { connectFakeAccount, FAKE_CLIENT, type FakeGoogle, PUBSUB_SCOPE, recordingEvents, startFakeGoogle } from "./fake-google.ts";
@@ -9,11 +11,22 @@ const SUB = `projects/${FAKE_CLIENT.projectId}/subscriptions/agentinbox-gmail-pu
 
 let fake: FakeGoogle;
 let ctx: AppContext;
+let rec: ReturnType<typeof recordingEvents>;
 let dispose: () => Promise<void>;
+
+async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error("timed out waiting for condition");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
 
 beforeEach(async () => {
   fake = await startFakeGoogle();
-  const t = testContext({ events: recordingEvents().factory }, { google: fake.google });
+  fake.pullWaitMs = 200;
+  rec = recordingEvents();
+  const t = testContext({ events: rec.factory }, { google: fake.google });
   ctx = t.ctx;
   dispose = t.dispose;
 });
@@ -38,7 +51,7 @@ describe("Pub/Sub provisioning", () => {
   });
 
   it("creates topic, IAM grant and subscription, starts watches and switches to pubsub mode", async () => {
-    const a = await connectFakeAccount(ctx, fake, "ops@example.com");
+    const a = await connectFakeAccount(ctx, fake, "ops@example.com", { pubsub: true });
     const b = await connectFakeAccount(ctx, fake, "sales@example.com");
     const state = await ctx.google.provisionPubsub();
     expect(state).toEqual({ mode: "pubsub", topic: TOPIC, subscription: SUB, lastError: null, lastMessageAt: null });
@@ -48,6 +61,11 @@ describe("Pub/Sub provisioning", () => {
       { role: "roles/pubsub.publisher", members: ["serviceAccount:gmail-api-push@system.gserviceaccount.com"] },
     ]);
     expect(fake.subscription(SUB)).toMatchObject({ topic: TOPIC, ackDeadlineSeconds: 60 });
+    // getIamPolicy is a GET (a POST gets Google's HTML 404).
+    expect(fake.requests).toContainEqual({ method: "GET", path: `/v1/${TOPIC}:getIamPolicy` });
+    const post = await fetch(`${fake.url}/v1/${TOPIC}:getIamPolicy`, { method: "POST", body: "{}" });
+    expect(post.status).toBe(404);
+    expect(await post.text()).toContain("<!DOCTYPE html>");
     expect(fake.watch("ops@example.com")?.topic).toBe(TOPIC);
     expect(fake.watch("sales@example.com")?.topic).toBe(TOPIC);
     expect(ctx.accounts.get(b.id)!.watchExpiresAt).not.toBeNull();
@@ -58,7 +76,7 @@ describe("Pub/Sub provisioning", () => {
   });
 
   it("explains the Domain Restricted Sharing org policy and stays in poll mode", async () => {
-    await connectFakeAccount(ctx, fake, "it@corp.example");
+    await connectFakeAccount(ctx, fake, "it@corp.example", { pubsub: true });
     fake.orgPolicyBlocksIam(true);
     const err = await provisionError();
     expect(err.message).toMatch(/iam\.allowedPolicyMemberDomains/);
@@ -72,7 +90,7 @@ describe("Pub/Sub provisioning", () => {
   });
 
   it("explains a disabled Pub/Sub API with an enable link", async () => {
-    await connectFakeAccount(ctx, fake, "a@example.com");
+    await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
     fake.disableApi("pubsub", true);
     const err = await provisionError();
     expect(err.message).toMatch(/Cloud Pub\/Sub API isn't enabled/);
@@ -80,7 +98,7 @@ describe("Pub/Sub provisioning", () => {
   });
 
   it("explains a disabled Gmail API (watch fails)", async () => {
-    await connectFakeAccount(ctx, fake, "a@example.com");
+    await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
     fake.disableApi("gmail", true);
     const err = await provisionError();
     expect(err.message).toMatch(/Gmail API isn't enabled/);
@@ -90,28 +108,50 @@ describe("Pub/Sub provisioning", () => {
 
   it("explains missing project permissions", async () => {
     fake.addAccount("intern@example.com", { projectAccess: false });
-    await connectFakeAccount(ctx, fake, "intern@example.com");
+    await connectFakeAccount(ctx, fake, "intern@example.com", { pubsub: true });
     const err = await provisionError();
     expect(err.message).toMatch(/intern@example\.com doesn't have permission to manage Pub\/Sub/);
-    expect(err.hint).toMatch(/Pub\/Sub Admin/);
+    expect(err.hint).toMatch(/Owner or Pub\/Sub Admin/);
+    expect(err.hint).not.toMatch(/Editor or/);
   });
 
-  it("asks to reconnect when the account didn't grant the pubsub scope", async () => {
-    await connectFakeAccount(ctx, fake, "a@example.com", { scopes: ["https://www.googleapis.com/auth/gmail.modify", "openid"] });
+  it("asks for Pub/Sub access only when provisioning, via incremental consent", async () => {
+    const acct = await connectFakeAccount(ctx, fake, "a@example.com");
+    expect(ctx.db.get<{ scopes: string }>("SELECT scopes FROM accounts")!.scopes).not.toContain("pubsub");
     const err = await provisionError();
-    expect(err.message).toMatch(/didn't grant agentinbox access to Pub\/Sub/);
-    expect(err.hint).toMatch(/Reconnect/);
-    expect(PUBSUB_SCOPE).toContain("pubsub");
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("pubsub_scope_required");
+    expect(err.message).toMatch(/permission to manage Pub\/Sub as a@example\.com/);
+
+    // The console's "Grant Pub/Sub access" button: POST /api/accounts/connect {scopes:["pubsub"]}.
+    fake.consentAs("a@example.com");
+    const res = await accountsApi(ctx).request("/accounts/connect", { method: "POST", body: JSON.stringify({ scopes: ["pubsub"] }) });
+    const { authUrl } = (await res.json()) as ConnectAccountResponse;
+    const q = new URL(authUrl).searchParams;
+    expect(q.get("scope")).toContain(PUBSUB_SCOPE);
+    expect(q.get("include_granted_scopes")).toBe("true");
+    expect(q.get("login_hint")).toBe("a@example.com");
+    const landed = (await fetch(authUrl, { redirect: "manual" })).headers.get("location")!;
+    expect(await ctx.google.completeConnectFromUrl(landed)).toMatchObject({ id: acct.id, status: "active" });
+    const scopes = JSON.parse(ctx.db.get<{ scopes: string }>("SELECT scopes FROM accounts")!.scopes) as string[];
+    expect(scopes).toEqual(expect.arrayContaining([PUBSUB_SCOPE, "https://www.googleapis.com/auth/gmail.modify"]));
+    await expect(ctx.google.provisionPubsub()).resolves.toMatchObject({ topic: TOPIC });
   });
 
-  it("tests the pipeline by publishing and pulling a message", async () => {
+  it("tests the pipeline by publishing and pulling a message, leaving Gmail notifications for ingest", async () => {
     expect((await ctx.google.testPubsub()).ok).toBe(false);
-    await connectFakeAccount(ctx, fake, "a@example.com");
+    await connectFakeAccount(ctx, fake, "a@example.com", { pubsub: true });
     await ctx.google.provisionPubsub();
+    // A real notification is waiting in the subscription when the test runs.
+    fake.deliver("a@example.com", { from: "x@y.test", subject: "Real mail", text: "hi" });
     const result = await ctx.google.testPubsub();
     expect(result).toMatchObject({ ok: true });
     expect(result.message).toMatch(/Pub\/Sub is working/);
     expect(ctx.google.pubsubState().lastMessageAt).not.toBeNull();
-    expect(fake.subscription(SUB)).toMatchObject({ outstanding: 0, queued: 0 });
+    // The Gmail notification was nacked, not acked: the ingest loop still gets it.
+    expect(fake.requests.some((r) => r.path.endsWith(":modifyAckDeadline"))).toBe(true);
+    ctx.ingest.start?.();
+    await waitFor(() => rec.ofType("message.received").length === 1);
+    expect(rec.events[0]!.message!.subject).toBe("Real mail");
   });
 });

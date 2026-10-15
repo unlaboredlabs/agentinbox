@@ -112,7 +112,8 @@ describe("connect", () => {
       state,
     });
     expect(u.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/gmail.modify");
-    expect(u.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/pubsub");
+    // Pub/Sub is requested later, only for the provisioning account.
+    expect(u.searchParams.get("scope")).not.toContain("https://www.googleapis.com/auth/pubsub");
   });
 
   it("completes a direct-mode callback and renders a success page", async () => {
@@ -196,6 +197,61 @@ describe("connect", () => {
     expect(new URL(ctx.google.startConnect({ reauthAccountId: acct.id }).authUrl).searchParams.get("login_hint")).toBe("frank@example.com");
   });
 
+  it("never revokes the tokens of another connected account picked during a reconnect", async () => {
+    const a = await connectFakeAccount(ctx, fake, "anna@example.com");
+    const b = await connectFakeAccount(ctx, fake, "ben@example.com");
+    ctx.accounts.setStatus(a.id, "needs_reauth", "revoked");
+    ctx.accounts.setStatus(b.id, "needs_reauth", "revoked too");
+    const before = ctx.db.get<{ refresh_token_enc: string }>("SELECT refresh_token_enc FROM accounts WHERE id = ?", b.id)!;
+    const landed = await consentRedirect("ben@example.com", {}, a.id);
+    await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toThrow(
+      /signed in as ben@example.com, but this reconnect is for anna@example.com\. Its saved sign-in in agentinbox was refreshed/,
+    );
+    expect(fake.revoked).toEqual([]);
+    // B got the fresh tokens and works; A still needs a reconnect.
+    const after = ctx.db.get<{ refresh_token_enc: string }>("SELECT refresh_token_enc FROM accounts WHERE id = ?", b.id)!;
+    expect(after.refresh_token_enc).not.toBe(before.refresh_token_enc);
+    expect(ctx.accounts.get(b.id)!.status).toBe("active");
+    await expect(ctx.google.gmail(b.id).getProfile()).resolves.toMatchObject({ emailAddress: "ben@example.com" });
+    expect(ctx.accounts.get(a.id)!.status).toBe("needs_reauth");
+  });
+
+  it("revokes per user like Google: removing one account doesn't touch others", async () => {
+    const a = await connectFakeAccount(ctx, fake, "one@example.com");
+    const b = await connectFakeAccount(ctx, fake, "two@example.com");
+    await ctx.accounts.remove(a.id);
+    ctx.db.run("UPDATE accounts SET access_expires_at = ?", new Date(0).toISOString());
+    await expect(ctx.google.gmail(b.id).getProfile()).resolves.toMatchObject({ emailAddress: "two@example.com" });
+  });
+
+  it("fails clearly when the account being reconnected was removed meanwhile", async () => {
+    const a = await connectFakeAccount(ctx, fake, "gone@example.com");
+    fake.consentAs("gone@example.com");
+    const { authUrl } = ctx.google.startConnect({ reauthAccountId: a.id });
+    await ctx.accounts.remove(a.id);
+    const revokedBefore = fake.revoked.length;
+    const landed = (await fetch(authUrl, { redirect: "manual" })).headers.get("location")!;
+    await expect(ctx.google.completeConnectFromUrl(landed)).rejects.toThrow(/was removed from agentinbox meanwhile/);
+    expect(ctx.accounts.list()).toHaveLength(0);
+    // Not connected here, so the fresh grant is revoked rather than left dangling.
+    expect(fake.revoked.length).toBe(revokedBefore + 1);
+  });
+
+  it("keeps a paused account paused when it is reconnected", async () => {
+    const a = await connectFakeAccount(ctx, fake, "pia@example.com");
+    await ctx.ingest.pause(a.id);
+    const again = await connectFakeAccount(ctx, fake, "pia@example.com", { reauthAccountId: a.id });
+    expect(again).toMatchObject({ id: a.id, status: "paused", lastError: null });
+  });
+
+  it("does not retry the one-time code exchange after a server error", async () => {
+    const landed = await consentRedirect("hal@example.com");
+    fake.failNext({ path: "/token", status: 500, retryAfter: 0 });
+    const before = tokenCalls();
+    await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toBeInstanceOf(HttpError);
+    expect(tokenCalls()).toBe(before + 1);
+  });
+
   it("renders an escaped error page on callback failure", async () => {
     const res = await oauthRoutes(ctx).request("/oauth/callback?error=%3Cscript%3Ealert(1)%3C/script%3E");
     expect(res.status).toBe(400);
@@ -231,6 +287,15 @@ describe("tokens", () => {
     expect(tokenCalls()).toBe(before + 1);
     await gmail.getProfile();
     expect(tokenCalls()).toBe(before + 1);
+  });
+
+  it("explains Workspace session-control reauth (invalid_rapt)", async () => {
+    fake.failRefresh("tess@example.com", { rapt: true });
+    ctx.db.run("UPDATE accounts SET access_expires_at = ?", new Date(0).toISOString());
+    await expect(ctx.google.gmail(accountId).getProfile()).rejects.toBeInstanceOf(AccountNeedsReauthError);
+    const acct = ctx.accounts.get(accountId)!;
+    expect(acct.status).toBe("needs_reauth");
+    expect(acct.lastError).toMatch(/invalid_rapt.*Workspace admin requires periodic re-authentication.*exempt this app/);
   });
 
   it("refreshes and retries once on 401", async () => {
@@ -290,6 +355,28 @@ describe("Gmail client", () => {
     expect(e2).toMatchObject({ status: 403, reason: "forbidden", message: "nope" });
     expect(fake.requests.length).toBe(before + 1);
     await expect(gmail.getMessage("does-not-exist")).rejects.toMatchObject({ notFound: true });
+  });
+
+  it("never re-sends after a 5xx or dropped response, but retries rate limits", async () => {
+    const gmail = ctx.google.gmail(accountId);
+    const raw = await ctx.google.mime.compose({ from: { name: null, email: "quinn@example.com" }, to: [{ name: null, email: "x@y.test" }], subject: "Once", text: "x" });
+    fake.failNext({ path: "/messages/send", status: 500, afterProcessing: true, retryAfter: 0 });
+    await expect(gmail.send(raw)).rejects.toMatchObject({ status: 500 });
+    expect(fake.sent("quinn@example.com")).toHaveLength(1);
+
+    fake.failNext({ path: "/messages/send", status: 429, retryAfter: 0 });
+    fake.failNext({ path: "/messages/send", status: 403, reason: "userRateLimitExceeded", retryAfter: 0 });
+    await gmail.send(raw);
+    expect(fake.sent("quinn@example.com")).toHaveLength(2);
+
+    const draft = await gmail.createDraft(raw);
+    fake.failNext({ path: "/drafts/send", status: 503, afterProcessing: true, retryAfter: 0 });
+    await expect(gmail.sendDraft(draft.id)).rejects.toMatchObject({ status: 503 });
+    expect(fake.sent("quinn@example.com")).toHaveLength(3);
+
+    // Idempotent reads still retry 5xx.
+    fake.failNext({ path: "/profile", status: 503, afterProcessing: true, retryAfter: 0 });
+    await expect(gmail.getProfile()).resolves.toMatchObject({ emailAddress: "quinn@example.com" });
   });
 
   it("lists labels for the console, cached briefly", async () => {

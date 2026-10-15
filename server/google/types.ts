@@ -174,7 +174,7 @@ export interface GmailClient {
 
 export interface ParsedMessage {
   summary: MessageSummary;
-  /** Lower-cased header name → first value. */
+  /** Lower-cased header name → first value. Only free-text headers (Subject, …) are RFC 2047-decoded. */
   headers: Record<string, string>;
   /** RFC 5322 Message-ID (with angle brackets), for threading replies. */
   messageId: string | null;
@@ -188,6 +188,17 @@ export interface ParsedMessage {
   attachments: Attachment[];
   /** Raw Authentication-Results header(s) joined with "\n", or null. */
   authenticationResults: string | null;
+  /**
+   * Text/html bodies Gmail returned by reference (very large parts); `text`/`html` are null for these.
+   * Fill them with `loadLargeBodies(gmail, messageId, parsed)` from server/google/mime.ts.
+   */
+  largeBodies?: LargeBody[];
+}
+
+export interface LargeBody {
+  kind: "text" | "html";
+  attachmentId: string;
+  charset: string | null;
 }
 
 export interface ComposeInput {
@@ -238,7 +249,11 @@ export interface GoogleService extends Lifecycle {
   redirectUri(): string;
 
   // Connecting accounts (PKCE, access_type=offline, prompt=consent)
-  startConnect(opts?: { reauthAccountId?: string }): ConnectAccountResponse;
+  /**
+   * Accounts are connected with gmail.modify (+ openid email profile). `scopes: ["pubsub"]` adds the
+   * Pub/Sub scope incrementally for the provisioning account (defaults to the account provisioning uses).
+   */
+  startConnect(opts?: { reauthAccountId?: string; scopes?: "pubsub"[] }): ConnectAccountResponse;
   /** Exchanges the code, stores the encrypted refresh token, upserts the account and calls ingest.onAccountConnected. */
   completeConnect(code: string, state: string): Promise<Account>;
   /** Paste mode: the full URL the user landed on after consent. */

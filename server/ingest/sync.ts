@@ -8,8 +8,11 @@ export const HISTORY_TYPES = ["messageAdded", "labelAdded", "labelRemoved"];
 const METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"];
 /** New messages with these labels produce no events. */
 const SKIP_NEW = ["DRAFT", "SPAM", "CHAT"];
-/** Label churn that isn't interesting as label.added/removed (drafts being saved, SENT handled as message.sent). */
-const SKIP_LABEL_CHANGES = new Set(["DRAFT", "SENT"]);
+/**
+ * Label churn that isn't interesting as label.added/removed: drafts being saved, SENT (reported as
+ * message.sent), and Gmail's automatic classification (IMPORTANT, CATEGORY_*).
+ */
+const skipLabelChange = (l: string) => l === "DRAFT" || l === "SENT" || l === "IMPORTANT" || l.startsWith("CATEGORY_");
 /** Bounded resync window after a history gap. */
 const RESYNC_QUERY = "newer_than:2d";
 const RESYNC_MAX = 100;
@@ -25,6 +28,8 @@ export class SyncPass {
   private readonly gmail: GmailClient;
   private readonly threadLabels = new Map<string, Promise<string[]>>();
   private readonly seen = new Set<string>();
+  /** Messages added during this pass: their labels are already in message.received. */
+  private readonly added = new Set<string>();
 
   constructor(
     private readonly ctx: AppContext,
@@ -33,32 +38,30 @@ export class SyncPass {
     this.gmail = ctx.google.gmail(account.id);
   }
 
-  async process(records: GmailHistoryRecord[]): Promise<void> {
-    const added = new Set<string>();
-    for (const r of records) for (const m of r.messagesAdded ?? []) added.add(m.message.id);
-    for (const r of records) {
-      for (const { message } of r.messagesAdded ?? []) {
-        if (message.labelIds?.some((l) => SKIP_NEW.includes(l))) continue;
-        const meta = await this.fetch(message.id);
-        if (meta) await this.newMessage(meta);
-      }
-      for (const [type, changes] of [
-        ["label.added", r.labelsAdded],
-        ["label.removed", r.labelsRemoved],
-      ] as const) {
-        for (const { message, labelIds } of changes ?? []) {
-          if (added.has(message.id)) continue;
-          // A message that gains SENT outside a messagesAdded record (e.g. a sent draft) is still a send.
-          if (type === "label.added" && labelIds.includes("SENT")) {
-            const meta = await this.fetch(message.id);
-            if (meta) await this.newMessage(meta);
-          }
-          const changed = labelIds.filter((l) => !SKIP_LABEL_CHANGES.has(l));
-          if (!changed.length || message.labelIds?.includes("DRAFT")) continue;
+  async processRecord(r: GmailHistoryRecord): Promise<void> {
+    for (const { message } of r.messagesAdded ?? []) {
+      this.added.add(message.id);
+      if (message.labelIds?.some((l) => SKIP_NEW.includes(l))) continue;
+      const meta = await this.fetch(message.id);
+      if (meta) await this.newMessage(meta);
+    }
+    for (const [type, changes] of [
+      ["label.added", r.labelsAdded],
+      ["label.removed", r.labelsRemoved],
+    ] as const) {
+      for (const { message, labelIds } of changes ?? []) {
+        if (this.added.has(message.id)) continue;
+        // A sent draft gains SENT; a message rescued from spam (or never seen) gains INBOX. Both are new
+        // to agents; the dedupe key drops it when message.sent/received was already emitted.
+        if (type === "label.added" && (labelIds.includes("SENT") || labelIds.includes("INBOX"))) {
           const meta = await this.fetch(message.id);
-          if (!meta || meta.labelIds?.includes("DRAFT")) continue;
-          this.emit(type, meta, await this.threadLabelIds(meta), `${message.id}:${type}:${r.id}`, changed);
+          if (meta) await this.newMessage(meta);
         }
+        const changed = labelIds.filter((l) => !skipLabelChange(l));
+        if (!changed.length || message.labelIds?.includes("DRAFT")) continue;
+        const meta = await this.fetch(message.id);
+        if (!meta || meta.labelIds?.includes("DRAFT")) continue;
+        this.emit(type, meta, await this.threadLabelIds(meta), `${message.id}:${type}:${r.id}`, changed);
       }
     }
   }
@@ -128,25 +131,65 @@ export class SyncPass {
   }
 }
 
-/** Reads all history after the account's cursor. Throws GoogleApiError 404 when the cursor is too old. */
-export async function readHistory(gmail: GmailClient, startHistoryId: string): Promise<{ records: GmailHistoryRecord[]; historyId: string }> {
-  const records: GmailHistoryRecord[] = [];
+const aborted = () => Object.assign(new Error("Sync stopped"), { name: "AbortError" });
+
+/** a > b for Gmail history ids (numeric strings). */
+export function historyNewer(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a) return false;
+  if (!b) return true;
+  try {
+    return BigInt(a) > BigInt(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Processes history after the account's cursor page by page, advancing the stored cursor to the last
+ * fully processed record (a failure or stop resumes there) and finally to the mailbox's current
+ * historyId. Throws GoogleApiError 404 when the cursor is too old.
+ */
+export async function syncHistory(ctx: AppContext, account: AccountRow, signal?: AbortSignal): Promise<number> {
+  const gmail = ctx.google.gmail(account.id);
+  const start = account.history_id!;
+  const pass = new SyncPass(ctx, account);
+  let saved = start;
+  let done: string | null = null;
+  const save = (historyId: string) => {
+    if (!historyNewer(historyId, saved)) return;
+    saved = historyId;
+    updateRow(ctx, account.id, { history_id: historyId });
+  };
   let pageToken: string | undefined;
-  let historyId = startHistoryId;
-  do {
-    const page = await gmail.listHistory({ startHistoryId, pageToken, maxResults: 500, historyTypes: HISTORY_TYPES });
-    records.push(...page.history);
-    historyId = page.historyId || historyId;
-    pageToken = page.nextPageToken ?? undefined;
-  } while (pageToken);
-  return { records, historyId };
+  try {
+    do {
+      const page = await gmail.listHistory({ startHistoryId: start, pageToken, maxResults: 500, historyTypes: HISTORY_TYPES });
+      for (const r of page.history) {
+        if (signal?.aborted) throw aborted();
+        await pass.processRecord(r);
+        done = r.id;
+      }
+      if (done) save(done);
+      pageToken = page.nextPageToken ?? undefined;
+      if (!pageToken) save(page.historyId);
+    } while (pageToken);
+  } finally {
+    if (done) save(done);
+  }
+  updateRow(ctx, account.id, { last_sync_at: now() }, pass.emitted > 0);
+  return pass.emitted;
 }
 
 /**
  * Bounded resync: emits events for recent messages (dedupe drops the ones already seen), resets the
  * cursor to the mailbox's current historyId and emits sync.gap.
  */
-export async function boundedResync(ctx: AppContext, account: AccountRow, reason: "history_expired" | "manual"): Promise<number> {
+export async function boundedResync(
+  ctx: AppContext,
+  account: AccountRow,
+  reason: "history_expired" | "manual",
+  signal?: AbortSignal,
+): Promise<number> {
   const gmail = ctx.google.gmail(account.id);
   // Profile first: anything that arrives during the listing is picked up by the next history sync.
   const profile = await gmail.getProfile();
@@ -159,6 +202,7 @@ export async function boundedResync(ctx: AppContext, account: AccountRow, reason
   } while (pageToken && ids.length < RESYNC_MAX);
   const pass = new SyncPass(ctx, account);
   for (const id of ids.reverse()) {
+    if (signal?.aborted) throw aborted();
     const meta = await pass.fetch(id);
     if (meta) await pass.newMessage(meta);
   }

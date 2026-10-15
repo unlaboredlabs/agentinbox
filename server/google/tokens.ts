@@ -3,7 +3,18 @@ import { sha256 } from "../crypto.ts";
 import { errorMessage, notFound } from "../util/errors.ts";
 import { type AccountRow, getRow, updateRow } from "./accounts.ts";
 import { clientCredentials } from "./client.ts";
-import { backoffMs, buildUrl, googleErrorFromBody, isAbortError, isRetryable, sleep } from "./http.ts";
+import {
+  backoffMs,
+  buildUrl,
+  googleErrorFromBody,
+  hasReason,
+  isAbortError,
+  isRetryable,
+  networkError,
+  rejectedBeforeProcessing,
+  REQUEST_TIMEOUT_MS,
+  sleep,
+} from "./http.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "./types.ts";
 
 export interface TokenResponse {
@@ -18,9 +29,15 @@ export interface TokenResponse {
 /** Refresh this long before the access token expires. */
 const EARLY_REFRESH_MS = 60_000;
 
-/** POSTs a form to Google's token endpoint. Retries network errors and 5xx; throws GoogleApiError otherwise. */
+/**
+ * POSTs a form to Google's token endpoint (30 s per attempt). Refreshes retry timeouts, network errors
+ * and 5xx; the one-time authorization code exchange only retries when the request never left this
+ * machine (a retried code would fail with invalid_grant anyway, hiding the real error).
+ */
 export async function postToken(ctx: Pick<AppContext, "config">, params: Record<string, string>): Promise<TokenResponse> {
   const url = buildUrl(ctx.config.google.oauthBase, "/token");
+  const host = new URL(url).host;
+  const idempotent = params.grant_type !== "authorization_code";
   for (let attempt = 0; ; attempt++) {
     let err: GoogleApiError;
     try {
@@ -28,6 +45,7 @@ export async function postToken(ctx: Pick<AppContext, "config">, params: Record<
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
         body: new URLSearchParams(params).toString(),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       const text = await res.text();
       let body: unknown = null;
@@ -39,10 +57,12 @@ export async function postToken(ctx: Pick<AppContext, "config">, params: Record<
       if (res.ok && body && typeof (body as TokenResponse).access_token === "string") return body as TokenResponse;
       err = googleErrorFromBody(res.status, body, `Google's token endpoint returned HTTP ${res.status}`);
     } catch (e) {
-      if (isAbortError(e)) throw e;
-      err = new GoogleApiError(0, `Could not reach Google's token endpoint: ${errorMessage(e)}`, "network");
+      err = isAbortError(e)
+        ? new GoogleApiError(0, `Google's token endpoint (${host}) didn't respond within ${REQUEST_TIMEOUT_MS / 1000}s`, "timeout")
+        : networkError(e, host);
     }
-    if (!isRetryable(err) || attempt >= 2) throw err;
+    const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
+    if (!retry || attempt >= 2) throw err;
     await sleep(backoffMs(attempt, err.details.retryAfterMs));
   }
 }
@@ -87,7 +107,12 @@ export class TokenManager {
         refresh_token: this.ctx.crypto.decrypt(row.refresh_token_enc),
       });
     } catch (err) {
-      if (err instanceof GoogleApiError && err.reason === "invalid_grant") this.authFailed(row, err.message);
+      if (err instanceof GoogleApiError && err.reason === "invalid_grant") {
+        // A reconnect may have stored a new refresh token while this refresh was in flight.
+        const fresh = getRow(this.ctx, row.id);
+        if (fresh && fresh.status !== "needs_reauth" && fresh.refresh_token_enc !== row.refresh_token_enc) return this.refresh(fresh);
+        this.authFailed(row, err.message, hasReason(err, "invalid_rapt"));
+      }
       if (err instanceof GoogleApiError && err.reason === "invalid_client") {
         throw new GoogleApiError(
           err.status,
@@ -108,10 +133,12 @@ export class TokenManager {
     return res.access_token;
   }
 
-  private authFailed(row: AccountRow, description: string): never {
-    const error =
-      `Google rejected the saved sign-in for ${row.email} (${description || "invalid_grant"}). Reconnect the account. ` +
-      "If this keeps happening about every 7 days, your OAuth app is External and still in Testing: publish it (In production).";
+  private authFailed(row: AccountRow, description: string, rapt: boolean): never {
+    const error = rapt
+      ? `Google requires ${row.email} to sign in again (invalid_rapt): your Workspace admin requires periodic re-authentication ` +
+        "for apps using Google Cloud scopes (Google Cloud session control). Reconnect the account, or ask the admin to exempt this app."
+      : `Google rejected the saved sign-in for ${row.email} (${description || "invalid_grant"}). Reconnect the account. ` +
+        "If this keeps happening about every 7 days, your OAuth app is External and still in Testing: publish it (In production).";
     this.ctx.log.child("google").warn("Refresh token rejected; account needs re-auth", { email: row.email });
     this.ctx.accounts.setStatus(row.id, "needs_reauth", error);
     try {
@@ -129,7 +156,7 @@ export class TokenManager {
       action: "account.auth_failed",
       accountId: row.id,
       outcome: "error",
-      detail: { email: row.email, error: description },
+      detail: { email: row.email, error: description, ...(rapt ? { subtype: "invalid_rapt" } : {}) },
     });
     throw new AccountNeedsReauthError(row.id, row.email);
   }

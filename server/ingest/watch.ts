@@ -40,11 +40,15 @@ const needsRenewal = (expiresAt: string | null) =>
  * Starts or renews watches for every active account whose watch is missing or older than a day
  * (all of them with `force`). Per-account failures are recorded on the account and returned.
  */
-export async function ensureWatches(ctx: AppContext, opts: { force?: boolean; topic?: string } = {}): Promise<WatchResult[]> {
+export async function ensureWatches(
+  ctx: AppContext,
+  opts: { force?: boolean; topic?: string; signal?: AbortSignal } = {},
+): Promise<WatchResult[]> {
   const topic = opts.topic ?? ctx.settings.getState("pubsub")?.topic;
   if (!topic) return [];
   const results: WatchResult[] = [];
   for (const row of allRows(ctx)) {
+    if (opts.signal?.aborted) break;
     if (row.status !== "active" && row.status !== "error") continue;
     if (!opts.force && !needsRenewal(row.watch_expires_at)) continue;
     try {

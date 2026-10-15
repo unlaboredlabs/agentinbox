@@ -1,7 +1,19 @@
 import type { GmailLabel } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
-import { errorMessage } from "../util/errors.ts";
-import { backoffMs, buildUrl, errorFromResponse, isAbortError, isRetryable, MAX_ATTEMPTS, type Query, sleep, TokenBucket } from "./http.ts";
+import {
+  backoffMs,
+  buildUrl,
+  errorFromResponse,
+  isAbortError,
+  isRetryable,
+  MAX_ATTEMPTS,
+  networkError,
+  type Query,
+  rejectedBeforeProcessing,
+  REQUEST_TIMEOUT_MS,
+  sleep,
+  TokenBucket,
+} from "./http.ts";
 import { TokenManager } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
 
@@ -12,6 +24,14 @@ export interface RequestOptions {
   /** Gmail quota units charged to the account's token bucket (0 = not throttled, e.g. Pub/Sub). */
   cost?: number;
   signal?: AbortSignal;
+  /**
+   * false for requests that must not run twice (messages.send, drafts.send, drafts.create): they are
+   * only retried when Google provably rejected them before processing (429, 403 rate limit, 401,
+   * connection refused), never after a 5xx, a timeout or a dropped connection.
+   */
+  idempotent?: boolean;
+  /** Per-attempt timeout; 0 disables it (long-polling Pub/Sub pulls bound themselves). */
+  timeoutMs?: number;
 }
 
 /**
@@ -31,11 +51,13 @@ export class GoogleRuntime {
 
   /**
    * Authenticated JSON request as `accountId`. Throttles by quota cost, retries 429/5xx/403 rate
-   * limits and network errors with backoff, refreshes the token once on 401.
+   * limits, timeouts and network errors with backoff (see `idempotent`), refreshes the token once on 401.
    */
   async request<T>(accountId: string, base: string, path: string, opts: RequestOptions = {}): Promise<T> {
     const url = buildUrl(base, path, opts.query);
     const method = opts.method ?? "GET";
+    const idempotent = opts.idempotent ?? true;
+    const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
     let forced = false;
     for (let attempt = 0; ; attempt++) {
       if (opts.cost) await this.bucket(accountId).take(opts.cost);
@@ -50,7 +72,7 @@ export class GoogleRuntime {
             ...(opts.body !== undefined ? { "content-type": "application/json" } : {}),
           },
           body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-          signal: opts.signal,
+          signal: attemptSignal(opts.signal, timeoutMs),
         });
         if (res.ok) {
           const text = await res.text();
@@ -58,16 +80,19 @@ export class GoogleRuntime {
         }
         err = await errorFromResponse(res);
       } catch (e) {
-        if (isAbortError(e)) throw e;
+        if (opts.signal?.aborted) throw e;
         if (e instanceof SyntaxError) throw new GoogleApiError(502, "Google returned an invalid JSON response", "invalid_response");
-        err = new GoogleApiError(0, `Could not reach Google (${new URL(url).host}): ${errorMessage(e)}`, "network");
+        err = isAbortError(e)
+          ? new GoogleApiError(0, `Google (${new URL(url).host}) didn't respond within ${timeoutMs / 1000}s`, "timeout")
+          : networkError(e, new URL(url).host);
       }
       if (err.status === 401 && !forced) {
         forced = true;
         this.tokens.invalidate(accountId);
         continue;
       }
-      if (!isRetryable(err) || attempt >= MAX_ATTEMPTS - 1) throw err;
+      const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
+      if (!retry || attempt >= MAX_ATTEMPTS - 1) throw err;
       await sleep(backoffMs(attempt, err.details.retryAfterMs), opts.signal);
       if (opts.signal?.aborted) throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
@@ -78,6 +103,12 @@ export class GoogleRuntime {
     if (!b) this.buckets.set(accountId, (b = new TokenBucket()));
     return b;
   }
+}
+
+function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
+  if (!timeoutMs) return outer;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return outer ? AbortSignal.any([outer, timeout]) : timeout;
 }
 
 const runtimes = new WeakMap<object, GoogleRuntime>();

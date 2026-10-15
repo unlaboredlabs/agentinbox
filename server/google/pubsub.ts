@@ -7,7 +7,7 @@ import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { randomToken } from "../util/ids.ts";
 import { accountScopes, allRows, getRow } from "./accounts.ts";
 import { projectId } from "./client.ts";
-import { hasReason, isAbortError } from "./http.ts";
+import { hasReason, isAbortError, sleep } from "./http.ts";
 import { PUBSUB_SCOPE } from "./oauth.ts";
 import { googleRuntime, type RequestOptions } from "./runtime.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "./types.ts";
@@ -79,7 +79,8 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
       hint: `Make sure ${GMAIL_PUSH_MEMBER.slice("serviceAccount:".length)} has the Pub/Sub Publisher role on projects/${p}/topics/${TOPIC_ID}, then retry provisioning.`,
     };
   }
-  if (err.status === 404) {
+  // A JSON NOT_FOUND means the project/topic is missing; an HTML 404 (no reason) is a wrong URL or verb.
+  if (err.status === 404 && err.reason) {
     return {
       message: `Google Cloud project "${p}" or its Pub/Sub resources were not found.`,
       hint: "Check the project ID in the Google step of the setup wizard (the ID, not the name or number), then retry provisioning.",
@@ -88,14 +89,14 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
   if (err.status === 403 || hasReason(err, "PERMISSION_DENIED")) {
     return {
       message: `${email ?? "The account"} doesn't have permission to manage Pub/Sub in project ${p}.`,
-      hint: "Grant that account Owner, Editor or Pub/Sub Admin (roles/pubsub.admin) in IAM & Admin, or connect an account that has it, then retry.",
+      hint: "Grant that account Owner or Pub/Sub Admin (roles/pubsub.admin) on the project in IAM & Admin (Editor can't change topic permissions), or connect an account that has it, then retry.",
     };
   }
   return { message: `Google returned an error: ${msg}`, hint: "Retry in a minute. If it persists, check the server log." };
 }
 
 /** The account whose token manages and pulls the subscription: the stored one if usable, else the first active account. */
-function principal(ctx: AppContext) {
+export function pubsubPrincipal(ctx: AppContext) {
   const stored = readPubsub(ctx).principalAccountId;
   const row = stored ? getRow(ctx, stored) : undefined;
   if (row && row.status === "active") return row;
@@ -127,7 +128,7 @@ export async function provisionPubsub(ctx: AppContext): Promise<PubsubState> {
   if (!project) {
     throw badRequest("Set your Google Cloud project ID first.", "Add the project ID in the Google step of the setup wizard.");
   }
-  const acct = principal(ctx);
+  const acct = pubsubPrincipal(ctx);
   if (!acct) throw badRequest("Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
   const topic = `projects/${project}/topics/${TOPIC_ID}`;
   const subscription = `projects/${project}/subscriptions/${SUBSCRIPTION_ID}`;
@@ -140,11 +141,20 @@ export async function provisionPubsub(ctx: AppContext): Promise<PubsubState> {
   };
 
   if (!accountScopes(acct).includes(PUBSUB_SCOPE)) {
-    fail(new GoogleApiError(403, "Request had insufficient authentication scopes.", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"));
+    // Pub/Sub access is requested only for the provisioning account, on demand (incremental consent).
+    throw new HttpError(
+      409,
+      "pubsub_scope_required",
+      `agentinbox needs permission to manage Pub/Sub as ${acct.email}.`,
+      `Grant Pub/Sub access for ${acct.email} on Google's consent screen, then provision again. ` +
+        `The account also needs Owner or Pub/Sub Admin on project ${project}.`,
+    );
   }
   try {
     await idempotent(() => pubsubCall(ctx, acct.id, topic, { method: "PUT", body: {} }));
-    const policy = await pubsubCall<IamPolicy>(ctx, acct.id, `${topic}:getIamPolicy`, { method: "POST", body: {} });
+    const policy = await pubsubCall<IamPolicy>(ctx, acct.id, `${topic}:getIamPolicy`, {
+      query: { "options.requestedPolicyVersion": 3 },
+    });
     const bindings = policy?.bindings ?? [];
     const binding = bindings.find((b) => b.role === PUBLISHER_ROLE);
     if (!binding?.members.includes(GMAIL_PUSH_MEMBER)) {
@@ -192,7 +202,7 @@ interface RawReceived {
 export async function pullPubsub(ctx: AppContext, opts: { signal?: AbortSignal; maxMessages?: number } = {}): Promise<PulledMessage[]> {
   const state = readPubsub(ctx);
   if (!state.subscription) throw badRequest("Pub/Sub isn't provisioned yet.", "Provision it in the setup wizard or stay on poll mode.");
-  const acct = principal(ctx);
+  const acct = pubsubPrincipal(ctx);
   if (!acct) throw badRequest("No active account can pull the Pub/Sub subscription.", "Connect or reconnect an account.");
   if (acct.id !== state.principalAccountId) writePubsub(ctx, { principalAccountId: acct.id });
   // Real pulls long-poll until messages arrive; bound them so shutdown and retries stay responsive.
@@ -201,6 +211,7 @@ export async function pullPubsub(ctx: AppContext, opts: { signal?: AbortSignal; 
     method: "POST",
     body: { maxMessages: opts.maxMessages ?? 100 },
     signal,
+    timeoutMs: 0,
   });
   const received = res?.receivedMessages ?? [];
   if (!received.length) return [];
@@ -230,17 +241,25 @@ export async function pullPubsub(ctx: AppContext, opts: { signal?: AbortSignal; 
 
 export async function ackPubsub(ctx: AppContext, ackIds: string[]): Promise<void> {
   const state = readPubsub(ctx);
-  const acct = principal(ctx);
+  const acct = pubsubPrincipal(ctx);
   if (!ackIds.length || !state.subscription || !acct) return;
   await pubsubCall(ctx, acct.id, `${state.subscription}:acknowledge`, { method: "POST", body: { ackIds } });
 }
 
 /** Publishes a test message to the topic and waits until a pull (ours or the ingest loop's) receives it. */
+/** Returns messages to the subscription for immediate redelivery (ackDeadlineSeconds 0). */
+export async function nackPubsub(ctx: AppContext, ackIds: string[]): Promise<void> {
+  const state = readPubsub(ctx);
+  const acct = pubsubPrincipal(ctx);
+  if (!ackIds.length || !state.subscription || !acct) return;
+  await pubsubCall(ctx, acct.id, `${state.subscription}:modifyAckDeadline`, { method: "POST", body: { ackIds, ackDeadlineSeconds: 0 } });
+}
+
 export async function testPubsub(ctx: AppContext, timeoutMs = 20_000): Promise<PubsubTestResult> {
   const state = readPubsub(ctx);
   const project = projectId(ctx);
   if (!state.topic || !state.subscription) return { ok: false, message: "Pub/Sub isn't provisioned yet. Run provisioning first." };
-  const acct = principal(ctx);
+  const acct = pubsubPrincipal(ctx);
   if (!acct) return { ok: false, message: "Connect a Gmail account first." };
   const nonce = randomToken(16);
   const waiters = googleRuntime(ctx).pubsubTests;
@@ -260,12 +279,9 @@ export async function testPubsub(ctx: AppContext, timeoutMs = 20_000): Promise<P
           if (!isAbortError(err)) throw err;
           return [];
         });
-        // Real notifications that we happened to pull: sync and ack, as the ingest loop would.
-        for (const m of msgs) {
-          const account = m.notification && ctx.accounts.getByEmail(m.notification.emailAddress);
-          if (account) ctx.ingest.kick(account.id);
-        }
-        await ackPubsub(ctx, msgs.map((m) => m.ackId));
+        // Real Gmail notifications we happened to pull go straight back to the subscription for the ingest loop.
+        await nackPubsub(ctx, msgs.map((m) => m.ackId));
+        if (msgs.length) await sleep(250, deadline);
       }
     })();
     const outcome = await Promise.race([

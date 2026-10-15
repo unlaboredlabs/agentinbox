@@ -20,18 +20,24 @@
  *   deliver(email, msg) → GmailMessage             incoming mail: builds RFC 5322, adds INBOX+UNREAD (or msg.labelIds), records
  *                                                  history and publishes a Pub/Sub notification if the mailbox is watched
  *   setLabels(email, messageId, add, remove)       label change with history (unknown user label ids are created)
- *   failRefresh(email)                             revoke the account's refresh tokens: refresh → 400 invalid_grant
+ *   failRefresh(email, { rapt? })                  revoke the user's grant: refresh → 400 invalid_grant (error_subtype invalid_rapt with rapt)
  *   expireAccessTokens(email)                      make cached access tokens invalid (next API call → 401)
  *   expireHistory(email)                           history.list with any cursor obtained before this call → 404
  *   orgPolicyBlocksIam(on)                         setIamPolicy adding a non-org member → 400 FAILED_PRECONDITION (iam.allowedPolicyMemberDomains)
  *   disableApi("gmail" | "pubsub", on)             API calls → 403 SERVICE_DISABLED
- *   failNext({ method?, path, status, reason?, message?, retryAfter?, times? })  inject errors for matching requests
+ *   failNext({ method?, path, status, reason?, message?, retryAfter?, times?, afterProcessing? })  inject errors for matching
+ *                                                  requests (afterProcessing: the request takes effect, then the error is returned)
  *   accessTokenTtl                                 seconds for newly issued access tokens (default 3600)
  *   pullWaitMs                                     how long an empty Pub/Sub pull is held open (default 1000)
  *
  * Inspection
  *   sent(email) / drafts(email) / messages(email) / message(email, id)   format=full Gmail JSON (+ drafts as {id, message})
  *   watch(email)  topics()  subscription(name)  iamPolicy(topic)  revoked (tokens)  requests ({method, path} log)
+ *
+ * OAuth grants are per user (like Google): revoking any token of a user revokes all of that user's tokens, and
+ * consent with include_granted_scopes=true adds to the scopes granted before. Unknown routes (or wrong verbs)
+ * get Google's HTML 404. Payload headers keep structured values (From, To, Message-ID, …) raw and decode
+ * encoded-words only in free-text headers (Subject).
  *
  * Gmail search (`q`) supports label:, in:, is:, from:, to:, cc:, subject:, has:attachment, newer_than:, older_than:,
  * after:, before:, rfc822msgid:, quoted phrases, free text, -negation, OR, AND, (…) and {…}.
@@ -80,6 +86,8 @@ export interface FailRule {
   message?: string;
   retryAfter?: number;
   times?: number;
+  /** Run the request normally first, then answer with the error (e.g. "sent, then 500"). */
+  afterProcessing?: boolean;
 }
 
 export interface FakeGoogle {
@@ -91,7 +99,7 @@ export interface FakeGoogle {
   consentAs(email: string, opts?: { deny?: boolean; noRefreshToken?: boolean; scopes?: string[] }): void;
   deliver(email: string, msg: DeliverInput): GmailMessage;
   setLabels(email: string, messageId: string, add: string[], remove: string[]): void;
-  failRefresh(email: string): void;
+  failRefresh(email: string, opts?: { rapt?: boolean }): void;
   expireAccessTokens(email: string): void;
   expireHistory(email: string): void;
   orgPolicyBlocksIam(on: boolean): void;
@@ -167,7 +175,11 @@ function parseHeaderBlock(head: string): GmailHeader[] {
     }
   }
   // Header bytes are UTF-8 when not encoded-words.
-  return out.map((h) => ({ name: h.name, value: decodeWords(Buffer.from(h.value, "latin1").toString("utf8")) }));
+  const text = new Set(["subject", "comments", "keywords", "thread-topic"]);
+  return out.map((h) => {
+    const value = Buffer.from(h.value, "latin1").toString("utf8");
+    return { name: h.name, value: text.has(h.name.toLowerCase()) ? decodeWords(value) : value };
+  });
 }
 
 function parseParams(value: string): { value: string; params: Record<string, string> } {
@@ -305,6 +317,8 @@ interface Token {
   scopes: string[];
   expiresAt: number;
   revoked: boolean;
+  /** Grant generation this token belongs to; revoking the grant bumps it. */
+  gen: number;
 }
 
 interface PubsubMessage {
@@ -400,6 +414,20 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   const mailboxes = new Map<string, Mailbox>();
   const accessTokens = new Map<string, Token>();
   const refreshTokens = new Map<string, Token>();
+  /** Per-user OAuth grant for the fake client. */
+  const grants = new Map<string, { scopes: Set<string>; gen: number; rapt: boolean }>();
+  const grantOf = (email: string) => {
+    let g = grants.get(email);
+    if (!g) grants.set(email, (g = { scopes: new Set(), gen: 0, rapt: false }));
+    return g;
+  };
+  const revokeGrant = (email: string, rapt = false) => {
+    const g = grantOf(email);
+    g.gen++;
+    g.scopes.clear();
+    g.rapt = rapt;
+  };
+  const valid = (t: Token | undefined): t is Token => Boolean(t && !t.revoked && t.gen === grantOf(t.email).gen);
   const codes = new Map<string, { email: string; scopes: string[]; challenge: string; redirectUri: string; noRefreshToken: boolean }>();
   const consents: { email: string; deny?: boolean; noRefreshToken?: boolean; scopes?: string[] }[] = [];
   const topics = new Map<string, { policy: { version: number; etag: string; bindings: { role: string; members: string[] }[] } }>();
@@ -720,7 +748,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
   function bearer(req: IncomingMessage, scope: string, api: "gmail" | "pubsub"): Token {
     const t = accessTokens.get((req.headers.authorization ?? "").replace(/^Bearer\s+/i, ""));
-    if (!t || t.revoked || t.expiresAt < Date.now()) {
+    if (!valid(t) || t.expiresAt < Date.now()) {
       throw apiError(401, "Request had invalid authentication credentials. Expected OAuth 2 access token.", "authError");
     }
     if (!t.scopes.includes(scope)) {
@@ -734,7 +762,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
   function issueAccess(email: string, scopes: string[]): string {
     const at = token("ya29.fake-");
-    accessTokens.set(at, { email, scopes, expiresAt: Date.now() + fake.accessTokenTtl * 1000, revoked: false });
+    accessTokens.set(at, { email, scopes, expiresAt: Date.now() + fake.accessTokenTtl * 1000, revoked: false, gen: grantOf(email).gen });
     return at;
   }
 
@@ -773,7 +801,11 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       target.searchParams.set("error", "access_denied");
     } else {
       const requested = (q.get("scope") ?? "").split(/\s+/).filter(Boolean);
-      const scopes = consent.scopes ?? requested.map((s) => (s === "email" ? "https://www.googleapis.com/auth/userinfo.email" : s));
+      let scopes = consent.scopes ?? requested.map((s) => (s === "email" ? "https://www.googleapis.com/auth/userinfo.email" : s));
+      const grant = grantOf(consent.email);
+      if (q.get("include_granted_scopes") === "true") scopes = [...new Set([...grant.scopes, ...scopes])];
+      grant.scopes = new Set(scopes);
+      grant.rapt = false;
       const code = token("4/0fake-");
       codes.set(code, { email: consent.email, scopes, challenge: q.get("code_challenge")!, redirectUri: redirect, noRefreshToken: Boolean(consent.noRefreshToken) });
       target.searchParams.set("code", code);
@@ -803,7 +835,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       };
       if (!c.noRefreshToken) {
         const rt = token("1//fake-rt-");
-        refreshTokens.set(rt, { email: mb.email, scopes: c.scopes, expiresAt: Infinity, revoked: false });
+        refreshTokens.set(rt, { email: mb.email, scopes: c.scopes, expiresAt: Infinity, revoked: false, gen: grantOf(mb.email).gen });
         out.refresh_token = rt;
       }
       if (c.scopes.includes("openid")) {
@@ -814,7 +846,10 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     }
     if (p.get("grant_type") === "refresh_token") {
       const rt = refreshTokens.get(p.get("refresh_token") ?? "");
-      if (!rt || rt.revoked) throw oauthFail(400, "invalid_grant", "Token has been expired or revoked.");
+      if (rt && rt.gen !== grantOf(rt.email).gen && grantOf(rt.email).rapt) {
+        throw new HttpFail(400, { error: "invalid_grant", error_description: "reauth related error (invalid_rapt)", error_subtype: "invalid_rapt" });
+      }
+      if (!valid(rt)) throw oauthFail(400, "invalid_grant", "Token has been expired or revoked.");
       return { access_token: issueAccess(rt.email, rt.scopes), expires_in: fake.accessTokenTtl, scope: rt.scopes.join(" "), token_type: "Bearer" };
     }
     throw oauthFail(400, "unsupported_grant_type", "Invalid grant_type.");
@@ -823,8 +858,9 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   on("POST", /^\/revoke$/, (_req, url, body) => {
     const t = form(body, url).get("token") ?? "";
     const found = refreshTokens.get(t) ?? accessTokens.get(t);
-    if (!found) throw oauthFail(400, "invalid_token", "Token expired or revoked");
-    found.revoked = true;
+    if (!valid(found)) throw oauthFail(400, "invalid_token", "Token expired or revoked");
+    // Like Google: revoking one token removes the user's whole grant for this client.
+    revokeGrant(found.email);
     fake.revoked.push(t);
     return {};
   });
@@ -1032,7 +1068,8 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     return t;
   };
 
-  pubsubRoute("POST", /^\/v1\/(projects\/[^/]+\/topics\/[^/:]+):getIamPolicy$/, (_u, _b, m) => structuredClone(topicOr404(m[1]!).policy));
+  // GET only, like Google (a POST gets the HTML 404).
+  pubsubRoute("GET", /^\/v1\/(projects\/[^/]+\/topics\/[^/:]+):getIamPolicy$/, (_u, _b, m) => structuredClone(topicOr404(m[1]!).policy));
 
   pubsubRoute("POST", /^\/v1\/(projects\/[^/]+\/topics\/[^/:]+):setIamPolicy$/, (_u, body, m) => {
     const t = topicOr404(m[1]!);
@@ -1160,22 +1197,25 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       const rule = failRules.find(
         (r) => r.left > 0 && (!r.method || r.method === method) && (typeof r.path === "string" ? url.pathname.includes(r.path) : r.path.test(url.pathname)),
       );
-      if (rule) {
-        rule.left--;
-        const fail = apiError(rule.status, rule.message ?? `Injected failure ${rule.status}`, rule.reason);
-        throw new HttpFail(fail.status, fail.body, rule.retryAfter !== undefined ? { "retry-after": String(rule.retryAfter) } : {});
-      }
+      const injected = () => {
+        rule!.left--;
+        const fail = apiError(rule!.status, rule!.message ?? `Injected failure ${rule!.status}`, rule!.reason);
+        return new HttpFail(fail.status, fail.body, rule!.retryAfter !== undefined ? { "retry-after": String(rule!.retryAfter) } : {});
+      };
+      if (rule && !rule.afterProcessing) throw injected();
       for (const [m, re, h] of routes) {
         if (m !== method) continue;
         const match = re.exec(url.pathname);
         if (!match) continue;
         const out = await h(req, url, body, match, res);
+        if (rule?.afterProcessing) throw injected();
         if (res.headersSent || res.writableEnded) return;
         if (out === undefined) res.writeHead(204).end();
         else res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out));
         return;
       }
-      throw apiError(404, `fake-google: no route for ${method} ${url.pathname}`);
+      // Google answers unknown paths and wrong verbs with an HTML page.
+      throw new HttpFail(404, `<!DOCTYPE html><html lang=en><title>Error 404 (Not Found)!!1</title><p><b>404.</b> <ins>That’s an error.</ins><p>The requested URL <code>${url.pathname}</code> was not found on this server. <ins>That’s all we know.</ins>`);
     } catch (err) {
       if (res.writableEnded) return;
       if (err instanceof HttpFail) {
@@ -1257,9 +1297,8 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       const mb = box(email);
       modify(mb, msgOr404(mb, messageId), add, removeIds);
     },
-    failRefresh(email) {
-      for (const t of refreshTokens.values()) if (t.email === email.toLowerCase()) t.revoked = true;
-      for (const t of accessTokens.values()) if (t.email === email.toLowerCase()) t.revoked = true;
+    failRefresh(email, opts = {}) {
+      revokeGrant(email.toLowerCase(), opts.rapt);
     },
     expireAccessTokens(email) {
       for (const t of accessTokens.values()) if (t.email === email.toLowerCase()) t.expiresAt = 0;
@@ -1315,22 +1354,28 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
 
 /**
  * Configures the fake OAuth client (unless already set) and runs the whole connect flow for `email`
- * (adding the mailbox if needed): startConnect → fake consent → completeConnectFromUrl.
+ * (adding the mailbox if needed): startConnect → fake consent → completeConnectFromUrl. `pubsub: true`
+ * then also grants the Pub/Sub scope through the incremental-consent flow provisioning uses.
+ * `scopes` overrides what the fake user grants on the consent screen.
  */
 export async function connectFakeAccount(
   ctx: AppContext,
   fake: FakeGoogle,
   email: string,
-  opts: { name?: string; reauthAccountId?: string; scopes?: string[] } = {},
+  opts: { name?: string; reauthAccountId?: string; scopes?: string[]; pubsub?: boolean } = {},
 ): Promise<Account> {
   if (!ctx.google.clientView().hasSecret) ctx.google.setClient({ ...FAKE_CLIENT, appType: "internal" });
   fake.addAccount(email, { name: opts.name });
-  fake.consentAs(email, { scopes: opts.scopes });
-  const { authUrl } = ctx.google.startConnect({ reauthAccountId: opts.reauthAccountId });
-  const res = await fetch(authUrl, { redirect: "manual" });
-  const location = res.headers.get("location");
-  if (!location) throw new Error(`fake consent failed: HTTP ${res.status} ${await res.text()}`);
-  return ctx.google.completeConnectFromUrl(location);
+  const consent = async (start: { reauthAccountId?: string; scopes?: "pubsub"[] }) => {
+    fake.consentAs(email, { scopes: opts.scopes });
+    const { authUrl } = ctx.google.startConnect(start);
+    const res = await fetch(authUrl, { redirect: "manual" });
+    const location = res.headers.get("location");
+    if (!location) throw new Error(`fake consent failed: HTTP ${res.status} ${await res.text()}`);
+    return ctx.google.completeConnectFromUrl(location);
+  };
+  const account = await consent({ reauthAccountId: opts.reauthAccountId });
+  return opts.pubsub ? consent({ reauthAccountId: account.id, scopes: ["pubsub"] }) : account;
 }
 
 /**

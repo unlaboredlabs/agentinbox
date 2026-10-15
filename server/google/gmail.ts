@@ -93,11 +93,19 @@ export function createGmailClient(ctx: AppContext, accountId: string): GmailClie
     trashMessage: (messageId) => call<GmailMessage>("messages.trash", `/messages/${id(messageId)}/trash`, { method: "POST" }),
     trashThread: (threadId) => call<GmailThread>("threads.trash", `/threads/${id(threadId)}/trash`, { method: "POST" }),
     send: (raw, threadId) =>
-      call<GmailMessage>("messages.send", "/messages/send", { method: "POST", body: { raw, ...(threadId ? { threadId } : {}) } }),
+      call<GmailMessage>("messages.send", "/messages/send", {
+        method: "POST",
+        body: { raw, ...(threadId ? { threadId } : {}) },
+        idempotent: false,
+      }),
     createDraft: (raw, threadId) =>
-      call<GmailDraft>("drafts.create", "/drafts", { method: "POST", body: { message: { raw, ...(threadId ? { threadId } : {}) } } }),
+      call<GmailDraft>("drafts.create", "/drafts", {
+        method: "POST",
+        body: { message: { raw, ...(threadId ? { threadId } : {}) } },
+        idempotent: false,
+      }),
     getDraft: (draftId) => call<GmailDraft>("drafts.get", `/drafts/${id(draftId)}`, { query: { format: "full" } }),
-    sendDraft: (draftId) => call<GmailMessage>("drafts.send", "/drafts/send", { method: "POST", body: { id: draftId } }),
+    sendDraft: (draftId) => call<GmailMessage>("drafts.send", "/drafts/send", { method: "POST", body: { id: draftId }, idempotent: false }),
     async deleteDraft(draftId) {
       await call<void>("drafts.delete", `/drafts/${id(draftId)}`, { method: "DELETE" });
     },

@@ -27,7 +27,7 @@ beforeEach(async () => {
   const t = testContext({ events: rec.factory }, { google: fake.google });
   ctx = t.ctx;
   dispose = t.dispose;
-  accountId = (await connectFakeAccount(ctx, fake, ME)).id;
+  accountId = (await connectFakeAccount(ctx, fake, ME, { pubsub: true })).id;
 });
 
 afterEach(async () => {
@@ -57,6 +57,13 @@ describe("pubsub ingest", () => {
     await ctx.ingest.stop?.();
     expect(Date.now() - t).toBeLessThan(1000);
     expect(ctx.ingest.status().running).toBe(false);
+  });
+
+  it("re-arms watches that expired while the daemon was offline", async () => {
+    await ctx.google.provisionPubsub();
+    ctx.db.run("UPDATE accounts SET watch_expires_at = ?", new Date(Date.now() - 86400e3).toISOString());
+    ctx.ingest.start?.();
+    await waitFor(() => Date.parse(ctx.accounts.get(accountId)!.watchExpiresAt ?? "0") > Date.now() + 6 * 86400e3);
   });
 
   it("starts a watch for accounts connected later, and on resume", async () => {

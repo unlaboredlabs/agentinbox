@@ -15,6 +15,8 @@ interface PageInput {
   title: string;
   message: string;
   hint?: string | null;
+  /** postMessage target origin for the opener (the console). */
+  targetOrigin: string;
 }
 
 export function callbackPage(p: PageInput): string {
@@ -62,7 +64,7 @@ export function callbackPage(p: PageInput): string {
 <script>
   (function () {
     var msg = ${scriptJson(payload)};
-    try { if (window.opener) { window.opener.postMessage(msg, "*"); ${p.ok ? "setTimeout(function () { window.close(); }, 600);" : ""} } } catch (e) {}
+    try { if (window.opener) { window.opener.postMessage(msg, ${scriptJson(p.targetOrigin)}); ${p.ok ? "setTimeout(function () { window.close(); }, 600);" : ""} } } catch (e) {}
   })();
 </script>
 </body>
@@ -75,10 +77,18 @@ export function oauthRoutes(ctx: AppContext) {
 
   r.get("/oauth/callback", async (c) => {
     const url = new URL(c.req.url);
+    // The console that opened the popup lives at publicUrl (in dev, Vite serves it from another port).
+    const targetOrigin = ctx.config.dev ? "*" : new URL(ctx.settings.publicUrl()).origin;
     try {
       const account = await ctx.google.completeConnectFromUrl(`?${url.searchParams.toString()}`);
       return c.html(
-        callbackPage({ ok: true, email: account.email, title: "Account connected", message: `Connected ${account.email}. You can close this tab.` }),
+        callbackPage({
+          ok: true,
+          email: account.email,
+          title: "Account connected",
+          message: `Connected ${account.email}. You can close this tab.`,
+          targetOrigin,
+        }),
       );
     } catch (err) {
       const e = asHttpError(err);
@@ -90,6 +100,7 @@ export function oauthRoutes(ctx: AppContext) {
           title: "Couldn't connect the account",
           message: known ? e.message : "Something went wrong while finishing the connection.",
           hint: known ? e.hint : "Check the agentinbox server log, then try connecting again from the console.",
+          targetOrigin,
         }),
         known && e.status < 500 ? 400 : 500,
       );

@@ -4,7 +4,11 @@ import type { AppContext } from "../context.ts";
 import { asHttpError } from "../google/http.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
-const ConnectInput = z.object({ reauthAccountId: z.string().min(1).optional() });
+const ConnectInput = z.object({
+  reauthAccountId: z.string().min(1).optional(),
+  /** ["pubsub"]: incremental consent for Pub/Sub on the provisioning account (default: the account provisioning uses). */
+  scopes: z.array(z.enum(["pubsub"])).optional(),
+});
 const CompleteInput = z.object({ url: z.string().trim().min(1, "Paste the URL you landed on after approving access") });
 
 const google = async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -24,8 +28,8 @@ export function accountsApi(ctx: AppContext) {
   r.get("/accounts", (c) => c.json(ctx.accounts.list()));
 
   r.post("/accounts/connect", async (c) => {
-    const { reauthAccountId } = await readBody(c, ConnectInput);
-    return c.json(ctx.google.startConnect({ reauthAccountId }));
+    const { reauthAccountId, scopes } = await readBody(c, ConnectInput);
+    return c.json(ctx.google.startConnect({ reauthAccountId, scopes }));
   });
 
   r.post("/accounts/connect/complete", async (c) => {
