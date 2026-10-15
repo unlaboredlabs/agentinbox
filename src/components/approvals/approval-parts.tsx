@@ -6,11 +6,11 @@ import { Visible } from "@/components/hidden-chars";
 import { Button } from "@/components/ui/button";
 import { useNow } from "@/hooks/use-now";
 import { fmtAddress, fmtBytes, fmtDuration } from "@/lib/format";
-import { APPROVAL_STATUS } from "@/lib/labels";
+import { approvalStatusInfo } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 
-export function ApprovalStatusBadge({ status }: { status: Approval["status"] }) {
-  const s = APPROVAL_STATUS[status];
+export function ApprovalStatusBadge({ status, kind }: { status: Approval["status"]; kind: Approval["kind"] }) {
+  const s = approvalStatusInfo(status, kind);
   return <ToneBadge tone={s.tone}>{s.label}</ToneBadge>;
 }
 

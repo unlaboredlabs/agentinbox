@@ -1,4 +1,6 @@
-import { type Account, CAPABILITIES, type Capability, type Grant } from "@shared/types";
+import { type Account, CAPABILITIES, type Capability, type Grant, MAIL_CAPABILITIES } from "@shared/types";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, ShieldOffIcon, ShieldPlusIcon } from "lucide-react";
 import { useState } from "react";
 import { AccountAvatar, AccountStatusBadge } from "@/components/accounts/account-status";
@@ -13,21 +15,38 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
-import { DEFAULT_GRANT, type GrantFields, grantProblem, sameGrant, toGrantFields, validateAddressGlob } from "@/lib/grants";
+import {
+  calendarWriteChoice,
+  DEFAULT_GRANT,
+  type GrantFields,
+  grantInput,
+  grantProblem,
+  hasCalendarAccess,
+  sameGrant,
+  toGrantFields,
+  validateAddressGlob,
+  withCalendarWriteChoice,
+} from "@/lib/grants";
 import { CAPABILITY_INFO } from "@/lib/labels";
 import { useApiMutation } from "@/lib/mutations";
-import { keys } from "@/lib/queries";
+import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { grantInWords } from "./grant-words";
+import { CalendarScopePicker } from "./calendar-scope-picker";
+import { CalendarWriteControl } from "./calendar-write-control";
+import { calendarInWords, mailInWords } from "./grant-words";
 import { LabelScopePicker } from "./label-scope-picker";
 import { SendModeControl } from "./send-mode-control";
 
 function summary(g: GrantFields) {
-  const parts: string[] = [grantInWords(g)];
-  if (g.labelScope) parts.push(`${g.labelScope.length} label${g.labelScope.length === 1 ? "" : "s"}`);
+  const parts: string[] = [];
+  const mail = mailInWords(g);
+  if (mail) parts.push(mail);
+  if (mail && g.labelScope) parts.push(`${g.labelScope.length} label${g.labelScope.length === 1 ? "" : "s"}`);
   if (g.allowTo.length) parts.push(`${g.allowTo.length} allowed recipient${g.allowTo.length === 1 ? "" : "s"}`);
-  if (g.replyOnly) parts.push("replies only");
-  return parts;
+  if (mail && g.replyOnly) parts.push("replies only");
+  const calendar = calendarInWords(g);
+  if (calendar) parts.push(calendar);
+  return parts.length ? parts : ["No access"];
 }
 
 /** One agent's access to one mailbox: collapsed summary, expandable editor, save/remove. */
@@ -54,7 +73,7 @@ export function GrantEditor({
 
   const path = `/api/agents/${encodeURIComponent(agentId)}/grants/${encodeURIComponent(account.id)}`;
   const save = useApiMutation({
-    mutationFn: (g: GrantFields) => api<Grant>(path, { method: "PUT", body: { ...g, accountId: account.id } }),
+    mutationFn: (g: GrantFields) => api<Grant>(path, { method: "PUT", body: grantInput(account.id, g) }),
     invalidate: [keys.agents],
     success: grant ? `Permissions for ${account.email} saved` : `${account.email} access granted`,
     errorTitle: "Couldn't save permissions",
@@ -176,26 +195,21 @@ export function GrantFieldsForm({
   const set = onChange;
   const id = (s: string) => `${idPrefix}-${s}`;
   const sends = value.capabilities.includes("send");
+  const calendarRead = value.capabilities.includes("calendar.read");
+  const calendarWrite = value.capabilities.includes("calendar.write");
+  const calendar = hasCalendarAccess(value);
+  const mail = value.capabilities.some((c) => (MAIL_CAPABILITIES as readonly string[]).includes(c));
   const toggleCap = (c: Capability, on: boolean) => set({ capabilities: CAPABILITIES.filter((x) => (x === c ? on : value.capabilities.includes(x))) });
   return (
     <>
       <FieldSet>
         <FieldLegend variant="label">Capabilities</FieldLegend>
         <div className="grid gap-2 sm:grid-cols-2">
-          {CAPABILITIES.map((c) => (
-            <label
-              key={c}
-              className="flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50 has-[[data-state=checked]]:bg-muted/40"
-            >
-              <Checkbox className="mt-0.5" checked={value.capabilities.includes(c)} onCheckedChange={(v) => toggleCap(c, v === true)} />
-              <span className="space-y-0.5">
-                <span className="block text-sm font-medium">{CAPABILITY_INFO[c].label}</span>
-                <span className="block text-xs text-muted-foreground">{CAPABILITY_INFO[c].description}</span>
-              </span>
-            </label>
+          {MAIL_CAPABILITIES.map((c) => (
+            <CapabilityBox key={c} capability={c} checked={value.capabilities.includes(c)} onChange={(on) => toggleCap(c, on)} />
           ))}
         </div>
-        {value.capabilities.length > 0 && !value.capabilities.includes("read") && (
+        {mail && !value.capabilities.includes("read") && (
           <FieldDescription className="text-warning">Without Read, the agent can't search or open messages, so most actions will fail.</FieldDescription>
         )}
       </FieldSet>
@@ -209,9 +223,33 @@ export function GrantFieldsForm({
         <LabelScopePicker accountId={accountId} value={value.labelScope} onChange={(labelScope) => set({ labelScope })} />
       </FieldSet>
 
-      <FieldSet disabled={!sends} className={cn(!sends && "opacity-60")}>
+      <FieldSet>
+        <FieldLegend variant="label">Calendar</FieldLegend>
+        <FieldDescription>Separate from mail access: an agent can have either, both or neither.</FieldDescription>
+        {calendar && <AccountCalendarNotice accountId={accountId} />}
+        <CapabilityBox capability="calendar.read" checked={calendarRead} onChange={(on) => toggleCap("calendar.read", on)} />
+        <Field>
+          <FieldLabel>Changes to events</FieldLabel>
+          <CalendarWriteControl value={calendarWriteChoice(value)} onChange={(choice) => set(withCalendarWriteChoice(value, choice))} />
+          {calendarWrite && !calendarRead && (
+            <FieldDescription className="text-warning">Without reading calendars, the agent can't look up the events it would change or answer.</FieldDescription>
+          )}
+        </Field>
+        <Field data-disabled={!calendar}>
+          <FieldLabel>Which calendars</FieldLabel>
+          <CalendarScopePicker accountId={accountId} value={value.calendarScope} onChange={(calendarScope) => set({ calendarScope })} disabled={!calendar} />
+        </Field>
+      </FieldSet>
+
+      <FieldSet disabled={!sends && !calendarWrite} className={cn(!sends && !calendarWrite && "opacity-60")}>
         <FieldLegend variant="label">Sending</FieldLegend>
-        {!sends && <FieldDescription>Turn on the Send capability to configure how sending works.</FieldDescription>}
+        {!sends && (
+          <FieldDescription>
+            {calendarWrite
+              ? "Turn on the Send capability to configure how mail sending works. The recipients and limits below also cover calendar invitations."
+              : "Turn on the Send capability to configure how sending works."}
+          </FieldDescription>
+        )}
         <SendModeControl value={value.sendMode} onChange={(sendMode) => set({ sendMode })} disabled={!sends} />
         <Field>
           <FieldLabel htmlFor={id("allow")}>Allowed recipients</FieldLabel>
@@ -226,22 +264,58 @@ export function GrantFieldsForm({
           />
           <FieldDescription id={id("allow-hint")}>
             Leave empty to allow any recipient. Use exact addresses or globs like <code className="font-mono">*@yourcompany.com</code>. Every
-            to, cc and bcc address must match.
+            to, cc and bcc address must match
+            {calendarWrite && ", and so must every guest Google would email about a calendar change and the organizer of an invitation it answers with a comment"}.
           </FieldDescription>
         </Field>
         <Field orientation="horizontal">
           <Switch id={id("reply")} checked={value.replyOnly} onCheckedChange={(replyOnly) => set({ replyOnly })} />
           <div className="space-y-0.5">
             <FieldLabel htmlFor={id("reply")}>Replies only</FieldLabel>
-            <FieldDescription>Only allow replying inside threads the agent can already see; no new conversations.</FieldDescription>
+            <FieldDescription>
+              Only allow replying inside threads the agent can already see; no new conversations.
+              {calendarWrite && " Calendar changes can't invite new guests either."}
+            </FieldDescription>
           </div>
         </Field>
         <div className="grid gap-3 sm:grid-cols-2">
           <CapInput id={id("hour")} label="Max sends per hour" value={value.maxSendsPerHour} onChange={(maxSendsPerHour) => set({ maxSendsPerHour })} />
           <CapInput id={id("day")} label="Max sends per day" value={value.maxSendsPerDay} onChange={(maxSendsPerDay) => set({ maxSendsPerDay })} />
         </div>
+        {calendarWrite && <FieldDescription>Calendar changes that email guests count as one send each.</FieldDescription>}
       </FieldSet>
     </>
+  );
+}
+
+function CapabilityBox({ capability: c, checked, onChange }: { capability: Capability; checked: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50 has-[[data-state=checked]]:bg-muted/40">
+      <Checkbox className="mt-0.5" checked={checked} onCheckedChange={(v) => onChange(v === true)} />
+      <span className="space-y-0.5">
+        <span className="block text-sm font-medium">{CAPABILITY_INFO[c].label}</span>
+        <span className="block text-xs text-muted-foreground">{CAPABILITY_INFO[c].description}</span>
+      </span>
+    </label>
+  );
+}
+
+/** Calendar access on an account that can't serve it yet: say so, with where to fix it. */
+function AccountCalendarNotice({ accountId }: { accountId: string }) {
+  const accounts = useQuery(queries.accounts());
+  const account = accounts.data?.find((a) => a.id === accountId);
+  const status = account ? (account.calendar?.status ?? "not_granted") : null;
+  if (status !== "not_granted" && status !== "api_disabled") return null;
+  return (
+    <p className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+      {status === "not_granted"
+        ? `${account!.email} hasn't added Google Calendar yet, so calendar tools fail for it until you add it on `
+        : "The Google Calendar API is turned off in your Cloud project, so calendar tools fail until you turn it on from "}
+      <Link to="/accounts" className="font-medium underline underline-offset-4">
+        Accounts
+      </Link>
+      .
+    </p>
   );
 }
 

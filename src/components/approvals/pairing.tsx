@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AccountAvatar, AccountStatusBadge } from "@/components/accounts/account-status";
 import { GrantFieldsForm } from "@/components/agents/grant-editor";
+import { calendarInWords } from "@/components/agents/grant-words";
 import { ErrorAlert, SectionLabel, StatusDot, TimeAgo, ToneBadge } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
@@ -35,40 +36,21 @@ import { useNow } from "@/hooks/use-now";
 import { api, ApiError, toastError } from "@/lib/api";
 import { TOOL_LABEL } from "@/lib/cli";
 import { fmtDuration } from "@/lib/format";
-import { GRANT_PRESETS, type GrantFields, grantProblem, presetGrant } from "@/lib/grants";
+import { GRANT_PRESETS, type GrantFields, grantInput, grantProblem, hasCalendarAccess, presetGrant } from "@/lib/grants";
 import { type Choice, ChoiceCards } from "@/components/choice-cards";
-import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
+import { CALENDAR_WRITE_MODE_INFO, CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useSilencePairingToasts } from "@/components/pairing-notifier";
+import { asksForMore, PAIRING_DEFAULT } from "./pairing-grant";
 import { deniedDescription } from "./pairing-link";
+
+const toolLabel = (t: string | undefined) => (t && t in TOOL_LABEL ? TOOL_LABEL[t as AgentTool] : t) || null;
 
 /** "jxgr xd93" → "JXGR-XD93". Codes are 8 characters from an alphabet without 0/O/1/I/L. */
 export function normalizeCode(raw: string): string {
   const s = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
   return s.length > 4 ? `${s.slice(0, 4)}-${s.slice(4)}` : s;
-}
-
-/** What a new pairing starts with, regardless of what the agent asked for. */
-const PAIRING_DEFAULT: GrantFields = {
-  capabilities: ["read"],
-  labelScope: null,
-  sendMode: "draft_only",
-  allowTo: [],
-  replyOnly: false,
-  maxSendsPerHour: null,
-  maxSendsPerDay: null,
-};
-
-const toolLabel = (t: string | undefined) => (t && t in TOOL_LABEL ? TOOL_LABEL[t as AgentTool] : t) || null;
-
-/** Whether the request asks for anything beyond read + draft-only. */
-function asksForMore(p: PairingRequest): string[] {
-  const more: string[] = [];
-  const caps = p.requested.capabilities ?? [];
-  for (const c of caps) if (c !== "read" && c !== "draft") more.push(CAPABILITY_INFO[c].label);
-  if (p.requested.sendMode && p.requested.sendMode !== "draft_only") more.push(SEND_MODE_INFO[p.requested.sendMode].label);
-  return more;
 }
 
 export function ExpiresIn({ at }: { at: string }) {
@@ -135,6 +117,7 @@ function AskedFor({ p, accounts }: { p: PairingRequest; accounts: Account[] }) {
     ]);
   if (r.capabilities?.length) rows.push(["Capabilities", r.capabilities.map((c) => CAPABILITY_INFO[c].label).join(", ")]);
   if (r.sendMode) rows.push(["Sending", SEND_MODE_INFO[r.sendMode].label]);
+  if (r.calendarWriteMode) rows.push(["Calendar writes", CALENDAR_WRITE_MODE_INFO[r.calendarWriteMode].label]);
   return (
     <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
       <SectionLabel>Asked for</SectionLabel>
@@ -336,7 +319,7 @@ const PAIRING_CHOICES: Choice<string>[] = [
   { value: "read", title: "Read only", description: "Search and read mail, get events. Can't change or send anything.", badge: <Badge variant="secondary">Default</Badge> },
   { value: "drafts", title: "Read and draft", description: "Anything it sends becomes a Gmail draft for you to send." },
   { value: "approval", title: "Send with my approval", description: "Each send waits in Approvals until you approve it." },
-  { value: "custom", title: "Custom", description: "Pick capabilities, labels, recipients and limits." },
+  { value: "custom", title: "Custom", description: "Pick capabilities, labels, calendars, recipients and limits." },
 ];
 
 /**
@@ -478,7 +461,7 @@ function ApproveForm({
         body: {
           userCode: typed,
           name: name.trim() || p.name,
-          grants: selected.map((a) => ({ accountId: a.id, ...choices[a.id]!.fields })),
+          grants: selected.map((a) => grantInput(a.id, choices[a.id]!.fields)),
         },
       });
       for (const key of [keys.pairings, keys.agents, keys.setupState, keys.overview]) void qc.invalidateQueries({ queryKey: key });
@@ -550,7 +533,8 @@ function ApproveForm({
           <InfoIcon className="mt-0.5 size-4 shrink-0 text-warning" />
           <span>
             It asked for more ({more.join(", ")}). Access below starts at <span className="font-medium">Read</span> with sending as{" "}
-            <span className="font-medium">Draft only</span>; add more only if you trust this agent.
+            <span className="font-medium">Draft only</span> and no calendar access; add more only if you trust this agent
+            {more.some((m) => m.startsWith("Calendar")) && " (Custom has the calendar settings)"}.
           </span>
         </p>
       )}
@@ -583,9 +567,12 @@ function ApproveForm({
                       choices={PAIRING_CHOICES}
                       onChange={(preset) => {
                         const pr = presetById(preset);
-                        set({ preset, fields: pr ? presetGrant(pr) : c.fields });
+                        set({ preset, fields: pr ? presetGrant(pr, c.fields) : c.fields });
                       }}
                     />
+                    {c.preset !== "custom" && hasCalendarAccess(c.fields) && (
+                      <p className="text-xs text-muted-foreground">Plus calendar: {calendarInWords(c.fields)}. Change it under Custom.</p>
+                    )}
                     {c.preset === "custom" && (
                       <div className="space-y-6 rounded-lg border p-3">
                         <GrantFieldsForm

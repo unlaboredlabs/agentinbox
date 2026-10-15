@@ -63,7 +63,7 @@ function ApprovalsPage() {
     <>
       <PageHeader
         title="Approvals"
-        description="Decisions only you can make: messages agents want to send, and agents asking for access to your mail."
+        description="Decisions only you can make: messages agents want to send, calendar changes they want to make, and agents asking for access."
       />
       <Tabs
         value={tab}
@@ -72,7 +72,7 @@ function ApprovalsPage() {
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
           <TabsList>
             <TabsTrigger value="messages">
-              Messages <Count n={count} />
+              Requests <Count n={count} />
             </TabsTrigger>
             <TabsTrigger value="access">
               Agent access <Count n={pendingPairings.length} />
@@ -83,7 +83,8 @@ function ApprovalsPage() {
 
         <TabsContent value="messages" className="mt-4 space-y-4">
           <p className="max-w-2xl text-sm text-muted-foreground">
-            Sends from agents whose grant is set to “Needs approval”. Approving sends the draft; rejecting deletes it. Unanswered requests expire.
+            Sends and calendar changes from agents set to ask you first. Approving sends the draft or applies the change; rejecting deletes the draft
+            or discards the change. Unanswered requests expire.
           </p>
           {pending.isPending ? (
             <Skeleton className="h-80 rounded-xl" />
@@ -96,10 +97,10 @@ function ApprovalsPage() {
                   <EmptyMedia variant="icon">
                     <StampIcon />
                   </EmptyMedia>
-                  <EmptyTitle>No messages waiting</EmptyTitle>
+                  <EmptyTitle>Nothing waiting</EmptyTitle>
                   <EmptyDescription>
-                    When an agent whose send mode is “Needs approval” sends a message, it waits here. The sidebar shows a count when something's
-                    pending.
+                    When an agent whose send mode is “Needs approval” sends a message, or one set to ask first changes a calendar, it waits here. The
+                    sidebar shows a count when something's pending.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -212,7 +213,7 @@ function ApprovalsPage() {
                     <HistoryIcon />
                   </EmptyMedia>
                   <EmptyTitle>No decisions yet</EmptyTitle>
-                  <EmptyDescription>Approved, rejected and expired messages are listed here.</EmptyDescription>
+                  <EmptyDescription>Approved, rejected and expired messages and calendar changes are listed here.</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             </Card>

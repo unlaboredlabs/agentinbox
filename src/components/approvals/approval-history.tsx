@@ -7,6 +7,8 @@ import { Card } from "@/components/ui/card";
 import { KIND_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 import { ApprovalStatusBadge, Attachments, BodyPreview, Recipients } from "./approval-parts";
+import { isCalendarApproval } from "./calendar-approval";
+import { CalendarApprovalBody } from "./calendar-approval-body";
 
 export function ApprovalHistory({ items }: { items: Approval[] }) {
   return (
@@ -32,14 +34,14 @@ function HistoryRow({ approval: a }: { approval: Approval }) {
       >
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <ApprovalStatusBadge status={a.status} />
+            <ApprovalStatusBadge status={a.status} kind={a.kind} />
             <span>{KIND_LABEL[a.kind]}</span>
             <span aria-hidden>·</span>
             <span className="truncate">
               {a.agentName} via {a.accountEmail}
             </span>
           </div>
-          <div className="truncate text-sm font-medium">{a.subject ? <Visible text={a.subject} /> : "(no subject)"}</div>
+          <div className="truncate text-sm font-medium">{a.subject ? <Visible text={a.subject} /> : isCalendarApproval(a) ? "(no title)" : "(no subject)"}</div>
           {(a.decisionNote || a.error) && (
             <div className={cn("truncate text-xs", a.error ? "text-critical" : "text-muted-foreground")}>{a.error ?? `Note: ${a.decisionNote}`}</div>
           )}
@@ -64,9 +66,15 @@ function HistoryRow({ approval: a }: { approval: Approval }) {
             </p>
           )}
           {a.error && <p className="text-sm text-critical">{a.error}</p>}
-          <Recipients approval={a} />
-          <BodyPreview body={a.body} />
-          <Attachments items={a.attachments} />
+          {isCalendarApproval(a) ? (
+            <CalendarApprovalBody approval={a} />
+          ) : (
+            <>
+              <Recipients approval={a} />
+              <BodyPreview body={a.body} />
+              <Attachments items={a.attachments} />
+            </>
+          )}
         </div>
       )}
     </li>

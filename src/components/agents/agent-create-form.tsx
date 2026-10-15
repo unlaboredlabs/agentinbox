@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { GRANT_PRESETS, presetGrant } from "@/lib/grants";
+import { GRANT_PRESETS, grantInput, presetGrant } from "@/lib/grants";
 import { useApiMutation } from "@/lib/mutations";
 import { keys, queries } from "@/lib/queries";
 import { rememberKey } from "@/lib/revealed-keys";
@@ -60,7 +60,7 @@ export function AgentCreateForm({
     create.mutate({
       name: name.trim(),
       description: description.trim() || null,
-      grants: selected.map((accountId) => ({ ...presetGrant(p), accountId })),
+      grants: selected.map((accountId) => grantInput(accountId, presetGrant(p))),
     });
   };
 

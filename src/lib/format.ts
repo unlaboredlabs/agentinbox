@@ -107,3 +107,40 @@ export function accountsStat(a: OverviewStats["accounts"]): { value: string; hin
   const paused = a.total - a.active;
   return { value, hint: paused ? `${paused} paused` : a.total === 1 ? "active" : "all active" };
 }
+
+const DAY_MS = 86_400_000;
+
+/**
+ * When a calendar event happens, in the console's time zone (or `timeZone`): "Tue, Oct 20, 2:00 – 3:00 PM",
+ * "Tue, Oct 20, 10:00 PM – Wed, Oct 21, 1:00 AM", "Tue, Oct 20 (all day)", "Oct 20 – 22 (all day)". The year
+ * shows when it isn't the current one. All-day dates are calendar dates (end exclusive, as Google gives
+ * them), so they never shift with the time zone.
+ */
+export function fmtEventWhen(
+  e: { start: string; end: string; allDay: boolean },
+  opts: { timeZone?: string; locale?: string; now?: number } = {},
+): string {
+  const start = valid(e.start);
+  if (!start) return e.start || "—";
+  const end = valid(e.end) ?? start;
+  const thisYear = new Date(opts.now ?? Date.now()).getUTCFullYear();
+  if (e.allDay) {
+    // The last day the event covers (Google's end date is the day after).
+    const last = new Date(Math.max(start.getTime(), end.getTime() - DAY_MS));
+    const year = start.getUTCFullYear() !== thisYear || last.getUTCFullYear() !== thisYear ? ("numeric" as const) : undefined;
+    const sameDay = last.getTime() === start.getTime();
+    const f = new Intl.DateTimeFormat(opts.locale, { timeZone: "UTC", month: "short", day: "numeric", year, weekday: sameDay ? "short" : undefined });
+    return `${sameDay ? f.format(start) : f.formatRange(start, last)} (all day)`;
+  }
+  const year = start.getFullYear() !== thisYear ? ("numeric" as const) : undefined;
+  const f = new Intl.DateTimeFormat(opts.locale, {
+    timeZone: opts.timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year,
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return end.getTime() > start.getTime() ? f.formatRange(start, end) : f.format(start);
+}

@@ -15,11 +15,17 @@ import { api, toastError } from "@/lib/api";
 import { KIND_LABEL } from "@/lib/labels";
 import { keys } from "@/lib/queries";
 import { Attachments, BodyPreview, ExpiryCountdown, Recipients } from "./approval-parts";
+import { calendarApprovalTexts, calendarVerb, isCalendarApproval } from "./calendar-approval";
+import { CalendarApprovalBody } from "./calendar-approval-body";
 
 type Decision = "approve" | "reject";
 
-/** A pending send request: everything needed to decide, plus approve / reject with an optional note. */
+/**
+ * A pending send or calendar change: everything needed to decide, plus approve / reject with an optional
+ * note. Calendar changes read "Apply" / "Discard": approving applies the stored change, rejecting drops it.
+ */
 export function ApprovalCard({ approval: a }: { approval: Approval }) {
+  const cal = isCalendarApproval(a) ? a : null;
   const qc = useQueryClient();
   const [note, setNote] = useState("");
   const [noting, setNoting] = useState(false);
@@ -32,7 +38,11 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
       qc.setQueryData<Approval[]>([...keys.approvals, "pending"], (list) => list?.filter((x) => x.id !== a.id));
       void qc.invalidateQueries({ queryKey: keys.approvals });
       void qc.invalidateQueries({ queryKey: keys.overview });
-      if (d === "reject") toast.success("Rejected", { description: "The draft was deleted and the agent is told it was rejected." });
+      if (cal) {
+        if (d === "reject") toast.success("Discarded", { description: "Nothing reached Google Calendar. The agent is told it was rejected." });
+        else if (res.status === "failed") toast.error("Approved, but applying failed", { description: res.error ?? undefined });
+        else toast.success("Applied to Google Calendar", { description: `"${a.subject || "(no title)"}" is updated.` });
+      } else if (d === "reject") toast.success("Rejected", { description: "The draft was deleted and the agent is told it was rejected." });
       else if (res.status === "failed") toast.error("Approved, but sending failed", { description: res.error ?? undefined });
       else toast.success("Approved and sent", { description: `"${a.subject || "(no subject)"}" is on its way.` });
     },
@@ -54,8 +64,22 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
               <BotIcon className="size-4 text-muted-foreground" />
               {a.agentName}
             </Link>
-            <span className="text-muted-foreground">wants to send from</span>
-            <span className="truncate font-medium">{a.accountEmail}</span>
+            {cal ? (
+              <>
+                <span className="text-muted-foreground">{calendarVerb(cal)}</span>
+                <span className="min-w-0 truncate font-medium">
+                  <Visible text={cal.calendar.calendarName || cal.calendar.calendarId} />
+                </span>
+                {(cal.calendar.calendarName || cal.calendar.calendarId) !== a.accountEmail && (
+                  <span className="truncate text-muted-foreground">({a.accountEmail})</span>
+                )}
+              </>
+            ) : (
+              <>
+                <span className="text-muted-foreground">wants to send from</span>
+                <span className="truncate font-medium">{a.accountEmail}</span>
+              </>
+            )}
             <Badge variant="secondary">{KIND_LABEL[a.kind]}</Badge>
           </div>
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
@@ -65,13 +89,15 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {hasHidden(
-          a.subject,
-          a.body,
-          a.reason,
-          ...[...a.to, ...a.cc, ...a.bcc].flatMap((x) => [x.name, x.email]),
-          ...a.attachments.map((f) => f.filename),
-        ) && <HiddenCharsWarning />}
+        {(cal
+          ? hasHidden(...calendarApprovalTexts(cal))
+          : hasHidden(
+              a.subject,
+              a.body,
+              a.reason,
+              ...[...a.to, ...a.cc, ...a.bcc].flatMap((x) => [x.name, x.email]),
+              ...a.attachments.map((f) => f.filename),
+            )) && <HiddenCharsWarning what={cal ? "This change" : undefined} />}
         {a.reason && (
           <div className="flex gap-2 rounded-lg border-l-2 border-chart-1 bg-chart-1/5 px-3 py-2 text-sm">
             <MessageSquareQuoteIcon className="mt-0.5 size-4 shrink-0 text-chart-1" />
@@ -83,12 +109,21 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
             </div>
           </div>
         )}
-        <Recipients approval={a} />
-        <div className="space-y-2">
-          <div className="text-base font-semibold break-words">{a.subject ? <Visible text={a.subject} /> : <span className="text-muted-foreground italic">(no subject)</span>}</div>
-          <BodyPreview body={a.body} />
-        </div>
-        <Attachments items={a.attachments} />
+        {cal ? (
+          <>
+            <div className="text-base font-semibold break-words">{a.subject ? <Visible text={a.subject} /> : <span className="text-muted-foreground italic">(no title)</span>}</div>
+            <CalendarApprovalBody approval={cal} />
+          </>
+        ) : (
+          <>
+            <Recipients approval={a} />
+            <div className="space-y-2">
+              <div className="text-base font-semibold break-words">{a.subject ? <Visible text={a.subject} /> : <span className="text-muted-foreground italic">(no subject)</span>}</div>
+              <BodyPreview body={a.body} />
+            </div>
+            <Attachments items={a.attachments} />
+          </>
+        )}
         {noting && (
           <Textarea
             autoFocus
@@ -107,10 +142,10 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
         </Button>
         <div className="flex gap-2">
           <Button variant="outline" disabled={decide.isPending} onClick={() => decide.mutate("reject")}>
-            {pending === "reject" ? <Spinner /> : <XIcon />} Reject
+            {pending === "reject" ? <Spinner /> : <XIcon />} {cal ? "Discard" : "Reject"}
           </Button>
           <Button disabled={decide.isPending} onClick={() => decide.mutate("approve")}>
-            {pending === "approve" ? <Spinner /> : <CheckIcon />} Approve & send
+            {pending === "approve" ? <Spinner /> : <CheckIcon />} {cal ? "Apply" : "Approve & send"}
           </Button>
         </div>
       </CardFooter>
