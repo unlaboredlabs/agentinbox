@@ -103,8 +103,11 @@ export class GoogleRuntime {
       }
       const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
       if (!retry || attempt >= MAX_ATTEMPTS - 1) {
-        // A conditional write (If-Match) whose retry fails its precondition: the first attempt may have been what changed it.
-        if (uncertain && err.status === 412) throw ambiguous(uncertain, opts.ambiguousHint);
+        // A write retried after an attempt that may have been applied, ending in a failed precondition (the first
+        // attempt may be what changed it) or in more server errors: its outcome is unknown.
+        if (uncertain && method !== "GET" && (err.status === 412 || isRetryable(err))) {
+          throw ambiguous(uncertain, opts.ambiguousHint ?? "The change may have been applied: check before retrying.");
+        }
         throw idempotent ? err : ambiguous(err, opts.ambiguousHint);
       }
       if (!rejectedBeforeProcessing(err)) uncertain ??= err;

@@ -242,6 +242,16 @@ describe("writes", () => {
     expect([stale?.status, classifyCalendarError(stale)]).toEqual([412, "other"]);
   });
 
+  it("calls a write that fails with server errors on every attempt an unknown outcome, but not a read", async () => {
+    const e = fake.calendar.putEvent(ME, ME, { summary: "x", start: at(0), end: at(1) });
+    fake.failNext({ method: "PATCH", path: "/events/", status: 503, retryAfter: 0, times: 5 });
+    const write = await rejection(cal.patchEvent(ME, e.id, { summary: "y" }, { sendUpdates: "none" }));
+    expect([write?.status, classifyCalendarError(write)]).toEqual([503, "outcome_unknown"]);
+    fake.failNext({ method: "GET", path: "/events/", status: 503, retryAfter: 0, times: 5 });
+    const read = await rejection(cal.getEvent(ME, e.id));
+    expect([read?.status, classifyCalendarError(read)]).toEqual([503, "other"]);
+  });
+
   it("retries idempotent calls after a 5xx", async () => {
     const e = fake.calendar.putEvent(ME, ME, { summary: "x", start: at(0), end: at(1) });
     fake.failNext({ method: "PATCH", path: "/events/", status: 503, retryAfter: 0 });

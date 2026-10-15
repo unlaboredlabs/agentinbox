@@ -292,12 +292,34 @@ describe("edge cases", () => {
     expect(rec.events).toEqual([]);
   });
 
+  it("after a 410, reports a series missing from the listing only when Google says it was deleted", async () => {
+    const finished = fake.calendar.putEvent(ME, ME, { summary: "Sprint standup", ...slot(1), recurrence: ["RRULE:FREQ=DAILY"] });
+    const deleted = fake.calendar.putEvent(ME, ME, { summary: "Old 1:1", ...slot(2), recurrence: ["RRULE:FREQ=WEEKLY"] });
+    await sync();
+    // The sprint ended days ago (its last occurrence is outside the listed window); the 1:1 was deleted.
+    fake.calendar.putEvent(ME, ME, { id: finished.id, ...slot(-5 * 24), recurrence: ["RRULE:FREQ=DAILY;COUNT=2"] });
+    fake.calendar.cancelEvent(ME, ME, deleted.id);
+    fake.calendar.expireSyncTokens(ME);
+    await sync();
+    expect(rec.events.map((e) => [e.type, e.calendarEvent!.id])).toEqual([["calendar.event_cancelled", deleted.id]]);
+    expect(fake.requests.some((r) => r.method === "GET" && r.path === `${eventsPath(ME)}/${finished.id}`)).toBe(true);
+  });
+
   it("gives finite series an end, so their state is pruned", () => {
     const start = { dateTime: "2030-01-01T09:00:00Z" };
     const end = { dateTime: "2030-01-01T10:00:00Z" };
     expect(endsAt({ id: "a", start, end, recurrence: ["RRULE:FREQ=DAILY"] })).toBeNull();
     expect(endsAt({ id: "b", start, end, recurrence: ["RRULE:FREQ=DAILY;UNTIL=20300110"] })).toBe("2030-01-11T01:00:00.000Z");
-    expect(Date.parse(endsAt({ id: "c", start, end, recurrence: ["RRULE:FREQ=WEEKLY;COUNT=4"] })!)).toBeGreaterThanOrEqual(Date.parse("2030-01-22T10:00:00Z"));
+    // COUNT occurrences span COUNT − 1 periods after the start.
+    expect(endsAt({ id: "c", start, end, recurrence: ["RRULE:FREQ=WEEKLY;COUNT=4"] })).toBe("2030-01-22T10:00:00.000Z");
+    expect(endsAt({ id: "c2", start, end, recurrence: ["RRULE:FREQ=DAILY;INTERVAL=2;COUNT=3"] })).toBe("2030-01-05T10:00:00.000Z");
+    // Tue Jan 1 + MO,WE,FR × 4 → Jan 1, 2, 4, 7: the bound may be later, never earlier.
+    const weekdays = Date.parse(endsAt({ id: "c3", start, end, recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=4"] })!);
+    expect(weekdays).toBeGreaterThanOrEqual(Date.parse("2030-01-07T10:00:00Z"));
+    // Rules that can skip ahead have no bound: BYMONTHDAY=31 from Jan 1 runs Jan 31, Mar 31, May 31.
+    expect(endsAt({ id: "e", start, end, recurrence: ["RRULE:FREQ=MONTHLY;BYMONTHDAY=31;COUNT=3"] })).toBeNull();
+    const jan31 = { dateTime: "2030-01-31T09:00:00Z" };
+    expect(endsAt({ id: "f", start: jan31, end: { dateTime: "2030-01-31T10:00:00Z" }, recurrence: ["RRULE:FREQ=MONTHLY;COUNT=3"] })).toBeNull();
     expect(endsAt({ id: "d", start, end })).toBe("2030-01-01T10:00:00.000Z");
   });
 });

@@ -153,7 +153,10 @@ function icalTime(s: string): number {
 
 const timeOf = (d: CalendarDateTimeRaw | undefined) => Date.parse(d?.dateTime ?? (d?.date ? `${d.date}T00:00:00Z` : ""));
 
-/** When a series' last occurrence ends at the latest (UNTIL or COUNT), or null when it never ends. */
+/**
+ * When a series' last occurrence ends at the latest (UNTIL or COUNT), or null when it never ends or can't be
+ * bounded. An estimate: callers that act on a series having ended confirm it with Google.
+ */
 function seriesEnd(e: CalendarEventRaw): number | null {
   const rule = e.recurrence?.find((r) => /^RRULE:/i.test(r));
   if (!rule) return null;
@@ -163,9 +166,17 @@ function seriesEnd(e: CalendarEventRaw): number | null {
   // A date-only UNTIL includes that whole day.
   if (p.UNTIL) return icalTime(p.UNTIL) + DAY + length;
   const period = PERIOD_MS[p.FREQ ?? ""];
-  if (!p.COUNT || !period || Number.isNaN(start)) return null;
-  const perPeriod = p.FREQ === "WEEKLY" && p.BYDAY ? p.BYDAY.split(",").length : 1;
-  return start + Math.ceil(Number(p.COUNT) / perPeriod) * (Number(p.INTERVAL) || 1) * period + length;
+  const count = Number(p.COUNT);
+  if (!count || !period || Number.isNaN(start)) return null;
+  const weekdays = p.FREQ === "WEEKLY" && p.BYDAY ? p.BYDAY.split(",").length : 0;
+  // Other BY* parts (BYMONTHDAY, BYSETPOS, a monthly BYDAY, …) and starts on days some months or years lack
+  // (Google skips those dates) can put occurrences arbitrarily late: no bound.
+  if (Object.keys(p).some((k) => k.startsWith("BY") && !(k === "BYDAY" && weekdays))) return null;
+  const at = new Date(start);
+  if ((p.FREQ === "MONTHLY" && at.getUTCDate() > 28) || (p.FREQ === "YEARLY" && at.getUTCMonth() === 1 && at.getUTCDate() === 29)) return null;
+  // The start is the first occurrence; weekday lists may need part of one more week.
+  const periods = weekdays ? Math.ceil((count - 1) / weekdays) + 1 : count - 1;
+  return start + periods * (Number(p.INTERVAL) || 1) * period + length;
 }
 
 /** When the event ends (ISO); for a series, when its last occurrence ends (null when it never ends). */

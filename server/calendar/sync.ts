@@ -378,6 +378,8 @@ class Sync implements CalendarSync {
       for (const [id, prev] of known) {
         // Missing from the listing: deleted, unless it simply ended before the listed window.
         if (listed.has(id) || (prev.endsAt !== null && prev.endsAt < timeMin)) continue;
+        // A series' end is only an estimate: ask Google whether it was deleted or just finished.
+        if (prev.summary.recurring && !(await seriesDeleted(client, cal.calendar_id, id))) continue;
         this.apply(accountId, cal, { id, status: "cancelled" }, prev, since);
       }
     }
@@ -488,6 +490,15 @@ class Sync implements CalendarSync {
     const setup = this.ctx.settings.getState("calendar.setup");
     if (setup?.api?.state === state) return;
     this.ctx.settings.setState("calendar.setup", { enabled: true, ...setup, api: { state, at: now(), error } });
+  }
+}
+
+async function seriesDeleted(client: CalendarClient, calendarId: string, eventId: string): Promise<boolean> {
+  try {
+    return (await client.getEvent(calendarId, eventId)).status === "cancelled";
+  } catch (err) {
+    if (err instanceof GoogleApiError && (err.status === 404 || err.status === 410)) return true;
+    throw err;
   }
 }
 
