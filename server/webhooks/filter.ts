@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
+import { type CalendarEventSummary, EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
 import type { StoredEvent } from "../events/types.ts";
 import { matchesAnyGlob } from "../util/glob.ts";
 import { RE2_SYNTAX_HINT, subjectMatches, subjectPatternError } from "./regex.ts";
@@ -37,6 +37,7 @@ export const webhookFilterSchema = z
         if (error) issues.addIssue({ code: "custom", message: `Subject pattern is not a valid regular expression (${error}). ${RE2_SYNTAX_HINT}` });
       }),
     hasAttachments: z.boolean().optional(),
+    calendarIds: list(100, "calendar"),
   })
   .strict();
 
@@ -68,7 +69,7 @@ export const webhookPatchSchema = z.object(webhookFields).partial();
 /** Drops empty lists and blank values so stored filters stay minimal. */
 export function normalizeFilter(f: WebhookFilter): WebhookFilter {
   const out: WebhookFilter = {};
-  const lists = ["accountIds", "labelIds", "from", "to"] as const;
+  const lists = ["accountIds", "labelIds", "from", "to", "calendarIds"] as const;
   for (const key of lists) {
     const v = f[key]?.map((s) => s.trim()).filter(Boolean);
     if (v?.length) out[key] = [...new Set(v)];
@@ -82,6 +83,7 @@ export function normalizeFilter(f: WebhookFilter): WebhookFilter {
 export function matchesFilter(f: WebhookFilter, ev: StoredEvent): boolean {
   if (f.accountIds?.length && !f.accountIds.includes(ev.accountId)) return false;
   if (ACCOUNT_EVENT_TYPES.includes(ev.type)) return true;
+  if (ev.calendarEvent) return matchesCalendar(f, ev.calendarEvent, ev.accountEmail);
   const hasMessageCriteria = !!(f.labelIds?.length || f.from?.length || f.to?.length || f.subject || f.hasAttachments !== undefined);
   const m = ev.message;
   if (!m) return !hasMessageCriteria;
@@ -94,5 +96,20 @@ export function matchesFilter(f: WebhookFilter, ev: StoredEvent): boolean {
   if (f.to?.length && ![...m.to, ...m.cc].some((a) => matchesAnyGlob(a.email, f.to!))) return false;
   if (f.subject && !subjectMatches(f.subject, m.subject.slice(0, MAX_SUBJECT_TESTED))) return false;
   if (f.hasAttachments !== undefined && m.hasAttachments !== f.hasAttachments) return false;
+  return true;
+}
+
+/**
+ * calendar.* events: `calendarIds` picks calendars ("primary" is the account's own), `from` matches the
+ * organizer, `to` any attendee and `subject` the summary. labelIds and hasAttachments don't apply.
+ */
+function matchesCalendar(f: WebhookFilter, e: CalendarEventSummary, accountEmail: string): boolean {
+  if (f.calendarIds?.length) {
+    const cal = e.calendarId.toLowerCase();
+    if (!f.calendarIds.some((id) => (id === "primary" ? accountEmail : id).toLowerCase() === cal)) return false;
+  }
+  if (f.from?.length && !(e.organizer && matchesAnyGlob(e.organizer.email, f.from))) return false;
+  if (f.to?.length && !e.attendees.some((a) => matchesAnyGlob(a.email, f.to!))) return false;
+  if (f.subject && !subjectMatches(f.subject, e.summary.slice(0, MAX_SUBJECT_TESTED))) return false;
   return true;
 }
