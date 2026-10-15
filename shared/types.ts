@@ -340,6 +340,8 @@ export interface WebhookPayload {
   data: MailEvent & {
     /** Present only when the webhook has includeBody and the event concerns a message. */
     content?: MessageContent;
+    /** Set instead of `content` when includeBody was requested but the body could not be fetched. */
+    contentError?: string;
   };
 }
 
