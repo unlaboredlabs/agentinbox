@@ -17,5 +17,4 @@ export default fixture({
     present: ["After that date, we will delete all messages and files older than 90 days."],
     links: [{ text: "upgrade to Pro", href: "https://chatterbox.example/pricing?ref=retention" }],
   },
-  bug: "suspiciousInstructions false positive on a retention notice (\"we will delete all messages\")",
 });

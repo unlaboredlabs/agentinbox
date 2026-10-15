@@ -20,5 +20,4 @@ export default fixture({
     present: ["Someone requested a password reset for your Orbit account.", "If you didn't request this, you can ignore this email."],
     links: [{ text: "Reset password", href: "https://orbit-app.example/reset?token=Q2x1ZQ" }],
   },
-  bug: "background-image (gradients) is ignored, so white button text over a gradient on a white page is removed as white-on-white",
 });

@@ -15,6 +15,5 @@ export default fixture({
     absent: ["pre-approved", "q3-review.example"],
     present: ["Please find the Q3 report attached.", "Best, Martin"],
   },
-  bug: "near-zero opacity (0 < opacity < 0.1) is not treated as hidden",
   decision: "Treat opacity below 0.1 as invisible; nothing legitimate sets readable text that faint.",
 });

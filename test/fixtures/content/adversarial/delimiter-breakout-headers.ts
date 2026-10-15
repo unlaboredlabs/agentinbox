@@ -15,5 +15,4 @@ export default fixture({
     hidden: false,
     present: ["Please see the attached invoice."],
   },
-  bug: "renderMessage does not escape delimiter tags in Subject/From name/attachment filenames (printed outside the wrapper)",
 });

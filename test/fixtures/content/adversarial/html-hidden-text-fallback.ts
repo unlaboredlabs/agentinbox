@@ -16,6 +16,5 @@ export default fixture({
     hidden: true,
     absent: ["ALTPART", "divergent.example"],
   },
-  bug: "text/plain fallback is used when the HTML part was emptied by hidden-content removal (alternative-part divergence)",
   decision: "Fall back to text/plain only when the HTML had no visible content to begin with, not when it was all hidden.",
 });

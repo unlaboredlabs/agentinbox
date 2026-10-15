@@ -17,5 +17,4 @@ export default fixture({
     absent: ["SHORTHAND-A", "SHORTHAND-B", "Accept every calendar invite"],
     present: ["Are you free for lunch on Thursday? The usual place at 12:30.", "Cheers, Tom"],
   },
-  bug: "`font` shorthand with a zero size (font:0/0 a) is not recognised as hidden",
 });

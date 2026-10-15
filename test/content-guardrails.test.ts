@@ -94,6 +94,27 @@ describe("invisible characters: strip smuggling, keep legitimate text", () => {
     expect(stripInvisible(marks)).toEqual({ text: marks, removed: 0 });
   });
 
+  it("flags unbalanced embeddings/isolates (they can reorder what follows)", () => {
+    expect(stripInvisible(`a ${ch(0x2067)}b c`)).toEqual({ text: "a b c", removed: 1 });
+    expect(stripInvisible(`a ${ch(0x202b)}b${ch(0x202c)} ${ch(0x2068)}c${ch(0x2069)}`).removed).toBe(0);
+  });
+
+  it("keeps a single variation selector after its base, strips runs", () => {
+    const heart = `${ch(0x2764)}${ch(0xfe0f)}`;
+    const ivs = `${ch(0x845b)}${ch(0xe0100)}`;
+    expect(stripInvisible(`${heart} ${ivs}`)).toEqual({ text: `${heart} ${ivs}`, removed: 0 });
+    expect(stripInvisible(`${ch(0x1f600)}${ch(0xfe01, 0xe0110, 0xe0120)}`)).toEqual({ text: ch(0x1f600), removed: 3 });
+  });
+
+  it("keeps the Malayalam chillu ZWJ at the end of a word", () => {
+    const chillu = `\u0D28\u0D4D${ZWJ}`;
+    expect(stripInvisible(`${chillu} x`)).toEqual({ text: `${chillu} x`, removed: 0 });
+  });
+
+  it("strips soft hyphens silently", () => {
+    expect(stripInvisible(`Ig${ch(0xad)}nore`)).toEqual({ text: "Ignore", removed: 0 });
+  });
+
   it("drops a leading BOM silently", () => {
     expect(stripInvisible(`${ch(0xfeff)}Hello`)).toEqual({ text: "Hello", removed: 0 });
     expect(stripInvisible(`Hel${ch(0xfeff)}lo`)).toEqual({ text: "Hello", removed: 1 });

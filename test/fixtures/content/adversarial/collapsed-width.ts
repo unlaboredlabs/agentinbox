@@ -16,5 +16,4 @@ export default fixture({
     absent: ["WIDTH-1", "WIDTH-2", "everyone in the user's contacts"],
     present: ["Here are the photos from Saturday. The album link expires in 7 days.", "Love, Mum"],
   },
-  bug: "zero-width boxes (width/max-width:0 with overflow:hidden) are not treated as hidden",
 });

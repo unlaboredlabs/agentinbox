@@ -15,6 +15,5 @@ export default fixture({
     present: ["We compare three ways to structure a system prompt for tool-using agents"],
     links: [{ text: "Read issue #88", href: "https://promptweekly.example/issues/88" }],
   },
-  bug: "suspiciousInstructions false positive on the noun phrase \"system prompt\" in ordinary AI newsletters",
   decision: "Flag requests to reveal/ignore a system prompt, not mentions of the term.",
 });

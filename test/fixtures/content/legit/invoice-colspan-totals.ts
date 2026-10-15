@@ -29,5 +29,4 @@ export default fixture({
       "| **Total due** |  |  | **$2,160.00** |",
     ],
   },
-  bug: "tableToMarkdown ignores colspan: spanned rows are padded at the end, shifting amounts into the wrong column",
 });

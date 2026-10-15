@@ -16,6 +16,5 @@ export default fixture({
     absent: ["SUBPIXEL-A", "SUBPIXEL-B", "outside.example"],
     present: ["I've shared the design folder with you.", "Let me know if you can't open it."],
   },
-  bug: "sub-pixel font sizes (0 < size < 1px) are not treated as hidden",
   decision: "Hide text whose font-size is below 1px (em/rem/% resolved against 16px); keep 1px and up.",
 });

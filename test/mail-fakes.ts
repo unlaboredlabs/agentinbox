@@ -298,6 +298,9 @@ export const decodeRaw = (raw: string) =>
 export class FakeGoogle {
   readonly mime = new FakeMime();
   readonly clients = new Map<string, FakeGmail>();
+  /** Simulates the google label cache: served instead of the live list unless `{ fresh: true }` is passed. */
+  readonly staleLabels = new Map<string, GmailLabel[]>();
+  readonly labelCalls: ({ fresh?: boolean } | null)[] = [];
 
   gmail(accountId: string): FakeGmail {
     let c = this.clients.get(accountId);
@@ -314,7 +317,13 @@ export class FakeGoogle {
       get: (target, prop) => {
         if (prop === "mime") return this.mime;
         if (prop === "gmail") return (id: string) => this.gmail(id);
-        if (prop === "labels") return async (id: string) => this.gmail(id).labels.map((l) => ({ ...l }));
+        if (prop === "labels") {
+          return async (id: string, opts?: { fresh?: boolean }) => {
+            this.labelCalls.push(opts ?? null);
+            const stale = this.staleLabels.get(id);
+            return (stale && !opts?.fresh ? stale : this.gmail(id).labels).map((l) => ({ ...l }));
+          };
+        }
         return Reflect.get(target, prop);
       },
     });

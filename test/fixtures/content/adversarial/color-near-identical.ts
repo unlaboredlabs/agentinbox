@@ -19,6 +19,5 @@ export default fixture({
     absent: ["NEAR-1", "NEAR-2", "reviewed and approved"],
     present: ["Please review and sign the attached contract by Monday.", "Signed copies are stored for 7 years."],
   },
-  bug: "near-identical text/background colours (contrast < 1.1) are not treated as hidden; only exact matches are",
   decision: "Same-colour heuristic should use a contrast threshold (WCAG ratio < 1.1), not equality.",
 });

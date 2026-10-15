@@ -23,5 +23,4 @@ export default fixture({
     present: ["# Seven nights in Zanzibar from $1,299", "Flights and transfers included.", "Offer ends Sunday."],
     links: [{ text: "See dates", href: "https://seabird.example/deals/zanzibar?src=email" }],
   },
-  bug: "colour words inside url() in the background shorthand are read as the background colour, and background images are ignored (white headline on a photo removed)",
 });

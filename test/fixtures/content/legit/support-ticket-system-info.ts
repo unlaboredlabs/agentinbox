@@ -28,5 +28,4 @@ View ticket: https://support.pixelpress.example/t/20817`,
     hidden: false,
     present: ["The app closes as soon as I click Export > PDF on any document over 20 pages.", "System: macOS 15.1 (24B83)"],
   },
-  bug: "suspiciousInstructions false positive on a diagnostics line \"System: macOS 15.1\"",
 });

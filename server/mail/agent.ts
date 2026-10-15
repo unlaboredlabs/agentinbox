@@ -223,6 +223,18 @@ export class AgentMail {
     return p;
   }
 
+  /**
+   * Bypasses the Google label cache (a label created in Gmail a moment ago). `labels(id, { fresh })` is an
+   * additive option of the google service; older implementations ignore the extra argument.
+   */
+  private labelsFresh(a: Access): Promise<GmailLabel[]> {
+    const fetchLabels = this.ctx.google.labels as (accountId: string, opts?: { fresh?: boolean }) => Promise<GmailLabel[]>;
+    const p = fetchLabels.call(this.ctx.google, a.account.id, { fresh: true });
+    this.labelCache.set(a.account.id, p);
+    p.catch(() => this.labelCache.delete(a.account.id));
+    return p;
+  }
+
   /** Labels for display only: falls back to raw ids on failure. */
   private async labelsSafe(a: Access): Promise<GmailLabel[] | null> {
     try {
@@ -311,7 +323,13 @@ export class AgentMail {
     const syntax = querySyntaxError(query);
     if (syntax) throw new ToolError("invalid_query", `${syntax} Fix the query and try again.`);
     const scope = a.grant.labelScope;
-    const search = scopedSearch(query, scope, scope === null ? [] : await this.labels(a));
+    let known: GmailLabel[] = [];
+    if (scope !== null) {
+      known = await this.labels(a);
+      // A scope label missing from the cached list may have just been created: look again once.
+      if (scope.some((id) => !known.some((l) => l.id === id))) known = await this.labelsFresh(a);
+    }
+    const search = scopedSearch(query, scope, known);
     this.trace.detail = { queryLength: query.length, scoped: scope !== null };
     const labels = await this.labelsSafe(a);
     if (search === null) return { account: a.account, threads: [], nextPageToken: null, hidden: 0, labels };
@@ -697,12 +715,15 @@ export class AgentMail {
   private async resolveLabelIds(a: Access, names: string[], mode: "add" | "remove"): Promise<string[]> {
     if (!names.length) return [];
     const scope = a.grant.labelScope;
-    const all = await this.labels(a);
+    let all = await this.labels(a);
+    const find = (list: GmailLabel[], key: string) => list.find((l) => l.id === key) ?? list.find((l) => l.name.toLowerCase() === key.toLowerCase());
+    // A name we don't know may be a label created in Gmail since the cache was filled: look again once.
+    if (names.some((n) => !find(all, n.trim()))) all = await this.labelsFresh(a);
     // Scoped agents only see (and may name) their scope labels and common system labels.
     const labels = scope === null ? all : all.filter((l) => scope.includes(l.id) || SCOPED_VISIBLE_SYSTEM.has(l.id));
     return names.map((n) => {
       const key = n.trim();
-      const label = labels.find((l) => l.id === key) ?? labels.find((l) => l.name.toLowerCase() === key.toLowerCase());
+      const label = find(labels, key);
       const addable = () => [...SCOPED_ADDABLE, ...all.filter((l) => scope!.includes(l.id)).map((l) => l.name)].join(", ");
       if (!label && scope !== null) {
         // Same answer whether or not the label exists outside the scope.

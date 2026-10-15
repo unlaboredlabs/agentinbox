@@ -17,5 +17,4 @@ export default fixture({
     present: ["Before the nest.", "Deep visible line.", "After the nest."],
     maxMs: 5000,
   },
-  bug: "deeply nested HTML (>= ~2000 levels) makes buildContent throw RangeError (stack overflow in turndown/domino and cleanTree)",
 });

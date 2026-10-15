@@ -18,5 +18,4 @@ export default fixture({
     present: ["Your October e-statement for account ending 4471 is now available in online banking.", "Harbor Credit Union will never ask you to share your password, PIN or one-time code"],
     links: [{ text: "View statement", href: "https://online.harborcu.example/statements" }],
   },
-  bug: "suspiciousInstructions false positive on negated security advice (\"never ask you to share your password\", \"Never send your credentials\")",
 });

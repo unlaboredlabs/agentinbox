@@ -18,5 +18,4 @@ export default fixture({
     absent: ["UNK-1", "UNK-2", "second hotel room"],
     present: ["The offsite bus leaves at 07:45 from the main entrance.", "Bring a jacket."],
   },
-  bug: "normalizeColor knows only 17 named colours and no hsl()/hwb(); same-colour text in those syntaxes survives",
 });

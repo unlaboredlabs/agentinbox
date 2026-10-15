@@ -17,5 +17,4 @@ export default fixture({
     absent: [variationSelectors("ignore"), variationSelectors("smuggle.example")],
     present: [`Great meeting today ${ch(0x1f600)}`, "Talk soon."],
   },
-  bug: "variation-selector smuggling (U+E0100–U+E01EF runs) is not stripped",
 });

@@ -144,6 +144,21 @@ describe("scoped labels", () => {
   });
 });
 
+describe("label cache", () => {
+  it("looks labels up again (fresh) when a name or scope label is missing from the cache", async () => {
+    const s = await setup({ labelScope: ["Label_support", "Label_new"] });
+    s.google.staleLabels.set("acc_a", [...s.gmail.labels]);
+    s.gmail.labels.push({ id: "Label_new", name: "New Things", type: "user" });
+    await s.call("search_threads", { query: "x" });
+    expect(s.gmail.queries.at(-1)).toBe("(x) (label:support OR label:new-things)");
+    expect(s.google.labelCalls).toContainEqual({ fresh: true });
+
+    s.google.labelCalls.length = 0;
+    expect((await s.call("modify_labels", { thread_id: "t1", add: ["New Things"] })).isError).toBe(false);
+    expect(s.google.labelCalls).toEqual([null, { fresh: true }]);
+  });
+});
+
 describe("attachments", () => {
   it("fetches by stable part id and never passes unlisted ids to Gmail", async () => {
     const s = await setup({ labelScope: ["Label_support"] });

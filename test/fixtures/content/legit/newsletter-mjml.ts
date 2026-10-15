@@ -41,5 +41,4 @@ export default fixture({
     present: ["What's new in October", "Shared dashboards are here: invite your whole team to a live view of your metrics.", "Also new: CSV export for every chart."],
     links: [{ text: "Try shared dashboards", href: "https://lumen-app.example/dashboards?ref=oct" }],
   },
-  bug: "font-size:0 on a container hides its whole subtree even when descendants reset font-size (MJML layout => entire body deleted)",
 });

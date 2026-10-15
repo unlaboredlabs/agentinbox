@@ -15,5 +15,4 @@ export default fixture({
     absent: ["script:alert"],
     present: ["Open document", "Download"],
   },
-  bug: "unsafeLinks misses schemes containing tab/newline (java\\tscript:); strip [\\t\\n\\r] (and control chars) before testing the scheme",
 });

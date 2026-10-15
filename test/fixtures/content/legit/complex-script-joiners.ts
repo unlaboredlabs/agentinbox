@@ -20,5 +20,4 @@ export default fixture({
     hidden: false,
     present: [persian, hindi, malayalam],
   },
-  bug: "stripInvisible removes orthographic ZWNJ/ZWJ in Persian and Indic scripts (misspells words, sets hiddenContentRemoved)",
 });

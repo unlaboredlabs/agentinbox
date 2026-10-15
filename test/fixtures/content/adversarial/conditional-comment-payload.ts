@@ -17,6 +17,5 @@ export default fixture({
     present: ["This month: three new integrations and a faster dashboard.", "Read the full changelog on our blog."],
     suspicious: "none",
   },
-  bug: "conditional comments with readable text are removed but not counted (signal gap; cleanTree comment branch)",
   decision: "Count a conditional comment as hidden content when its inner text (tags stripped) is non-blank.",
 });

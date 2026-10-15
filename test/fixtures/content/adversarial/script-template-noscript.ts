@@ -20,6 +20,5 @@ export default fixture({
     present: ["Your trial ends in 3 days. Upgrade to keep your projects.", "Plans start at $8/month."],
     suspicious: "none",
   },
-  bug: "text inside <script>/<template>/<noscript> is removed silently (NON_RENDERED) without setting hiddenContentRemoved",
   decision: "Count script (except type=application/ld+json), template and noscript with text as hidden; keep style/head silent.",
 });

@@ -26,6 +26,5 @@ p.fine { font-size: 0 !important }
     absent: ["CLS-1", "CLS-2", "CLS-3", "weekly-goals.example"],
     present: ["You completed 5 of 7 goals this week.", "Keep it up!"],
   },
-  bug: "hiding via <style> class/id rules is not detected (only inline style attributes are read)",
   decision: "Treat simple top-level <style> rules (.class, #id, tag.class) that hide as a requirement, not a known limitation.",
 });

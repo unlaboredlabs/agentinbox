@@ -19,5 +19,4 @@ export default fixture({
     hidden: false,
     present: [`Our hackathon team ${technologist} ${technologist} is ready!`, `Morning run club ${runner} meets at 7.`, `Mentoring pairs ${holding} announced Friday.`],
   },
-  bug: "EMOJI_ZWJ misses skin-tone modifiers before the ZWJ, so skin-toned ZWJ emoji are split and flagged as hidden content",
 });

@@ -14,5 +14,4 @@ export default fixture({
     hidden: false,
     present: ["You are now a new member of Bean Rewards, and your first drink is on us.", "Your member number is BR-559201."],
   },
-  bug: "suspiciousInstructions false positive on \"You are now a new member\"",
 });
