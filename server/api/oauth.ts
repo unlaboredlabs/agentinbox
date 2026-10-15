@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AppContext } from "../context.ts";
+import { registerInlineScript } from "../csp.ts";
 import { HttpError } from "../util/errors.ts";
 import { asHttpError } from "../google/http.ts";
 import { router } from "./util.ts";
@@ -26,6 +27,9 @@ export const OAUTH_CALLBACK_SCRIPT = `(function () {
 
 /** CSP source for OAUTH_CALLBACK_SCRIPT, e.g. script-src 'sha256-…'. */
 export const OAUTH_CALLBACK_SCRIPT_HASH = `sha256-${createHash("sha256").update(OAUTH_CALLBACK_SCRIPT).digest("base64")}`;
+
+// Allow exactly this static script under the console CSP (server/csp.ts).
+registerInlineScript(OAUTH_CALLBACK_SCRIPT);
 
 interface PageInput {
   ok: boolean;

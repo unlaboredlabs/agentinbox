@@ -178,9 +178,13 @@ describe("console", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("<title>console</title>");
     expect(res.headers.get("cache-control")).toBe("no-cache");
-    // The inline theme script is allowed by hash, nothing else inline.
+    // The inline theme script is allowed by hash; only registered static scripts (e.g. the OAuth
+    // callback page) may be listed besides it, and never 'unsafe-inline'.
     const hash = createHash("sha256").update(THEME_SCRIPT).digest("base64");
-    expect(res.headers.get("content-security-policy")).toContain(`script-src 'self' 'sha256-${hash}';`);
+    const scriptSrc = (res.headers.get("content-security-policy") ?? "").split(";").map((d) => d.trim()).find((d) => d.startsWith("script-src ")) ?? "";
+    expect(scriptSrc.startsWith("script-src 'self' ")).toBe(true);
+    expect(scriptSrc).toContain(`'sha256-${hash}'`);
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
 
     res = await h.request("/agents/agt_123?tab=grants");
     expect(res.status).toBe(200);
