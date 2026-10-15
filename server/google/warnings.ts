@@ -1,9 +1,8 @@
 import { isCalendarCapability, type SetupWarning } from "../../shared/types.ts";
-import { calendarEnabled, enableApiLink } from "../calendar/setup.ts";
+import { setupState } from "../calendar/setup.ts";
 import type { AppContext } from "../context.ts";
 import { json } from "../db/index.ts";
 import { type AccountRow, accountScopes, allRows } from "./accounts.ts";
-import { enableCalendarApiCommand } from "./calendar.ts";
 import { clientWarnings, redirectWarning } from "./client.ts";
 import { CALENDAR_SCOPES, describeScopes, missingScopes } from "./scopes.ts";
 
@@ -140,16 +139,13 @@ function calendarInUse(ctx: Ctx): Set<string> {
 /** calendar_* codes (see SetupWarning). Mail-only installs that haven't added Calendar see only the info notice. */
 function calendarWarnings(ctx: Ctx, rows: AccountRow[]): SetupWarning[] {
   const out: SetupWarning[] = [];
-  const setup = ctx.settings.getState("calendar.setup");
-  const enabled = calendarEnabled(ctx);
-  const projectId = ctx.settings.getState("google.client")?.projectId || null;
-  const enableLink = enableApiLink(ctx);
+  const setup = setupState(ctx);
   const enableSteps =
-    (projectId ? `run ${enableCalendarApiCommand(projectId)}, or ` : "") +
-    `open ${enableLink ?? "Google Cloud → APIs & Services → Library → Google Calendar API"} and click Enable`;
+    (setup.enableApiCommand ? `run ${setup.enableApiCommand}, or ` : "") +
+    `open ${setup.enableApiUrl ?? "Google Cloud → APIs & Services → Library → Google Calendar API"} and click Enable`;
   const inUse = calendarInUse(ctx);
 
-  if (!enabled && !setup?.dismissedAt && rows.length) {
+  if (!setup.enabled && !setup.dismissed && rows.length) {
     out.push({
       code: "calendar_not_added",
       severity: "info",
@@ -160,21 +156,20 @@ function calendarWarnings(ctx: Ctx, rows: AccountRow[]): SetupWarning[] {
     });
   }
 
-  const disabled = rows.some((r) => r.calendar_status === "api_disabled") || (setup?.api?.state === "disabled" && rows.some((r) => !missingScopes(accountScopes(r), CALENDAR_SCOPES).length));
-  if (disabled) {
+  if (setup.api === "disabled") {
     out.push({
       code: "calendar_api_disabled",
       severity: rows.some((r) => inUse.has(r.id)) ? "error" : "warning",
       message: "The Google Calendar API is turned off in your Google Cloud project, so agents can't use any calendar.",
       hint: `To turn it on, ${enableSteps}. Wait a minute, then click Check again on the Google Calendar card. Mail is unaffected.`,
-      ...(enableLink ? { url: enableLink } : {}),
+      ...(setup.enableApiUrl ? { url: setup.enableApiUrl } : {}),
     });
   }
 
   for (const row of rows) {
     if (row.status === "needs_reauth") continue;
     const missing = missingScopes(accountScopes(row), CALENDAR_SCOPES);
-    if (enabled && missing.length) {
+    if (setup.enabled && missing.length) {
       const none = missing.length === CALENDAR_SCOPES.length;
       out.push({
         code: "calendar_scope_missing",
