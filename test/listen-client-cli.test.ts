@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { saveProfile } from "../server/listen/profile.ts";
@@ -39,6 +40,22 @@ describe("agentinbox CLI (subprocess)", () => {
     expect(out).toContain("npx agentinbox-cli listen --save --exec");
     expect(out).toContain("npx agentinbox-cli listen service install");
     expect(out).not.toContain(FAKE_KEY);
+  }, 30_000);
+
+  it("connect --log works from the real command line (the SKILL.md self-setup)", async () => {
+    api.pollScript = [{ status: "approved", apiKey: FAKE_KEY, agent: { id: "agt_9", name: "x" }, mcpUrl: `${api.url}/mcp`, skillUrl: `${api.url}/skill.md` }];
+    const log = join(env.root, "connect.log");
+    const run = cli(["connect", api.url, "--name", "Smoke on box", "--tool", "claude-code", "--log", log], xdg);
+    expect(await run.exit).toBe(0);
+    const text = readFileSync(log, "utf8");
+    expect(text).toContain("K7QM-2XPD");
+    expect(text).toContain("Approved");
+    expect(text).not.toContain(FAKE_KEY);
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+
+    const recipe = cli(["listen", "--print-recipe", "claude-code"], xdg);
+    expect(await recipe.exit).toBe(0);
+    expect(recipe.output().trim()).toContain(`--mcp-config '${join(xdg.XDG_CONFIG_HOME!, "agentinbox", "mcp", "default.claude.json")}'`);
   }, 30_000);
 
   it("listen exits 78 when access is revoked, so services don't restart-loop", async () => {

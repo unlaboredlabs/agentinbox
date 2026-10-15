@@ -75,6 +75,18 @@ export function assertTrustedDir(dir: string): string {
   if (process.platform !== "win32" && (st.mode & 0o022) !== 0) {
     throw new Error(`Refusing --cwd ${dir}: it is writable by group or others (mode ${(st.mode & 0o777).toString(8)}). Use a directory only you can write to.`);
   }
+  // A parent others can write to (without the sticky bit) lets them swap this directory out.
+  for (let p = dirname(dir); p !== dirname(p); p = dirname(p)) {
+    try {
+      const ps = statSync(p);
+      if (process.platform !== "win32" && (ps.mode & 0o022) !== 0 && (ps.mode & 0o1000) === 0) {
+        process.stderr.write(`warning: --cwd ${dir}: its parent ${p} is writable by group or others, so they could replace it.\n`);
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
   return dir;
 }
 

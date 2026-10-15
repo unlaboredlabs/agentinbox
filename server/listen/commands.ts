@@ -56,8 +56,9 @@ export function registerListenCommands(program: Command): void {
     .option("--setup-mcp", "also register the MCP server in the chosen tool (the key is never shown)")
     .option("--profile <name>", `profile to save the key in (default "${DEFAULT_PROFILE}")`)
     .option("--consumer <name>", "listener cursor name (default <hostname>-<profile>)")
+    .option("--log <file>", "also write the output to this file (created 0600; for running connect in the background)")
     .option("--insecure", "allow plain http to a non-loopback, non-Tailscale daemon (loud warning)")
-    .option("--force", "replace an existing profile")
+    .option("--force", "re-pair an existing profile (keeps its listener settings)")
     .addHelpText(
       "after",
       `
@@ -103,8 +104,15 @@ Example:
   )
     .option("--dry-run", "print matching events without running anything or advancing the cursor")
     .option("--from-start", "first run of a consumer: also process events stored before now (default: only new ones)")
+    .option("--print-recipe <tool>", `print the ready-made --exec command for ${TOOLS.join(", ")} (with this machine's paths) and exit`)
     .addHelpText("after", recipesHelp())
-    .action(async (flags: ListenFlags) => {
+    .action(async (flags: ListenFlags & { printRecipe?: string }) => {
+      if (flags.printRecipe !== undefined) {
+        const { parseTool } = await import("./connect.ts");
+        const { recipe } = await import("./recipes.ts");
+        process.stdout.write(`${recipe(parseTool(flags.printRecipe), flags.profile ?? DEFAULT_PROFILE).exec}\n`);
+        return;
+      }
       const { runListener } = await import("./listen.ts");
       process.exit(await runListener({ flags, handleSignals: true }));
     });
