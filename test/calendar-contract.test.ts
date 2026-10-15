@@ -202,7 +202,7 @@ describe("grant calendar fields", () => {
       draftId: "",
       payload: {
         ...base,
-        calendar: { calendarId: "me@acme.com", calendarName: null, eventId: null, change: { summary: "s" }, before: null, response: null, notifyAttendees: true, notified: [] },
+        calendar: { calendarId: "me@acme.com", calendarName: null, eventId: null, change: { summary: "s" }, before: null, etag: null, response: null, notifyAttendees: true, notified: [] },
       },
     });
     expect(approvals.get(cal.id)!.calendar?.change.summary).toBe("s");

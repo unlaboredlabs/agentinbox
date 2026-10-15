@@ -922,6 +922,8 @@ export interface CalendarApprovalDetail {
   change: CalendarEventInput;
   /** The event when the change was queued (update/delete/rsvp), to show a before/after. null for create. */
   before: CalendarEventSummary | null;
+  /** Google etag of `before`: applying sends If-Match, so an event changed since fails instead of being overwritten. */
+  etag: string | null;
   /** rsvp only. */
   response: CalendarResponseStatus | null;
   /** Google emails attendees (sendUpdates "all"); false = "none". */

@@ -8,7 +8,7 @@ import { approvalsApi } from "../server/api/approvals.ts";
 import type { AppContext } from "../server/context.ts";
 import { anyAgentVerified } from "../server/agentapi/listeners.ts";
 import { overviewStats } from "../server/api/overview.ts";
-import { INSTRUCTIONS, rejectedCall, TOOL_NAMES } from "../server/mcp/server.ts";
+import { CALENDAR_TOOL_NAMES, INSTRUCTIONS, rejectedCall, TOOL_NAMES } from "../server/mcp/server.ts";
 import { mcpRoutes } from "../server/mcp/index.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { ALL_CAPS, grantInput, mailTestContext } from "./mail-fakes.ts";
@@ -236,7 +236,8 @@ describe("rejected tool calls", () => {
     const { http, addAgent } = setup();
     const full = addAgent("full", [grantInput("acc_a", { capabilities: ALL_CAPS })]);
     const names = (await (await mcpClient(http, full.apiKey)).listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual([...TOOL_NAMES].sort());
+    // Calendar workstream C: grant calendar.read + calendar.write too and expect all of TOOL_NAMES.
+    expect(names).toEqual(TOOL_NAMES.filter((n) => !CALENDAR_TOOL_NAMES.includes(n)).sort());
   });
 
   it("rejected calls alone don't verify setup", async () => {

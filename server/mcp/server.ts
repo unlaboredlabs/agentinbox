@@ -146,6 +146,7 @@ export const TOOL_NAMES = [
   "delete_calendar_event",
   "respond_to_invitation",
 ] as const;
+export const CALENDAR_TOOL_NAMES: readonly ToolName[] = TOOL_NAMES.slice(TOOL_NAMES.indexOf("list_calendars"));
 export type ToolName = (typeof TOOL_NAMES)[number];
 const CATALOG: ReadonlySet<string> = new Set(TOOL_NAMES);
 
