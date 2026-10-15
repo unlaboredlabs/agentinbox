@@ -1,4 +1,4 @@
-import type { GoogleAppType, GoogleClientConfig, GoogleClientView } from "@shared/types";
+import type { GoogleAppType, GoogleClientConfig, GoogleClientSaveResult, GoogleClientView } from "@shared/types";
 import { CheckCircle2Icon } from "lucide-react";
 import { useState } from "react";
 import { ErrorAlert } from "@/components/common";
@@ -14,8 +14,8 @@ import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
 import { rememberClientRedirect } from "./redirect-notice";
 
-/** Last characters of the saved secret, when the server reports them (newer servers). */
-export const secretHintOf = (v: GoogleClientView | undefined) => (v as (GoogleClientView & { secretHint?: string | null }) | undefined)?.secretHint ?? null;
+/** Last characters of the saved secret (to recognize which one is saved). */
+export const secretHintOf = (v: GoogleClientView | undefined) => v?.secretHint ?? null;
 
 export const CLIENT_ID_RE = /^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/;
 
@@ -48,7 +48,7 @@ export function ClientForm({
   /** When given (from the wizard), these aren't editable here. */
   projectId?: string;
   appType?: GoogleAppType;
-  onSaved?: (v: GoogleClientView) => void;
+  onSaved?: (v: GoogleClientSaveResult) => void;
   submitLabel?: string;
   onCancel?: () => void;
 }) {
@@ -60,7 +60,7 @@ export function ClientForm({
   const hasSecret = !!view?.hasSecret;
 
   const save = useApiMutation({
-    mutationFn: (cfg: GoogleClientConfig) => api<GoogleClientView>("/api/google/client", { method: "PUT", body: cfg }),
+    mutationFn: (cfg: GoogleClientConfig) => api<GoogleClientSaveResult>("/api/google/client", { method: "PUT", body: cfg }),
     invalidate: [keys.googleClient, keys.setupState],
     success: "OAuth client saved",
     errorTitle: false,

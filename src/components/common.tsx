@@ -301,6 +301,22 @@ export function ExternalLink({ href, children, className }: { href: string; chil
   );
 }
 
+/** Turns the https:// URLs in a server hint into links (they're deep links to the fix). */
+export function linkify(text: string): React.ReactNode {
+  const parts = text.split(/(https:\/\/[^\s)]+[^\s).,;:])/);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    i % 2 ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="break-all underline underline-offset-3">
+        {part}
+        <span className="sr-only"> (opens in a new tab)</span>
+      </a>
+    ) : (
+      part
+    ),
+  );
+}
+
 /** Server error, rendered prominently with its remediation hint. */
 export function ErrorAlert({
   error,
@@ -320,7 +336,7 @@ export function ErrorAlert({
       <AlertTitle>{title ?? message}</AlertTitle>
       <AlertDescription>
         {title && <p>{message}</p>}
-        {hint && <p className="text-foreground/80">{hint}</p>}
+        {hint && <p className="text-foreground/80">{linkify(hint)}</p>}
         {children}
       </AlertDescription>
     </Alert>

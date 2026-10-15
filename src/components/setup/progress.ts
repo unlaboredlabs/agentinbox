@@ -40,6 +40,9 @@ const KEY = `agentinbox.setup:${typeof window === "undefined" ? "" : window.loca
 const listeners = new Set<() => void>();
 let cache: SetupDraft | null = null;
 
+/** The current draft outside React (event handlers). */
+export const readDraft = (): SetupDraft => read();
+
 function read(): SetupDraft {
   if (cache) return cache;
   try {

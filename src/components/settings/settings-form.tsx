@@ -1,8 +1,8 @@
 import { useState } from "react";
-import type { IngestMode, Settings, SystemInfo } from "@shared/types";
+import type { GoogleClientView, IngestMode, Settings, SystemInfo } from "@shared/types";
 import { useForm } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertTriangleIcon, InfoIcon } from "lucide-react";
+import { InfoIcon } from "lucide-react";
 import { toast } from "sonner";
 import { ChipsInput } from "@/components/chips-input";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,11 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { RedirectNotice, rememberRedirectBeforeChange } from "@/components/google/redirect-notice";
+import { readDraft } from "@/components/setup/progress";
+import { UrlVerdict } from "@/components/setup/step-url";
 import { api, toastError } from "@/lib/api";
+import { addressLabel, analyzeUrl, isLoopbackOrigin, publicUrlError } from "@/lib/public-url";
 import { keys } from "@/lib/queries";
 
 interface FormValues {
@@ -49,35 +53,12 @@ const fromForm = (v: FormValues): Settings => ({
   pairingEnabled: v.pairingEnabled,
 });
 
-// Mirrors the server's validation (server/settings.ts) so mistakes show before saving.
-export function publicUrlError(v: string): string | undefined {
-  let url: URL;
-  try {
-    url = new URL(v.trim());
-  } catch {
-    return "Enter a full URL, e.g. https://mail.example.com or http://localhost:8425";
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return "Use http or https.";
-  if (url.search || url.hash) return "Leave out any ?query or #fragment.";
-  return undefined;
-}
-
 const intError = (label: string, min: number, max: number) => (v: string) => {
   if (!/^\d+$/.test(v.trim())) return `${label} must be a whole number.`;
   const n = Number(v);
   if (n < min || n > max) return `${label} must be between ${min.toLocaleString()} and ${max.toLocaleString()}.`;
   return undefined;
 };
-
-/** True when the URL is plain http on a host other than localhost: Google can't redirect there. */
-export function needsPasteMode(publicUrl: string) {
-  try {
-    const u = new URL(publicUrl);
-    return u.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
-  } catch {
-    return false;
-  }
-}
 
 const allowlistError = (v: string) => (v.length > 253 ? "too long" : /[/]/.test(v) && !/^[\d.:a-f]+\/\d{1,3}$/i.test(v) ? "use a hostname, IP or CIDR like 10.0.0.0/8" : null);
 
@@ -91,6 +72,8 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         Object.entries(next).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(settings[k as keyof Settings])),
       ) as Partial<Settings>;
       try {
+        // The OAuth client was registered with the current redirect URI: remember it so the new one gets flagged.
+        if (patch.publicUrl !== undefined) rememberRedirectBeforeChange(qc.getQueryData<GoogleClientView>(keys.googleClient), readDraft().clientRedirectUri);
         const saved = await api<Settings>("/api/settings", { method: "PATCH", body: patch });
         qc.setQueryData(keys.settings, saved);
         for (const k of [keys.system, keys.googleClient, keys.setupState]) void qc.invalidateQueries({ queryKey: k });
@@ -139,27 +122,30 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
                 />
                 {!field.state.meta.isValid ? (
                   <FieldError>{field.state.meta.errors.join(" ")}</FieldError>
-                ) : needsPasteMode(field.state.value) ? (
-                  <FieldDescription className="flex items-start gap-1.5">
-                    <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
-                    <span>
-                      Plain http on a non-localhost address: Google can't redirect back here after sign-in, so connecting accounts uses paste mode
-                      (you paste the address you land on). Use https to avoid that.
-                    </span>
-                  </FieldDescription>
                 ) : (
-                  <FieldDescription>MCP endpoint: {field.state.value.replace(/\/+$/, "")}/mcp</FieldDescription>
+                  <FieldDescription>MCP endpoint: {field.state.value.trim().replace(/\/+$/, "")}/mcp</FieldDescription>
                 )}
                 {system && system.addresses.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs text-muted-foreground">
-                    <span>This machine:</span>
-                    {system.addresses.map((a) => (
-                      <Button key={a} type="button" size="xs" variant="outline" className="font-mono" onClick={() => field.handleChange(a)}>
-                        {a}
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1" role="group" aria-label="Addresses this server is reachable at">
+                    {[...new Set([window.location.origin, ...system.addresses])].map((a) => (
+                      <Button
+                        key={a}
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-auto flex-col items-start gap-0 py-1 text-left"
+                        onClick={() => field.handleChange(a)}
+                      >
+                        <span className="text-[11px] font-normal text-muted-foreground">{addressLabel(a, window.location.origin)}</span>
+                        <span className="font-mono text-xs">{a}</span>
                       </Button>
                     ))}
                   </div>
                 )}
+                {field.state.meta.isValid && analyzeUrl(field.state.value) && (
+                  <UrlVerdict analysis={analyzeUrl(field.state.value)!} browserRemote={!isLoopbackOrigin(window.location.origin)} className="mt-1" />
+                )}
+                <RedirectNotice className="mt-2" />
               </Field>
             )}
           </form.Field>

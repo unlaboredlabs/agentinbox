@@ -40,7 +40,14 @@ function AppLayout() {
 
   return (
     <StreamProvider>
-      <SidebarProvider>
+      {/* Tablets get the sidebar collapsed (it's a toggle away), so content isn't squeezed. */}
+      <SidebarProvider defaultOpen={window.matchMedia("(min-width: 1024px)").matches}>
+        <a
+          href="#main"
+          className="sr-only z-50 rounded-md bg-background px-3 py-2 text-sm font-medium focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:ring-2 focus:ring-ring"
+        >
+          Skip to content
+        </a>
         <AppSidebar />
         <SidebarInset className="min-w-0">
           <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 rounded-t-xl border-b bg-background/80 px-4 backdrop-blur">
@@ -49,7 +56,7 @@ function AppLayout() {
             <ConnectionIndicator />
             <ThemeToggle />
           </header>
-          <main className="mx-auto w-full max-w-6xl min-w-0 flex-1 space-y-6 p-4 md:p-6 lg:p-8">
+          <main id="main" tabIndex={-1} className="mx-auto w-full max-w-6xl min-w-0 flex-1 space-y-6 p-4 outline-none md:p-6 lg:p-8">
             <Outlet />
           </main>
         </SidebarInset>

@@ -1,8 +1,10 @@
+import type { GoogleClientCheck } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangleIcon, CheckCircle2Icon, InfoIcon } from "lucide-react";
 import { useState } from "react";
 import { ErrorAlert } from "@/components/common";
 import { ClientForm, secretHintOf } from "@/components/google/client-form";
+import { ClientCheckResult } from "@/components/google/client-check";
 import { ClientImport } from "@/components/google/client-import";
 import { RedirectNotice } from "@/components/google/redirect-notice";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -22,6 +24,8 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
   const appType = state?.googleAppType ?? client.data?.appType ?? draft.appType ?? undefined;
   const configured = !!client.data?.clientId && !!client.data.hasSecret;
   const [manual, setManual] = useState(false);
+  // What Google said about the client right after it was saved (import or manual), and on "Check again".
+  const [check, setCheck] = useState<GoogleClientCheck>();
   const reusing = draft.projectMode === "existing";
   const v = client.data;
 
@@ -108,8 +112,14 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
                   </span>
                 </p>
               )}
-              <ClientImport appType={appType} expectedProjectId={project || undefined} onNeedsManual={() => setManual(true)} />
-              <SetupWarnings filter={(w) => !["redirect_uri_missing", "testing_mode", "sign_in_expires", "needs_reauth", "app_type_mismatch", "pubsub_failing"].includes(w.code)} />
+              <ClientImport
+                appType={appType}
+                expectedProjectId={project || undefined}
+                onNeedsManual={() => setManual(true)}
+                onImported={(r) => setCheck(r.check)}
+              />
+              {configured && <ClientCheckResult check={check} view={v} onChecked={setCheck} />}
+              {!check && <SetupWarnings filter={(w) => w.code === "client_invalid" || w.code === "client_secret_invalid"} />}
               <Disclosure
                 key={manual ? "open" : "closed"}
                 defaultOpen={manual}
@@ -123,7 +133,13 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
                   Open Clients
                 </CloudLink>
                 <div className="max-w-xl pt-1 text-foreground">
-                  <ClientForm view={v} projectId={project || undefined} appType={appType} submitLabel={configured ? "Replace client" : "Save client"} />
+                  <ClientForm
+                    view={v}
+                    projectId={project || undefined}
+                    appType={appType}
+                    submitLabel={configured ? "Replace client" : "Save client"}
+                    onSaved={(r) => setCheck(r.check)}
+                  />
                 </div>
               </Disclosure>
             </GuideStep>
