@@ -34,3 +34,13 @@ export const EXTRA_SCOPE_SETS = { pubsub: [PUBSUB_SCOPE], calendar: CALENDAR_SCO
 export const missingScopes = (granted: readonly string[], wanted: readonly string[]): string[] => wanted.filter((s) => !granted.includes(s));
 
 export const hasScopes = (granted: readonly string[], wanted: readonly string[]): boolean => missingScopes(granted, wanted).length === 0;
+
+/** What each calendar scope lets agentinbox do, in the words used to report unticked permissions. */
+export const CALENDAR_SCOPE_WORDS: Record<string, string> = {
+  [CALENDAR_EVENTS_SCOPE]: "view and edit events",
+  [CALENDAR_LIST_SCOPE]: "see the list of calendars",
+  [CALENDAR_FREEBUSY_SCOPE]: "see when people are free or busy",
+};
+
+/** "view and edit events, see the list of calendars" for missing calendar scopes. */
+export const describeScopes = (scopes: readonly string[]): string => scopes.map((s) => CALENDAR_SCOPE_WORDS[s] ?? s).join(", ");

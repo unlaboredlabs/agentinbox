@@ -15,6 +15,13 @@ const ProvisionInput = z.object({
   accountId: z.string().trim().min(1).optional(),
 });
 
+const CalendarSetupInput = z.object({
+  /** Turn Calendar on (start "Add Google Calendar") or off (connects ask for mail only again). */
+  enabled: z.boolean().optional(),
+  /** Hide (or show again) the calendar_not_added notice. */
+  dismissed: z.boolean().optional(),
+});
+
 const ClientInput = z.object({
   clientId: z.string().trim().min(1, "Client ID is required"),
   clientSecret: z.string().optional(),
@@ -22,7 +29,10 @@ const ClientInput = z.object({
   appType: z.enum(["internal", "external"]),
 });
 
-/** GET/PUT /google/client, POST /google/client/import, POST /google/pubsub/provision, POST /google/pubsub/test. */
+/**
+ * GET/PUT /google/client, POST /google/client/import, POST /google/pubsub/provision, POST /google/pubsub/test,
+ * GET/PATCH /google/calendar, POST /google/calendar/check.
+ */
 export function googleApi(ctx: AppContext) {
   const r = router();
 
@@ -115,6 +125,13 @@ export function googleApi(ctx: AppContext) {
       throw asHttpError(err);
     }
   });
+
+  r.get("/google/calendar", (c) => c.json(ctx.calendar.setupState()));
+
+  // Audited inside calendar.updateSetup.
+  r.patch("/google/calendar", async (c) => c.json(ctx.calendar.updateSetup(await readBody(c, CalendarSetupInput))));
+
+  r.post("/google/calendar/check", async (c) => c.json(await ctx.calendar.check()));
 
   return r;
 }
