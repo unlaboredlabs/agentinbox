@@ -37,7 +37,10 @@ export interface FeedOptions {
 
 export interface FeedResult {
   events: MailEvent[];
-  /** Pass as `after` to continue; equals the last returned seq (or `after` when empty). */
+  /**
+   * Pass as `after` to continue (or to `ack`): the highest seq examined, so events the agent can't
+   * see are skipped past. Equals `after` when nothing new exists.
+   */
   cursor: number;
   /** The agent's acknowledged position. */
   ackedSeq: number;
