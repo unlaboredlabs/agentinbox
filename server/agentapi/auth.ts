@@ -4,6 +4,7 @@ import { clientIp, lockedOut } from "../auth/index.ts";
 import { BAN_MS, type LoginLimiter } from "../auth/lockout.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
+import { clientKey } from "./ratelimit.ts";
 
 /** AppEnv plus the hash of the key the request authenticated with (streams re-check it on revocation). */
 export type AgentApiEnv = { Variables: AppEnv["Variables"] & { keyHash: string } };
@@ -14,20 +15,22 @@ export const bearer = (header: string | undefined): string | null => {
 };
 
 /**
- * Bearer `aib_…` auth for /agent/v1. Bad keys count toward a per-IP lockout like admin login
- * (5 distinct wrong keys → 15 min); a locked-out address is refused even with a valid key, so the
- * lockout can't be used as an oracle. Other addresses are unaffected. Success does not reset the count.
+ * Bearer `aib_…` auth for /agent/v1. The key is checked first and a valid key is never refused, so
+ * bogus keys from a shared address (NAT, proxy) can't lock out real listeners. Only failures are
+ * limited: 5 distinct wrong keys from one client (IPv4 address or IPv6 /64) → 429 for 15 minutes.
+ * Keys carry 160 bits of entropy, so the lockout bounds noise rather than guarding a guessable secret.
  */
 export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): MiddlewareHandler<AgentApiEnv> {
   return async (c, next) => {
-    const limiter = limiterOf();
-    const ip = clientIp(c, ctx.config.trustProxy);
-    const banned = limiter.bannedMinutes(ip);
-    if (banned) return lockedOut(c, banned);
     const key = bearer(c.req.header("authorization"));
     const principal = key ? ctx.policy.authenticate(key) : null;
     if (!principal) {
-      if (key && limiter.fail(ip, key)) {
+      const limiter = limiterOf();
+      const ip = clientIp(c, ctx.config.trustProxy);
+      const source = clientKey(ip);
+      const banned = limiter.bannedMinutes(source);
+      if (banned) return lockedOut(c, banned);
+      if (key && limiter.fail(source, key)) {
         ctx.audit.record({
           actorType: "system",
           action: "agent_api.auth",

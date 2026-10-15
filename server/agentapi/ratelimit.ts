@@ -1,4 +1,35 @@
+import { isIPv6 } from "node:net";
 import type { Context } from "hono";
+
+/** Tracked keys per limiter; the least recently used is dropped beyond this. */
+export const MAX_KEYS = 10_000;
+
+/**
+ * Limiter key for a client address: IPv4 as is (also when IPv4-mapped), IPv6 by /64, since one
+ * client usually owns the whole prefix. Same normalization as `clientKey` in server/auth/lockout.ts
+ * on feat/platform (switch to that export once both are on main). Idempotent.
+ */
+export function clientKey(ip: string): string {
+  const addr = ip.replace(/%.*$/, "").toLowerCase();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
+  if (mapped) return mapped[1]!;
+  if (!isIPv6(addr)) return addr;
+  const [head = "", tail] = addr.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(8 - left.length - right.length).fill("0"), ...right];
+  return `${groups
+    .slice(0, 4)
+    .map((g) => g.replace(/^0+(?=.)/, ""))
+    .join(":")}::/64`;
+}
+
+/** Map order doubles as LRU order: re-insert on use, evict from the front. */
+function touch<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value!);
+}
 
 export interface Take {
   ok: boolean;
@@ -8,43 +39,72 @@ export interface Take {
   retryAfter: number;
 }
 
-/** Sliding-window counter per key (client IP): at most `limit` hits per `windowMs`. In memory. */
+interface Entry {
+  hits: number[];
+  denied: boolean;
+}
+
+/**
+ * Sliding-window counter per key: at most `limit` hits per `windowMs`. In memory, size-capped LRU;
+ * each call drops a couple of stale entries from the cold end, so there are no full scans.
+ */
 export class RateLimiter {
-  private readonly hits = new Map<string, number[]>();
-  private readonly denied = new Set<string>();
+  private readonly entries = new Map<string, Entry>();
 
   constructor(
     private readonly limit: number,
     private readonly windowMs: number,
     private readonly clock: () => number = Date.now,
+    private readonly maxKeys = MAX_KEYS,
   ) {}
 
   /** Counts a hit unless the key is over the limit (refused hits are not counted). */
   take(key: string): Take {
     const t = this.clock();
-    const recent = (this.hits.get(key) ?? []).filter((ts) => t - ts < this.windowMs);
-    if (recent.length >= this.limit) {
-      this.hits.set(key, recent);
-      const firstDenial = !this.denied.has(key);
-      this.denied.add(key);
-      return { ok: false, firstDenial, retryAfter: Math.max(1, Math.ceil((recent[0]! + this.windowMs - t) / 1000)) };
+    this.evictStale(t);
+    const entry = this.entries.get(key) ?? { hits: [], denied: false };
+    entry.hits = entry.hits.filter((ts) => t - ts < this.windowMs);
+    let result: Take;
+    if (entry.hits.length >= this.limit) {
+      result = { ok: false, firstDenial: !entry.denied, retryAfter: Math.max(1, Math.ceil((entry.hits[0]! + this.windowMs - t) / 1000)) };
+      entry.denied = true;
+    } else {
+      entry.hits.push(t);
+      entry.denied = false;
+      result = { ok: true, firstDenial: false, retryAfter: 0 };
     }
-    recent.push(t);
-    this.hits.set(key, recent);
-    this.denied.delete(key);
-    this.sweep(t);
-    return { ok: true, firstDenial: false, retryAfter: 0 };
+    touch(this.entries, key, entry, this.maxKeys);
+    return result;
   }
 
-  /** Bounds memory under a spray of addresses. */
-  private sweep(t: number): void {
-    if (this.hits.size < 1000) return;
-    for (const [key, list] of this.hits) {
-      if (!list.length || t - list.at(-1)! >= this.windowMs) {
-        this.hits.delete(key);
-        this.denied.delete(key);
-      }
+  get size(): number {
+    return this.entries.size;
+  }
+
+  private evictStale(t: number): void {
+    for (let i = 0; i < 2; i++) {
+      const first = this.entries.entries().next().value;
+      if (!first || t - (first[1].hits.at(-1) ?? 0) < this.windowMs) return;
+      this.entries.delete(first[0]);
     }
+  }
+}
+
+/** True at most once per key per window: for auditing repeated refusals once. Size-capped LRU. */
+export class OncePer {
+  private readonly seen = new Map<string, number>();
+
+  constructor(
+    private readonly windowMs: number,
+    private readonly clock: () => number = Date.now,
+  ) {}
+
+  first(key: string): boolean {
+    const t = this.clock();
+    const last = this.seen.get(key);
+    if (last !== undefined && t - last < this.windowMs) return false;
+    touch(this.seen, key, t, MAX_KEYS);
+    return true;
   }
 }
 

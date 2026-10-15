@@ -112,7 +112,13 @@ export function createPolicyService(ctx: AppContext): PolicyService {
   });
 
   /** Live listener streams re-check access on this (after the change is committed). */
-  const changed = (agentId: string, reason: BusEvents["agent"][0]["reason"]) => ctx.bus.emit("agent", { agentId, reason });
+  const changed = (agentId: string, reason: BusEvents["agent"][0]["reason"]) => {
+    try {
+      ctx.bus.emit("agent", { agentId, reason });
+    } catch (err) {
+      ctx.log.error("Bus listener failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  };
 
   return {
     authenticate(apiKey: string): AgentPrincipal | null {

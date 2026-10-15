@@ -31,7 +31,11 @@ async function setup(opts: AgentApiOptions = {}) {
     start: (ip = "10.0.0.1", body: unknown = { name: "Hermes on laptop", client: { hostname: "laptop", tool: "hermes" } }) =>
       r("/agent/v1/pairings", { method: "POST", headers: ipHeaders(ip), json: body }),
     poll: (deviceCode: string, ip = "10.0.0.1") => r("/agent/v1/pairings/poll", { method: "POST", headers: ipHeaders(ip), json: { deviceCode } }),
-    approve: (id: string, body: unknown = { grants: [readGrant("acc_a")] }) => r(`/api/pairings/${id}/approve`, { method: "POST", cookie, headers: CSRF, json: body }),
+    /** Sends the request's real user code unless the body has one. */
+    approve: (id: string, body: Record<string, unknown> = { grants: [readGrant("acc_a")] }) => {
+      const userCode = h!.ctx.db.get<{ user_code: string }>("SELECT user_code FROM pairings WHERE id = ?", id)?.user_code ?? "XXXX-XXXX";
+      return r(`/api/pairings/${id}/approve`, { method: "POST", cookie, headers: CSRF, json: { userCode, ...body } });
+    },
     deny: (id: string, note?: string) => r(`/api/pairings/${id}/deny`, { method: "POST", cookie, headers: CSRF, json: { note } }),
     list: async (status?: string): Promise<PairingRequest[]> => json(await r(`/api/pairings${status ? `?status=${status}` : ""}`, { cookie })),
     actions: (action: string) => h!.ctx.audit.list({ action }).items,
@@ -103,9 +107,13 @@ describe("pairing poll", () => {
     const s = await setup();
     const p = await started(s);
     expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "pending" });
-    expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "slow_down", interval: 3 });
+    // RFC 8628: each slow_down adds 5 s, and the longer interval is enforced from then on.
+    expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "slow_down", interval: 8 });
     s.clock.advance(3000);
+    expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "slow_down", interval: 13 });
+    s.clock.advance(13_000);
     expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "pending" });
+    s.clock.advance(13_000);
 
     const approved = await s.approve(p.id, { name: "Hermes", grants: [readGrant("acc_a")] });
     expect(approved.status).toBe(200);
@@ -119,7 +127,7 @@ describe("pairing poll", () => {
     expect(row.api_key_enc).not.toMatch(/aib_/);
     expect((await s.approve(p.id)).status).toBe(409);
 
-    s.clock.advance(3000);
+    s.clock.advance(13_000);
     const delivered = await json(await s.poll(p.deviceCode));
     expect(delivered).toMatchObject({ status: "approved", agent: { id: agent.id, name: "Hermes" } });
     expect(delivered.apiKey).toMatch(/^aib_/);
@@ -131,7 +139,7 @@ describe("pairing poll", () => {
     expect(after.api_key_enc).toBeNull();
     expect(after.delivered_at).not.toBeNull();
 
-    s.clock.advance(3000);
+    s.clock.advance(13_000);
     expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "consumed" });
     expect(s.actions("pairing.approved")[0]).toMatchObject({ actorType: "admin", target: p.id, detail: { agentId: agent.id } });
     expect(s.actions("pairing.key_delivered")[0]).toMatchObject({ actorType: "agent", actorId: agent.id, target: p.id });
@@ -201,8 +209,119 @@ describe("pairing poll", () => {
     const p = await started(s);
     const agent = await json(await s.approve(p.id));
     s.h.ctx.policy.deleteAgent(agent.id);
-    expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "expired" });
+    // Wiped right away (bus "agent"), not only at the next poll.
     expect(s.h.ctx.db.get<{ api_key_enc: string | null }>("SELECT api_key_enc FROM pairings WHERE id = ?", p.id)!.api_key_enc).toBeNull();
+    expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "expired" });
+    expect(s.actions("pairing.expired")[0]).toMatchObject({ target: p.id, detail: { reason: "agent_deleted" } });
+  });
+
+  for (const [what, takeOver, reason] of [
+    ["rotates its key", (s: Awaited<ReturnType<typeof setup>>, id: string) => s.h.ctx.policy.rotateKey(id), "key_rotated"],
+    ["edits it", (s: Awaited<ReturnType<typeof setup>>, id: string) => s.h.ctx.policy.updateAgent(id, { name: "Set up by hand" }), "agent_updated"],
+  ] as const) {
+    it(`keeps the agent when the admin ${what} before the key is collected`, async () => {
+      const s = await setup();
+      const p = await started(s);
+      const agent = await json(await s.approve(p.id));
+      takeOver(s, agent.id);
+      const row = s.h.ctx.db.get<{ api_key_enc: string | null; status: string }>("SELECT api_key_enc, status FROM pairings WHERE id = ?", p.id)!;
+      expect(row).toEqual({ api_key_enc: null, status: "approved" });
+      expect(await json(await s.poll(p.deviceCode))).toEqual({ status: "consumed" });
+      s.clock.advance(20 * MIN);
+      sweepPairings(s.h.ctx);
+      expect(s.h.ctx.policy.getAgent(agent.id)).not.toBeNull();
+      expect(s.actions("pairing.key_withdrawn")[0]).toMatchObject({ target: p.id, detail: { reason, agentId: agent.id } });
+    });
+  }
+
+  it("never deletes an agent whose key no longer matches the uncollected one", async () => {
+    const s = await setup();
+    const p = await started(s);
+    const agent = await json(await s.approve(p.id));
+    // A key change that bypassed the bus: the sweep compares hashes before deleting.
+    s.h.ctx.db.run("UPDATE agents SET key_hash = 'other' WHERE id = ?", agent.id);
+    s.clock.advance(20 * MIN);
+    expect(sweepPairings(s.h.ctx)).toBe(1);
+    expect(s.h.ctx.policy.getAgent(agent.id)).not.toBeNull();
+    expect(s.h.ctx.db.get<{ api_key_enc: string | null }>("SELECT api_key_enc FROM pairings WHERE id = ?", p.id)!.api_key_enc).toBeNull();
+    expect(s.actions("pairing.expired")[0]).toMatchObject({ detail: { agentDeleted: null } });
+  });
+});
+
+describe("approval checks", () => {
+  it("requires the user code from the terminal, ignoring case and dashes", async () => {
+    const s = await setup();
+    const p = await started(s);
+    expect((await s.approve(p.id, { userCode: "", grants: [readGrant("acc_a")] })).status).toBe(400);
+    const wrong = await s.approve(p.id, { userCode: "AAAA-AAAA", grants: [readGrant("acc_a")] });
+    expect(wrong.status).toBe(409);
+    expect((await json(wrong)).error).toMatchObject({ code: "user_code_mismatch", message: expect.stringMatching(/doesn't match/) });
+    expect(s.actions("pairing.approved")[0]).toMatchObject({ outcome: "denied", reason: "user_code_mismatch", target: p.id });
+    expect(s.h.ctx.policy.listAgents()).toHaveLength(0);
+    const ok = await s.approve(p.id, { userCode: ` ${p.userCode.replace("-", "").toLowerCase()} `, grants: [readGrant("acc_a")] });
+    expect(ok.status).toBe(200);
+  });
+
+  it("strips control and format characters from requester text and normalizes the tool", async () => {
+    const s = await setup();
+    const res = await s.start("10.0.0.1", {
+      name: "Claude Code on wynn-mbp\u202e\u200b\n[verified]",
+      description: "\u001b[31mred\u0007",
+      requested: { sendMode: "direct", reason: "needs\u2028mail\u{E0041}" },
+      client: { hostname: "wynn-mbp\u0007\u001b[31m", tool: "anything-not-in-AgentTool" },
+    });
+    expect(res.status).toBe(200);
+    const [p] = await s.list();
+    expect(p).toMatchObject({
+      name: "Claude Code on wynn-mbp[verified]",
+      description: "[31mred",
+      requested: { sendMode: "direct", reason: "needsmail" },
+      client: { hostname: "wynn-mbp[31m", tool: "other" },
+    });
+    expect((await s.start("10.0.0.2", { name: "\u200b\u0007" })).status).toBe(400);
+    // `requested` is informational: approval takes only the grants the human chose.
+    const agent = await json(await s.approve(p!.id));
+    expect(agent.grants.map((g: { sendMode: string }) => g.sendMode)).toEqual(["draft_only"]);
+  });
+});
+
+describe("browser and DNS-rebinding guard", () => {
+  it("refuses browser requests, non-JSON bodies and foreign Host names before doing anything", async () => {
+    const s = await setup({ maxPendingPerSource: 10 });
+    const body = JSON.stringify({ name: "Claude Code on wynn-mbp" });
+    const post = (headers: Record<string, string>, url = "/agent/v1/pairings") => s.h.app.request(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+    const cases: [Record<string, string>, number, string][] = [
+      [{ origin: "http://evil.example" }, 403, "browser_request"],
+      [{ "sec-fetch-site": "same-origin" }, 403, "browser_request"],
+      [{ "content-type": "text/plain;charset=UTF-8" }, 415, "unsupported_media_type"],
+      [{ host: "evil.example:8425" }, 421, "unknown_host"],
+    ];
+    for (let round = 0; round < 4; round++) {
+      for (const [headers, status, code] of cases) {
+        const res = await post(headers);
+        expect(res.status).toBe(status);
+        expect((await json(res)).error.code).toBe(code);
+      }
+    }
+    expect((await post({ origin: "http://evil.example" }, "/agent/v1/pairings/poll")).status).toBe(403);
+    expect((await s.h.app.request("/agent/v1/me", { headers: { "sec-fetch-site": "cross-site" } })).status).toBe(403);
+    expect(s.h.ctx.db.all("SELECT * FROM pairings")).toHaveLength(0);
+    // None of that spent the address's start budget.
+    for (const host of ["localhost:8425", "127.0.0.1", "[::1]:8425", new URL(s.h.ctx.settings.publicUrl()).host]) {
+      expect((await post({ host }, "/agent/v1/pairings")).status).toBe(200);
+    }
+  });
+
+  it("accepts the public URL host and local interface addresses", async () => {
+    const { networkInterfaces } = await import("node:os");
+    const { hostAllowed } = await import("../server/agentapi/guard.ts");
+    const s = await setup();
+    s.h.ctx.settings.update({ publicUrl: "https://mail.example.com" });
+    expect(hostAllowed(s.h.ctx, "mail.example.com")).toBe(true);
+    expect(hostAllowed(s.h.ctx, "evil.example")).toBe(false);
+    expect(hostAllowed(s.h.ctx, "203.0.113.9")).toBe(false);
+    const lan = Object.values(networkInterfaces()).flat().find((a) => a && !a.internal);
+    if (lan) expect(hostAllowed(s.h.ctx, lan.address.toLowerCase())).toBe(true);
   });
 });
 
@@ -237,6 +356,28 @@ describe("pairing limits", () => {
     expect((await s.start("10.0.0.4")).status).toBe(200);
   });
 
+  it("caps pending requests per source, grouping IPv6 by /64, and audits the refusals once", async () => {
+    const s = await setup({ startsPerHour: 100 });
+    for (let i = 1; i <= 3; i++) expect((await s.start(`2001:db8:1:2::${i}`)).status).toBe(200);
+    for (let i = 4; i <= 9; i++) {
+      const res = await s.start(`2001:db8:1:2:abcd::${i}`);
+      expect(res.status).toBe(429);
+      expect((await json(res)).error.code).toBe("too_many_pending");
+    }
+    expect((await s.start("2001:db8:1:3::1")).status).toBe(200);
+    expect(s.actions("pairing.requested").filter((e) => e.outcome === "denied")).toMatchObject([{ reason: "pending_cap_source" }]);
+  });
+
+  it("limits pairing starts globally", async () => {
+    const s = await setup({ globalStartsPerHour: 2 });
+    expect((await s.start("10.0.0.1")).status).toBe(200);
+    expect((await s.start("10.0.0.2")).status).toBe(200);
+    const res = await s.start("10.0.0.3");
+    expect(res.status).toBe(429);
+    expect((await s.start("10.0.0.4")).status).toBe(429);
+    expect(s.actions("pairing.requested").filter((e) => e.outcome === "denied")).toMatchObject([{ reason: "global_rate_limit" }]);
+  });
+
   it("refuses pairing when it is turned off", async () => {
     const s = await setup();
     s.h.ctx.settings.update({ pairingEnabled: false });
@@ -253,20 +394,11 @@ describe("pairing limits", () => {
     const s = await setup();
     const p = await started(s, "10.0.0.9");
     for (let i = 0; i < 5; i++) expect(await json(await s.poll(`guess${i}`, "10.0.0.1"))).toEqual({ status: "expired" });
-    const locked = await s.poll(p.deviceCode, "10.0.0.1");
+    const locked = await s.poll("guess-more", "10.0.0.1");
     expect(locked.status).toBe(429);
     expect((await json(locked)).error.code).toBe("locked_out");
-    expect(await json(await s.poll(p.deviceCode, "10.0.0.9"))).toEqual({ status: "pending" });
+    // A real device code is never refused, even from the locked-out address.
+    expect(await json(await s.poll(p.deviceCode, "10.0.0.1"))).toEqual({ status: "pending" });
     expect(s.actions("pairing.poll")[0]).toMatchObject({ outcome: "denied", reason: "lockout" });
-  });
-
-  it("rate limits polls per client IP", async () => {
-    const s = await setup({ pollsPerMinute: 2 });
-    const p = await started(s);
-    expect((await s.poll(p.deviceCode)).status).toBe(200);
-    expect((await s.poll(p.deviceCode)).status).toBe(200);
-    const limited = await s.poll(p.deviceCode);
-    expect(limited.status).toBe(429);
-    expect(s.actions("pairing.poll")[0]).toMatchObject({ outcome: "denied", reason: "rate_limit" });
   });
 });

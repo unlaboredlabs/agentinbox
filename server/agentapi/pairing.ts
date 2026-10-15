@@ -1,14 +1,17 @@
 import { randomInt } from "node:crypto";
 import { z } from "zod";
-import type { PairingPoll, PairingStart } from "../../shared/agent-api.ts";
+import type { AgentTool, PairingPoll, PairingStart } from "../../shared/agent-api.ts";
 import { type Agent, type ApprovePairingInput, CAPABILITIES, type PairingRequest, type PairingStatus, SEND_MODES } from "../../shared/types.ts";
+import type { AuditInput } from "../audit.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
+import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { json } from "../db/index.ts";
 import { grantInputSchema } from "../policy/grants.ts";
 import { badRequest, HttpError, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
+import { clientKey } from "./ratelimit.ts";
 
 export interface PairingOptions {
   clock?: () => number;
@@ -20,6 +23,8 @@ export interface PairingOptions {
   collectGraceMs?: number;
   /** Global cap on pending requests. Default 20. */
   maxPending?: number;
+  /** Pending requests per source (IPv4 address or IPv6 /64). Default 3. */
+  maxPendingPerSource?: number;
 }
 
 /** No 0/O, 1/I/L: easy to read aloud and compare. */
@@ -28,26 +33,38 @@ const USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const DEVICE_CODE_CHARS = 48;
 /** Slack for client timers and network jitter before a poll counts as too fast. */
 const POLL_JITTER_MS = 250;
+/** RFC 8628: each slow_down adds 5 s to the interval the client must keep. */
+const SLOW_DOWN_STEP_S = 5;
+const MAX_INTERVAL_S = 60;
 
 export const PAIRING_STATUSES: PairingStatus[] = ["pending", "approved", "denied", "expired"];
+const AGENT_TOOLS = ["claude-code", "codex", "cursor", "hermes", "other"] as const satisfies readonly AgentTool[];
+
+/**
+ * Requester-supplied text is shown to the approving human: drop control and format characters
+ * (ANSI escapes, BEL, newlines, zero-width, bidi overrides, tag characters) so it can't disguise itself.
+ */
+export const cleanText = (s: string): string => s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").trim();
+const text = (max: number, label = "Text") => z.string().transform(cleanText).pipe(z.string().max(max, `${label} must be at most ${max} characters`));
 
 export const pairingStartSchema = z.object({
-  name: z.string().trim().min(1, "Name is required").max(80, "Name must be at most 80 characters"),
-  description: z.string().trim().max(500).nullable().optional(),
+  name: z.string().transform(cleanText).pipe(z.string().min(1, "Name is required").max(80, "Name must be at most 80 characters")),
+  description: text(500, "Description").nullable().optional(),
+  /** Informational only: approval never pre-fills grants from it. */
   requested: z
     .object({
-      accounts: z.array(z.string().trim().min(1).max(320)).max(50).optional(),
+      accounts: z.array(text(320).pipe(z.string().min(1))).max(50).optional(),
       capabilities: z.array(z.enum(CAPABILITIES)).optional(),
       sendMode: z.enum(SEND_MODES).optional(),
-      reason: z.string().trim().max(500).optional(),
+      reason: text(500, "Reason").optional(),
     })
     .optional(),
   client: z
     .object({
-      hostname: z.string().max(255).optional(),
-      platform: z.string().max(50).optional(),
-      tool: z.string().max(40).optional(),
-      version: z.string().max(50).optional(),
+      hostname: text(255).optional(),
+      platform: text(50).optional(),
+      tool: z.enum(AGENT_TOOLS).catch("other").optional(),
+      version: text(50).optional(),
     })
     .optional(),
 });
@@ -55,14 +72,16 @@ export const pairingStartSchema = z.object({
 export const pollSchema = z.object({ deviceCode: z.string().min(1).max(200) });
 
 export const approveSchema = z.object({
-  name: z.string().trim().min(1).max(80).optional(),
-  grants: z
-    .array(grantInputSchema)
-    .min(1, "Grant access to at least one account")
-    .max(100) satisfies z.ZodType<ApprovePairingInput["grants"]>,
-});
+  /** The code shown in the agent's terminal, typed by the human: proves they approve that request. */
+  userCode: z.string().min(1, "Type the code shown in the agent's terminal").max(20),
+  name: z.string().transform(cleanText).pipe(z.string().min(1).max(80)).optional(),
+  grants: z.array(grantInputSchema).min(1, "Grant access to at least one account").max(100),
+}) satisfies z.ZodType<ApprovePairingInput>;
 
-export const denySchema = z.object({ note: z.string().trim().max(500).nullable().optional() });
+export const denySchema = z.object({ note: text(500, "Note").nullable().optional() });
+
+/** "k7qm 2xpd", "K7QM-2XPD" and "k7qm2xpd" compare equal. */
+const normalizeCode = (code: string) => code.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 interface PairingRow {
   id: string;
@@ -101,9 +120,10 @@ const toPairing = (r: PairingRow): PairingRequest => ({
 });
 
 export interface PairingService {
+  /** Base poll interval in seconds. */
   readonly intervalSeconds: number;
-  /** Whether the global cap on pending requests is reached. */
-  full(): boolean;
+  /** Which pending cap a new request from this source would exceed, if any. */
+  capReached(source: string): "global" | "source" | null;
   start(input: z.infer<typeof pairingStartSchema>, ip: string): PairingStart;
   /** Unknown device codes return null (the caller counts them toward the per-IP lockout). */
   poll(deviceCode: string): PairingPoll | null;
@@ -113,10 +133,13 @@ export interface PairingService {
   deny(id: string, note?: string | null): PairingRequest;
   /**
    * Expires overdue pending requests, and approved requests whose key was never collected: their
-   * key is wiped and the agent created on approval is deleted, so no undelivered credential lingers.
-   * Also prunes decided requests older than the retention period. Returns how many expired.
+   * key is wiped and the agent created on approval is deleted (unless an admin has since rotated
+   * its key and taken it over), so no undelivered credential lingers. Also prunes decided requests
+   * older than the retention period. Returns how many expired.
    */
   sweep(): number;
+  /** Bus "agent" listener: an admin rotating, editing or deleting the agent before the CLI collected the key. */
+  onAgentChange(change: BusEvents["agent"][0]): void;
 }
 
 export function createPairingService(ctx: AppContext, opts: PairingOptions = {}): PairingService {
@@ -126,7 +149,10 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
   const intervalSeconds = opts.intervalSeconds ?? 3;
   const graceMs = opts.collectGraceMs ?? 2 * 60_000;
   const maxPending = opts.maxPending ?? 20;
+  const maxPerSource = opts.maxPendingPerSource ?? 3;
   const iso = (ms = clock()) => new Date(ms).toISOString();
+  /** Interval each pairing must keep after slow_down responses (in memory; resets to the base on restart). */
+  const intervals = new Map<string, number>();
 
   const row = (id: string) => db.get<PairingRow>("SELECT * FROM pairings WHERE id = ?", id);
   const publish = (id: string) => {
@@ -138,9 +164,21 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
       ctx.log.error("Bus listener failed", { error: err instanceof Error ? err.message : String(err) });
     }
   };
+  const audit = (r: PairingRow, input: Omit<AuditInput, "target">) =>
+    ctx.audit.record({ target: r.id, ...input, detail: { userCode: r.user_code, name: r.name, ...input.detail } });
   const urls = () => {
     const base = ctx.settings.publicUrl();
     return { mcpUrl: `${base}/mcp`, skillUrl: `${base}/skill.md`, base };
+  };
+  /** The stored key is still the agent's current key (no rotation since approval). */
+  const keyIsCurrent = (r: PairingRow): boolean => {
+    if (!r.agent_id || !r.api_key_enc) return false;
+    const agent = db.get<{ key_hash: string }>("SELECT key_hash FROM agents WHERE id = ?", r.agent_id);
+    try {
+      return !!agent && agent.key_hash === sha256(ctx.crypto.decrypt(r.api_key_enc));
+    } catch {
+      return false;
+    }
   };
 
   function newUserCode(): string {
@@ -158,25 +196,29 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
     for (const r of db.all<PairingRow>("SELECT * FROM pairings WHERE status = 'pending' AND expires_at <= ?", t)) {
       if (!db.run("UPDATE pairings SET status = 'expired' WHERE id = ? AND status = 'pending'", r.id).changes) continue;
       expired++;
-      ctx.audit.record({ actorType: "system", action: "pairing.expired", target: r.id, outcome: "ok", detail: { userCode: r.user_code, name: r.name } });
+      audit(r, { actorType: "system", action: "pairing.expired", outcome: "ok", detail: { reason: "not_approved" } });
       publish(r.id);
     }
-    // Approved, but the CLI never came back for the key: remove the credential and its agent.
+    // Approved, but the CLI never came back for the key: remove the credential and, unless an admin
+    // took the agent over (rotated its key), the agent itself.
     for (const r of db.all<PairingRow>("SELECT * FROM pairings WHERE status = 'approved' AND api_key_enc IS NOT NULL AND expires_at <= ?", t)) {
+      const deleteAgent = keyIsCurrent(r);
       db.tx(() => {
         db.run("UPDATE pairings SET status = 'expired', api_key_enc = NULL WHERE id = ?", r.id);
-        if (r.agent_id) db.run("DELETE FROM agents WHERE id = ?", r.agent_id);
+        if (deleteAgent) db.run("DELETE FROM agents WHERE id = ?", r.agent_id);
       });
       expired++;
-      ctx.audit.record({
+      audit(r, {
         actorType: "system",
         action: "pairing.expired",
-        target: r.id,
         outcome: "ok",
-        detail: { userCode: r.user_code, name: r.name, keyCollected: false, agentDeleted: r.agent_id },
+        detail: { reason: "key_not_collected", keyCollected: false, agentDeleted: deleteAgent ? r.agent_id : null },
       });
-      if (r.agent_id) ctx.bus.emit("agent", { agentId: r.agent_id, reason: "deleted" });
+      if (deleteAgent) ctx.bus.emit("agent", { agentId: r.agent_id!, reason: "deleted" });
       publish(r.id);
+    }
+    for (const id of intervals.keys()) {
+      if (!db.get("SELECT 1 FROM pairings WHERE id = ? AND (status = 'pending' OR api_key_enc IS NOT NULL)", id)) intervals.delete(id);
     }
     const before = iso(clock() - ctx.settings.get().retentionDays * 86_400_000);
     db.run("DELETE FROM pairings WHERE status IN ('denied', 'expired', 'approved') AND api_key_enc IS NULL AND created_at < ?", before);
@@ -193,11 +235,31 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
     return r;
   }
 
+  /** Wipes an undelivered key, e.g. once the agent was deleted or taken over in the console. */
+  function withdrawKey(r: PairingRow, status: "approved" | "expired", reason: string): void {
+    // Taken over: stays approved and counts as handled (later polls say "consumed"), so the sweep leaves the agent alone.
+    const changes =
+      status === "approved"
+        ? db.run("UPDATE pairings SET api_key_enc = NULL, delivered_at = ? WHERE id = ? AND api_key_enc IS NOT NULL", iso(), r.id).changes
+        : db.run("UPDATE pairings SET api_key_enc = NULL, status = 'expired' WHERE id = ? AND api_key_enc IS NOT NULL", r.id).changes;
+    if (!changes) return;
+    intervals.delete(r.id);
+    audit(r, {
+      actorType: "system",
+      action: status === "expired" ? "pairing.expired" : "pairing.key_withdrawn",
+      outcome: "ok",
+      detail: { reason, agentId: r.agent_id },
+    });
+    publish(r.id);
+  }
+
   return {
     intervalSeconds,
 
-    full() {
-      return db.get<{ n: number }>("SELECT COUNT(*) AS n FROM pairings WHERE status = 'pending' AND expires_at > ?", iso())!.n >= maxPending;
+    capReached(source) {
+      const ips = db.all<{ ip: string | null }>("SELECT ip FROM pairings WHERE status = 'pending' AND expires_at > ?", iso());
+      if (ips.length >= maxPending) return "global";
+      return ips.filter((r) => clientKey(r.ip ?? "") === source).length >= maxPerSource ? "source" : null;
     },
 
     start(input, ip) {
@@ -220,13 +282,7 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
         iso(t),
         expiresAt,
       );
-      ctx.audit.record({
-        actorType: "system",
-        action: "pairing.requested",
-        target: id,
-        outcome: "ok",
-        detail: { userCode, name: input.name, ip, tool: input.client?.tool ?? null, hostname: input.client?.hostname ?? null },
-      });
+      audit(row(id)!, { actorType: "system", action: "pairing.requested", outcome: "ok", detail: { ip, tool: input.client?.tool ?? null, hostname: input.client?.hostname ?? null } });
       publish(id);
       return {
         deviceCode,
@@ -241,10 +297,14 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
       const found = db.get<PairingRow>("SELECT * FROM pairings WHERE device_code_hash = ?", sha256(deviceCode));
       if (!found) return null;
       const t = clock();
-      if (found.last_poll_at && t - Date.parse(found.last_poll_at) < intervalSeconds * 1000 - POLL_JITTER_MS) {
-        return { status: "slow_down", interval: intervalSeconds };
-      }
+      const interval = intervals.get(found.id) ?? intervalSeconds;
+      const tooFast = !!found.last_poll_at && t - Date.parse(found.last_poll_at) < interval * 1000 - POLL_JITTER_MS;
       db.run("UPDATE pairings SET last_poll_at = ? WHERE id = ?", iso(t), found.id);
+      if (tooFast) {
+        const next = Math.min(interval + SLOW_DOWN_STEP_S, MAX_INTERVAL_S);
+        intervals.set(found.id, next);
+        return { status: "slow_down", interval: next };
+      }
       if (found.expires_at <= iso(t)) sweep();
       const r = row(found.id)!;
       switch (r.status) {
@@ -258,16 +318,17 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
           break;
       }
       if (r.delivered_at) return { status: "consumed" };
-      const agent = r.agent_id ? db.get<{ id: string; name: string }>("SELECT id, name FROM agents WHERE id = ?", r.agent_id) : undefined;
-      // Exactly once: only the poll that clears the ciphertext gets the key.
-      const claimed = db.run("UPDATE pairings SET api_key_enc = NULL, delivered_at = ? WHERE id = ? AND api_key_enc IS NOT NULL", iso(t), r.id).changes;
-      if (!claimed || !r.api_key_enc) return { status: "expired" };
-      if (!agent) {
-        // The agent was deleted in the console before the CLI collected its key.
-        db.run("UPDATE pairings SET status = 'expired', delivered_at = NULL WHERE id = ?", r.id);
-        publish(r.id);
+      if (!r.api_key_enc) return { status: "expired" };
+      if (!keyIsCurrent(r)) {
+        // Deleted or rotated in the console before the CLI collected it: the stored key is dead.
+        withdrawKey(r, "expired", r.agent_id && db.get("SELECT 1 FROM agents WHERE id = ?", r.agent_id) ? "key_rotated" : "agent_deleted");
         return { status: "expired" };
       }
+      // Exactly once: only the poll that clears the ciphertext gets the key.
+      const claimed = db.run("UPDATE pairings SET api_key_enc = NULL, delivered_at = ? WHERE id = ? AND api_key_enc IS NOT NULL", iso(t), r.id).changes;
+      if (!claimed) return { status: "consumed" };
+      intervals.delete(r.id);
+      const agent = db.get<{ id: string; name: string }>("SELECT id, name FROM agents WHERE id = ?", r.agent_id!)!;
       const apiKey = ctx.crypto.decrypt(r.api_key_enc);
       ctx.audit.record({ actorType: "agent", actorId: agent.id, action: "pairing.key_delivered", target: r.id, outcome: "ok", detail: { userCode: r.user_code } });
       publish(r.id);
@@ -290,6 +351,15 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
 
     approve(id, input) {
       const r = requirePending(id);
+      if (normalizeCode(input.userCode) !== normalizeCode(r.user_code)) {
+        audit(r, { ...ADMIN_ACTOR, action: "pairing.approved", outcome: "denied", reason: "user_code_mismatch" });
+        throw new HttpError(
+          409,
+          "user_code_mismatch",
+          "That code doesn't match this pairing request",
+          "Type the code shown in the agent's terminal. If it shows a different code, deny this request: someone else may have started it.",
+        );
+      }
       const seen = new Set<string>();
       for (const g of input.grants) {
         if (seen.has(g.accountId)) throw badRequest(`Only one grant per account (duplicate ${g.accountId})`);
@@ -310,12 +380,11 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
         if (!changes) throw new HttpError(409, "conflict", "This pairing request was decided meanwhile");
         return agent.id;
       });
-      ctx.audit.record({
+      audit(r, {
         ...ADMIN_ACTOR,
         action: "pairing.approved",
-        target: id,
         outcome: "ok",
-        detail: { userCode: r.user_code, agentId, grants: input.grants.map((g) => ({ accountId: g.accountId, capabilities: g.capabilities, sendMode: g.sendMode })) },
+        detail: { agentId, grants: input.grants.map((g) => ({ accountId: g.accountId, capabilities: g.capabilities, sendMode: g.sendMode })) },
       });
       publish(id);
       return ctx.policy.getAgent(agentId)!;
@@ -324,11 +393,26 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
     deny(id, note) {
       const r = requirePending(id);
       db.run("UPDATE pairings SET status = 'denied', decided_at = ?, decision_note = ? WHERE id = ?", iso(), note || null, id);
-      ctx.audit.record({ ...ADMIN_ACTOR, action: "pairing.denied", target: id, outcome: "ok", detail: { userCode: r.user_code, name: r.name } });
+      audit(r, { ...ADMIN_ACTOR, action: "pairing.denied", outcome: "ok" });
+      intervals.delete(id);
       publish(id);
       return toPairing(row(id)!);
     },
 
     sweep,
+
+    onAgentChange({ agentId, reason }) {
+      if (reason === "deleted") {
+        // agent_id is already NULL (ON DELETE SET NULL): any approved row still holding a key lost its agent.
+        for (const r of db.all<PairingRow>("SELECT * FROM pairings WHERE status = 'approved' AND api_key_enc IS NOT NULL AND (agent_id IS NULL OR agent_id = ?)", agentId)) {
+          withdrawKey(r, "expired", "agent_deleted");
+        }
+      } else if (reason === "key_rotated" || reason === "updated") {
+        // The admin took the agent over (new key, or edited it): the pairing's key must not be handed out later.
+        for (const r of db.all<PairingRow>("SELECT * FROM pairings WHERE status = 'approved' AND api_key_enc IS NOT NULL AND agent_id = ?", agentId)) {
+          withdrawKey(r, "approved", reason === "key_rotated" ? "key_rotated" : "agent_updated");
+        }
+      }
+    },
   };
 }

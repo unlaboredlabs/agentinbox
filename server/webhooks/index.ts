@@ -1,13 +1,14 @@
 import { z } from "zod";
-import type { Delivery, DeliveryStatus, EventType, MessageContent, Page, Webhook, WebhookFilter, WebhookPayload, WebhookWithSecret } from "../../shared/types.ts";
+import type { Delivery, DeliveryStatus, EventType, Page, Webhook, WebhookFilter, WebhookWithSecret } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { bool, json, now, type Param } from "../db/index.ts";
-import { eventBySeq, TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_ID, toMailEvent } from "../events/repo.ts";
+import { eventBySeq, TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_ID } from "../events/repo.ts";
 import type { StoredEvent } from "../events/types.ts";
 import { badRequest, errorMessage, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { DELIVERY_SELECT, type DeliveryRow, deliveryById, toDelivery } from "./deliveries.ts";
 import { matchesFilter, normalizeFilter, webhookInputSchema, webhookPatchSchema } from "./filter.ts";
+import { buildPayload } from "./payload.ts";
 import { newSecret, postPinned, secretPrefix, type SendResult, sign } from "./send.ts";
 import { subjectPatternError } from "./regex.ts";
 import { type LookupFn, resolveTarget, SsrfError } from "./ssrf.ts";
@@ -76,15 +77,6 @@ interface AttemptRow {
   include_body: number;
   agent_id: string;
 }
-
-const CONTENT_TIMEOUT_MS = 20_000;
-
-const TEST_CONTENT: MessageContent = {
-  body: "This is a **test delivery** from agentinbox. It is not a real email.",
-  truncated: false,
-  attachments: [],
-  signals: { hiddenContentRemoved: false, suspiciousInstructions: [], auth: null, external: true },
-};
 
 export function createWebhooksService(ctx: AppContext, options: WebhooksOptions = {}): WebhooksService {
   const log = ctx.log.child("webhooks");
@@ -447,7 +439,7 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
 
     let body: string;
     try {
-      body = JSON.stringify(await untilAborted(payload(event, bool(d.include_body), isTest), signal));
+      body = JSON.stringify(await untilAborted(buildPayload(ctx, event, bool(d.include_body), { isTest }), signal));
     } catch (err) {
       if (signal.aborted) return interrupted();
       throw err;
@@ -463,21 +455,6 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
     const result = await postPinned(url, target, headers, body, { timeoutMs, signal });
     if (signal.aborted) return interrupted();
     record(d, isTest, result);
-  }
-
-  async function payload(event: StoredEvent, includeBody: boolean, isTest: boolean): Promise<WebhookPayload> {
-    const data: WebhookPayload["data"] = toMailEvent(event);
-    if (includeBody && event.message) {
-      if (isTest) data.content = TEST_CONTENT;
-      else {
-        try {
-          data.content = await withTimeout(ctx.mail.messageContent(event.accountId, event.message.id), CONTENT_TIMEOUT_MS);
-        } catch (err) {
-          data.contentError = `Message body unavailable: ${errorMessage(err)}`.slice(0, 300);
-        }
-      }
-    }
-    return { type: event.type, timestamp: event.createdAt, data };
   }
 
   function record(d: AttemptRow, isTest: boolean, r: SendResult, final = false): void {
@@ -596,14 +573,4 @@ function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
       signal.addEventListener("abort", onAbort, { once: true });
     }),
   ]).finally(() => signal.removeEventListener("abort", onAbort));
-}
-
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  let t: NodeJS.Timeout;
-  return Promise.race([
-    p,
-    new Promise<never>((_, reject) => {
-      t = setTimeout(() => reject(new Error(`timed out after ${ms / 1000} s`)), ms);
-    }),
-  ]).finally(() => clearTimeout(t));
 }

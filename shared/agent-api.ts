@@ -1,5 +1,5 @@
-// Agent-facing HTTP API under /agent/v1. Used by `npx agentinbox connect` (device-flow pairing)
-// and `npx agentinbox listen` (outbound event stream that wakes local agents).
+// Agent-facing HTTP API under /agent/v1. Used by `npx agentinbox-cli connect` (device-flow pairing)
+// and `npx agentinbox-cli listen` (outbound event stream that wakes local agents).
 //
 // Routes:
 //   POST /agent/v1/pairings                  PairingStartInput → PairingStart          (public; rate-limited)
@@ -12,6 +12,9 @@
 //        Resumes after max(after, Last-Event-ID, the consumer's acked cursor).
 //   POST /agent/v1/events/ack                { consumer, seq } → { ackedSeq }          (bearer aib_ key)
 //
+// Requests must not carry Origin or Sec-Fetch-* headers (browsers are refused), POST bodies must be
+// `Content-Type: application/json`, and the Host must be one this daemon answers to (DNS-rebinding guard).
+// `after`, Last-Event-ID and acks are capped at the newest event the agent can see.
 // Pairing (approved design): the CLI starts a pairing and shows `userCode` + `verificationUrl`; a human
 // approves that exact code in the console (choosing the grant, draft_only by default). Only then is
 // the API key generated; it is handed to the polling CLI exactly once and written to a 0600 file.
@@ -49,7 +52,10 @@ export interface PairingStart {
 
 export type PairingPoll =
   | { status: "pending" }
-  /** Polled faster than `interval`: wait longer. */
+  /**
+   * Polled faster than the current interval (RFC 8628): `interval` is the previous one + 5 s and is
+   * enforced for this pairing from now on, so keep polling at least that far apart.
+   */
   | { status: "slow_down"; interval: number }
   | {
       status: "approved";

@@ -129,7 +129,7 @@ export interface Settings {
    * "10.0.0.0/8", "n8n.internal"). Defaults to loopback only.
    */
   webhookAllowlist: string[];
-  /** Accept device-flow pairing requests from `npx agentinbox connect` (each still needs approval). */
+  /** Accept device-flow pairing requests from `npx agentinbox-cli connect` (each still needs approval). */
   pairingEnabled: boolean;
 }
 
@@ -216,7 +216,7 @@ export interface ListenerInfo {
 
 export type PairingStatus = "pending" | "approved" | "denied" | "expired";
 
-/** A device-flow pairing request from `npx agentinbox connect`, shown in the approvals inbox. */
+/** A device-flow pairing request from `npx agentinbox-cli connect`, shown in the approvals inbox. */
 export interface PairingRequest {
   id: string; // par_…
   /** The code the agent's terminal shows; the human must match it before approving. */
@@ -238,6 +238,8 @@ export interface PairingRequest {
 
 /** POST /api/pairings/:id/approve. Grants default to sendMode draft_only in the console. */
 export interface ApprovePairingInput {
+  /** Typed by the human from the agent's terminal (not pre-filled); case and dashes are ignored. 409 on mismatch. */
+  userCode: string;
   name?: string;
   grants: (GrantInput & { accountId: string })[];
 }
