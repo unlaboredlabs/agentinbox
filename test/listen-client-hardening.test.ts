@@ -109,7 +109,8 @@ describe("refusals", () => {
     expect(output.match(/An admin disabled this agent/g)).toHaveLength(1); // logged once per state change
     api.blockedCode = null;
     await waitFor(() => api.live.size === 1, 5000, "resumed");
-    expect(output).toContain("Access restored.");
+    // The log line is written right after the stream reconnects; wait for it rather than racing it.
+    await waitFor(() => output.includes("Access restored."), 5000, "restore message");
     api.publish(makeEvent(1));
     await waitFor(() => api.acked === 1, 5000, "event after resume");
 

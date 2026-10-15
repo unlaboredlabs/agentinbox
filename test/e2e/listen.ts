@@ -221,7 +221,7 @@ let built = false;
 /** Builds dist/cli.js from this checkout (tsdown; ~1 s), once per test process. */
 export function buildCli(): string {
   if (!built) {
-    execFileSync("pnpm", ["exec", "tsdown"], { cwd: REPO_ROOT, stdio: "pipe", env: { ...process.env, CI: "1" } });
+    execFileSync("pnpm", ["exec", "tsdown", "--config-loader", "native"], { cwd: REPO_ROOT, stdio: "pipe", env: { ...process.env, CI: "1" } });
     built = true;
   }
   return join(REPO_ROOT, "dist", "cli.js");

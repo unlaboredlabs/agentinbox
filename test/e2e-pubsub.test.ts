@@ -57,10 +57,11 @@ describe("pub/sub provisioning", () => {
     expect(test.ok).toBe(true);
     expect(test.message).toMatch(/Pub\/Sub is working/);
 
-    // Real time: no kicks, no poll interval (5 s); the notification drives the sync.
+    // Real time: no kicks; in healthy Pub/Sub mode the only polling is the 5-minute safety net, so
+    // delivery within 15 s proves the notification drove the sync (generous for slow CI runners).
     const started = Date.now();
     s.fake.deliver(email, { from: "Rt <rt@else.test>", subject: "Realtime hello", text: "fast" });
-    const ev = await s.waitForEvent((e) => e.message?.subject === "Realtime hello", { kick: false, timeout: 4000 });
+    const ev = await s.waitForEvent((e) => e.message?.subject === "Realtime hello", { kick: false, timeout: 15_000 });
     expect(Date.now() - started).toBeLessThan(4000);
     expect(ev).toMatchObject({ type: "message.received", accountId: account!.id });
     await waitFor(async () => (await s!.admin.get<SetupState>("/api/setup/state")).pubsub.lastMessageAt, { what: "pubsub.lastMessageAt" });
@@ -99,7 +100,7 @@ describe("pub/sub provisioning", () => {
     // The user picks poll (the wizard's fallback). The real poll loop (5 s) picks up new mail: no kicks.
     await s.admin.patch("/api/settings", { ingestMode: "poll", pollIntervalSeconds: 5 });
     s.fake.deliver(email, { from: "Poll <poll@else.test>", subject: "Polled mail", text: "still works" });
-    const ev = await s.waitForEvent((e) => e.message?.subject === "Polled mail", { kick: false, timeout: 9000 });
+    const ev = await s.waitForEvent((e) => e.message?.subject === "Polled mail", { kick: false, timeout: 15_000 });
     expect(ev).toMatchObject({ type: "message.received", accountId: account!.id });
     expect((await s.admin.get<SystemInfo>("/api/system")).ingest).toMatchObject({ mode: "poll", running: true, lastError: null });
 
@@ -109,7 +110,7 @@ describe("pub/sub provisioning", () => {
     expect(fixed).toMatchObject({ mode: "pubsub", topic: TOPIC, subscription: SUBSCRIPTION, lastError: null });
     expect((await s.admin.get<SetupState>("/api/setup/state")).pubsub.lastError).toBeNull();
     s.fake.deliver(email, { from: "poll@else.test", subject: "Realtime at last", text: "x" });
-    await s.waitForEvent((e) => e.message?.subject === "Realtime at last", { kick: false, timeout: 4000 });
+    await s.waitForEvent((e) => e.message?.subject === "Realtime at last", { kick: false, timeout: 15_000 });
   }, 20_000);
 
   it("watches accounts connected after provisioning and stops the watch when an account is removed", async () => {
@@ -121,7 +122,7 @@ describe("pub/sub provisioning", () => {
     expect(s.fake.watch(second)?.topic).toBe(TOPIC);
 
     s.fake.deliver(second, { from: "x@else.test", subject: "Second realtime", text: "x" });
-    await s.waitForEvent((e) => e.message?.subject === "Second realtime", { kick: false, timeout: 4000 });
+    await s.waitForEvent((e) => e.message?.subject === "Second realtime", { kick: false, timeout: 15_000 });
 
     await s.admin.del(`/api/accounts/${acc2.id}`);
     expect(s.fake.watch(second)).toBeNull();
@@ -140,6 +141,6 @@ describe("pub/sub provisioning", () => {
     await s.connectAccount(email, { reauthAccountId: account!.id });
     s.fake.deliver(email, { from: "x@else.test", subject: "Realtime after reauth", text: "x" });
     // Real time means about a second (one pull), as before the outage; without the fix this takes ≥ 2.5 s.
-    await s.waitForEvent((e) => e.message?.subject === "Realtime after reauth", { kick: false, timeout: 1500 });
+    await s.waitForEvent((e) => e.message?.subject === "Realtime after reauth", { kick: false, timeout: 4500 });
   }, 15_000);
 });

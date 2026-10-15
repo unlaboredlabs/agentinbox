@@ -63,7 +63,7 @@ describe("restart durability", () => {
     expect(failed.nextAttemptAt).not.toBeNull();
 
     await rx.start(); // receiver back
-    const done = await waitFor(async () => (await deliveries()).find((d) => d.eventId === ev.id && d.status === "succeeded"), { what: "delivery after the receiver is back", timeout: 5000 });
+    const done = await waitFor(async () => (await deliveries()).find((d) => d.eventId === ev.id && d.status === "succeeded"), { what: "delivery after the receiver is back", timeout: 15_000 });
     // The attempt aborted by the shutdown doesn't count; the one against the dead receiver does.
     expect(done.attempts).toBe(2);
 
