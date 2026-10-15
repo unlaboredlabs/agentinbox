@@ -1,4 +1,4 @@
-import type { Address, Approval, ApprovalStatus } from "../../shared/types.ts";
+import { type Address, type Approval, type ApprovalStatus, type CalendarApprovalDetail, isCalendarApprovalKind } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { bool, json, now } from "../db/index.ts";
@@ -18,6 +18,8 @@ export interface ApprovalPayload {
   reason: string | null;
   /** Fingerprint of the Gmail draft when it was queued; a mismatch at approval means it was edited in Gmail. */
   fingerprint?: string;
+  /** Calendar kinds: the change to apply (to/subject/body mirror it for generic lists, see Approval). */
+  calendar?: CalendarApprovalDetail;
 }
 
 interface ApprovalRow {
@@ -63,6 +65,7 @@ function toApproval(r: ApprovalRow): Approval {
     threadId: p.threadId ?? null,
     attachments: p.attachments ?? [],
     reason: p.reason ?? null,
+    ...(isCalendarApprovalKind(r.kind) && p.calendar ? { calendar: p.calendar } : {}),
     decidedAt: r.decided_at,
     decisionNote: r.decision_note,
     sentMessageId: r.sent_message_id,
@@ -152,6 +155,7 @@ export class Approvals {
     // Claim atomically so two clicks can't send twice.
     if (!this.transition(id, "pending", "approved", note)) throw this.notPending(current);
     this.emit(id);
+    if (isCalendarApprovalKind(current.kind)) return this.applyCalendar(current, started);
     const gmail = this.ctx.google.gmail(current.accountId);
     try {
       const expected = this.payload(id).fingerprint;
@@ -178,6 +182,29 @@ export class Approvals {
         );
       } else if (err instanceof GoogleApiError && err.status === 404) {
         this.fail(id, "The draft no longer exists in Gmail (it may have been sent or deleted there).");
+      } else {
+        this.fail(id, message);
+      }
+      this.audit("approval.approve", current, "error", started, { error: message, transient: isTransient(err) });
+    }
+    return this.emit(id);
+  }
+
+  /** Calendar kinds: the stored change goes to Google Calendar (server/calendar/approvals.ts); "sent" = applied. */
+  private async applyCalendar(current: Approval, started: number): Promise<Approval> {
+    const id = current.id;
+    try {
+      const { eventId } = await this.ctx.calendar.applyApproval(current);
+      this.ctx.db.run("UPDATE approvals SET status = 'sent', sent_message_id = ?, error = NULL WHERE id = ?", eventId, id);
+      this.audit("approval.approve", current, "ok", started, { eventId });
+    } catch (err) {
+      const message = errorMessage(err);
+      if (isTransient(err)) {
+        this.ctx.db.run(
+          "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
+          `Applying the change failed temporarily (${message}). Approve again to retry.`,
+          id,
+        );
       } else {
         this.fail(id, message);
       }
@@ -242,12 +269,12 @@ export class Approvals {
    * Rejects the agent's pending approvals (optionally for one account) after its access changed, and deletes
    * their drafts in the background. Synchronous so callers can run it right before deleting the agent.
    */
-  cancelForAgent(agentId: string, accountId: string | null, why: string): number {
+  cancelForAgent(agentId: string, accountId: string | null, why: string, only?: "mail" | "calendar"): number {
     const rows = accountId
-      ? this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND agent_id = ? AND account_id = ?", agentId, accountId)
-      : this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
+      ? this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ? AND account_id = ?", agentId, accountId)
+      : this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
     return this.cancel(
-      rows.map((r) => r.id),
+      rows.filter((r) => !only || (only === "calendar") === isCalendarApprovalKind(r.kind)).map((r) => r.id),
       `${CANCELLED_PREFIX}${why}`,
     );
   }
@@ -266,6 +293,7 @@ export class Approvals {
 
   /** Why this send is no longer allowed under the agent's current grant, or null. */
   private sendBlockedReason(a: Approval): string | null {
+    if (isCalendarApprovalKind(a.kind)) return this.ctx.calendar.approvalBlockedReason(a);
     const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", a.agentId);
     if (!agent) return "the agent was deleted";
     if (bool(agent.disabled)) return "the agent is disabled";
@@ -314,6 +342,8 @@ export class Approvals {
   }
 
   private async deleteDraft(a: Approval): Promise<void> {
+    // Calendar approvals have no draft: nothing reached Google before approval.
+    if (isCalendarApprovalKind(a.kind) || !a.draftId) return;
     try {
       await this.ctx.google.gmail(a.accountId).deleteDraft(a.draftId);
     } catch (err) {

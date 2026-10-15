@@ -236,4 +236,65 @@ export const MIGRATIONS: string[] = [
     SELECT 'setup.verifiedAt', json_quote(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     WHERE EXISTS (SELECT 1 FROM agents WHERE last_mcp_at IS NOT NULL);
   `,
+  /* 7: Google Calendar (docs/calendar.md). Additive only: mail keeps working untouched. */ `
+  -- Grants: calendar.read / calendar.write live in grants.capabilities; existing grants have neither (mail-only).
+  ALTER TABLE grants ADD COLUMN calendar_scope TEXT;   -- JSON string[] of calendar ids | NULL (= every calendar)
+  ALTER TABLE grants ADD COLUMN calendar_write_mode TEXT NOT NULL DEFAULT 'approval'; -- 'direct' | 'approval'
+
+  -- Accounts: granted scopes are already in accounts.scopes (JSON, since migration 1).
+  -- NULL = derive from scopes (missing calendar scopes → not_granted, else active); 'api_disabled' | 'error'
+  -- when a probe or sync said so (cleared by the next success).
+  ALTER TABLE accounts ADD COLUMN calendar_status TEXT;
+  ALTER TABLE accounts ADD COLUMN calendar_error TEXT;
+  ALTER TABLE accounts ADD COLUMN calendar_synced_at TEXT;
+
+  -- Events: calendar.* events carry a CalendarEventSummary instead of a message.
+  ALTER TABLE events ADD COLUMN calendar_id TEXT;       -- for calendar scopes and filters
+  ALTER TABLE events ADD COLUMN calendar_event TEXT;    -- JSON CalendarEventSummary | NULL
+
+  -- Incremental sync cursor (and optional push channel) per synced calendar.
+  CREATE TABLE calendar_sync (
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    calendar_id TEXT NOT NULL,
+    name TEXT,
+    access_role TEXT,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    sync_token TEXT,                 -- events.list nextSyncToken; NULL = needs a (baseline) full sync
+    baseline_at TEXT,                -- when the last full sync finished: events created before it aren't "new"
+    last_sync_at TEXT,
+    last_error TEXT,
+    channel_id TEXT,                 -- events.watch channel (push), NULL when polling only
+    channel_resource_id TEXT,
+    channel_token_hash TEXT,         -- sha256 of the X-Goog-Channel-Token we chose
+    channel_expires_at TEXT,
+    channel_verified_at TEXT,        -- Google's "sync" notification reached us (the address is reachable)
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, calendar_id)
+  );
+  CREATE UNIQUE INDEX calendar_sync_channel ON calendar_sync(channel_id) WHERE channel_id IS NOT NULL;
+
+  -- Last seen version of events on synced calendars, to tell created / updated (what changed) / cancelled
+  -- apart and to replay a 410 full resync as changes. Upcoming and recurring events only (pruned after end).
+  CREATE TABLE calendar_event_state (
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    calendar_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,       -- digest of the material fields (CalendarEventChange)
+    summary TEXT NOT NULL,           -- JSON CalendarEventSummary as last seen
+    description_hash TEXT,
+    ends_at TEXT,                    -- NULL for recurring series (kept while the series lives)
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, calendar_id, event_id)
+  );
+  CREATE INDEX calendar_event_state_ends ON calendar_event_state(ends_at);
+
+  -- Calendar approvals reuse the approvals table: kind 'calendar.*', draft_id '' (no Gmail draft),
+  -- payload JSON {calendar: CalendarApprovalDetail, reason, …}, sent_message_id = the Google event id once applied.
+
+  -- Existing installs (an account was connected before this upgrade) add Calendar explicitly with the
+  -- console's "Add Google Calendar" flow; fresh installs get it by default (no row = enabled).
+  INSERT OR IGNORE INTO settings (key, value)
+    SELECT 'calendar.setup', '{"enabled":false}'
+    WHERE EXISTS (SELECT 1 FROM accounts);
+  `,
 ];

@@ -40,7 +40,11 @@ export interface PolicyService extends Lifecycle {
   /**
    * FROZEN. Event visibility for the agent feed and webhooks: the agent needs a grant with `read`
    * on the account, and for message/label events the thread labels must intersect its label scope.
-   * Account-level events (account.auth_failed, sync.gap) only need the grant.
+   * calendar.* events need `calendar.read` and the event's calendar in the grant's calendar scope.
+   * Account-level events (account.auth_failed, sync.gap) need `read` or `calendar.read`.
    */
-  canSeeEvent(agentId: string, ev: { accountId: string; type: EventType; threadLabelIds: string[] }): boolean;
+  canSeeEvent(
+    agentId: string,
+    ev: { accountId: string; type: EventType; threadLabelIds: string[]; calendarEvent?: { calendarId: string } | null },
+  ): boolean;
 }

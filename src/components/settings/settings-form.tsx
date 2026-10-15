@@ -41,7 +41,8 @@ const toForm = (s: Settings): FormValues => ({
   pairingEnabled: s.pairingEnabled,
 });
 
-const fromForm = (v: FormValues): Settings => ({
+// calendarPollSeconds: not on the form yet (calendar workstream E); PATCH leaves it unchanged.
+const fromForm = (v: FormValues): Omit<Settings, "calendarPollSeconds"> => ({
   publicUrl: v.publicUrl.trim().replace(/\/+$/, ""),
   ingestMode: v.ingestMode,
   pollIntervalSeconds: Number(v.pollIntervalSeconds),

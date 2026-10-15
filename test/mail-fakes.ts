@@ -353,6 +353,8 @@ export function fakeAccounts(ctx: AppContext): AccountsService {
     refreshTokenExpiresAt: null,
     refreshTokenExpiryKind: null,
     workspaceDomain: null,
+    grantedScopes: null,
+    calendar: null,
   });
   const get = (id: string) => {
     const r = ctx.db.get<AccountRow>("SELECT * FROM accounts WHERE id = ?", id);
@@ -391,7 +393,9 @@ export class FakeEvents {
         .filter((e) => e.seq > after)
         .filter((e) => !opts.types || opts.types.includes(e.type))
         .filter((e) => !opts.accountIds || opts.accountIds.includes(e.accountId))
-        .filter((e) => ctx.policy.canSeeEvent(agentId, { accountId: e.accountId, type: e.type, threadLabelIds: e.message?.labelIds ?? [] }))
+        .filter((e) =>
+          ctx.policy.canSeeEvent(agentId, { accountId: e.accountId, type: e.type, threadLabelIds: e.message?.labelIds ?? [], calendarEvent: e.calendarEvent ?? null }),
+        )
         .slice(0, opts.limit ?? 50);
       // `hasMore` is additive in the events contract (feat/events-webhooks); harmless before it lands.
       const result: FeedResult & { hasMore: boolean } = { events, cursor: events.at(-1)?.seq ?? after, ackedSeq, hasMore: false };

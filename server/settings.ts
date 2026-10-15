@@ -6,7 +6,7 @@ import { badRequest } from "./util/errors.ts";
 
 /**
  * Internal key/value state kept in the `settings` table next to the user-facing Settings.
- * Owners: google.* and pubsub → server/google, admin.* → server/auth.
+ * Owners: google.* and pubsub → server/google, admin.* → server/auth, calendar.* → server/calendar.
  */
 export interface InternalState {
   "google.client": {
@@ -37,6 +37,17 @@ export interface InternalState {
     /** Account chosen to provision with that hasn't succeeded yet (becomes principalAccountId on success). */
     pendingPrincipalAccountId?: string | null;
   };
+  /**
+   * Google Calendar for this install (CalendarSetupState). No row = enabled (fresh install); migration 7
+   * writes {enabled:false} on installs that had accounts before the upgrade.
+   */
+  "calendar.setup": {
+    enabled: boolean;
+    /** When the operator hid the calendar_not_added notice. */
+    dismissedAt?: string | null;
+    /** Last observation of the Calendar API in the project (CalendarSetupState.api). */
+    api?: { state: "enabled" | "disabled"; at: string; error?: string | null };
+  };
   "admin.passwordHash": string;
   /** When SetupState.verified first had evidence; kept so pruning the audit log doesn't undo it. */
   "setup.verifiedAt": string;
@@ -63,6 +74,7 @@ export class SettingsStore {
       approvalTtlHours: 72,
       webhookAllowlist: ["localhost", "127.0.0.0/8", "::1"],
       pairingEnabled: true,
+      calendarPollSeconds: 60,
     };
   }
 
@@ -135,6 +147,7 @@ function validate(s: Settings): Settings {
     approvalTtlHours: int(s.approvalTtlHours, "Approval expiry", 1, 24 * 30),
     webhookAllowlist: [...new Set(allowlist)],
     pairingEnabled: s.pairingEnabled !== false,
+    calendarPollSeconds: int(s.calendarPollSeconds, "Calendar poll interval", 15, 3600),
   };
 }
 

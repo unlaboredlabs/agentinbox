@@ -3,6 +3,9 @@ import type { EventType, Grant, MailEvent } from "@shared/types";
 import {
   AlertTriangleIcon,
   BellRingIcon,
+  CalendarIcon,
+  CalendarPlusIcon,
+  CalendarXIcon,
   ChevronRightIcon,
   CornerDownRightIcon,
   KeyRoundIcon,
@@ -30,6 +33,11 @@ const ICON: Record<EventType, typeof MailIcon> = {
   "label.removed": TagIcon,
   "account.auth_failed": KeyRoundIcon,
   "sync.gap": AlertTriangleIcon,
+  // Calendar rows: workstream E renders calendarEvent (title, time, organizer) instead of the message.
+  "calendar.event_created": CalendarPlusIcon,
+  "calendar.event_updated": CalendarIcon,
+  "calendar.event_cancelled": CalendarXIcon,
+  "calendar.invitation_received": CalendarPlusIcon,
 };
 const ALERT_TYPES: EventType[] = ["account.auth_failed", "sync.gap"];
 

@@ -1,5 +1,7 @@
 import type {
   AccountStatus,
+  ApprovalKind,
+  CalendarWriteMode,
   ApprovalStatus,
   AuditOutcome,
   Capability,
@@ -22,6 +24,27 @@ export const CAPABILITY_INFO: Record<Capability, { label: string; description: s
   },
   organize: { label: "Organize", description: "Add and remove labels, archive, mark read or unread, star." },
   trash: { label: "Trash", description: "Move messages and threads to the trash (recoverable for 30 days in Gmail)." },
+  "calendar.read": {
+    label: "Calendar: read",
+    description: "List calendars, read and search events, check free/busy, and receive calendar events.",
+  },
+  "calendar.write": {
+    label: "Calendar: write",
+    description: "Create, change and delete events and answer invitations. How writes run is set by the calendar write mode.",
+  },
+};
+
+export const CALENDAR_WRITE_MODE_INFO: Record<CalendarWriteMode, { label: string; short: string; description: string }> = {
+  direct: {
+    label: "Write directly",
+    short: "Direct",
+    description: "Changes go to Google Calendar immediately. The attendee allowlist and send limits still apply.",
+  },
+  approval: {
+    label: "Needs approval",
+    short: "Approval",
+    description: "Changes wait in Approvals here. Approving applies them; rejecting discards them. Nothing reaches Google before.",
+  },
 };
 
 export const SEND_MODE_INFO: Record<SendMode, { label: string; short: string; description: string }> = {
@@ -59,6 +82,13 @@ export const EVENT_TYPE_INFO: Record<EventType, { label: string; description: st
   "sync.gap": {
     label: "Sync gap",
     description: "History was too old to replay; a bounded resync ran and some events may be missing.",
+  },
+  "calendar.event_created": { label: "Calendar event created", description: "A new event appeared on a synced calendar." },
+  "calendar.event_updated": { label: "Calendar event updated", description: "An event's time, title, place, attendees or answers changed." },
+  "calendar.event_cancelled": { label: "Calendar event cancelled", description: "An event was cancelled or deleted." },
+  "calendar.invitation_received": {
+    label: "Invitation received",
+    description: "Someone invited the account to an event and is waiting for an answer.",
   },
 };
 
@@ -111,6 +141,9 @@ export const DENIAL_REASONS: Record<string, string> = {
   pending_cap: "Too many pairing requests are already waiting",
   lockout: "Too many wrong codes or keys from this address",
   not_found: "The item doesn't exist or is outside the agent's access",
+  calendar_scope: "The calendar is outside the agent's calendar scope",
+  calendar_not_granted: "The account hasn't granted Google Calendar access yet",
+  calendar_api_disabled: "The Google Calendar API is turned off in the Google Cloud project",
   // Tool calls rejected before the tool ran (outcome "error").
   invalid_arguments: "The agent's arguments don't match the tool's schema",
   unknown_tool: "No such tool for this agent (unknown, or its grants don't include it)",
@@ -123,4 +156,12 @@ export function explainReason(reason: string): string {
   return text ? text[0]!.toLowerCase() + text.slice(1) : reason;
 }
 
-export const KIND_LABEL = { send: "New message", reply: "Reply", forward: "Forward" } as const;
+export const KIND_LABEL = {
+  send: "New message",
+  reply: "Reply",
+  forward: "Forward",
+  "calendar.create": "New calendar event",
+  "calendar.update": "Calendar event change",
+  "calendar.delete": "Calendar event deletion",
+  "calendar.rsvp": "Invitation answer",
+} as const satisfies Record<ApprovalKind, string>;

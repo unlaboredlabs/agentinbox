@@ -1,8 +1,9 @@
-import type { Account, AccountStatus } from "../../shared/types.ts";
+import type { Account, AccountCalendar, AccountStatus } from "../../shared/types.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { AppContext } from "../context.ts";
 import { json } from "../db/index.ts";
 import { errorMessage, notFound } from "../util/errors.ts";
+import { CALENDAR_SCOPES, missingScopes } from "./scopes.ts";
 import type { AccountsService } from "./types.ts";
 
 /** Raw `accounts` row. Token and cursor columns are private to server/google and server/ingest. */
@@ -25,6 +26,24 @@ export interface AccountRow {
   refresh_expiry_kind: "testing" | "time_based" | null;
   /** '' = personal (non-Workspace) account (detected), NULL = unknown (connected before migration 3). */
   workspace_domain: string | null;
+  /** Migration 7. NULL = derive from scopes; 'api_disabled' | 'error' as last observed by a probe or sync. */
+  calendar_status: "api_disabled" | "error" | null;
+  calendar_error: string | null;
+  calendar_synced_at: string | null;
+}
+
+/** Account.calendar from the row (see AccountCalendar). Recorded problems win over the scope check only once scopes are complete. */
+export function accountCalendar(r: AccountRow): AccountCalendar | null {
+  const granted = accountScopes(r);
+  const missing = missingScopes(granted, CALENDAR_SCOPES);
+  if (missing.length === CALENDAR_SCOPES.length && r.calendar_status === null) return null;
+  const status = missing.length ? "not_granted" : (r.calendar_status ?? "active");
+  return {
+    status,
+    missingScopes: missing,
+    lastSyncAt: r.calendar_synced_at,
+    error: status === "api_disabled" || status === "error" ? r.calendar_error : null,
+  };
 }
 
 export const toAccount = (r: AccountRow): Account => ({
@@ -40,6 +59,8 @@ export const toAccount = (r: AccountRow): Account => ({
   refreshTokenExpiresAt: r.refresh_expires_at,
   refreshTokenExpiryKind: r.refresh_expires_at ? r.refresh_expiry_kind : null,
   workspaceDomain: r.workspace_domain || null,
+  grantedScopes: accountScopes(r).length ? accountScopes(r) : null,
+  calendar: accountCalendar(r),
 });
 
 export const accountScopes = (r: AccountRow): string[] => json.parse<string[]>(r.scopes, []);

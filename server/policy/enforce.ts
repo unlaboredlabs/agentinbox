@@ -15,6 +15,8 @@ export const CAPABILITY_HELP: Record<Capability, string> = {
   send: "send mail",
   organize: "change labels, archive or mark read",
   trash: "move mail to the trash",
+  "calendar.read": "read calendars and events",
+  "calendar.write": "create, change or delete calendar events and answer invitations",
 };
 
 // ───────────── Label scope ─────────────
