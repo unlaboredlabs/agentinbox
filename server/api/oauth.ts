@@ -11,17 +11,36 @@ const escapeHtml = (s: string) =>
 /** JSON safe to embed in a <script type="application/json"> data block. */
 const scriptJson = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
 
+/** BroadcastChannel the console listens on (src/components/accounts/connect-host.tsx). */
+export const OAUTH_CHANNEL = "agentinbox-oauth";
+
 /**
  * The callback page's only executable script. It is static (all dynamic data lives in the JSON block
  * #oauth-result), so the CSP can allow exactly this hash instead of inline scripts in general.
+ *
+ * The result goes to the opener (the console's popup host) and also on a same-origin
+ * BroadcastChannel: Google's pages can sever window.opener (COOP), and the console may run on a
+ * different origin than publicUrl. Without an opener the page stays open with its link to /accounts.
  */
 export const OAUTH_CALLBACK_SCRIPT = `(function () {
   try {
     var r = JSON.parse(document.getElementById("oauth-result").textContent);
+    var msg = { type: "agentinbox:oauth", ok: r.ok, email: r.email, error: r.error };
+    var toOpener = false;
     if (window.opener) {
-      window.opener.postMessage({ type: "agentinbox:oauth", ok: r.ok, email: r.email, error: r.error }, r.targetOrigin);
-      if (r.ok) setTimeout(function () { window.close(); }, 600);
+      try {
+        window.opener.postMessage(msg, r.targetOrigin);
+        toOpener = true;
+      } catch (e) {}
     }
+    if (typeof BroadcastChannel === "function") {
+      try {
+        var channel = new BroadcastChannel("${OAUTH_CHANNEL}");
+        channel.postMessage(msg);
+        channel.close();
+      } catch (e) {}
+    }
+    if (r.ok && toOpener) setTimeout(function () { window.close(); }, 600);
   } catch (e) {}
 })();`;
 
