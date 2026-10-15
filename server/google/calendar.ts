@@ -80,6 +80,8 @@ export interface CalendarEventRaw {
   transparency?: "opaque" | "transparent";
   visibility?: string;
   guestsCanModify?: boolean;
+  /** false: attendees (and the account, when it doesn't organize) can't see the guest list. */
+  guestsCanSeeOtherGuests?: boolean;
 }
 
 export interface EventsListParams {

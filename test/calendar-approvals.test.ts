@@ -7,6 +7,7 @@ import type { Approval, CalendarApprovalDetail, GrantInput } from "../shared/typ
 import type { CalendarWriteOutcome } from "../server/calendar/agent.ts";
 import { GoogleApiError } from "../server/google/types.ts";
 import { Approvals } from "../server/mail/approvals.ts";
+import { HttpError } from "../server/util/errors.ts";
 import { calendarTestContext, tool } from "./calendar-fakes.ts";
 import { grantInput } from "./mail-fakes.ts";
 
@@ -127,36 +128,109 @@ describe("approve", () => {
     expect(await s.approvals.approve(a.id)).toMatchObject({ status: "failed", error: "The event no longer exists in Google Calendar." });
   });
 
-  it("a transient failure goes back to pending; the retried create finds its event instead of duplicating it", async () => {
+  it("marks the attempt before calling Google", async () => {
     const s = setup();
-    const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "Once", ...AT, attendees: ["ann@acme.com"] }, {}));
+    const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "Lunch", ...AT }, {}));
+    expect(a.calendar!.attemptedAt).toBeUndefined();
+    let marked: unknown;
     const insert = s.cal.insertEvent.bind(s.cal);
-    let first = true;
     s.cal.insertEvent = async (cal, ev, opts) => {
-      const created = await insert(cal, ev, opts);
-      if (first) {
-        first = false;
-        // Google created it and emailed Ann, but the answer never arrived.
-        throw new GoogleApiError(503, "Backend Error", "backendError");
-      }
-      return created;
+      marked = s.approvals.get(a.id)!.calendar!.attemptedAt;
+      return insert(cal, ev, opts);
     };
-    const retry = await s.approvals.approve(a.id);
-    expect(retry).toMatchObject({ status: "pending", error: expect.stringContaining("Approve again to retry") });
-    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent", sentMessageId: a.calendar!.eventId });
-    expect([...s.cal.calendars.get(ME)!.events.keys()]).toEqual([a.calendar!.eventId]);
-    expect(s.cal.writes.filter((w) => w.op === "insert")).toHaveLength(1);
+    await s.approvals.approve(a.id);
+    expect(marked).toEqual(expect.any(String));
   });
 
-  it("an approval interrupted by a crash is recovered and applied once", async () => {
+  it("a create whose answer was lost counts as applied when Google has it (timeouts included)", async () => {
+    for (const lost of [new GoogleApiError(503, "Backend Error", "backendError"), new GoogleApiError(0, "Google didn't respond within 30s", "timeout")]) {
+      const s = setup();
+      const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "Once", ...AT, attendees: ["ann@acme.com"] }, {}));
+      const insert = s.cal.insertEvent.bind(s.cal);
+      s.cal.insertEvent = async (cal, ev, opts) => {
+        await insert(cal, ev, opts);
+        // Google created it and emailed Ann, but the answer never arrived.
+        throw lost;
+      };
+      expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent", sentMessageId: a.calendar!.eventId });
+      expect([...s.cal.calendars.get(ME)!.events.keys()]).toEqual([a.calendar!.eventId]);
+      await s.dispose();
+    }
+    dispose = undefined;
+  });
+
+  it("a transient failure that didn't land goes back to pending, and the retry applies it once", async () => {
     const s = setup();
     const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "Once", ...AT }, {}));
-    // The process died after Google created the event, before the approval was marked applied.
-    s.ctx.db.run("UPDATE approvals SET status = 'approved', decided_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", a.id);
-    s.cal.put(ME, { id: a.calendar!.eventId!, summary: "Once" });
-    expect(s.approvals.recoverInterrupted()).toBe(1);
+    s.cal.fail.insert = [new GoogleApiError(0, "Could not reach Google", "network")];
+    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "pending", error: expect.stringContaining("Approve again to retry") });
     expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent" });
     expect(s.cal.calendars.get(ME)!.events.size).toBe(1);
+  });
+
+  it("an approval interrupted by a crash is recovered with calendar wording and applied once", async () => {
+    const s = setup();
+    const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "Once", ...AT }, {}));
+    // The process died after marking the attempt and Google creating the event, before recording it.
+    s.ctx.db.run(
+      "UPDATE approvals SET status = 'approved', decided_at = '2000-01-01T00:00:00.000Z', payload = json_set(payload, '$.calendar.attemptedAt', '2000-01-01T00:00:00.000Z') WHERE id = ?",
+      a.id,
+    );
+    s.cal.put(ME, { id: a.calendar!.eventId!, summary: "Once, renamed by a human since" });
+    expect(s.approvals.recoverInterrupted()).toBe(1);
+    expect(s.approvals.get(a.id)!.error).toBe(
+      "Applying the change was interrupted before it finished. Approve again to retry: agentinbox checks Google Calendar first, so it is never applied twice.",
+    );
+    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent" });
+    expect(s.cal.calendars.get(ME)!.events.size).toBe(1);
+  });
+
+  it("an update whose answer was lost counts as applied when every field is in place", async () => {
+    const s = setup();
+    s.meeting();
+    const a = await s.queue("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { summary: "Plan v2", ...{ start: "2026-10-20T10:00:00Z", end: "2026-10-20T10:30:00Z" } }, {}));
+    const patch = s.cal.patchEvent.bind(s.cal);
+    s.cal.patchEvent = async (...args) => {
+      await patch(...args);
+      // The workstream A client marks a retried If-Match write whose retry got 412.
+      throw new GoogleApiError(503, "Backend Error", "outcome_unknown");
+    };
+    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent", sentMessageId: "m1" });
+  });
+
+  it("after an earlier attempt, an event that moved on is 'may already have been applied', never 'not applied'", async () => {
+    const s = setup();
+    s.meeting();
+    const a = await s.queue("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { summary: "Ours" }, {}));
+    s.cal.fail.patch = [new GoogleApiError(503, "Backend Error", "backendError")];
+    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "pending" });
+    // Unknown to us, it landed after all; then a human renamed the event.
+    s.cal.put(ME, { ...s.cal.event(ME, "m1")!, summary: "Theirs" });
+    const done = await s.approvals.approve(a.id);
+    expect(done).toMatchObject({ status: "failed", error: "The change may already have been applied, but the event has changed in Google Calendar since, so agentinbox can't tell. Check Google Calendar." });
+    expect(s.cal.writes).toEqual([]);
+  });
+
+  it("a retried delete that finds the event gone counts as applied", async () => {
+    const s = setup();
+    s.meeting();
+    const a = await s.queue("delete_calendar_event", (c) => c.deleteEvent(ME, undefined, "m1", {}));
+    const del = s.cal.deleteEvent.bind(s.cal);
+    s.cal.deleteEvent = async (...args) => {
+      await del(...args);
+      // The client retried after a lost answer; the retry found it deleted.
+      throw new GoogleApiError(410, "Resource has been deleted", "deleted");
+    };
+    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent", sentMessageId: "m1" });
+  });
+
+  it("a needs_reauth answer from the calendar list is transient", async () => {
+    const s = setup();
+    const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, TEAM, { summary: "x", ...AT }, {}));
+    s.ctx.calendar.calendars = async () => {
+      throw new HttpError(409, "needs_reauth", "me@acme.com needs to be reconnected before agentinbox can read its calendars.", "Accounts → Reconnect.");
+    };
+    expect(await s.approvals.approve(a.id)).toMatchObject({ status: "pending" });
   });
 });
 
@@ -279,6 +353,7 @@ describe("malformed changes", () => {
       ["calendar.delete", detail({ etag: null })],
       ["calendar.rsvp", detail({ response: null })],
       ["calendar.create", detail({ eventId: null })],
+      ["calendar.delete", detail({ notified: "x" as unknown as string[] })],
     ];
     for (const [kind, calendar] of cases) {
       const a = s.approvals.create({

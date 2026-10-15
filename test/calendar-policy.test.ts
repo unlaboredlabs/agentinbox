@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GrantInput, MessageContent } from "../shared/types.ts";
 import { createPairingService, pairingStartSchema } from "../server/agentapi/pairing.ts";
 import { GoogleApiError } from "../server/google/types.ts";
+import { HttpError } from "../server/util/errors.ts";
 import { Approvals } from "../server/mail/approvals.ts";
 import { attendeeImpact } from "../server/policy/calendar.ts";
 import { sendsSince } from "../server/policy/enforce.ts";
@@ -83,6 +84,20 @@ describe("account and capability resolution", () => {
     expect(r).toMatchObject({ outcome: "error", reason: "calendar_not_granted" });
     expect(messageOf(r)).toBe("Google Calendar isn't connected for me@acme.com yet. Ask the operator to add Google Calendar for me@acme.com in the agentinbox console.");
     expect(s.cal.calls).toEqual([]);
+  });
+
+  it("says Google account (not Gmail) when it needs reconnecting, and keeps operator hints out of agent errors", async () => {
+    const s = setup();
+    s.ctx.calendar.calendars = async () => {
+      throw new HttpError(409, "calendar_api_disabled", "The Google Calendar API is turned off.", "Run gcloud services enable calendar-json.googleapis.com --project=p");
+    };
+    const listed = await s.run("list_calendars", (c) => c.listCalendars(ME));
+    expect(listed).toMatchObject({ reason: "calendar_api_disabled" });
+    expect(messageOf(listed)).toBe("The Google Calendar API is turned off.");
+    s.ctx.db.run("UPDATE accounts SET status = 'needs_reauth' WHERE id = 'acc_a'");
+    const r = await s.run("list_calendar_events", (c) => c.listEvents(ME, WINDOW));
+    expect(r.reason).toBe("needs_reauth");
+    expect(messageOf(r)).toBe("The Google account me@acme.com needs to be reconnected. Ask the operator to reconnect it in the agentinbox console.");
   });
 
   it("turns Google's disabled-API and missing-scope answers into words", async () => {
@@ -195,13 +210,16 @@ describe("calendar scope", () => {
 
   it("rejects ids that could leave the Calendar URL path, and bad windows", async () => {
     const s = setup();
-    for (const id of ["..", ".", "a/b", "x y", "a\u0000"]) {
+    for (const id of ["..", ".", "a/b", "x y", "a\u0000", "a#b", "a%2Fb", "a?b"]) {
       expect((await s.run("get_calendar_event", (c) => c.getEvent(ME, undefined, id))).reason).toBe("invalid_arguments");
     }
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { ...WINDOW, calendarId: ".." }))).reason).toBe("invalid_arguments");
+    // Google's holiday calendar ids carry "#": a valid id (here not in the account's list).
+    expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { ...WINDOW, calendarId: "en.usa#holiday@group.v.calendar.google.com" }))).reason).toBe("calendar_scope");
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { timeMin: "2026-10-20T00:00:00", timeMax: WINDOW.timeMax }))).reason).toBe("invalid_arguments");
     expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { timeMin: WINDOW.timeMax, timeMax: WINDOW.timeMin }))).reason).toBe("invalid_arguments");
-    expect(s.cal.calls).toEqual([]);
+    // Only the holiday calendar's lookup in the account's list; no event call went out.
+    expect(s.cal.calls).toEqual(["calendarList"]);
   });
 });
 
@@ -305,13 +323,57 @@ describe("write modes", () => {
     const insert = s.cal.insertEvent.bind(s.cal);
     s.cal.insertEvent = async (cal, ev, opts) => {
       ids.push(ev.id!);
-      // The first attempt landed in Google, but its answer was lost.
-      s.cal.put(cal, { ...ev, id: ev.id!, summary: "landed" });
+      // The client's first attempt landed, but its answer was lost; its retry gets 409.
+      s.cal.put(cal, { ...ev, id: ev.id! });
       return insert(cal, ev, opts);
     };
     const r = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT }, {}));
-    expect(r.value).toMatchObject({ status: "applied", event: { id: ids[0], summary: "landed" } });
+    expect(r.value).toMatchObject({ status: "applied", event: { id: ids[0], summary: "x" } });
     expect([...s.cal.calendars.get(ME)!.events.keys()]).toEqual(ids);
+  });
+
+  it("an uncertain create names its event_id; retrying with it is idempotent", async () => {
+    const s = setup({ capabilities: ["calendar.write"] });
+    const insert = s.cal.insertEvent.bind(s.cal);
+    s.cal.insertEvent = async (cal, ev, opts) => {
+      await insert(cal, ev, opts);
+      throw new GoogleApiError(0, "Google didn't respond within 30s", "timeout");
+    };
+    s.cal.fail.get = [new GoogleApiError(0, "Google didn't respond within 30s", "timeout")];
+    const first = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT, attendees: ["ann@acme.com"] }, {}));
+    const id = first.detail.eventId as string;
+    expect(first).toMatchObject({ outcome: "error", reason: "write_uncertain", detail: { maybeSent: true } });
+    // A write-only grant can't read events: the advice is the safe retry only.
+    expect(messageOf(first)).toBe(
+      `The connection to Google Calendar failed, so the change may or may not have been applied. To retry, call create_calendar_event again with the same details and event_id ${id}: it can't create a second event.`,
+    );
+    s.cal.insertEvent = insert;
+    const retry = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT, attendees: ["ann@acme.com"] }, { eventId: id }));
+    expect(retry.value).toMatchObject({ status: "applied", event: { id } });
+    expect(s.cal.calendars.get(ME)!.events.size).toBe(1);
+
+    const other = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "different", ...AT }, { eventId: id }));
+    expect(other).toMatchObject({ outcome: "error", reason: "event_id_taken" });
+    expect((await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT }, { eventId: "Not-Base32" }))).reason).toBe("invalid_arguments");
+  });
+
+  it("a direct update whose answer was lost: applied when in place, uncertain otherwise", async () => {
+    const s = setup({ maxSendsPerHour: 10 });
+    s.cal.put(ME, { id: "m1", summary: "A", organizer: { email: ME, self: true }, attendees: [{ email: "ann@acme.com" }], start: { dateTime: AT.start }, end: { dateTime: AT.end } });
+    const patch = s.cal.patchEvent.bind(s.cal);
+    s.cal.patchEvent = async (...args) => {
+      await patch(...args);
+      throw new GoogleApiError(503, "Backend Error", "outcome_unknown");
+    };
+    const landed = await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { summary: "B" }, {}));
+    expect(landed).toMatchObject({ outcome: "ok", value: { status: "applied", event: { summary: "B" } }, detail: { maybeSent: true } });
+
+    s.cal.patchEvent = async () => {
+      throw new GoogleApiError(0, "Could not reach Google", "network");
+    };
+    const lost = await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { summary: "C" }, {}));
+    expect(lost).toMatchObject({ outcome: "error", reason: "write_uncertain", detail: { maybeSent: true } });
+    expect(messageOf(lost)).toContain("Check with get_calendar_event (event_id m1) before retrying.");
   });
 
   it("RSVP answers only invitations, patching the account's own entry", async () => {
@@ -333,6 +395,48 @@ describe("write modes", () => {
     expect(r.value).toMatchObject({ status: "applied", event: { selfResponse: "tentative" }, notified: [] });
     expect(s.cal.writes[0]).toMatchObject({ op: "patch", body: { attendees: [{ email: ME, responseStatus: "tentative" }], attendeesOmitted: true }, opts: { sendUpdates: "none" } });
     expect(s.cal.event(ME, "inv")!.attendees![0]!.responseStatus).toBe("accepted");
+  });
+
+  it("rejects a time_zone-only update instead of sending an empty patch", async () => {
+    const s = setup();
+    s.cal.put(ME, { id: "m1", summary: "A", organizer: { email: ME, self: true }, attendees: [{ email: "ann@acme.com" }], start: { dateTime: AT.start }, end: { dateTime: AT.end } });
+    const r = await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { timeZone: "Europe/Berlin" }, {}));
+    expect(r).toMatchObject({ outcome: "error", reason: "invalid_arguments" });
+    expect(messageOf(r)).toBe("time_zone applies to start and end: pass them with it.");
+    expect(s.cal.writes).toEqual([]);
+  });
+
+  it("keeps rooms on an update unless the new list names rooms itself", async () => {
+    const s = setup();
+    const room = "r1@resource.calendar.google.com";
+    s.cal.put(ME, {
+      id: "m1",
+      summary: "A",
+      organizer: { email: ME, self: true },
+      attendees: [{ email: "ann@acme.com" }, { email: room, resource: true, responseStatus: "accepted" }],
+      start: { dateTime: AT.start },
+      end: { dateTime: AT.end },
+    });
+    await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { attendees: ["bob@acme.com"] }, {}));
+    expect(s.cal.writes[0]!.body!.attendees).toEqual([{ email: "bob@acme.com" }, { email: room, resource: true, responseStatus: "accepted" }]);
+    await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { attendees: ["bob@acme.com", "r2@resource.calendar.google.com"] }, {}));
+    expect(s.cal.writes[1]!.body!.attendees).toEqual([{ email: "bob@acme.com" }, { email: "r2@resource.calendar.google.com" }]);
+  });
+
+  it("changing an existing event needs calendar.read too", async () => {
+    const s = setup({ capabilities: ["calendar.write"] });
+    s.cal.put(ME, { id: "m1", summary: "A", organizer: { email: "eve@evil.com" }, start: { dateTime: AT.start }, end: { dateTime: AT.end } });
+    for (const call of [
+      s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "m1", { summary: "B" }, {})),
+      s.run("delete_calendar_event", (c) => c.deleteEvent(ME, undefined, "m1", {})),
+      s.run("respond_to_invitation", (c) => c.respond(ME, undefined, "m1", "accepted", {})),
+    ]) {
+      const r = await call;
+      expect(r).toMatchObject({ outcome: "denied", reason: "capability" });
+      expect(messageOf(r)).toBe("Your access to me@acme.com lets you create events but not read them, and changing an existing event needs both. Ask the operator to add calendar.read.");
+    }
+    expect(s.cal.calls).toEqual([]);
+    expect((await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT }, {}))).outcome).toBe("ok");
   });
 
   it("validates event input", async () => {
@@ -415,7 +519,52 @@ describe("attendees and allowTo", () => {
     const theirs = await s.run("delete_calendar_event", (c) => c.deleteEvent(ME, undefined, "m2", {}));
     expect(theirs.reason).toBe("allow_to");
     expect(messageOf(theirs)).toContain("eve@evil.com");
+    // Quietly removing someone else's event from the account's calendar writes nothing to its organizer.
+    expect((await s.run("delete_calendar_event", (c) => c.deleteEvent(ME, undefined, "m2", { notifyAttendees: false }))).value).toMatchObject({ status: "deleted" });
     expect(attendeeImpact({ kind: "delete", selfEmail: ME, before: ["ann@acme.com"], after: [], notify: true, organizer: "eve@evil.com" }).emailed).toEqual(["eve@evil.com"]);
+  });
+
+  it("RSVP: a comment must pass allowTo for every attendee, since Google shows it to all of them", async () => {
+    const s = setup({ ...allow, calendarWriteMode: "approval" });
+    s.cal.put(ME, {
+      id: "inv",
+      summary: "Offsite",
+      organizer: { email: "boss@acme.com" },
+      attendees: [{ email: "boss@acme.com", organizer: true }, { email: "eve@evil.com" }, { email: "r@resource.calendar.google.com", resource: true }, { email: ME, self: true }],
+      start: { dateTime: AT.start },
+      end: { dateTime: AT.end },
+    });
+    const commented = await s.run("respond_to_invitation", (c) => c.respond(ME, undefined, "inv", "accepted", { comment: "Q3 numbers attached" }));
+    expect(commented).toMatchObject({ outcome: "denied", reason: "allow_to" });
+    expect(messageOf(commented)).toContain("eve@evil.com");
+    s.ctx.policy.upsertGrant(s.agentId, "acc_a", grantInput("acc_a", { capabilities: ["calendar.read", "calendar.write"], allowTo: ["*@acme.com", "eve@evil.com"] }));
+    const queued = await s.run("respond_to_invitation", (c) => c.respond(ME, undefined, "inv", "accepted", { comment: "See you" }));
+    const approval = new Approvals(s.ctx).get((queued.value as { approvalId: string }).approvalId)!;
+    expect(approval.calendar).toMatchObject({ notified: ["boss@acme.com"], checked: ["boss@acme.com", "eve@evil.com"] });
+  });
+
+  it("won't change or comment on an event whose guest list is hidden from the account", async () => {
+    const s = setup(allow);
+    for (const hide of [{ guestsCanSeeOtherGuests: false }, { attendeesOmitted: true }]) {
+      s.cal.put(ME, {
+        id: "h1",
+        summary: "All hands",
+        organizer: { email: "boss@acme.com" },
+        attendees: [{ email: ME, self: true, responseStatus: "needsAction" }],
+        guestsCanModify: true,
+        start: { dateTime: AT.start },
+        end: { dateTime: AT.end },
+        ...hide,
+      });
+      const upd = await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "h1", { description: "x" }, { notifyAttendees: false }));
+      expect(upd).toMatchObject({ outcome: "denied", reason: "allow_to" });
+      expect(messageOf(upd)).toMatch(/^The organizer hides this event's guest list/);
+      expect((await s.run("respond_to_invitation", (c) => c.respond(ME, undefined, "h1", "accepted", { comment: "hi" }))).reason).toBe("allow_to");
+      expect((await s.run("respond_to_invitation", (c) => c.respond(ME, undefined, "h1", "accepted", {}))).outcome).toBe("ok");
+    }
+    // Without an allowlist there's nothing to check.
+    s.ctx.policy.upsertGrant(s.agentId, "acc_a", grantInput("acc_a", { capabilities: ["calendar.read", "calendar.write"], calendarWriteMode: "direct" }));
+    expect((await s.run("update_calendar_event", (c) => c.updateEvent(ME, undefined, "h1", { description: "x" }, {}))).outcome).toBe("ok");
   });
 
   it("RSVP: a bare answer goes to any organizer, a comment only to allowed ones", async () => {
@@ -450,20 +599,23 @@ describe("attendees and allowTo", () => {
 });
 
 describe("send caps shared with mail", () => {
-  it("counts mail sends and emailing calendar writes on one counter; quiet writes don't count", async () => {
-    const s = setup({ capabilities: ["send", "calendar.write"], maxSendsPerHour: 2 });
+  it("counts mail sends, emailing calendar writes and invitations on one counter", async () => {
+    const s = setup({ capabilities: ["send", "calendar.write"], maxSendsPerHour: 3 });
     s.google.gmail("acc_a");
     const mail = await s.run("send_message", (_c, m) => m.sendMessage(ME, { to: "ann@acme.com", subject: "Hi", body: "Hello" }));
     expect(mail.outcome).toBe("ok");
     const invite = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT, attendees: ["ann@acme.com"] }, {}));
     expect(invite.outcome).toBe("ok");
+    // Without an email the event still lands on Ann's calendar: it counts.
     const quiet = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "q", ...AT, attendees: ["ann@acme.com"] }, { notifyAttendees: false }));
-    const solo = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "solo", ...AT }, {}));
-    expect([quiet.outcome, solo.outcome]).toEqual(["ok", "ok"]);
+    expect(quiet).toMatchObject({ outcome: "ok", detail: { emailed: false, invited: 1 } });
+    // Nobody else involved: free.
+    const solo = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "solo", ...AT, attendees: ["room@resource.calendar.google.com"] }, {}));
+    expect(solo).toMatchObject({ outcome: "ok", detail: { emailed: false, invited: 0 } });
 
-    const capped = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "y", ...AT, attendees: ["ann@acme.com"] }, {}));
+    const capped = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "y", ...AT, attendees: ["ann@acme.com"] }, { notifyAttendees: false }));
     expect(capped).toMatchObject({ outcome: "denied", reason: "rate_limit" });
-    expect(messageOf(capped)).toBe("Send limit reached: 2 of 2 sends in the last hour for this account. Try again later, or ask your user to make this change in Google Calendar.");
+    expect(messageOf(capped)).toBe("Send limit reached: 3 of 3 sends in the last hour for this account. Try again later, or ask your user to make this change in Google Calendar.");
     const mailCapped = await s.run("send_message", (_c, m) => m.sendMessage(ME, { to: "ann@acme.com", subject: "Again", body: "x" }));
     expect(mailCapped.reason).toBe("rate_limit");
     expect(s.cal.writes).toHaveLength(3);
@@ -508,6 +660,30 @@ describe("grants", () => {
     const g = s.ctx.policy.upsertGrant(s.agentId, "acc_a", grantInput("acc_a", { capabilities: ["calendar.read"], calendarScope: [" Me@Acme.com ", "Team@Group.Calendar.Google.com", "AbC"] }));
     expect(g.calendarScope).toEqual([ME, TEAM, "AbC"]);
     expect(() => s.ctx.policy.upsertGrant(s.agentId, "acc_a", grantInput("acc_a", { capabilities: ["calendar.read"], calendarScope: ["Primary"] }))).toThrow(/not "primary"/);
+  });
+
+  it("starts calendar sync when the calendar scope widens", () => {
+    const s = setup({ capabilities: ["calendar.read"], calendarScope: [ME] });
+    const set = (calendarScope: string[] | null) => s.ctx.policy.upsertGrant(s.agentId, "acc_a", grantInput("acc_a", { capabilities: ["calendar.read"], calendarScope }));
+    set([ME]);
+    expect(s.kicks).toEqual([]);
+    set([ME, TEAM]);
+    expect(s.kicks).toHaveLength(1);
+    set([TEAM]);
+    expect(s.kicks).toHaveLength(1);
+    set(null);
+    expect(s.kicks).toHaveLength(2);
+    set([ME]);
+    expect(s.kicks).toHaveLength(2);
+  });
+
+  it("reads an unreadable calendar scope as no calendars, never as all", async () => {
+    const s = setup({ calendarScope: [ME] });
+    for (const bad of ["{oops", "null", '{"a":1}']) {
+      s.ctx.db.run("UPDATE grants SET calendar_scope = ? WHERE agent_id = ?", bad, s.agentId);
+      expect(s.ctx.policy.grant(s.agentId, "acc_a")!.calendarScope).toEqual([]);
+      expect((await s.run("list_calendar_events", (c) => c.listEvents(ME, { ...WINDOW, calendarId: ME }))).reason).toBe("calendar_scope");
+    }
   });
 
   it("starts calendar sync when a grant gains calendar.read", () => {
