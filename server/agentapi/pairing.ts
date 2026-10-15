@@ -4,6 +4,7 @@ import type { AgentTool, PairingPoll, PairingStart } from "../../shared/agent-ap
 import { type Agent, type ApprovePairingInput, CAPABILITIES, type PairingRequest, type PairingStatus, SEND_MODES } from "../../shared/types.ts";
 import type { AuditInput } from "../audit.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
+import { clientKey } from "../auth/lockout.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
@@ -11,7 +12,6 @@ import { json } from "../db/index.ts";
 import { grantInputSchema } from "../policy/grants.ts";
 import { badRequest, HttpError, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
-import { clientKey } from "./ratelimit.ts";
 
 export interface PairingOptions {
   clock?: () => number;

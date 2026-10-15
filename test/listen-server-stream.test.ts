@@ -251,7 +251,9 @@ describe("agent API auth", () => {
     const s = await setup();
     s.ctx.config.trustProxy = true;
     const app = createApp(s.ctx);
-    const me = (ip: string, key: string) => app.request("/agent/v1/me", { headers: { authorization: `Bearer ${key}`, "x-forwarded-for": ip } });
+    // Behind a local proxy (XFF is only honored from a private peer).
+    const peer = { incoming: { socket: { remoteAddress: "127.0.0.1" } } };
+    const me = (ip: string, key: string) => app.request("/agent/v1/me", { headers: { authorization: `Bearer ${key}`, "x-forwarded-for": ip } }, peer);
     // Retrying the same stale key counts once.
     for (let i = 0; i < 6; i++) expect((await me("10.0.0.1", "aib_stale")).status).toBe(401);
     for (let i = 0; i < 3; i++) expect((await me("10.0.0.1", `aib_bad${i}`)).status).toBe(401);

@@ -1,10 +1,9 @@
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../api/util.ts";
 import { clientIp, lockedOut } from "../auth/index.ts";
-import { BAN_MS, type LoginLimiter } from "../auth/lockout.ts";
+import { BAN_MS, clientKey, type LoginLimiter } from "../auth/lockout.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
-import { clientKey } from "./ratelimit.ts";
 
 /** AppEnv plus the hash of the key the request authenticated with (streams re-check it on revocation). */
 export type AgentApiEnv = { Variables: AppEnv["Variables"] & { keyHash: string } };
@@ -30,7 +29,7 @@ export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): Middl
       const source = clientKey(ip);
       const banned = limiter.bannedMinutes(source);
       if (banned) return lockedOut(c, banned);
-      if (key && limiter.fail(source, key)) {
+      if (key && limiter.fail(source, key, { global: false })) {
         ctx.audit.record({
           actorType: "system",
           action: "agent_api.auth",

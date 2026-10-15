@@ -4,19 +4,18 @@
 // its own browser/DNS-rebinding guard instead.
 
 import { Hono } from "hono";
-import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { AgentSelf } from "../../shared/agent-api.ts";
 import { readBody } from "../api/util.ts";
 import { clientIp, lockedOut } from "../auth/index.ts";
-import { LoginLimiter } from "../auth/lockout.ts";
+import { clientKey, LoginLimiter } from "../auth/lockout.ts";
 import type { AppContext } from "../context.ts";
 import { HttpError, notFound } from "../util/errors.ts";
 import { type AgentApiEnv, agentAuth } from "./auth.ts";
 import { agentRequestGuard } from "./guard.ts";
 import { ackListener, parseConsumer } from "./listeners.ts";
 import { createPairingService, type PairingOptions, type PairingService, pairingStartSchema, pollSchema } from "./pairing.ts";
-import { clientKey, OncePer, RateLimiter, tooManyRequests } from "./ratelimit.ts";
+import { OncePer, RateLimiter, tooManyRequests } from "./ratelimit.ts";
 import { streamEvents } from "./stream.ts";
 
 export interface AgentApiOptions extends PairingOptions {
@@ -112,13 +111,6 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
   };
 
   app.use("/agent/*", agentRequestGuard(ctx));
-  app.use(
-    "/agent/v1/*",
-    bodyLimit({
-      maxSize: 64 * 1024,
-      onError: (c) => c.json({ error: { code: "payload_too_large", message: "Request body is too large" } }, 413),
-    }),
-  );
 
   // ── Pairing (public) ──
   app.post("/agent/v1/pairings", async (c) => {
@@ -168,7 +160,7 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
     if (result) return c.json(result);
     const banned = s.codeLimiter.bannedMinutes(source);
     if (banned) return lockedOut(c, banned);
-    if (s.codeLimiter.fail(source, deviceCode)) denied("pairing.poll", "lockout", source, { ip });
+    if (s.codeLimiter.fail(source, deviceCode, { global: false })) denied("pairing.poll", "lockout", source, { ip });
     // Indistinguishable from a request that was pruned.
     return c.json({ status: "expired" });
   });

@@ -1,28 +1,7 @@
-import { isIPv6 } from "node:net";
 import type { Context } from "hono";
 
 /** Tracked keys per limiter; the least recently used is dropped beyond this. */
 export const MAX_KEYS = 10_000;
-
-/**
- * Limiter key for a client address: IPv4 as is (also when IPv4-mapped), IPv6 by /64, since one
- * client usually owns the whole prefix. Same normalization as `clientKey` in server/auth/lockout.ts
- * on feat/platform (switch to that export once both are on main). Idempotent.
- */
-export function clientKey(ip: string): string {
-  const addr = ip.replace(/%.*$/, "").toLowerCase();
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
-  if (mapped) return mapped[1]!;
-  if (!isIPv6(addr)) return addr;
-  const [head = "", tail] = addr.split("::");
-  const left = head ? head.split(":") : [];
-  const right = tail ? tail.split(":") : [];
-  const groups = tail === undefined ? left : [...left, ...Array(8 - left.length - right.length).fill("0"), ...right];
-  return `${groups
-    .slice(0, 4)
-    .map((g) => g.replace(/^0+(?=.)/, ""))
-    .join(":")}::/64`;
-}
 
 /** Map order doubles as LRU order: re-insert on use, evict from the front. */
 function touch<V>(map: Map<string, V>, key: string, value: V, max: number): void {
