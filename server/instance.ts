@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NPM_PACKAGE } from "../shared/types.ts";
-import type { Config } from "./config.ts";
+import { type Config, DEFAULT_PORT } from "./config.ts";
 import { Crypto } from "./crypto.ts";
 
 /**
@@ -14,6 +15,20 @@ export function cliCommand(args: string): string {
   const viaNpx = process.env.npm_command === "exec" || /[\\/]_npx[\\/]/.test(process.argv[1] ?? "") || process.env.AGENTINBOX_SERVICE === "1";
   return `${viaNpx ? `npx ${NPM_PACKAGE}` : "agentinbox"} ${args}`;
 }
+
+/**
+ * `service install` with the flags this run used, so the service gets the same data and address.
+ * Printed by the startup banner and shown in the console (SystemInfo.serviceCommand).
+ */
+export function serviceInstallCommand(config: Pick<Config, "dataDir" | "host" | "port">): string {
+  const flags: string[] = [];
+  if (config.dataDir !== resolve(join(homedir(), ".agentinbox"))) flags.push(`--data ${quoteArg(config.dataDir)}`);
+  if (config.host !== "0.0.0.0") flags.push(`--host ${quoteArg(config.host)}`);
+  if (config.port !== DEFAULT_PORT) flags.push(`--port ${config.port}`);
+  return cliCommand(["service install", ...flags].join(" "));
+}
+
+const quoteArg = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
 // ───────────── Single instance per data directory ─────────────
 

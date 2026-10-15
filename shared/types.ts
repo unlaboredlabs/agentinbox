@@ -76,6 +76,8 @@ export interface SystemInfo {
   addresses: string[];
   publicUrl: string;
   ingest: IngestStatus;
+  /** Installs this instance as a service with the flags it runs with (`… service install --port 9000`), as the startup banner prints it. */
+  serviceCommand: string;
 }
 
 /** GET /api/system/latest: update notice. */
@@ -359,7 +361,10 @@ export interface Agent {
   /** First chars of the key, for identification (e.g. "aib_7Hk2"). The full key is shown once at creation/rotation. */
   keyPrefix: string;
   disabled: boolean;
+  /** Last request with this agent's key (MCP or the listener API), written at most once a minute. */
   lastUsedAt: string | null;
+  /** Last request to /mcp only (a tool's startup `tools/list` counts), written at most once a minute. */
+  lastMcpAt: string | null;
   createdAt: string;
   grants: Grant[];
   /** `agentinbox listen` instances (one per consumer name) and their stream position. */
@@ -743,4 +748,6 @@ export type ConsoleStreamMessage =
   | { kind: "approval"; data: Approval }
   | { kind: "audit"; data: AuditEntry }
   | { kind: "account"; data: Account }
-  | { kind: "pairing"; data: PairingRequest };
+  | { kind: "pairing"; data: PairingRequest }
+  /** An agent's state changed: listener connect/disconnect/ack (at most ~1/s), first use and lastMcpAt, access changes. */
+  | { kind: "agent"; data: Agent };

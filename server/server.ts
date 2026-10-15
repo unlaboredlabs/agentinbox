@@ -7,9 +7,9 @@ import open from "open";
 import pc from "picocolors";
 import { createApp, hasMcp } from "./app.ts";
 import { currentSetupToken } from "./auth/index.ts";
-import { type Config, type ConfigInput, DEFAULT_PORT, loadConfig } from "./config.ts";
+import { type Config, type ConfigInput, loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
-import { acquireInstanceLock, assertMasterKeyUsable, cliCommand, type InstanceLock } from "./instance.ts";
+import { acquireInstanceLock, assertMasterKeyUsable, cliCommand, type InstanceLock, serviceInstallCommand } from "./instance.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { consoleUrls, isPrivateIPv4, isWildcardHost, loopbackUrl, networkAddresses } from "./urls.ts";
 import { errorMessage } from "./util/errors.ts";
@@ -232,15 +232,6 @@ export function tunnelCommand(config: Pick<Config, "host" | "port">, e: BannerEn
   const forward = `${config.port}:${target.includes(":") ? `[${target}]` : target}:${config.port}`;
   const port = sshPort && sshPort !== "22" && /^\d+$/.test(sshPort) ? ` -p ${sshPort}` : "";
   return `ssh${port} -L ${forward} ${host}`;
-}
-
-/** `service install` with the flags this run used, so the service gets the same data and address. */
-function serviceInstallCommand(config: Config): string {
-  const flags: string[] = [];
-  if (config.dataDir !== resolve(join(homedir(), ".agentinbox"))) flags.push(`--data ${shellQuote(config.dataDir)}`);
-  if (config.host !== "0.0.0.0") flags.push(`--host ${config.host}`);
-  if (config.port !== DEFAULT_PORT) flags.push(`--port ${config.port}`);
-  return cliCommand(["service install", ...flags].join(" "));
 }
 
 const shellQuote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);

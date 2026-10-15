@@ -10,8 +10,16 @@ const HEARTBEAT_MS = 20_000;
 /** A client this far behind has stalled; drop it rather than buffer without bound. It reconnects. */
 const MAX_PENDING_WRITES = 1000;
 
-/** Bus channel → stream message kind. */
-const CHANNELS = ["event", "delivery", "approval", "audit", "account", "pairing"] as const satisfies (keyof BusEvents & ConsoleStreamMessage["kind"])[];
+/** Bus channel → stream message kind (bus "agent" is the access-change signal for listener streams; the console gets "agentState"). */
+const CHANNELS = {
+  event: "event",
+  delivery: "delivery",
+  approval: "approval",
+  audit: "audit",
+  account: "account",
+  pairing: "pairing",
+  agentState: "agent",
+} as const satisfies Partial<Record<keyof BusEvents, ConsoleStreamMessage["kind"]>>;
 
 /** Paths are relative to /api. */
 export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPendingWrites?: number } = {}) {
@@ -45,10 +53,10 @@ export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPend
         };
         const send = (msg: ConsoleStreamMessage) => enqueue(() => stream.writeSSE({ data: JSON.stringify(msg) }));
         enqueue(() => stream.write(": connected\n\n"));
-        const listeners = CHANNELS.map((kind) => {
+        const listeners = Object.entries(CHANNELS).map(([channel, kind]) => {
           const listener = (data: unknown) => send({ kind, data } as ConsoleStreamMessage);
-          ctx.bus.on(kind, listener);
-          return () => ctx.bus.off(kind, listener);
+          ctx.bus.on(channel as keyof typeof CHANNELS, listener);
+          return () => ctx.bus.off(channel as keyof typeof CHANNELS, listener);
         });
         const heartbeat = setInterval(() => enqueue(() => stream.write(": ping\n\n")), heartbeatMs);
 

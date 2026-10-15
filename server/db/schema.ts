@@ -217,4 +217,8 @@ export const MIGRATIONS: string[] = [
   -- before this migration, or by an ack (unknown).
   ALTER TABLE listener_cursors ADD COLUMN start_seq INTEGER;
   `,
+  /* 5: MCP use apart from listen */ `
+  -- Last authenticated request to /mcp; throttled like last_used_at (first write immediate).
+  ALTER TABLE agents ADD COLUMN last_mcp_at TEXT;
+  `,
 ];

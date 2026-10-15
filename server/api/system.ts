@@ -4,6 +4,7 @@ import type { Context } from "hono";
 import { type HealthResponse, type IngestStatus, NPM_PACKAGE, type SystemInfo, type UpdateInfo } from "../../shared/types.ts";
 import { type Config, DEFAULT_PORT } from "../config.ts";
 import type { AppContext } from "../context.ts";
+import { serviceInstallCommand } from "../instance.ts";
 import { consoleUrls } from "../urls.ts";
 import { errorMessage } from "../util/errors.ts";
 import { setupState } from "./setup.ts";
@@ -70,6 +71,7 @@ export function systemApi(ctx: AppContext) {
         addresses: consoleUrls(ctx.config.host, ctx.config.port),
         publicUrl: ctx.settings.publicUrl(),
         ingest,
+        serviceCommand: serviceInstallCommand(ctx.config),
       });
     })
     .get("/system/latest", async (c) => {

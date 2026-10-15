@@ -127,6 +127,9 @@ export function ensureConsumerSlot(ctx: AppContext, agentId: string, consumer: s
   db.run("DELETE FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, idle.consumer);
 }
 
+/** Console pushes for acks: at most one per agent per this interval (the last ack in a burst still goes out). */
+const ACK_PUSH_INTERVAL_MS = 1000;
+
 /** Moves the consumer's cursor forward only, and never past the newest event in its granted accounts. */
 export function ackListener(ctx: AppContext, agentId: string, consumer: string, seq: number, maxConsumers: number): { ackedSeq: number } {
   const { db } = ctx;
@@ -141,5 +144,6 @@ export function ackListener(ctx: AppContext, agentId: string, consumer: string, 
     target,
     t,
   );
+  ctx.policy.publishAgent(agentId, ACK_PUSH_INTERVAL_MS);
   return { ackedSeq: ackedSeq(db, agentId, consumer) };
 }

@@ -29,6 +29,8 @@ export function mcpRoutes(ctx: AppContext) {
       );
     }
     c.set("agent", principal);
+    // Apart from lastUsedAt (also set by `listen`): proves the agent's tool reaches /mcp, even a bare tools/list.
+    ctx.policy.markMcpUse(principal.agentId);
 
     if (c.req.method !== "POST") {
       c.header("Allow", "POST");

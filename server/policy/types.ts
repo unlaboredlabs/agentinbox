@@ -14,6 +14,15 @@ export interface PolicyService extends Lifecycle {
   /** FROZEN. Looks up a key by sha256; null if unknown or the agent is disabled. Updates last_used_at. */
   authenticate(apiKey: string): AgentPrincipal | null;
 
+  /** Records a request to /mcp (`lastMcpAt`, throttled like last_used_at; the first write is immediate). */
+  markMcpUse(agentId: string): void;
+  /**
+   * Pushes the agent's current state to bus "agentState" (the console stream). Calls coalesce per
+   * agent: the state is read when the push goes out, on the next macrotask, and pushes are at least
+   * `minIntervalMs` apart (later calls in the window are folded into one trailing push).
+   */
+  publishAgent(agentId: string, minIntervalMs?: number): void;
+
   listAgents(): Agent[];
   getAgent(id: string): Agent | null;
   createAgent(input: CreateAgentInput): AgentWithKey;

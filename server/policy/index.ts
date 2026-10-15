@@ -15,7 +15,7 @@ import type { AgentPrincipal, PolicyService } from "./types.ts";
 export const API_KEY_PREFIX = "aib_";
 /** 32 base32 chars = 160 bits of entropy. */
 const KEY_RANDOM_CHARS = 32;
-/** `last_used_at` is written at most this often per agent. */
+/** `last_used_at` and `last_mcp_at` are written at most this often per agent (the first write is immediate). */
 const LAST_USED_THROTTLE_MS = 60_000;
 /** Account-level events visible to any agent with `read` on the account, regardless of label scope. */
 const ACCOUNT_EVENTS = new Set(["account.auth_failed", "sync.gap"]);
@@ -28,6 +28,7 @@ interface AgentRow {
   key_hash: string;
   disabled: number;
   last_used_at: string | null;
+  last_mcp_at: string | null;
   created_at: string;
 }
 
@@ -60,6 +61,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     keyPrefix: r.key_prefix,
     disabled: bool(r.disabled),
     lastUsedAt: r.last_used_at,
+    lastMcpAt: r.last_mcp_at,
     createdAt: r.created_at,
     grants: grantsOf(r.id),
     listeners: listenersOf(db, r.id),
@@ -118,16 +120,67 @@ export function createPolicyService(ctx: AppContext): PolicyService {
     } catch (err) {
       ctx.log.error("Bus listener failed", { error: err instanceof Error ? err.message : String(err) });
     }
+    if (reason === "deleted") {
+      clearTimeout(pushes.get(agentId)?.timer);
+      pushes.delete(agentId);
+    } else {
+      publishAgent(agentId);
+    }
+  };
+
+  // bus "agentState": per agent, when the last one went out and the one scheduled next.
+  const pushes = new Map<string, { last: number; timer?: ReturnType<typeof setTimeout> }>();
+  let stopped = false;
+  const publishAgent = (agentId: string, minIntervalMs = 0) => {
+    if (stopped) return;
+    let p = pushes.get(agentId);
+    if (!p) pushes.set(agentId, (p = { last: 0 }));
+    // Already scheduled: that one reads the agent when it fires, so it carries this change too.
+    if (p.timer) return;
+    const entry = p;
+    // Delay 0 still defers to the next macrotask, so changes made together (auth + MCP use) go out once.
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      entry.last = Date.now();
+      try {
+        const r = row(agentId);
+        if (r) ctx.bus.emit("agentState", toAgent(r));
+        else pushes.delete(agentId);
+      } catch (err) {
+        ctx.log.debug("Agent update not published", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }, Math.max(0, entry.last + minIntervalMs - Date.now()));
+    entry.timer.unref?.();
+  };
+
+  /** Writes `column` = now unless it was written within the throttle window; true if it was written. */
+  const touchColumn = (column: "last_used_at" | "last_mcp_at", agentId: string): boolean => {
+    const ts = Date.now();
+    const cutoff = new Date(ts - LAST_USED_THROTTLE_MS).toISOString();
+    return (
+      db.run(`UPDATE agents SET ${column} = ? WHERE id = ? AND (${column} IS NULL OR ${column} <= ?)`, new Date(ts).toISOString(), agentId, cutoff).changes > 0
+    );
   };
 
   return {
+    stop() {
+      stopped = true;
+      for (const p of pushes.values()) clearTimeout(p.timer);
+      pushes.clear();
+    },
+
+    publishAgent,
+
+    markMcpUse(agentId) {
+      if (touchColumn("last_mcp_at", agentId)) publishAgent(agentId);
+    },
+
     authenticate(apiKey: string): AgentPrincipal | null {
       if (typeof apiKey !== "string" || !apiKey.startsWith(API_KEY_PREFIX) || apiKey.length > 200) return null;
       const r = db.get<AgentRow>("SELECT * FROM agents WHERE key_hash = ?", sha256(apiKey));
       if (!r || bool(r.disabled)) return null;
-      const ts = Date.now();
-      if (!r.last_used_at || ts - Date.parse(r.last_used_at) >= LAST_USED_THROTTLE_MS) {
-        db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", new Date(ts).toISOString(), r.id);
+      if ((!r.last_used_at || Date.now() - Date.parse(r.last_used_at) >= LAST_USED_THROTTLE_MS) && touchColumn("last_used_at", r.id)) {
+        publishAgent(r.id);
       }
       return { agentId: r.id, name: r.name };
     },
