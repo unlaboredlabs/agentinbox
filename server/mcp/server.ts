@@ -102,8 +102,33 @@ export interface BuildOptions {
   signal?: AbortSignal;
 }
 
-/** Tool names that can be an audit action as they are: no "." (see isMcpToolAction), short, plain. */
-const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * Every tool agentinbox has, whichever an agent's grants register. Only these names become an audit
+ * action as they are; anything else an agent calls is recorded as "unknown_tool" (with the cleaned
+ * name in detail.tool), so arbitrary strings never fill the action column or pass for console actions.
+ */
+export const TOOL_NAMES = [
+  "list_accounts",
+  "list_labels",
+  "search_threads",
+  "get_thread",
+  "get_message",
+  "get_attachment",
+  "list_events",
+  "wait_for_events",
+  "ack_events",
+  "mark_read",
+  "archive",
+  "modify_labels",
+  "trash",
+  "create_draft",
+  "send_message",
+  "reply",
+  "forward",
+  "get_send_status",
+] as const;
+export type ToolName = (typeof TOOL_NAMES)[number];
+const CATALOG: ReadonlySet<string> = new Set(TOOL_NAMES);
 
 /** The argument fields that fail a tool's schema: names (paths) only, never the values. */
 export function invalidFields(shape: z.ZodRawShape, args: unknown): string[] {
@@ -126,8 +151,8 @@ export function rejectedCall(
   const p = (params && typeof params === "object" ? params : {}) as { name?: unknown; arguments?: unknown };
   const name = typeof p.name === "string" ? p.name : null;
   const shape = name === null ? undefined : shapes.get(name);
-  // An odd name can't be the action (a "." would make it look like a console action): keep a short, cleaned copy.
-  const action = name !== null && TOOL_NAME_RE.test(name) ? name : name === null ? "invalid_request" : "unknown_tool";
+  // Only catalog names are the action (TOOL_NAMES); keep a short, cleaned copy of any other.
+  const action = name !== null && CATALOG.has(name) ? name : name === null ? "invalid_request" : "unknown_tool";
   const named = name !== null && action !== name ? { tool: cleanLine(name).slice(0, 64) } : {};
   if (response.error) return { action, reason: "invalid_request", detail: { ...named, code: response.error.code } };
   if (!shape) return { action, reason: "unknown_tool", detail: Object.keys(named).length ? named : null };
@@ -138,6 +163,7 @@ export function rejectedCall(
 /**
  * Records tools/call requests that never reach a tool handler (see rejectedCall). The SDK answers those
  * itself, so this watches the transport: each tools/call request, and its answer unless a handler ran.
+ * Installed before connect: Protocol.connect chains an onmessage that is already set.
  */
 function auditRejections(
   transport: Transport,
@@ -171,15 +197,15 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
   const shapes = new Map<string, z.ZodRawShape>();
   const connect = server.connect.bind(server);
   server.connect = async (transport) => {
-    await connect(transport);
     auditRejections(transport, handled, (params, response) => {
       const r = rejectedCall(params, response, shapes);
       if (r) ctx.audit.record({ actorType: "agent", actorId: principal.agentId, action: r.action, outcome: "error", reason: r.reason, detail: r.detail });
     });
+    await connect(transport);
   };
 
   const register = <S extends z.ZodRawShape>(
-    name: string,
+    name: ToolName,
     config: { title: string; description: string; input: S; annotations: ToolAnnotations },
     handler: (args: z.output<z.ZodObject<S>>, mail: AgentMail, extra: Extra) => Promise<Output>,
   ) => {

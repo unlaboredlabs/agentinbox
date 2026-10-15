@@ -8,7 +8,7 @@ import { approvalsApi } from "../server/api/approvals.ts";
 import type { AppContext } from "../server/context.ts";
 import { anyAgentVerified } from "../server/agentapi/listeners.ts";
 import { overviewStats } from "../server/api/overview.ts";
-import { INSTRUCTIONS, rejectedCall } from "../server/mcp/server.ts";
+import { INSTRUCTIONS, rejectedCall, TOOL_NAMES } from "../server/mcp/server.ts";
 import { mcpRoutes } from "../server/mcp/index.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { ALL_CAPS, grantInput, mailTestContext } from "./mail-fakes.ts";
@@ -191,6 +191,8 @@ describe("rejected tool calls", () => {
     expect(unknown.isError).toBe(true);
     const dotted = await client.callTool({ name: "gmail.send", arguments: {} });
     expect(dotted.isError).toBe(true);
+    // Not in the catalog: never the action itself.
+    expect((await client.callTool({ name: "send_email", arguments: {} })).isError).toBe(true);
     // A tools/call without a name never reaches McpServer: the SDK answers with a JSON-RPC error.
     const raw = await http.request("/mcp", {
       method: "POST",
@@ -207,6 +209,7 @@ describe("rejected tool calls", () => {
       ["get_message", "error", "invalid_arguments", { fields: ["message_id"] }],
       ["send_message", "error", "unknown_tool", null],
       ["unknown_tool", "error", "unknown_tool", { tool: "gmail.send" }],
+      ["unknown_tool", "error", "unknown_tool", { tool: "send_email" }],
       ["invalid_request", "error", "invalid_request", { code }],
       ["list_accounts", "ok", null, null],
     ]);
@@ -215,7 +218,25 @@ describe("rejected tool calls", () => {
     expect(stored).not.toContain("private body");
     expect(rows.every((e) => e.actorType === "agent" && isMcpToolAction(e.action))).toBe(true);
     // The Overview counts every call; only the successful one proves the agent works.
-    expect(overviewStats(ctx).toolCalls24h).toBe(5);
+    expect(overviewStats(ctx).toolCalls24h).toBe(6);
+  });
+
+  it("a tool that ran and failed (isError) is audited once, by the tool", async () => {
+    const { http, ctx, addAgent } = setup();
+    const { agent, apiKey } = addAgent("reader", [grantInput("acc_a", { capabilities: ["read"] })]);
+    const client = await mcpClient(http, apiKey);
+    const r = await client.callTool({ name: "get_message", arguments: { message_id: "nope" } });
+    expect(r.isError).toBe(true);
+    const rows = ctx.audit.list({ agentId: agent.id }).items;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: "get_message", outcome: "error", reason: "not_found" });
+  });
+
+  it("the catalog is every tool a fully granted agent gets", async () => {
+    const { http, addAgent } = setup();
+    const full = addAgent("full", [grantInput("acc_a", { capabilities: ALL_CAPS })]);
+    const names = (await (await mcpClient(http, full.apiKey)).listTools()).tools.map((t) => t.name).sort();
+    expect(names).toEqual([...TOOL_NAMES].sort());
   });
 
   it("rejected calls alone don't verify setup", async () => {
@@ -230,7 +251,9 @@ describe("rejected tool calls", () => {
 
   it("rejectedCall ignores successes", () => {
     expect(rejectedCall({ name: "x" }, { result: { content: [] } }, new Map())).toBeNull();
-    expect(rejectedCall({ name: "x" }, { result: { content: [], isError: true } }, new Map())).toEqual({ action: "x", reason: "unknown_tool", detail: null });
+    expect(rejectedCall({ name: "x" }, { result: { content: [], isError: true } }, new Map())).toEqual({ action: "unknown_tool", reason: "unknown_tool", detail: { tool: "x" } });
+    // In the catalog but not granted to this agent: the name is the action.
+    expect(rejectedCall({ name: "trash" }, { result: { content: [], isError: true } }, new Map())).toEqual({ action: "trash", reason: "unknown_tool", detail: null });
   });
 });
 
