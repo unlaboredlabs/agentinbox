@@ -430,7 +430,9 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       stopReason = why;
       stream.stop();
     };
-    opts.signal?.addEventListener("abort", () => stop("stopped"), { once: true });
+    // An abort that came while we were starting up (before this listener existed) still stops us.
+    if (opts.signal?.aborted) stop("stopped");
+    else opts.signal?.addEventListener("abort", () => stop("stopped"), { once: true });
     const onSignal = (sig: NodeJS.Signals) => {
       if (stopReason) {
         log.warn("Exiting now.");

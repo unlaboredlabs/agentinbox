@@ -40,6 +40,13 @@ afterEach(async () => {
 });
 
 const baseProfile = () => ({ url: api.url, apiKey: FAKE_KEY, agentId: "agt_1", agentName: "t", consumer: "c", exec: "cat > /dev/null" });
+/**
+ * Times the listener itself reported "Connected" (its stream is open and being read). Waiting on this
+ * client-side state, rather than on the fake having seen a request, means a stop() never lands in the
+ * middle of the connection handshake.
+ */
+const connected = () => (output.match(/ Connected[ .]/g) ?? []).length;
+
 function start(extra: Partial<RunListenerOptions> = {}) {
   const ac = new AbortController();
   const done = runListener({ flags: {}, signal: ac.signal, minBackoffMs: 50, maxBackoffMs: 200, blockedRetryMs: 100, ...extra });
@@ -50,7 +57,7 @@ describe("starting point", () => {
   it("a new consumer listens from now on; --from-start asks for the beginning only while the consumer is new", async () => {
     saveProfile("default", baseProfile());
     let l = start({ flags: { fromStart: true } });
-    await waitFor(() => api.live.size === 1, 5000, "stream");
+    await waitFor(() => connected() === 1, 5000, "stream");
     expect(api.streamRequests[0]).toMatchObject({ start: "beginning", consumer: "c" });
     expect(output).toContain("Processing every stored event");
     l.stop();
@@ -59,7 +66,8 @@ describe("starting point", () => {
     // The consumer exists now: --from-start would do nothing, so say so and how to backfill.
     output = "";
     l = start({ flags: { fromStart: true } });
-    await waitFor(() => api.streamRequests.length === 2, 5000, "second stream");
+    await waitFor(() => connected() === 1, 5000, "second stream");
+    expect(api.streamRequests).toHaveLength(2);
     expect(output).toContain('already has a position on the daemon, so --from-start does nothing');
     expect(output).toContain("npx agentinbox-cli listen --backfill");
     expect(output).not.toContain("Processing every stored event");
@@ -69,7 +77,8 @@ describe("starting point", () => {
     // A fresh consumer without the flag: "from now on" plus the backfill hint.
     output = "";
     l = start({ flags: { consumer: "fresh" } });
-    await waitFor(() => api.streamRequests.length === 3, 5000, "third stream");
+    await waitFor(() => connected() === 1, 5000, "third stream");
+    expect(api.streamRequests).toHaveLength(3);
     expect(api.streamRequests[2]!.start).toBeNull();
     expect(output).toContain("Listening for new events from now on. To also run the mail from before this listener started, once (in another terminal, while this keeps running): npx agentinbox-cli listen --backfill");
     l.stop();
@@ -80,7 +89,7 @@ describe("starting point", () => {
     saveProfile("default", { ...baseProfile(), consumer: "real" });
     for (const s of [1, 2, 3]) api.events.push(makeEvent(s));
     const l = start({ flags: { dryRun: true } });
-    await waitFor(() => api.live.size === 1, 5000, "stream");
+    await waitFor(() => connected() === 1, 5000, "stream");
     expect(api.streamRequests[0]).toMatchObject({ consumer: "real-dry-run", after: "3", start: null });
     api.publish(makeEvent(4));
     await waitFor(() => output.includes("#4 message.received"), 5000, "dry-run event");
@@ -92,7 +101,8 @@ describe("starting point", () => {
     // The real consumer is still new afterwards.
     output = "";
     const r = start();
-    await waitFor(() => api.streamRequests.length === 2, 5000, "real stream");
+    await waitFor(() => connected() === 1, 5000, "real stream");
+    expect(api.streamRequests).toHaveLength(2);
     expect(api.streamRequests[1]!.consumer).toBe("real");
     expect(output).toContain("Listening for new events from now on");
     r.stop();
@@ -108,9 +118,9 @@ describe("refusals", () => {
     await waitFor(() => api.streamRequests.length >= 3, 5000, "retries while disabled");
     expect(output.match(/An admin disabled this agent/g)).toHaveLength(1); // logged once per state change
     api.blockedCode = null;
-    await waitFor(() => api.live.size === 1, 5000, "resumed");
-    // The log line is written right after the stream reconnects; wait for it rather than racing it.
-    await waitFor(() => output.includes("Access restored."), 5000, "restore message");
+    // "Access restored." is logged as the stream reopens, before "Connected.".
+    await waitFor(() => connected() === 1, 5000, "resumed");
+    expect(output).toContain("Access restored.");
     api.publish(makeEvent(1));
     await waitFor(() => api.acked === 1, 5000, "event after resume");
 
@@ -118,7 +128,7 @@ describe("refusals", () => {
     api.revoke("no_read_grant");
     api.revoked = null;
     await waitFor(() => output.includes("no read access"), 5000, "no_read_grant notice");
-    await waitFor(() => api.live.size === 1, 5000, "resumed again");
+    await waitFor(() => connected() === 2, 5000, "resumed again");
     l.stop();
     expect(await l.done).toBe(EXIT.ok);
   });
@@ -135,7 +145,7 @@ describe("one listener per profile", () => {
   it("refuses a second listener and takes over a stale lock", async () => {
     saveProfile("default", baseProfile());
     const l = start();
-    await waitFor(() => api.live.size === 1, 5000, "stream");
+    await waitFor(() => connected() === 1, 5000, "stream");
     await expect(runListener({ flags: {} })).rejects.toBeInstanceOf(ProfileLockedError);
     l.stop();
     await l.done;

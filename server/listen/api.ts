@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import type { AgentSelf, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
+import { abortable } from "./abortable.ts";
 import { safeText } from "./ui.ts";
 import { version } from "./version.ts";
 
@@ -52,14 +53,16 @@ async function call<T>(base: string, path: string, init: RequestInit & { key?: s
   if (init.body) headers["content-type"] = "application/json";
   if (init.key) headers.authorization = `Bearer ${init.key}`;
   let res: Response;
+  const signal = init.signal ?? AbortSignal.timeout(init.timeoutMs ?? 15_000);
   try {
-    res = await fetch(`${base}${path}`, { ...init, headers, redirect: "error", signal: init.signal ?? AbortSignal.timeout(init.timeoutMs ?? 15_000) });
+    // abortable: the timeout must win even when undici fails to settle on abort (see abortable.ts).
+    res = await abortable(fetch(`${base}${path}`, { ...init, headers, redirect: "error", signal }), signal);
   } catch (err) {
     const reason = describeFetchError(err);
     throw new ApiError(`${what} failed: could not reach ${base} (${reason})`, 0, null, null, null, `daemon unreachable: ${reason}`);
   }
-  if (!res.ok) throw await apiError(res, what);
-  return (await res.json()) as T;
+  if (!res.ok) throw await abortable(apiError(res, what), signal);
+  return (await abortable(res.json(), signal)) as T;
 }
 
 export function describeFetchError(err: unknown): string {
