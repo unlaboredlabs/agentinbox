@@ -113,6 +113,16 @@ export function addressLabel(raw: string, browserOrigin: string): string {
 
 export const isLoopbackOrigin = (origin: string) => analyzeUrl(origin)?.host === "loopback";
 
+/**
+ * The "this computer" address step 1 recommends: the browser's own origin when it is already a loopback
+ * address the server calls back to directly (localhost, 127.0.0.1, [::1]), so the session cookie and
+ * the links the CLI prints (built from this address) stay on the same host; otherwise localhost.
+ */
+export function localConsoleUrl(browserOrigin: string, port: string): { url: string; fromBrowser: boolean } {
+  const a = analyzeUrl(browserOrigin);
+  return a && a.host === "loopback" && a.google === "direct" ? { url: a.url.origin, fromBrowser: true } : { url: `http://localhost:${port}`, fromBrowser: false };
+}
+
 /** The port this console is served on (for tunnel and Tailscale commands). */
 export function consolePort(addresses: string[], publicUrl: string): string {
   // The server's own addresses first: the browser may reach it through a tunnel or proxy on another port.

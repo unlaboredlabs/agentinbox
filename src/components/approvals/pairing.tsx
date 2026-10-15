@@ -41,6 +41,7 @@ import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useSilencePairingToasts } from "@/components/pairing-notifier";
+import { deniedDescription } from "./pairing-link";
 
 /** "jxgr xd93" → "JXGR-XD93". Codes are 8 characters from an alphabet without 0/O/1/I/L. */
 export function normalizeCode(raw: string): string {
@@ -188,7 +189,7 @@ export function PairingCard({
     setBusy(true);
     try {
       await api(`/api/pairings/${encodeURIComponent(p.id)}/deny`, { body: note.trim() ? { note: note.trim() } : {} });
-      toast.success(`Denied ${p.name}`, { description: "The agent's terminal shows that it was denied, with your note." });
+      toast.success(`Denied ${p.name}`, { description: deniedDescription(note) });
       void qc.invalidateQueries({ queryKey: keys.pairings });
     } catch (err) {
       toastError(err, "Couldn't deny the request");

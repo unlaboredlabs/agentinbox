@@ -33,7 +33,7 @@ export interface SetupDraft {
    * this browser's own result (verified) completes that step, not the server's weaker evidence.
    */
   verifyStarted?: boolean;
-  /** Set by the "Check that it works" step: "Finish setup" (every check green) or "Finish without checking". */
+  /** Set by the "Check that it works" step: as soon as every check is green, or by "Finish without checking". */
   verified?: boolean;
 }
 
@@ -80,6 +80,19 @@ export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): 
 export function startsVerify(step: StepId, statuses: Record<StepId, StepStatus>, draft: SetupDraft): boolean {
   if (draft.verifyStarted || draft.verified || statuses.verify !== "todo") return false;
   return step === "verify" || (step === "agent" && statuses.agent === "todo");
+}
+
+/**
+ * The draft change once step 8's required checks are all green ("Setup complete"): the step is done
+ * right away, so leaving without "Finish setup" doesn't leave setup at 7 of 8. null when nothing changes.
+ */
+export function verifiedPatch(complete: boolean, draft: SetupDraft): Partial<SetupDraft> | null {
+  return complete && !draft.verified ? { verified: true } : null;
+}
+
+/** The sidebar's "Get started" entry: while setup is unfinished, and on /get-started itself (it goes on navigating away). */
+export function showsSetupLink(loaded: boolean, allDone: boolean, pathname: string): boolean {
+  return loaded && (!allDone || pathname.startsWith("/get-started"));
 }
 
 /** Setup counts as done once every step is (Pub/Sub is optional). */

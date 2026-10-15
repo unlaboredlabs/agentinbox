@@ -75,3 +75,20 @@ export function verifyChecks({ test, events, listeners, calls, skipListen }: Ver
     readIt: calls.some((e) => e.outcome === "ok" && READ_TOOLS.has(e.action) && e.ts >= test.sentAt),
   };
 }
+
+export interface ChecksState {
+  mcpDone: boolean;
+  listenDone: boolean;
+  skipListen: boolean;
+  sent: boolean;
+  received: boolean;
+  delivered: boolean;
+}
+
+/**
+ * Every required check is green: what shows "Setup complete" and, from then on, marks step 8 done in
+ * this browser (SetupDraft.verified) without waiting for "Finish setup". Reading the mail is optional.
+ */
+export function checksComplete({ mcpDone, listenDone, skipListen, sent, received, delivered }: ChecksState): boolean {
+  return mcpDone && (listenDone || skipListen) && sent && received && (delivered || skipListen);
+}

@@ -1,5 +1,6 @@
 import { EVENT_TYPES, type EventType, type ListenerInfo } from "../../shared/types.ts";
 import { bool, type Db, json } from "../db/index.ts";
+import { mcpToolCallSql } from "../audit.ts";
 import type { AppContext } from "../context.ts";
 import { EVENT_SELECT, type EventRow, toStoredEvent } from "../events/repo.ts";
 import { badRequest, HttpError } from "../util/errors.ts";
@@ -162,8 +163,7 @@ export function anyAgentVerified(db: Db): boolean {
   return !!db.get(
     `SELECT 1 AS ok WHERE EXISTS (
          SELECT 1 FROM agents ag WHERE EXISTS (
-           SELECT 1 FROM audit_log l WHERE l.actor_id = ag.id AND l.actor_type = 'agent' AND l.outcome = 'ok'
-             AND instr(l.action, '.') = 0))
+           SELECT 1 FROM audit_log l WHERE l.actor_id = ag.id AND ${mcpToolCallSql("l")} AND l.outcome = 'ok'))
        OR EXISTS (SELECT 1 FROM listener_cursors WHERE acked_seq > COALESCE(start_seq, 0))`,
   );
 }

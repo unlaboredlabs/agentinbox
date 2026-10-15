@@ -1,4 +1,5 @@
 import type { OverviewStats } from "../../shared/types.ts";
+import { mcpToolCallSql } from "../audit.ts";
 import type { AppContext } from "../context.ts";
 import { router } from "./util.ts";
 
@@ -22,8 +23,9 @@ export function overviewStats(ctx: AppContext, at = new Date()): OverviewStats {
      FROM deliveries WHERE updated_at >= ? AND attempts > 0 AND event_seq > 0`,
     since,
   )!;
+  // MCP tool calls only (the same rule as anyAgentVerified): not pairing.key_delivered and the like.
   const agentCalls = db.get<{ calls: number; denied: number | null }>(
-    `SELECT COUNT(*) AS calls, SUM(outcome = 'denied') AS denied FROM audit_log WHERE actor_type = 'agent' AND ts >= ?`,
+    `SELECT COUNT(*) AS calls, SUM(outcome = 'denied') AS denied FROM audit_log WHERE ${mcpToolCallSql()} AND ts >= ?`,
     since,
   )!;
 
@@ -33,7 +35,7 @@ export function overviewStats(ctx: AppContext, at = new Date()): OverviewStats {
   const bucketCounts = (sql: string) =>
     new Map(db.all<{ h: string; n: number }>(sql, firstHour).map((r) => [r.h, r.n] as const));
   const events = bucketCounts(`SELECT substr(created_at, 1, 13) AS h, COUNT(*) AS n FROM events WHERE seq > 0 AND created_at >= ? GROUP BY h`);
-  const calls = bucketCounts(`SELECT substr(ts, 1, 13) AS h, COUNT(*) AS n FROM audit_log WHERE actor_type = 'agent' AND ts >= ? GROUP BY h`);
+  const calls = bucketCounts(`SELECT substr(ts, 1, 13) AS h, COUNT(*) AS n FROM audit_log WHERE ${mcpToolCallSql()} AND ts >= ? GROUP BY h`);
   const activity = Array.from({ length: 24 }, (_, i) => {
     const hour = new Date(currentHour - (23 - i) * HOUR).toISOString();
     const key = hour.slice(0, 13);

@@ -57,7 +57,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
           </div>
           <p className="text-muted-foreground">
             Uses Google Cloud Pub/Sub, Google's notification service, in your project. agentinbox sets it up for you in one click; works even when
-            this machine isn't reachable from the internet. No cost at this volume, but Google may ask you to add a billing account first.
+            this machine isn't reachable from the internet. No cost at this volume.
           </p>
         </div>
         <div className="space-y-1.5 rounded-lg border p-3 text-sm">

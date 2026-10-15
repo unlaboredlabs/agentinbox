@@ -3,16 +3,17 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentTool } from "../shared/agent-api.ts";
-import type { AuditEntry, ListenerInfo, MailEvent, SetupState } from "../shared/types.ts";
+import type { AuditEntry, ListenerInfo, MailEvent, PairingRequest, SetupState } from "../shared/types.ts";
 import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
+import { deniedDescription, linkedPairing } from "../src/components/approvals/pairing-link.ts";
 import { listenerHandled } from "../src/components/agents/listener-handled.ts";
-import { allStepsDone, type SetupDraft, STEP_META, startsVerify, type StepId, type StepStatus, stepStatuses, wizardStep } from "../src/components/setup/steps.ts";
-import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
+import { allStepsDone, type SetupDraft, showsSetupLink, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, wizardStep } from "../src/components/setup/steps.ts";
+import { activeTest, checksComplete, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
-import { fmtAgo } from "../src/lib/format.ts";
+import { agentOnHost, fmtAgo } from "../src/lib/format.ts";
 
 // ───────────── Verify checks ─────────────
 
@@ -352,6 +353,36 @@ describe("stepStatuses: the verify step", () => {
     expect(verify(false, { verifyStarted: true, verified: true })).toBe("done");
   });
 
+  it("is done as soon as every required check is green, without clicking Finish setup", () => {
+    const green = { mcpDone: true, listenDone: true, skipListen: false, sent: true, received: true, delivered: true };
+    expect(checksComplete(green)).toBe(true);
+    expect(checksComplete({ ...green, delivered: false })).toBe(false);
+    expect(checksComplete({ ...green, listenDone: false })).toBe(false);
+    expect(checksComplete({ ...green, mcpDone: false })).toBe(false);
+    expect(checksComplete({ ...green, received: false })).toBe(false);
+    // MCP only: no listener, no delivery.
+    expect(checksComplete({ ...green, listenDone: false, delivered: false, skipListen: true })).toBe(true);
+
+    const draft: SetupDraft = { verifyStarted: true, pubsubSkipped: true };
+    expect(verifiedPatch(false, draft)).toBeNull();
+    const patched = { ...draft, ...verifiedPatch(checksComplete(green), draft) };
+    expect(patched.verified).toBe(true);
+    const statuses = stepStatuses(state(true), patched);
+    expect(statuses.verify).toBe("done");
+    expect(allStepsDone(statuses)).toBe(true);
+    expect(STEP_IDS.filter((id) => statuses[id] !== "todo")).toHaveLength(STEP_IDS.length);
+    // Already done: nothing to write.
+    expect(verifiedPatch(true, patched)).toBeNull();
+  });
+
+  it("keeps the sidebar entry while on /get-started, and drops it on navigation once done", () => {
+    expect(showsSetupLink(false, false, "/")).toBe(false);
+    expect(showsSetupLink(true, false, "/")).toBe(true);
+    expect(showsSetupLink(true, true, "/get-started")).toBe(true);
+    expect(showsSetupLink(true, true, "/")).toBe(false);
+    expect(showsSetupLink(true, true, "/events")).toBe(false);
+  });
+
   it("calls setup done without the optional real-time delivery step", () => {
     expect(allStepsDone(stepStatuses(state(true), {}))).toBe(true);
     expect(STEP_META.pubsub.short).toBe("Real-time delivery");
@@ -370,6 +401,61 @@ describe("fmtAgo", () => {
     expect(fmtAgo(later(-180), now)).toBe("3 minutes ago");
     expect(fmtAgo(later(30), now)).toBe("in 30 seconds");
     expect(fmtAgo(null, now)).toBe("—");
+  });
+});
+
+describe("agentOnHost", () => {
+  it("adds the host only when the agent's name doesn't already end with it", () => {
+    expect(agentOnHost("Claude Code on anvil", "anvil")).toBe("Claude Code on anvil");
+    expect(agentOnHost("Claude Code on anvil", "anvil.local")).toBe("Claude Code on anvil");
+    expect(agentOnHost("Claude Code on Anvil", "anvil")).toBe("Claude Code on Anvil");
+    expect(agentOnHost("Claude Code on anvil", "forge")).toBe("Claude Code on anvil on forge");
+    expect(agentOnHost("Inbox bot", "anvil")).toBe("Inbox bot on anvil");
+    expect(agentOnHost("Inbox bot", null)).toBe("Inbox bot");
+    // Not a suffix match on a longer word.
+    expect(agentOnHost("Claude Code on xanvil", "anvil")).toBe("Claude Code on xanvil on anvil");
+  });
+});
+
+describe("Approvals: the CLI's ?pairing= link after a decision", () => {
+  const req = (id: string, status: PairingRequest["status"], over: Partial<PairingRequest> = {}): PairingRequest => ({
+    id,
+    userCode: "ABCD-EFGH",
+    name: "Claude Code on anvil",
+    description: null,
+    requested: {},
+    client: {},
+    ip: "127.0.0.1",
+    status,
+    agentId: null,
+    createdAt: SENT_AT,
+    expiresAt: later(600),
+    decidedAt: null,
+    decisionNote: null,
+    ...over,
+  });
+
+  it("says what was decided instead of \"isn't waiting anymore\"", () => {
+    expect(linkedPairing("ABCD-EFGH", [req("par_1", "pending")]).kind).toBe("pending");
+    expect(linkedPairing("ABCD-EFGH", [req("par_1", "denied")]).kind).toBe("denied");
+    const approved = linkedPairing("ABCD-EFGH", [req("par_1", "approved", { agentId: "agt_1" })]);
+    expect(approved.kind === "approved" && approved.p.agentId).toBe("agt_1");
+    expect(linkedPairing("ABCD-EFGH", [req("par_1", "expired")]).kind).toBe("gone");
+    expect(linkedPairing("ABCD-EFGH", []).kind).toBe("gone");
+    expect(linkedPairing("WXYZ-0000", [req("par_1", "denied")]).kind).toBe("gone");
+  });
+
+  it("follows the newest request when a code was reused, and a pending one first", () => {
+    // Newest first, as the API lists them: a denied request's code came back on a new request.
+    expect(linkedPairing("ABCD-EFGH", [req("par_2", "pending"), req("par_1", "denied")])).toMatchObject({ kind: "pending", p: { id: "par_2" } });
+    expect(linkedPairing("ABCD-EFGH", [req("par_2", "expired"), req("par_1", "denied")]).kind).toBe("gone");
+  });
+
+  it("mentions the note only when one was entered", () => {
+    expect(deniedDescription("")).toBe("The agent's terminal shows that it was denied.");
+    expect(deniedDescription("   ")).toBe("The agent's terminal shows that it was denied.");
+    expect(deniedDescription(null)).toBe("The agent's terminal shows that it was denied.");
+    expect(deniedDescription("Ask in #ops first")).toBe("The agent's terminal shows that it was denied, with your note.");
   });
 });
 

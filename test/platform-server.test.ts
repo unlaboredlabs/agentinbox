@@ -139,11 +139,30 @@ describe("startup banner", () => {
     withHarness(async (h) => {
       await h.claim();
       const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: { SSH_CONNECTION: "1.2.3.4 1 5.6.7.8 22" } }));
-      expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425/);
+      // Bound to 127.0.0.1, address still the default localhost: one loopback host, the saved address.
+      expect(out).toMatch(/Console\s+http:\/\/localhost:8425\n/);
+      expect(out).not.toContain("127.0.0.1:8425");
       expect(out).toContain("Agents connect to http://localhost:8425/mcp");
       expect(out).not.toContain("setup?token");
       expect(out).not.toContain("ssh -L");
       expect(out).toContain("Ctrl-C stops it");
+    }));
+
+  it("once claimed: the console URL is the saved loopback address, never two spellings of it", () =>
+    withHarness(async (h) => {
+      await h.claim();
+      h.ctx.settings.update({ publicUrl: "http://127.0.0.1:8425" });
+      let out = text(bannerLines(h.ctx, { mcp: true }, desktop));
+      expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425\n/);
+      expect(out).toContain("Agents connect to http://127.0.0.1:8425/mcp");
+      expect(out).not.toContain("localhost:8425");
+      // A different port (a tunnel or proxy) or a real address: both lines stay.
+      h.ctx.settings.update({ publicUrl: "https://mail.example.com" });
+      out = text(bannerLines(h.ctx, { mcp: true }, desktop));
+      expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425\n\s+https:\/\/mail\.example\.com\n/);
+      h.ctx.settings.update({ publicUrl: "http://localhost:9000" });
+      out = text(bannerLines(h.ctx, { mcp: true }, desktop));
+      expect(out).toMatch(/Console\s+http:\/\/127\.0\.0\.1:8425\n\s+http:\/\/localhost:9000\n/);
     }));
 
   it("as a service: never prints the setup token, points at reset-password", () =>

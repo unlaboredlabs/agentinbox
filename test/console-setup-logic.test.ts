@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { callbackMode } from "../server/google/client.ts";
 import { checkTransport } from "../server/listen/transport.ts";
 import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
-import { analyzeUrl, urlVerdict } from "../src/lib/public-url.ts";
+import { analyzeUrl, localConsoleUrl, urlVerdict } from "../src/lib/public-url.ts";
 import { tunnelCommand } from "../src/lib/tunnel.ts";
 import { wrapParts } from "../src/lib/wrap.ts";
 
@@ -63,6 +63,21 @@ describe("address verdicts match the server", () => {
     expect(urlVerdict(analyzeUrl("http://localhost:8425")!, true).google[0]).toBe("bad");
     expect(urlVerdict(analyzeUrl("http://localhost:8425")!, false).google[0]).toBe("good");
     expect(urlVerdict(analyzeUrl("https://mail.example.com")!, true).google[0]).toBe("good");
+  });
+
+  it("recommends the loopback origin the browser is on for \"All on this computer\", not another hostname", () => {
+    // Opened from the CLI's link when bound to --host 127.0.0.1: stay there (the session cookie is 127.0.0.1's).
+    expect(localConsoleUrl("http://127.0.0.1:8425", "8425")).toEqual({ url: "http://127.0.0.1:8425", fromBrowser: true });
+    expect(localConsoleUrl("http://localhost:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: true });
+    expect(localConsoleUrl("http://[::1]:8425", "8425")).toEqual({ url: "http://[::1]:8425", fromBrowser: true });
+    expect(localConsoleUrl("https://localhost:8443", "8425")).toEqual({ url: "https://localhost:8443", fromBrowser: true });
+    // Each of those is a direct callback on the server too.
+    for (const o of ["http://127.0.0.1:8425", "http://localhost:8425", "http://[::1]:8425"]) expect(serverCallback(localConsoleUrl(o, "8425").url)).toBe("direct");
+    // Loopback names the server doesn't call back to directly, and remote browsers: localhost on the server's port.
+    expect(localConsoleUrl("http://127.0.0.2:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
+    expect(localConsoleUrl("http://inbox.localhost:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
+    expect(localConsoleUrl("http://192.168.1.20:8425", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
+    expect(localConsoleUrl("https://mail.example.com", "8425")).toEqual({ url: "http://localhost:8425", fromBrowser: false });
   });
 
   it("rejects what isn't an http(s) URL", () => {

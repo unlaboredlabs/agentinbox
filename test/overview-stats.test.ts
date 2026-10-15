@@ -45,6 +45,10 @@ describe("overview", () => {
     audit(ago(3 * HOUR), "agent", "ok");
     audit(ago(60_000), "admin", "ok");
     audit(ago(25 * HOUR), "agent", "denied");
+    // Not MCP tool calls: pairing.key_delivered (agent actor, dotted action) and console actions.
+    db.run("INSERT INTO audit_log (ts, actor_type, action, outcome) VALUES (?, 'agent', 'pairing.key_delivered', 'ok')", ago(60_000));
+    db.run("INSERT INTO audit_log (ts, actor_type, action, outcome) VALUES (?, 'agent', 'pairing.key_delivered', 'ok')", ago(3 * HOUR));
+    db.run("INSERT INTO audit_log (ts, actor_type, action, outcome) VALUES (?, 'admin', 'agent.create', 'ok')", ago(60_000));
 
     db.run("INSERT INTO webhooks (id, agent_id, name, url, secret_enc, secret_prefix, event_types, created_at) VALUES ('w', 'g1', 'w', 'http://x', 'x', 'x', '[]', ?)", ago(0));
     const delivery = (id: string, status: string, updatedAt: string, attempts = 1) =>
