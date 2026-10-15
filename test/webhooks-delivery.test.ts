@@ -59,6 +59,8 @@ function setup(opts: WebhooksOptions = {}) {
     policy: () =>
       ({
         canSeeEvent: (agentId: string, ev: { threadLabelIds: string[] }) => agentId !== "agt_scoped" || ev.threadLabelIds.includes("Label_ok"),
+        // No label-scoped grants: bodies skip the current-thread-labels check.
+        grant: () => null,
       }) as unknown as PolicyService,
     mail: () =>
       ({
@@ -606,7 +608,9 @@ describe("worker fairness, retention and shutdown", () => {
     const second = createAppContext(config, overrides);
     cleanups.push(() => stopServices(second));
     await startServices(second).catch(() => second.webhooks.start!()); // other services may still be placeholders
-    await until(() => rx.requests.length === 2);
+    // Rows are marked succeeded after the receiver's response is processed, so wait for the status.
+    await until(() => second.webhooks.listDeliveries({}).items.filter((d) => d.status === "succeeded").length === 2);
+    expect(rx.requests).toHaveLength(2);
     const all = second.webhooks.listDeliveries({}).items;
     expect(all.filter((d) => d.status === "succeeded")).toHaveLength(2);
     expect(all.find((d) => d.id === "dlv_t")).toMatchObject({ status: "failed", lastError: "Interrupted by a restart" });

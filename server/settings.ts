@@ -44,6 +44,7 @@ export class SettingsStore {
       retentionDays: 30,
       approvalTtlHours: 72,
       webhookAllowlist: ["localhost", "127.0.0.0/8", "::1"],
+      pairingEnabled: true,
     };
   }
 
@@ -115,6 +116,7 @@ function validate(s: Settings): Settings {
     retentionDays: int(s.retentionDays, "Retention", 1, 3650),
     approvalTtlHours: int(s.approvalTtlHours, "Approval expiry", 1, 24 * 30),
     webhookAllowlist: [...new Set(allowlist)],
+    pairingEnabled: s.pairingEnabled !== false,
   };
 }
 

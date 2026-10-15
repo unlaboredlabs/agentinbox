@@ -22,6 +22,8 @@ interface FormValues {
   retentionDays: string;
   approvalTtlHours: string;
   webhookAllowlist: string[];
+  /** Not edited here yet: carried through unchanged. */
+  pairingEnabled: boolean;
 }
 
 const toForm = (s: Settings): FormValues => ({
@@ -32,6 +34,7 @@ const toForm = (s: Settings): FormValues => ({
   retentionDays: String(s.retentionDays),
   approvalTtlHours: String(s.approvalTtlHours),
   webhookAllowlist: s.webhookAllowlist,
+  pairingEnabled: s.pairingEnabled,
 });
 
 const fromForm = (v: FormValues): Settings => ({
@@ -42,6 +45,7 @@ const fromForm = (v: FormValues): Settings => ({
   retentionDays: Number(v.retentionDays),
   approvalTtlHours: Number(v.approvalTtlHours),
   webhookAllowlist: v.webhookAllowlist,
+  pairingEnabled: v.pairingEnabled,
 });
 
 // Mirrors the server's validation (server/settings.ts) so mistakes show before saving.

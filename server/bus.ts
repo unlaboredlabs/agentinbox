@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { Account, Approval, AuditEntry, Delivery, MailEvent, Settings } from "../shared/types.ts";
+import type { Account, Approval, AuditEntry, Delivery, MailEvent, PairingRequest, Settings } from "../shared/types.ts";
 
 /**
  * In-process notifications. Fired *after* the change is committed to the database, so listeners
@@ -17,6 +17,12 @@ export interface BusEvents {
   /** An account was connected or its status/sync state changed. */
   account: [Account];
   settings: [Settings];
+  /**
+   * An agent's access changed: live listener streams re-check the key/grants and close on revocation.
+   * Emitted by policy on update (incl. disable), key rotation, deletion and grant upsert/delete.
+   */
+  agent: [{ agentId: string; reason: "updated" | "key_rotated" | "deleted" | "grant_changed" }];
+  pairing: [PairingRequest];
 }
 
 export type Bus = EventEmitter<BusEvents>;

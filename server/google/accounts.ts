@@ -105,6 +105,8 @@ export function createAccountsService(ctx: AppContext): AccountsService {
       } catch (err) {
         log.warn("Could not revoke the Google token", { email: row.email, error: errorMessage(err) });
       }
+      // Their grants go with the account: live listener streams must re-check access.
+      const agents = ctx.db.all<{ agent_id: string }>("SELECT DISTINCT agent_id FROM grants WHERE account_id = ?", id);
       ctx.db.tx(() => {
         ctx.db.run("DELETE FROM sent_threads WHERE account_id = ?", id);
         ctx.db.run("DELETE FROM accounts WHERE id = ?", id);
@@ -119,6 +121,13 @@ export function createAccountsService(ctx: AppContext): AccountsService {
         detail: { email: row.email },
       });
       log.info("Account removed", { email: row.email });
+      for (const { agent_id } of agents) {
+        try {
+          ctx.bus.emit("agent", { agentId: agent_id, reason: "grant_changed" });
+        } catch (err) {
+          log.error("Bus listener failed", { error: errorMessage(err) });
+        }
+      }
     },
   };
 }

@@ -1,9 +1,12 @@
+import { sweepPairings } from "./agentapi/index.ts";
 import { adminAuth } from "./auth/index.ts";
 import type { AppContext } from "./context.ts";
 import { errorMessage } from "./util/errors.ts";
 
 const INTERVAL_MS = 3600_000;
 const FIRST_RUN_MS = 60_000;
+/** Pairing codes live 10 minutes: expire them (and wipe uncollected keys) promptly. */
+const PAIRING_SWEEP_MS = 30_000;
 
 export interface MaintenanceResult {
   events: number;
@@ -48,8 +51,10 @@ export function startMaintenance(ctx: AppContext): () => void {
   };
   const first = setTimeout(run, FIRST_RUN_MS).unref();
   const timer = setInterval(run, INTERVAL_MS).unref();
+  const pairings = setInterval(() => sweepPairings(ctx), PAIRING_SWEEP_MS).unref();
   return () => {
     clearTimeout(first);
     clearInterval(timer);
+    clearInterval(pairings);
   };
 }
