@@ -1,7 +1,11 @@
-import type { SetupWarning } from "../../shared/types.ts";
+import { isCalendarCapability, type SetupWarning } from "../../shared/types.ts";
+import { calendarEnabled, enableApiLink } from "../calendar/setup.ts";
 import type { AppContext } from "../context.ts";
-import { type AccountRow, allRows } from "./accounts.ts";
+import { json } from "../db/index.ts";
+import { type AccountRow, accountScopes, allRows } from "./accounts.ts";
+import { enableCalendarApiCommand } from "./calendar.ts";
 import { clientWarnings, redirectWarning } from "./client.ts";
+import { CALENDAR_SCOPES, describeScopes, missingScopes } from "./scopes.ts";
 
 type Ctx = Pick<AppContext, "db" | "settings" | "config" | "crypto">;
 
@@ -122,5 +126,75 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
     }
   }
 
+  out.push(...calendarWarnings(ctx, rows));
+
   return out.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+}
+
+/** Accounts some grant gives a calendar capability (their calendar problems are errors, not warnings). */
+function calendarInUse(ctx: Ctx): Set<string> {
+  const grants = ctx.db.all<{ account_id: string; capabilities: string }>("SELECT account_id, capabilities FROM grants");
+  return new Set(grants.filter((g) => json.parse<string[]>(g.capabilities, []).some(isCalendarCapability)).map((g) => g.account_id));
+}
+
+/** calendar_* codes (see SetupWarning). Mail-only installs that haven't added Calendar see only the info notice. */
+function calendarWarnings(ctx: Ctx, rows: AccountRow[]): SetupWarning[] {
+  const out: SetupWarning[] = [];
+  const setup = ctx.settings.getState("calendar.setup");
+  const enabled = calendarEnabled(ctx);
+  const projectId = ctx.settings.getState("google.client")?.projectId || null;
+  const enableLink = enableApiLink(ctx);
+  const enableSteps =
+    (projectId ? `run ${enableCalendarApiCommand(projectId)}, or ` : "") +
+    `open ${enableLink ?? "Google Cloud → APIs & Services → Library → Google Calendar API"} and click Enable`;
+  const inUse = calendarInUse(ctx);
+
+  if (!enabled && !setup?.dismissedAt && rows.length) {
+    out.push({
+      code: "calendar_not_added",
+      severity: "info",
+      message: "agentinbox can now give your agents Google Calendar too: reading events, scheduling and answering invitations.",
+      hint:
+        `Click Add Google Calendar. It walks you through it: turn on the Calendar API (${enableSteps}), then approve Calendar access for each account. ` +
+        "Mail keeps working throughout, and no agent gets calendar access until you grant it.",
+    });
+  }
+
+  const disabled = rows.some((r) => r.calendar_status === "api_disabled") || (setup?.api?.state === "disabled" && rows.some((r) => !missingScopes(accountScopes(r), CALENDAR_SCOPES).length));
+  if (disabled) {
+    out.push({
+      code: "calendar_api_disabled",
+      severity: rows.some((r) => inUse.has(r.id)) ? "error" : "warning",
+      message: "The Google Calendar API is turned off in your Google Cloud project, so agents can't use any calendar.",
+      hint: `To turn it on, ${enableSteps}. Wait a minute, then click Check again on the Google Calendar card. Mail is unaffected.`,
+      ...(enableLink ? { url: enableLink } : {}),
+    });
+  }
+
+  for (const row of rows) {
+    if (row.status === "needs_reauth") continue;
+    const missing = missingScopes(accountScopes(row), CALENDAR_SCOPES);
+    if (enabled && missing.length) {
+      const none = missing.length === CALENDAR_SCOPES.length;
+      out.push({
+        code: "calendar_scope_missing",
+        severity: inUse.has(row.id) ? "error" : "warning",
+        message: none
+          ? `Google Calendar isn't added to ${row.email} yet, so agents can't use its calendar. Its mail is unaffected.`
+          : `${row.email} granted only part of Google Calendar access (not granted: ${describeScopes(missing)}). Its mail is unaffected.`,
+        hint: `Accounts → ${row.email} → Add Calendar, and keep every Calendar permission ticked on Google's screen.`,
+        accountId: row.id,
+      });
+    }
+    if (row.calendar_status === "error" && !missing.length) {
+      out.push({
+        code: "calendar_sync_failing",
+        severity: "error",
+        message: `Google Calendar sync for ${row.email} is failing${row.calendar_error ? `: ${row.calendar_error}` : "."}`,
+        hint: "agentinbox retries on every poll, and calendar events arrive late until it works again. If it keeps failing, check the agentinbox log. Mail is unaffected.",
+        accountId: row.id,
+      });
+    }
+  }
+  return out;
 }
