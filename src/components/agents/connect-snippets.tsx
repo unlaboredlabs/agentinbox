@@ -59,7 +59,7 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
         </div>
         <TabsContent value="claude" className="space-y-2">
           <p className="text-sm text-muted-foreground">Run in a terminal on the machine where Claude Code runs:</p>
-          <CodeBlock code={s.claude} />
+          <CodeBlock code={s.claude} wrap />
         </TabsContent>
         <TabsContent value="codex" className="space-y-2">
           <p className="text-sm text-muted-foreground">
@@ -93,7 +93,7 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
             The agentinbox skill teaches agents how to use the tools well: triage, replying in threads, handling approvals and treating email
             content as untrusted data. Install it next to your agent:
           </p>
-          <CodeBlock code={s.skill} />
+          <CodeBlock code={s.skill} wrap />
           <p className="text-sm text-muted-foreground">
             Or read it first: <ExternalLink href={s.skillUrl}>{s.skillUrl}</ExternalLink>
           </p>

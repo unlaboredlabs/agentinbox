@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
 import { EVENT_TYPE_INFO } from "@/lib/labels";
 import { queries } from "@/lib/queries";
+import { prettySystemLabel } from "@/hooks/use-label-names";
 import { cn } from "@/lib/utils";
 
 const ICON: Record<EventType, typeof MailIcon> = {
@@ -54,20 +55,16 @@ function headline(e: MailEvent) {
 }
 
 /** One event, expandable to its full metadata. Message content is never rendered as HTML. */
-/** "CATEGORY_UPDATES" → "Updates", "STARRED" → "Starred"; user label ids stay as they are until names load. */
-function prettyLabel(id: string) {
-  if (!/^[A-Z_]+$/.test(id)) return id;
-  const s = id.replace(/^CATEGORY_/, "").toLowerCase().replace(/_/g, " ");
-  return s[0]!.toUpperCase() + s.slice(1);
-}
-
 export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolean }) {
   const [open, setOpen] = useState(false);
   const m = e.message;
   const info = EVENT_TYPE_INFO[e.type];
   const isLabel = e.type === "label.added" || e.type === "label.removed";
   const labels = useQuery({ ...queries.labels(e.accountId), enabled: isLabel && !!e.labelIds?.length });
-  const labelNames = isLabel ? (e.labelIds ?? []).map((id) => labels.data?.find((l) => l.id === id)?.name ?? prettyLabel(id)) : [];
+  const labelNames = isLabel ? (e.labelIds ?? []).map((id) => {
+    const l = labels.data?.find((x) => x.id === id);
+    return l && l.type === "user" ? l.name : prettySystemLabel(id);
+  }) : [];
   return (
     <li className={cn(fresh && "animate-in duration-500 fade-in slide-in-from-top-1")}>
       <button

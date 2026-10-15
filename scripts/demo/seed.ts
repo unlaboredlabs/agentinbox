@@ -396,12 +396,6 @@ function deliver(email: string, m: DemoMail) {
   msgIds[m.key] = { id: msg.id, threadId: msg.threadId };
 }
 
-for (const m of PERSONAL_MAIL) deliver(PERSONAL, m);
-for (const m of [...OPS_MAIL].sort((a, b) => b.hoursAgo - a.hoursAgo)) {
-  deliver(OPS, m);
-  await sleep(120);
-}
-
 async function waitFor(what: string, check: () => boolean, timeoutMs = 30_000) {
   const t0 = Date.now();
   while (!check()) {
@@ -413,7 +407,11 @@ async function waitFor(what: string, check: () => boolean, timeoutMs = 30_000) {
   }
 }
 const eventCount = () => ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE gmail_message_id IS NOT NULL")!.n;
-await waitFor("mail ingest", () => eventCount() >= planned.size);
+// One message at a time, so events (and their deliveries) are stored in delivery order.
+for (const [email, m] of [...PERSONAL_MAIL.map((m) => [PERSONAL, m] as const), ...[...OPS_MAIL].sort((a, b) => b.hoursAgo - a.hoursAgo).map((m) => [OPS, m] as const)]) {
+  deliver(email, m);
+  await waitFor(`ingest of "${m.subject}"`, () => eventCount() >= planned.size, 8000);
+}
 log(`ingested ${eventCount()} message events`);
 
 // The personal account's refresh token stops working (password change, revoked access…).

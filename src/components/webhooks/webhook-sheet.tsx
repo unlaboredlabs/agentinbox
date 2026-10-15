@@ -1,4 +1,5 @@
 import type { Webhook, WebhookInput, WebhookWithSecret } from "@shared/types";
+import { useLabelNames } from "@/hooks/use-label-names";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { InfoIcon, SparklesIcon } from "lucide-react";
@@ -69,6 +70,7 @@ function WebhookForm({
 }) {
   const agents = useQuery(queries.agents());
   const accounts = useQuery(queries.accounts());
+  const labelName = useLabelNames(accounts.data ?? []);
   const [draft, setDraft] = useState<WebhookInput>(() =>
     webhook
       ? {
@@ -204,7 +206,7 @@ function WebhookForm({
             <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <SparklesIcon className="size-3.5" /> In plain words
             </div>
-            <p>{describeWebhook(draft, accounts.data ?? []).join(", ")}.</p>
+            <p>{describeWebhook(draft, accounts.data ?? [], labelName).join(", ")}.</p>
           </div>
           {save.isError && <ErrorAlert error={save.error} title="Couldn't save the webhook" />}
         </FieldGroup>

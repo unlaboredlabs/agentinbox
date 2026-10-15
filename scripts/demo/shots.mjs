@@ -44,7 +44,7 @@ for (const theme of a.themes.split(",")) {
     page.on("pageerror", (e) => console.error("pageerror", e.message));
     page.on("console", (m) => m.type() === "error" && console.error("console", m.text()));
     for (const spec of a.routes.split(",")) {
-      const [name, route] = spec.includes("=") ? spec.split("=") : [spec.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "root", spec];
+      const [name, route] = /^[\w-]+=\//.test(spec) ? [spec.slice(0, spec.indexOf("=")), spec.slice(spec.indexOf("=") + 1)] : [spec.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "root", spec];
       await page.goto(base + route, { waitUntil: "networkidle" }).catch(() => {});
       await page.waitForTimeout(Number(a.wait));
       const file = join(a.out, `${name}-${width}-${theme}.png`);

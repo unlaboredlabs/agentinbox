@@ -37,7 +37,11 @@ export function cleanFilter(f: WebhookFilter): WebhookFilter {
 const list = (xs: string[], max = 3) => (xs.length <= max ? xs.join(", ") : `${xs.slice(0, max).join(", ")} and ${xs.length - max} more`);
 
 /** Plain-language description of what a webhook sends, e.g. for the editor preview and detail page. */
-export function describeWebhook(w: Pick<WebhookInput, "eventTypes" | "filter" | "includeBody">, accounts: Account[]): string[] {
+export function describeWebhook(
+  w: Pick<WebhookInput, "eventTypes" | "filter" | "includeBody">,
+  accounts: Account[],
+  labelName: (id: string) => string = (id) => id,
+): string[] {
   const f = w.filter;
   const types = w.eventTypes.map((t: EventType) => EVENT_TYPE_INFO[t]?.label.toLowerCase() ?? t);
   const lines = [types.length ? `Sends ${list(types)} events` : "Sends nothing yet: pick at least one event type"];
@@ -46,7 +50,7 @@ export function describeWebhook(w: Pick<WebhookInput, "eventTypes" | "filter" | 
       ? `from ${list(f.accountIds.map((id) => accounts.find((a) => a.id === id)?.email ?? id))}`
       : "from every account the agent can read",
   );
-  if (f.labelIds?.length) lines.push(`only for messages labeled ${list(f.labelIds)}`);
+  if (f.labelIds?.length) lines.push(`only for messages labeled ${list(f.labelIds.map(labelName))}`);
   if (f.from?.length) lines.push(`where the sender matches ${list(f.from)}`);
   if (f.to?.length) lines.push(`where a recipient matches ${list(f.to)}`);
   if (f.subject) lines.push(`where the subject matches /${f.subject}/i`);
