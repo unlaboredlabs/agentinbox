@@ -129,6 +129,8 @@ export interface Settings {
    * "10.0.0.0/8", "n8n.internal"). Defaults to loopback only.
    */
   webhookAllowlist: string[];
+  /** Accept device-flow pairing requests from `npx agentinbox connect` (each still needs approval). */
+  pairingEnabled: boolean;
 }
 
 export interface GoogleClientConfig {
@@ -200,6 +202,44 @@ export interface Agent {
   lastUsedAt: string | null;
   createdAt: string;
   grants: Grant[];
+  /** `agentinbox listen` instances (one per consumer name) and their stream position. */
+  listeners: ListenerInfo[];
+}
+
+export interface ListenerInfo {
+  consumer: string;
+  connected: boolean;
+  ackedSeq: number;
+  lastSeenAt: string | null;
+  client: { hostname?: string; platform?: string; version?: string };
+}
+
+export type PairingStatus = "pending" | "approved" | "denied" | "expired";
+
+/** A device-flow pairing request from `npx agentinbox connect`, shown in the approvals inbox. */
+export interface PairingRequest {
+  id: string; // par_…
+  /** The code the agent's terminal shows; the human must match it before approving. */
+  userCode: string;
+  name: string;
+  description: string | null;
+  requested: { accounts?: string[]; capabilities?: Capability[]; sendMode?: SendMode; reason?: string };
+  client: { hostname?: string; platform?: string; tool?: string; version?: string };
+  /** Requester IP as seen by the daemon. */
+  ip: string | null;
+  status: PairingStatus;
+  /** Set once approved. */
+  agentId: string | null;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
+  decisionNote: string | null;
+}
+
+/** POST /api/pairings/:id/approve. Grants default to sendMode draft_only in the console. */
+export interface ApprovePairingInput {
+  name?: string;
+  grants: (GrantInput & { accountId: string })[];
 }
 
 export interface Grant {
@@ -497,6 +537,9 @@ export interface ApiError {
 //   POST   /api/deliveries/:id/replay                 → Delivery
 //   GET    /api/events?accountId&type&cursor          → Page<MailEvent>
 //   GET    /api/events/stream                         → text/event-stream of ConsoleStreamMessage (SSE `data:` = JSON)
+//   GET    /api/pairings?status                       → PairingRequest[]
+//   POST   /api/pairings/:id/approve ApprovePairingInput → Agent   (the key goes to the polling CLI, never to the console)
+//   POST   /api/pairings/:id/deny {note?}             → PairingRequest
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval
@@ -506,6 +549,7 @@ export interface ApiError {
 // Agent-facing (bearer = agent API key):
 //   POST/GET/DELETE /mcp                               MCP streamable HTTP (stateless)
 //   GET    /skill.md                                   the agent skill (public, no secrets)
+//   /agent/v1/*                                        pairing + listener stream (see shared/agent-api.ts)
 //   GET    /health                                     HealthResponse (alias of /api/health for uptime monitors; 503 when degraded)
 
 export type ConsoleStreamMessage =
@@ -513,4 +557,5 @@ export type ConsoleStreamMessage =
   | { kind: "delivery"; data: Delivery }
   | { kind: "approval"; data: Approval }
   | { kind: "audit"; data: AuditEntry }
-  | { kind: "account"; data: Account };
+  | { kind: "account"; data: Account }
+  | { kind: "pairing"; data: PairingRequest };
