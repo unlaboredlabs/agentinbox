@@ -76,9 +76,29 @@ export function oauthErrorHint(code: string, redirectUri?: string): { message: s
   }
 }
 
+/** Google error codes oauthErrorHint explains; any other code is reported as "oauth_error" where it's stored. */
+export const KNOWN_OAUTH_ERRORS = new Set(["access_denied", "org_internal", "admin_policy_enforced", "redirect_uri_mismatch", "invalid_client", "unauthorized_client", "invalid_grant"]);
+
+/**
+ * An error Google reported (on the redirect or the token endpoint). The redirect's `error` and
+ * `error_description` come from the URL, so anyone holding a pending state can choose them: the
+ * attempt status (connectAttempt) keeps only `googleCode`'s fixed explanation, never the text.
+ */
+export class GoogleOAuthError extends HttpError {
+  constructor(
+    readonly googleCode: string,
+    message: string,
+    hint: string,
+    readonly redirectUri: string,
+  ) {
+    super(400, `oauth_${googleCode}`, message, hint);
+  }
+}
+
 const oauthError = (ctx: AppContext, code: string, description?: string | null, redirectUri?: string) => {
-  const { message, hint } = oauthErrorHint(code, redirectUri ?? callbackMode(ctx).redirectUri);
-  return new HttpError(400, `oauth_${code}`, description && !message.includes(description) ? `${message} (${description})` : message, hint);
+  const uri = redirectUri ?? callbackMode(ctx).redirectUri;
+  const { message, hint } = oauthErrorHint(code, uri);
+  return new GoogleOAuthError(code, description && !message.includes(description) ? `${message} (${description})` : message, hint, uri);
 };
 
 /**
@@ -156,19 +176,28 @@ export function rememberCompleted(ctx: AppContext, state: string, code: string, 
  */
 const failed = new WeakMap<AppContext, Map<string, { code: string; error: string; hint: string | null; at: number }>>();
 
-function rememberFailed(ctx: AppContext, state: string, err: unknown): void {
+const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/** What the attempt status reports for a failure: fixed text for Google's codes, capped lengths for the rest. */
+export function storedFailure(err: unknown): { code: string; error: string; hint: string | null } {
+  const e = asHttpError(err);
+  if (e instanceof GoogleOAuthError) {
+    if (!KNOWN_OAUTH_ERRORS.has(e.googleCode)) return { code: "oauth_error", error: "Google returned an error, so nothing was connected.", hint: "Start the connection again from the console." };
+    const { message, hint } = oauthErrorHint(e.googleCode, e.redirectUri);
+    return { code: `oauth_${e.googleCode}`, error: message, hint };
+  }
+  if (e instanceof HttpError) return { code: cap(e.code, 64), error: cap(e.message, 500), hint: e.hint ? cap(e.hint, 1000) : null };
+  return { code: "internal", error: "Something went wrong while finishing the connection.", hint: "Check the agentinbox server log, then try again." };
+}
+
+/** Records how a pending state failed (exported for tests). Never replaces a success for the same state. */
+export function rememberFailed(ctx: AppContext, state: string, err: unknown): void {
   if (completed.get(ctx)?.has(state)) return;
   let m = failed.get(ctx);
   if (!m) failed.set(ctx, (m = new Map()));
   const cutoff = Date.now() - COMPLETED_TTL_MS;
   for (const [k, v] of m) if (v.at < cutoff || m.size >= COMPLETED_MAX) m.delete(k);
-  const e = asHttpError(err);
-  m.set(
-    state,
-    e instanceof HttpError
-      ? { code: e.code, error: e.message, hint: e.hint ?? null, at: Date.now() }
-      : { code: "internal", error: "Something went wrong while finishing the connection.", hint: "Check the agentinbox server log, then try again.", at: Date.now() },
-  );
+  m.set(state, { ...storedFailure(err), at: Date.now() });
 }
 
 /**
