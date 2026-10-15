@@ -18,6 +18,7 @@ project, with no cloud service in between.
   `modify_labels`, `wait_for_events` and more. Each agent sees only the tools its grants allow.
 - **Real-time events.** New mail, replies to threads you sent into, and label changes arrive within seconds through
   Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or by polling with zero extra setup.
+  `agentinbox listen` wakes agents on a laptop behind NAT.
 - **Webhooks.** Filter by account, label, sender, recipient, subject or attachments. Payloads are signed per
   [Standard Webhooks](https://www.standardwebhooks.com), retried with backoff, logged, and replayable.
 - **Guardrails that don't degrade content.** Per agent and mailbox: capabilities, label scope, send mode (direct,
@@ -72,22 +73,27 @@ agentinbox uses **your own** Google Cloud project and OAuth client. Gmail's read
 client isn't an option, and this way your mail never passes through anyone else's app. The wizard shows each step with
 the exact values to paste; in short:
 
-1. **Create a Google Cloud project** and enable the **Gmail API** (and the **Cloud Pub/Sub API** if you want push).
-2. **Configure the OAuth consent screen** (Google Auth Platform → Audience):
+1. **Confirm the public URL** agents and Google will use to reach agentinbox.
+2. **Create a Google Cloud project**, paste its project ID, and enable the **Gmail API** (and the **Cloud Pub/Sub API**
+   if you want push).
+3. **Configure the OAuth consent screen** (Google Auth Platform) and add the scopes the console lists:
    - **Internal** if every mailbox is in your Google Workspace organization. No review, no expiry, nothing else to do.
    - **External** for personal `@gmail.com` accounts (or mailboxes outside your org). Then **publish the app to
      "In production"**. Left in *Testing*, Google expires refresh tokens after **7 days** and your accounts silently
      disconnect. You don't need Google's verification for your own use: on consent, click *Advanced → Go to
      (app name)* past the "unverified app" warning.
-3. **Create an OAuth client** of type *Web application*, add the redirect URI the console shows
-   (`<public URL>/oauth/callback`), and paste the client ID, client secret and project ID into the console.
-4. **Connect accounts.** Each one goes through Google's consent screen. If the console is on plain HTTP at a non-localhost
-   address, Google can't redirect back to it; the console then asks you to paste the URL you land on instead.
-5. **Choose how new mail arrives:**
+4. **Create an OAuth client** of type *Web application*, add the redirect URI the console shows
+   (`<public URL>/oauth/callback`), and paste the client ID and secret into the console. If the public URL is plain
+   HTTP on a non-localhost address, Google won't redirect to it: the console then shows a `localhost` redirect URI and,
+   when connecting, asks you to paste the URL you land on.
+5. **Connect accounts.** Each one goes through Google's consent screen and grants `gmail.modify` plus `openid email
+   profile`, nothing more.
+6. **Choose how new mail arrives:**
    - **Pub/Sub (recommended):** one click creates the topic, grants Gmail's push service
-     (`gmail-api-push@system.gserviceaccount.com`) permission to publish, and creates a pull subscription, using a
-     connected account that can manage Pub/Sub in the project. Events arrive in seconds, with no inbound connections.
-     If a Workspace organization policy (domain-restricted sharing) blocks that grant, the console says so; use polling.
+     (`gmail-api-push@system.gserviceaccount.com`) permission to publish, and creates a pull subscription. It asks one
+     connected account for the extra `pubsub` scope (only then); that account needs **Owner** or **Pub/Sub Admin** on
+     the project (Editor can't change topic permissions). Events arrive in seconds, with no inbound connections. If a
+     Workspace organization policy (domain-restricted sharing) blocks the grant, the console says so; use polling.
    - **Polling:** no extra setup; checks each mailbox every 30 seconds by default.
 
 Then create an agent and give it a grant on a mailbox.
@@ -100,18 +106,19 @@ copy-paste snippets with your URL and key filled in, and a **Test connection** b
 **Claude Code**
 
 ```sh
-claude mcp add --transport http agentinbox http://your-host:8425/mcp --header "Authorization: Bearer aib_…"
+claude mcp add --transport http --scope user agentinbox http://your-host:8425/mcp \
+  --header "Authorization: Bearer $AGENTINBOX_API_KEY"
 ```
 
-**Codex** (`~/.codex/config.toml`)
+**Codex** (`~/.codex/config.toml`, with `export AGENTINBOX_API_KEY="aib_…"` in the environment Codex runs in)
 
 ```toml
 [mcp_servers.agentinbox]
 url = "http://your-host:8425/mcp"
-bearer_token_env_var = "AGENTINBOX_KEY"
+bearer_token_env_var = "AGENTINBOX_API_KEY"
 ```
 
-**Cursor** (`~/.cursor/mcp.json`) and most other MCP clients
+**Cursor** (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project) and most other MCP clients
 
 ```json
 {
@@ -124,7 +131,8 @@ bearer_token_env_var = "AGENTINBOX_KEY"
 }
 ```
 
-Any MCP client that speaks streamable HTTP works: endpoint `/mcp`, header `Authorization: Bearer <key>`.
+Cursor also accepts `"Bearer ${env:AGENTINBOX_API_KEY}"` in `headers`, so the key can stay out of the file. Any MCP
+client that speaks streamable HTTP works: endpoint `/mcp`, header `Authorization: Bearer <key>`.
 
 ### The agent skill
 
@@ -148,12 +156,15 @@ Event types: `message.received`, `message.sent`, `thread.reply_received` (a repl
 labels their grants let them read.
 
 - **Agents without an HTTP endpoint** (most coding agents) use the MCP tools `wait_for_events` (long poll),
-  `list_events` and `ack_events`. The server keeps each agent's position.
+  `list_events` and `ack_events` while a session is running. The server keeps each agent's position. To start an
+  agent when mail arrives, use [`agentinbox listen`](#wake-local-agents-agentinbox-listen).
 - **Agents with an endpoint** get webhooks: create one under **Webhooks**, pick event types and filters, and optionally
-  include the cleaned message body. Failed deliveries retry with exponential backoff before they're marked dead, and
-  any delivery can be replayed from the console.
+  include the cleaned message body. A delivery succeeds on a `2xx` within 10 seconds (redirects aren't followed);
+  failures are retried 8 times with growing delays (30 s up to 12 h, about a day in total) before they're marked dead,
+  and any delivery can be replayed from the console.
 
-Each webhook request carries `webhook-id`, `webhook-timestamp` and `webhook-signature` headers. Verify them with any
+Each webhook request carries `webhook-id`, `webhook-timestamp` and `webhook-signature` headers (`v1,` + base64
+HMAC-SHA256 of `{webhook-id}.{webhook-timestamp}.{body}`). Verify them with any
 [Standard Webhooks library](https://github.com/standard-webhooks/standard-webhooks) and the `whsec_…` secret shown when
 you create the webhook:
 
@@ -164,10 +175,33 @@ const wh = new Webhook(process.env.AGENTINBOX_WEBHOOK_SECRET);
 const payload = wh.verify(rawBody, request.headers); // throws if the signature or timestamp is bad
 ```
 
-A dependency-free Node version is in the [skill](server/skill/SKILL.md#webhooks).
+A dependency-free Node version is in the [skill](server/skill/SKILL.md#webhooks). `webhook-id` is the delivery id: it
+stays the same across retries and replays of one webhook. To dedupe across webhooks, use the event id `data.id`.
 
-By default webhooks may only target public addresses and loopback; other private addresses (for example a LAN host or
-`n8n.internal`) must be added to the webhook allowlist in **Settings**.
+Webhooks may target public `https` URLs and, through the default allowlist (`localhost`, `127.0.0.0/8`, `::1`),
+loopback. Other private addresses (for example a LAN host or `n8n.internal`) must be added to the webhook allowlist in
+**Settings** as a hostname, `*.suffix`, IP or CIDR. Plain `http` works only for loopback and allowlisted hosts.
+
+## Wake local agents: `agentinbox listen`
+
+MCP events only reach an agent while a session is running, and webhooks need a reachable endpoint. `agentinbox listen`
+runs on the agent's own machine, holds an **outbound** event stream to agentinbox (no open ports or tunnels), and runs a
+command or POSTs to a localhost URL for each new event:
+
+```sh
+# Pair this machine's agent: prints a code to approve in the agentinbox console, then registers the MCP server
+npx agentinbox-cli connect https://mail.example.com --tool claude-code --setup-mcp
+
+# Run the ready-made Claude Code recipe once per event (event JSON on stdin) as a background service
+npx agentinbox-cli listen service install --exec "$(npx agentinbox-cli listen --print-recipe claude-code)"
+npx agentinbox-cli listen status
+```
+
+The approver picks the mailboxes and capabilities: the approval dialog defaults to **Read only**, and once send access
+is granted, `draft_only` is the default send mode. The key goes into a profile file (mode 0600) and is never printed.
+Listener commands run in a private working directory, so no stray `CLAUDE.md`, `.mcp.json` or hooks apply. Delivery is
+at-least-once with retries and a dead-letter list. Recipes for Codex, Cursor and Hermes (`--print-recipe <tool>`),
+forward mode, filters and the security model are in [docs/listen.md](docs/listen.md).
 
 ## Security model
 
@@ -179,25 +213,27 @@ Only what a human reader couldn't see is removed: hidden CSS (`display:none`, ze
 same-colour text), HTML comments, scripts and styles, zero-width characters, Unicode tag characters and bidi overrides.
 Each body is wrapped in one `<email_content … untrusted>` delimiter and comes with signals: SPF/DKIM/DMARC results, an
 external-sender flag, whether hidden content was removed, and phrases typical of prompt injection. Signals are
-informational; nothing is withheld because of them.
+informational; nothing is withheld because of them. Very long bodies are cut at 20,000 characters by default (Settings),
+with a note saying so.
 
 **Actions are strictly controlled.** A new agent can do nothing. Each grant (agent × mailbox) sets:
 
 | Control | |
 |---|---|
 | Capabilities | `read` (search, read, attachments, events), `draft`, `send`, `organize` (labels, archive, read state), `trash` |
-| Label scope | Confine the agent to threads carrying certain labels. Searches are rewritten and fetches by id are checked. |
+| Label scope | Confine the agent to threads carrying certain labels. Searches are rewritten and fetches by id are checked; anything outside looks "not found". |
 | Send mode | `draft_only` (default: a Gmail draft for a human to send), `approval` (queued in the console; approving sends it) or `direct` |
-| Allowed recipients | Exact addresses or `*@domain.com` globs |
-| Reply only | Sending only inside threads the agent can already see |
-| Send caps | Per hour and per day |
+| Allowed recipients | Exact addresses or globs such as `*@example.com` |
+| Reply only | No new messages or forwards; replies only, inside threads the agent can see, to people already in the conversation. The reply goes to the message's Reply-To or From, which the sender chooses: use Allowed recipients to limit who can be written to. |
+| Send caps | Per rolling hour and 24 hours, counting sends that became drafts or approvals too |
 
 **Everything is audited.** Every tool call and every console change is recorded with its outcome, and denials name the
 guardrail that blocked them.
 
 **The console** is protected by an admin password (set through the one-time setup link), HttpOnly session cookies
-that expire after 30 days of inactivity (90 at most), a CSRF header on every change, request size limits, a strict
-Content Security Policy, and a 15-minute lockout after five wrong passwords (or 30 attempts) from one address. When
+that expire after 30 days of inactivity (90 at most), a CSRF header on every API change, request size limits, a
+Content Security Policy that allows only the console's own scripts, and a 15-minute lockout after five wrong passwords
+(or 30 attempts) from one address. When
 failures pile up across many addresses, every sign-in attempt is slowed down instead. It never allows being framed.
 The data directory and database are readable only by their owner.
 
@@ -213,16 +249,17 @@ npx agentinbox-cli service install
 ```
 
 Installs a background service that starts at boot: systemd on Linux (a user service with lingering enabled, or a system
-service when run as root) and launchd on macOS. The service runs its own copy of agentinbox from the data directory,
-so it never depends on the npx cache; a failed install leaves the running service as it was. Re-run `service install`
-to update; `service status` and `service uninstall` do what you'd expect, and uninstalling keeps your data. Pass the same
-`--port`, `--host` and `--data` options each time. `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS`,
-`TRUST_PROXY_FROM` and `AGENTINBOX_LOG_LEVEL` are taken from your shell and remembered in `<data>/service.env`, so later
-installs keep them (set one to an empty value to remove it).
+service when run as root) and launchd on macOS. The service runs its own copy of agentinbox (the latest npm release),
+installed in the data directory, so it never depends on the npx cache; if that install fails, the running service is
+left as it was. Re-run `service install` to update; `service status` and `service uninstall` do what you'd expect, and
+uninstalling keeps your data. `--port`, `--host` and `--data` aren't remembered: pass the same ones each time.
+`AGENTINBOX_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS`, `TRUST_PROXY_FROM` and `AGENTINBOX_LOG_LEVEL` are taken from
+your shell and remembered in `<data>/service.env`, so later installs keep them (set one to an empty value to remove it).
 
 Only one agentinbox runs per data directory; a second one refuses to start.
 
-When a newer version is published, the console shows **Update available** with the exact command to run.
+When a newer version is published, the console shows **Update available** with the exact command to run, flags
+included.
 
 The unit runs the Node.js binary you installed it with. If you remove or replace that Node, run `service install` again.
 If the service doesn't come up, `service install` rolls back and prints where to look (`systemctl --user status
@@ -251,11 +288,12 @@ agentinbox serves plain HTTP. To expose it beyond your network, put it behind a 
 Tailscale Funnel) and:
 
 - bind it to localhost: `--host 127.0.0.1`
-- set `TRUST_PROXY=1`, so lockouts apply per client and cookies are marked `Secure`. The client address is taken from
-  the right end of `X-Forwarded-For`; with more than one proxy in front, set `TRUST_PROXY_HOPS` to their number.
-  Forwarding headers are believed only from a proxy on the same host (loopback); if the proxy runs on another machine,
-  list its address in `TRUST_PROXY_FROM` (for example `TRUST_PROXY_FROM=10.0.0.5` or a CIDR like `10.0.0.0/24`; `/0` is refused). The proxy must append to (or overwrite)
-  `X-Forwarded-For`; a tunnel or proxy that passes the header through unchanged lets clients choose their own address
+- set `TRUST_PROXY=1`, so lockouts apply per client and cookies are marked `Secure` on https. The client address is
+  taken from the right end of `X-Forwarded-For`; with more than one proxy in front, set `TRUST_PROXY_HOPS` to their
+  number. Forwarding headers are believed only from a proxy on the same host (loopback); if the proxy runs on another
+  machine, list its address in `TRUST_PROXY_FROM` (for example `TRUST_PROXY_FROM=10.0.0.5` or a CIDR like
+  `10.0.0.0/24`; `/0` is refused). The proxy must append to (or overwrite) `X-Forwarded-For`; a tunnel or proxy that
+  passes the header through unchanged lets clients choose their own address
 - set **Settings → Public URL** to the https address, so MCP snippets, the skill and the OAuth redirect use it
 
 `GET /health` (or `/api/health`) needs no auth and suits uptime monitors: `200` when healthy, `503` when degraded, for
@@ -268,10 +306,13 @@ With a global install (`npm i -g agentinbox-cli`); otherwise prefix `npx agentin
 
 ```
 agentinbox [start] [--port 8425] [--host 0.0.0.0] [--data ~/.agentinbox] [--no-open] [--dev]
-agentinbox service install|uninstall|status [--port …] [--host …] [--data …]
+agentinbox service install [--port …] [--host …] [--data …]
+agentinbox service uninstall [--data …]
+agentinbox service status
 agentinbox skill install [--target claude|codex|agents|<dir>] [--url <public url>]
 agentinbox skill print [--url <public url>]
 agentinbox reset-password [--data …]
+agentinbox connect <url> … / listen … / listen service install …   # agent machines, see docs/listen.md
 ```
 
 | Flag | Env | Default | |
@@ -284,6 +325,7 @@ agentinbox reset-password [--data …]
 | | `TRUST_PROXY_HOPS` | `1` | Number of proxies in front of agentinbox (which `X-Forwarded-For` entry, from the right, is the client) |
 | | `TRUST_PROXY_FROM` | loopback | Other proxy addresses whose forwarding headers are believed: comma-separated IPs or CIDRs (IPv4 or IPv6) |
 | | `AGENTINBOX_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `--url` | `AGENTINBOX_URL` | `http://localhost:8425` | `skill` commands only: the server URL written into SKILL.md |
 
 Forgot the admin password? Run `npx agentinbox-cli reset-password` on the server, as the user agentinbox runs as (`sudo` for a
 system service) and with the same `--data`. It signs out all sessions and prints a new setup link; a running instance
@@ -295,8 +337,8 @@ Everything lives in the data directory (`~/.agentinbox` by default):
 
 | File | |
 |---|---|
-| `agentinbox.db` | SQLite database: accounts, encrypted tokens, agents, grants, events, deliveries, approvals, audit log |
-| `master.key` | Encrypts refresh tokens, webhook secrets and the OAuth client secret (mode 0600) |
+| `agentinbox.db` | SQLite database (plus `-wal` and `-shm` files): accounts, encrypted tokens, agents, grants, events, deliveries, approvals, audit log |
+| `master.key` | Encrypts Google tokens, webhook secrets and the OAuth client secret (mode 0600) |
 | `setup-token` | The one-time setup token, until the instance is claimed |
 | `agentinbox.lock` | Marks the running instance (pid and port) |
 | `service.env` | Environment the service was installed with, possibly including `AGENTINBOX_MASTER_KEY` (mode 0600; `service install` only) |
@@ -307,10 +349,20 @@ Back up `agentinbox.db` and `master.key` together: without the key, stored secre
 refuses to start rather than create a new one. Keep the key somewhere safer than the database backup, or supply it via
 `AGENTINBOX_MASTER_KEY`. The database runs in WAL mode, so don't just copy the file while agentinbox is running: stop
 it first (`systemctl --user stop agentinbox`), or take a consistent copy with
-`sqlite3 ~/.agentinbox/agentinbox.db ".backup /path/to/backup.db"`. Mail
-bodies are never stored; agentinbox keeps metadata (ids, headers, labels, snippets) and fetches content from Gmail on
-demand. Events, deliveries and audit entries are pruned after the retention period set in **Settings** (30 days by
-default).
+`sqlite3 ~/.agentinbox/agentinbox.db ".backup /path/to/backup.db"`.
+
+Received mail bodies are never stored; agentinbox keeps metadata (ids, headers, labels, snippets) and fetches content
+from Gmail on demand. The only bodies in the database are those of sends queued for approval. Events, deliveries,
+audit entries and decided approvals (with their bodies) are pruned after the retention period set in **Settings** (30
+days by default).
+
+## Release channel
+
+Every push to `main` (a quick second merge can supersede the first) is published to npm as
+`agentinbox-cli@<version>-nightly.<n>` under the `latest` tag, built by GitHub Actions with npm trusted publishing and
+[provenance](https://docs.npmjs.com/generating-provenance-statements).
+`npx agentinbox-cli` therefore runs the newest build of `main`, and `service install` always installs `latest`. To
+stay on one build, run it pinned in the foreground: `npx agentinbox-cli@<version>`.
 
 ## Development
 
