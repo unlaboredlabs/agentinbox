@@ -4,11 +4,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_HEADER_CHARS, parse, parseAddresses, summarize } from "../server/google/mime.ts";
 import type { GmailMessage } from "../server/google/types.ts";
 
-const time = (fn: () => unknown) => {
-  const t0 = performance.now();
-  fn();
-  return performance.now() - t0;
-};
+import { bestOf } from "./content-perf.ts";
 
 describe("header caps", () => {
   const groups = "g:".repeat(200_000) + "a@b.example;";
@@ -28,16 +24,18 @@ describe("header caps", () => {
     },
   });
 
-  it("bounds address parsing of heavy group syntax", () => {
-    parseAddresses(groups);
-    expect(time(() => parseAddresses(groups))).toBeLessThan(100);
+  it("bounds address parsing of heavy group syntax: beyond the cap, more input costs nothing", () => {
+    const atCap = "g:".repeat(MAX_HEADER_CHARS / 2) + "a@b.example;";
+    const capped = bestOf(() => parseAddresses(atCap));
+    const huge = bestOf(() => parseAddresses(groups));
+    expect(huge / Math.max(capped, 2)).toBeLessThan(4);
+    expect(huge).toBeLessThan(1_000);
   });
 
   it("bounds summarize/parse of a message with huge headers", () => {
     const m = msg("Alice <alice@client.example>");
-    summarize(m);
-    expect(time(() => summarize(m))).toBeLessThan(150);
-    expect(time(() => parse(m))).toBeLessThan(150);
+    expect(bestOf(() => summarize(m))).toBeLessThan(1_000);
+    expect(bestOf(() => parse(m))).toBeLessThan(1_000);
     expect(summarize(m).from).toEqual({ name: "Alice", email: "alice@client.example" });
     expect(summarize(m).subject.length).toBeLessThanOrEqual(MAX_HEADER_CHARS);
   });

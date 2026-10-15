@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { buildContent, cleanLine, formatAddress, htmlToMarkdown, isExternal, MAX_HTML_CHARS, parseAuthResults, stripInvisible } from "../server/mail/content.ts";
 import type { ParsedMessage } from "../server/google/types.ts";
+import { bestOf, expectLinear } from "./content-perf.ts";
 
 const ch = (...cps: number[]) => String.fromCodePoint(...cps);
 const ZWNJ = ch(0x200c);
@@ -164,26 +165,26 @@ describe("one-line untrusted text", () => {
 });
 
 describe("stylesheets: bounded work, precise effects", () => {
-  const time = (fn: () => void) => {
-    const t0 = performance.now();
-    fn();
-    return performance.now() - t0;
+  const hostile = (elements: number) => {
+    const rules = Array.from({ length: 8000 }, (_, i) => `.c${i} p, .c${i}{display:none}`).join("\n");
+    const els = Array.from({ length: elements }, (_, i) => `<div class="c${i % 9000} a b">item ${i}</div>`).join("");
+    return `<html><head><style>${rules}</style></head><body>${els}</body></html>`;
   };
 
-  it("handles a hostile ~700 KB document (8,000 rules x 10,000 elements) quickly", () => {
-    const rules = Array.from({ length: 8000 }, (_, i) => `.c${i} p, .c${i}{display:none}`).join("\n");
-    const els = Array.from({ length: 10000 }, (_, i) => `<div class="c${i % 9000} a b">item ${i}</div>`).join("");
-    const html = `<html><head><style>${rules}</style></head><body>${els}</body></html>`;
+  it("handles a hostile ~700 KB document (8,000 rules x 10,000 elements) in linear time", () => {
+    const html = hostile(10_000);
     expect(html.length).toBeGreaterThan(600_000);
+    // Generous absolute bound: the quadratic version took ~20 s.
     let r: ReturnType<typeof htmlToMarkdown> | undefined;
-    expect(time(() => (r = htmlToMarkdown(html)))).toBeLessThan(500);
+    expect(bestOf(() => (r = htmlToMarkdown(html)), 1)).toBeLessThan(3_000);
     expect(r!.markdown).toContain("item 9999");
+    expectLinear("rules x elements", (n) => () => htmlToMarkdown(hostile(n)), 2_500);
   });
 
   it("stops matching after its operation budget (many rules on one class)", () => {
-    const rules = Array.from({ length: 1000 }, (_, i) => `.a{margin:${i}px;color:#000}`).join("");
-    const els = '<div class="a">x</div>'.repeat(10000);
-    expect(time(() => htmlToMarkdown(`<style>${rules}</style>${els}`))).toBeLessThan(500);
+    const doc = (elements: number) => `<style>${Array.from({ length: 1000 }, (_, i) => `.a{margin:${i}px;color:#000}`).join("")}</style>${'<div class="a">x</div>'.repeat(elements)}`;
+    expect(bestOf(() => htmlToMarkdown(doc(10_000)), 1)).toBeLessThan(3_000);
+    expectLinear("one class, many rules", (n) => () => htmlToMarkdown(doc(n)), 2_500);
   });
 
   it("a stylesheet that doesn't set colours doesn't disable the same-colour check", () => {

@@ -5,6 +5,7 @@ import type { ParsedMessage } from "../server/google/types.ts";
 import { buildContent, cleanLine, escapeDelimiters, fallbackContent, formatAddress, stripInvisible } from "../server/mail/content.ts";
 import { ContentPool } from "../server/mail/pool.ts";
 import { createLogger } from "../server/util/log.ts";
+import { bestOf, expectLinear } from "./content-perf.ts";
 
 const log = createLogger("test").child("content");
 
@@ -89,8 +90,9 @@ describe("content pool", () => {
     };
     for (const [name, html] of Object.entries(hostile)) {
       const m = await measure(() => p.content(message(html, "fallback text"), OPTS));
+      // Generous bounds for slow CI; the point is "never blocks for seconds" (these took 3 s to minutes).
       expect(m.ms, name).toBeLessThan(3_000);
-      expect(m.lag, name).toBeLessThan(250);
+      expect(m.lag, name).toBeLessThan(500);
       expect(m.result.body.length, name).toBeGreaterThan(0);
     }
   });
@@ -112,23 +114,18 @@ describe("content pool", () => {
   });
 });
 
-describe("linear-time helpers on 40k-character inputs", () => {
-  const time = (fn: () => unknown) => {
-    const t0 = performance.now();
-    fn();
-    return performance.now() - t0;
-  };
+describe("linear-time helpers", () => {
   it.each([
-    ["delimiter escaping (spaces)", () => escapeDelimiters("<" + " ".repeat(40_000))],
-    ["delimiter escaping (angle brackets)", () => escapeDelimiters("<".repeat(40_000))],
-    ["zero-length check", () => buildContent(message(`<p style="font-size:${"0".repeat(40_000)}x">a</p>`), OPTS)],
-    ["background shorthand", () => buildContent(message(`<p style="background:${"a-".repeat(20_000)}">a</p>`), OPTS)],
-    ["comment with brackets", () => buildContent(message(`<!--${"<".repeat(40_000)}-->`), OPTS)],
-    ["auth results parentheses", () => buildContent({ ...message(null, "x"), authenticationResults: "mx.google.com; " + "(".repeat(40_000) }, OPTS)],
-    ["role-spoof pattern on blank lines", () => buildContent(message(null, "\n".repeat(40_000) + "x"), OPTS)],
-  ])("%s", (_name, fn) => {
-    fn();
-    expect(time(fn)).toBeLessThan(20);
+    ["delimiter escaping (spaces)", (n: number) => () => escapeDelimiters("<" + " ".repeat(n))],
+    ["delimiter escaping (angle brackets)", (n: number) => () => escapeDelimiters("<".repeat(n))],
+    ["zero-length check", (n: number) => () => buildContent(message(`<p style="font-size:${"0".repeat(n)}x">a</p>`), OPTS)],
+    ["background shorthand", (n: number) => () => buildContent(message(`<p style="background:${"a-".repeat(n / 2)}">a</p>`), OPTS)],
+    ["comment with brackets", (n: number) => () => buildContent(message(`<!--${"<".repeat(n)}-->`), OPTS)],
+    ["auth results parentheses", (n: number) => () => buildContent({ ...message(null, "x"), authenticationResults: "mx.google.com; " + "(".repeat(n) }, OPTS)],
+    ["role-spoof pattern on blank lines", (n: number) => () => buildContent(message(null, "\n".repeat(n) + "x"), OPTS)],
+  ])("%s", (name, make) => {
+    expect(bestOf(make(40_000), 1)).toBeLessThan(1_000);
+    expectLinear(name, make, 10_000);
   });
 });
 
@@ -145,17 +142,16 @@ describe("review inputs finish well inside the deadline", () => {
     "19.9k unclosed divs": "<div>".repeat(19_900) + "x",
   };
   it.each(Object.entries(big))("%s in-process", (_name, html) => {
-    const t0 = performance.now();
-    buildContent(message(html, "text"), OPTS);
-    expect(performance.now() - t0).toBeLessThan(1_000);
+    // Must stay well inside the 2 s worker deadline even on slow runners (locally 0-200 ms).
+    expect(bestOf(() => buildContent(message(html, "text"), OPTS), 1)).toBeLessThan(1_500);
   });
   workerOnly("all of them through the pool, without fallbacks", async () => {
     const p = pool();
     for (const [name, html] of Object.entries(big)) {
       const m = await measure(() => p.content(message(html, "text"), OPTS));
-      expect(m.ms, name).toBeLessThan(2_000);
-      expect(m.lag, name).toBeLessThan(250);
+      // No deadline fallback is the real assertion; lag only has to show the loop never blocked.
       expect(m.result.body, name).not.toMatch(/too complex to display safely; showing its plain-text/);
+      expect(m.lag, name).toBeLessThan(500);
     }
   });
 });
@@ -173,8 +169,9 @@ describe("queueing: total deadline, bounded queue, memory of slow inputs, lanes"
     const bombs = Array.from({ length: 10 }, (_, i) => p.content(msg("SLOW", `bomb${i}`), OPTS));
     const t0 = performance.now();
     const benign = await p.content(msg("benign"), OPTS);
-    expect(performance.now() - t0).toBeLessThan(700);
-    expect(benign.truncated).toBe(true); // it waited past its deadline: fallback, not a 10 x 300 ms wait
+    // Queued behind 10 jobs of 10 s each, it resolves at its own deadline with the fallback.
+    expect(benign.truncated).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(5_000);
     await Promise.all(bombs);
   });
 
@@ -182,32 +179,34 @@ describe("queueing: total deadline, bounded queue, memory of slow inputs, lanes"
     const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 5_000, maxQueue: 2, size: 1 });
     await p.content(msg("warm"), OPTS);
     const running = p.content(msg("SLOW", "a"), OPTS);
+    let runningDone = false;
+    void running.then(() => (runningDone = true));
     const queued = [p.content(msg("SLOW", "b"), OPTS), p.content(msg("SLOW", "c"), OPTS)];
-    const t0 = performance.now();
+    // Resolves while every queued job is still busy-waiting (10 s each, 5 s deadline).
     const overflow = await p.content(msg("SLOW", "d"), OPTS);
-    expect(performance.now() - t0).toBeLessThan(50);
     expect(overflow.body).toMatch(/too complex to display safely/);
+    expect(runningDone).toBe(false);
     await p.close();
     await Promise.all([running, ...queued]);
   });
 
   it("sends inputs that already timed out straight to the fallback", async () => {
-    const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 300 });
+    const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 1_500 });
     await warm(p);
     await p.content(msg("SLOW", "same"), OPTS);
     const t0 = performance.now();
     const again = await p.content(msg("SLOW", "same"), OPTS);
-    expect(performance.now() - t0).toBeLessThan(50);
     expect(again.truncated).toBe(true);
+    // Without the memory it would wait for the 1.5 s deadline again.
+    expect(performance.now() - t0).toBeLessThan(750);
   });
 
   it("keeps a worker free for interactive reads while background jobs are slow", async () => {
     const p = pool({ workerUrl: SLOW_WORKER, deadlineMs: 2_000 });
     await warm(p);
     const background = Array.from({ length: 5 }, (_, i) => p.content(msg("SLOW", `hook${i}`), OPTS, "background"));
-    const t0 = performance.now();
+    // Not the fallback: a worker was free for it while the background jobs busy-wait.
     const read = await p.content(msg("benign"), OPTS, "interactive");
-    expect(performance.now() - t0).toBeLessThan(200);
     expect(read.body).toBe("fast:benign");
     await p.close();
     await Promise.all(background);
@@ -217,28 +216,24 @@ describe("queueing: total deadline, bounded queue, memory of slow inputs, lanes"
 describe("bidi bombs stay linear on every main-thread path", () => {
   const pairs = (n: number) => String.fromCodePoint(0x202a).repeat(n) + String.fromCodePoint(0x2069).repeat(n);
   const bomb = pairs(40_000);
-  const time = (fn: () => unknown) => {
-    const t0 = performance.now();
-    fn();
-    return performance.now() - t0;
-  };
   it.each([
-    ["stripInvisible", () => stripInvisible(bomb)],
-    ["fallbackContent (text part)", () => fallbackContent(message(null, bomb), OPTS)],
-    ["fallbackContent (subject)", () => fallbackContent({ ...message(null, "x"), summary: { ...message(null).summary, subject: bomb } }, OPTS)],
-    ["in-process plain text", () => buildContent(message(null, bomb), OPTS)],
-    ["cleanLine", () => cleanLine(bomb)],
-    ["formatAddress", () => formatAddress({ name: bomb, email: "x@evil.example" })],
-    ["nested comments in Authentication-Results", () => buildContent({ ...message(null, "x"), authenticationResults: "mx.google.com; " + "(".repeat(4000) + ")".repeat(4000) + '"'.repeat(4000) }, OPTS)],
-  ])("%s", (_name, fn) => {
-    fn();
-    expect(time(fn)).toBeLessThan(50);
+    ["stripInvisible", (n: number) => () => stripInvisible(pairs(n))],
+    ["fallbackContent (text part)", (n: number) => () => fallbackContent(message(null, pairs(n)), OPTS)],
+    ["fallbackContent (subject)", (n: number) => () => fallbackContent({ ...message(null, "x"), summary: { ...message(null).summary, subject: pairs(n) } }, OPTS)],
+    ["in-process plain text", (n: number) => () => buildContent(message(null, pairs(n)), OPTS)],
+    ["cleanLine", (n: number) => () => cleanLine(pairs(n))],
+    ["formatAddress", (n: number) => () => formatAddress({ name: pairs(n), email: "x@evil.example" })],
+    ["nested comments in Authentication-Results", (n: number) => () => buildContent({ ...message(null, "x"), authenticationResults: "mx.google.com; " + "(".repeat(n / 10) + ")".repeat(n / 10) + '"'.repeat(n / 10) }, OPTS)],
+  ])("%s", (name, make) => {
+    // 40k pairs took ~3 s when this was quadratic.
+    expect(bestOf(make(40_000), 1)).toBeLessThan(1_000);
+    expectLinear(name, make, 10_000);
   });
 
   workerOnly("text attachments are cleaned in a worker", async () => {
     const p = pool();
     const m = await measure(() => p.text(`hi${bomb}`));
     expect(m.result).toBe("hi");
-    expect(m.lag).toBeLessThan(50);
+    expect(m.lag).toBeLessThan(500);
   });
 });
