@@ -1,5 +1,5 @@
 import type { AgentTool } from "@shared/agent-api";
-import type { Agent, AuditEntry, ListenerInfo } from "@shared/types";
+import type { Agent, AuditEntry } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { TOOL_LABEL } from "@/lib/cli";
 import { queries } from "@/lib/queries";
@@ -21,12 +21,6 @@ export function useAgentOrigin(agent: Agent | undefined): { paired: boolean; too
     known: !!agent && (!paired || !pairings.isPending),
   };
 }
-
-/**
- * True when this listener received and acknowledged event `seq`: past where its cursor started
- * (older mail predates it; null = unknown, counted) and at or below what it acked.
- */
-export const listenerHandled = (l: ListenerInfo, seq: number) => seq > (l.startSeq ?? 0) && seq <= l.ackedSeq;
 
 /** MCP tool names are snake_case; console and pairing actions are dotted (agent.create, pairing.key_delivered). */
 const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && /^[a-z_]+$/.test(e.action);

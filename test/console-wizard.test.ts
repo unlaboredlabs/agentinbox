@@ -8,6 +8,7 @@ import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
+import { listenerHandled } from "../src/components/agents/listener-handled.ts";
 import { allStepsDone, type SetupDraft, STEP_META, startsVerify, type StepId, type StepStatus, stepStatuses } from "../src/components/setup/steps.ts";
 import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
@@ -43,11 +44,12 @@ function event(seq: number, type: MailEvent["type"], over: { id?: string; subjec
   };
 }
 
-const listener = (consumer: string, ackedSeq: number, connected = true, startSeq: number | null = null): ListenerInfo => ({
+const listener = (consumer: string, ackedSeq: number, connected = true, startSeq: number | null = null, types: ListenerInfo["types"] = null): ListenerInfo => ({
   consumer,
   connected,
   startSeq,
   ackedSeq,
+  types,
   lastSeenAt: null,
   client: {},
 });
@@ -67,6 +69,26 @@ const call = (action: string, outcome: AuditEntry["outcome"], ts: string): Audit
 });
 
 const base = { events: [] as MailEvent[], listeners: [] as ListenerInfo[], calls: [] as AuditEntry[], skipListen: false };
+
+describe("listenerHandled", () => {
+  const sent = { seq: 7, type: "message.sent" as const };
+  const received = { seq: 8, type: "message.received" as const };
+  it("needs the event's type among the listener's types", () => {
+    const l = listener("x", 9, true, 5, ["message.received"]);
+    expect(listenerHandled(l, received)).toBe(true);
+    expect(listenerHandled(l, sent)).toBe(false);
+  });
+  it("counts every type when the types are unknown (cursors from older daemons)", () => {
+    const l = listener("x", 9, true, 5, null);
+    expect(listenerHandled(l, received)).toBe(true);
+    expect(listenerHandled(l, sent)).toBe(true);
+  });
+  it("needs the event after the cursor's start and at or below the ack", () => {
+    expect(listenerHandled(listener("x", 7, true, 7, ["message.received", "message.sent"]), sent)).toBe(false);
+    expect(listenerHandled(listener("x", 6, true, 0, ["message.sent"]), sent)).toBe(false);
+    expect(listenerHandled(listener("x", 7, true, null, ["message.sent"]), sent)).toBe(true);
+  });
+});
 
 describe("verifyChecks", () => {
   it("is all false before a test email is sent", () => {
@@ -102,6 +124,15 @@ describe("verifyChecks", () => {
     expect(r.resendForListener).toBe(true);
     const other = verifyChecks({ ...base, test: test0, events, listeners: [listener("laptop-default", 9)] });
     expect(other.delivered).toBe(false);
+  });
+
+  it("counts delivery only for event types the listener asked for", () => {
+    // The default listener takes message.received only: it acks the test's message.sent without running anything.
+    const onlyReceived = [listener("host-default", 9, true, null, ["message.received"])];
+    expect(verifyChecks({ ...base, test: test0, events: [event(7, "message.sent")], listeners: onlyReceived }).delivered).toBe(false);
+    expect(verifyChecks({ ...base, test: test0, events: [event(8, "message.received"), event(7, "message.sent")], listeners: onlyReceived }).delivered).toBe(true);
+    const onlySent = [listener("host-default", 9, true, null, ["message.sent"])];
+    expect(verifyChecks({ ...base, test: test0, events: [event(8, "message.received"), event(7, "message.sent")], listeners: onlySent }).delivered).toBe(false);
   });
 
   it("does not count a listener whose cursor started at or after the event", () => {

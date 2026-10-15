@@ -3,6 +3,7 @@
 // load this module too.
 
 import type { AuditEntry, ListenerInfo, MailEvent, TestEmailResult } from "../../../shared/types.ts";
+import { listenerHandled } from "../agents/listener-handled.ts";
 
 export const TEST_SUBJECT = "agentinbox test: your setup works";
 /** A test email older than this is forgotten: its events may have scrolled out of the first page. */
@@ -53,8 +54,8 @@ export function verifyChecks({ test, events, listeners, calls, skipListen }: Ver
   );
   const received = ofTest.find((e) => e.type === "message.received") ?? ofTest[0];
   const atSend = new Set(test.listenersAtSend ?? []);
-  // Past where the listener's cursor started (older mail predates it; null = unknown) and acked (as listenerHandled in agent-status).
-  const delivered = !!received && listeners.some((l) => atSend.has(l.consumer) && received.seq > (l.startSeq ?? 0) && l.ackedSeq >= received.seq);
+  // Of a type the listener asked for, past where its cursor started, and acked (see listenerHandled).
+  const delivered = !!received && listeners.some((l) => atSend.has(l.consumer) && listenerHandled(l, received));
   return {
     sent: true,
     received,

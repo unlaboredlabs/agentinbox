@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSelf } from "../shared/agent-api.ts";
-import type { Agent } from "../shared/types.ts";
+import { type Agent, EVENT_TYPES } from "../shared/types.ts";
 import { type AgentApiOptions, agentApi } from "../server/agentapi/index.ts";
 import { createApp } from "../server/app.ts";
 import { type RunningServer, startServer } from "../server/server.ts";
@@ -143,12 +143,36 @@ describe("GET /agent/v1/events/stream", () => {
     const r = await s.open("?consumer=laptop", { "user-agent": "agentinbox-listen/1.2.3", "x-agentinbox-client": JSON.stringify({ hostname: "wynn-mbp", platform: "darwin" }) });
     const listeners = s.ctx.policy.getAgent(s.agent.id)!.listeners;
     expect(listeners).toEqual([
-      { consumer: "laptop", connected: true, startSeq: 0, ackedSeq: 0, lastSeenAt: expect.any(String), client: { hostname: "wynn-mbp", platform: "darwin", version: "1.2.3" } },
+      {
+        consumer: "laptop",
+        connected: true,
+        startSeq: 0,
+        ackedSeq: 0,
+        types: [...EVENT_TYPES],
+        lastSeenAt: expect.any(String),
+        client: { hostname: "wynn-mbp", platform: "darwin", version: "1.2.3" },
+      },
     ]);
     r.cancel();
     const deadline = Date.now() + 2000;
     while (s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.connected && Date.now() < deadline) await new Promise((x) => setTimeout(x, 10));
     expect(s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.connected).toBe(false);
+  });
+
+  it("records the event types each listener's stream asked for, as of its latest connection", async () => {
+    const s = await setup();
+    const typesOf = (consumer: string) => s.ctx.policy.getAgent(s.agent.id)!.listeners.find((l) => l.consumer === consumer)!.types;
+    // The client header can't set them: only the stream's own `types` counts.
+    const a = await s.open("?consumer=laptop&types=message.received", { "x-agentinbox-client": JSON.stringify({ hostname: "h", types: ["message.sent"] }) });
+    expect(typesOf("laptop")).toEqual(["message.received"]);
+    a.cancel();
+    const b = await s.open("?consumer=laptop&types=message.received,message.sent");
+    expect(typesOf("laptop")).toEqual(["message.received", "message.sent"]);
+    b.cancel();
+    // Cursors recorded before types were: unknown.
+    s.ctx.db.run("UPDATE listener_cursors SET client = ? WHERE consumer = ?", JSON.stringify({ hostname: "old" }), "laptop");
+    expect(typesOf("laptop")).toBeNull();
+    expect(s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.client).toEqual({ hostname: "old" });
   });
 
   it("pushes the agent to the console bus on connect, disconnect and acks (at most once a second)", async () => {

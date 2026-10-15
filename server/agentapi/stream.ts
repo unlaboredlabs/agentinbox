@@ -130,7 +130,8 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
     consumer,
     startAt,
     startAt,
-    json.str(clientInfo(c)),
+    // What this stream asked for, so the console only counts events of these types as delivered.
+    json.str({ ...clientInfo(c), types: types ?? EVENT_TYPES }),
     t,
     t,
   );
