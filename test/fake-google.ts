@@ -52,6 +52,30 @@
  * get Google's HTML 404. Payload headers keep structured values (From, To, Message-ID, …) raw and decode
  * encoded-words only in free-text headers (Subject).
  *
+ * Google Calendar (`g.calendar.*`, routes under /calendar/v3; every account starts with a primary calendar whose id is its email)
+ *   addCalendar(email, { name, accessRole?, id?, timeZone? }) → id    a calendar in the account's list (default role owner)
+ *   putEvent(email, calendarId, event) → event     create, or replace by id (bumps `updated`, etag and the change log sync tokens read)
+ *   invite(organizer, attendees, event) → event    the organizer's event (when the organizer is a fake account) plus each fake
+ *                                                  attendee's copy on their primary calendar (same id, `self`, needsAction), like Google
+ *   respond(email, eventId, status)                a human RSVP, copied into the organizer's and the other copies
+ *   cancelEvent(email, calendarId, eventId)        cancel (the organizer's cancel reaches every copy)
+ *   events(email, calendarId) / event(email, calendarId, id)    live events / any event or recurring instance (null if none)
+ *   expireSyncTokens(email, calendarId?)           sync tokens handed out so far → 410 fullSyncRequired
+ *   disableApi("calendar", on)                     403 SERVICE_DISABLED (accessNotConfigured, ErrorInfo metadata.activationUrl)
+ *   mailsSent(email)                               emails Google would have sent for that account's API writes (sendUpdates
+ *                                                  all / externalOnly = non-fake guests): { to, kind: invite|update|cancel|reply, eventId }
+ *   channels() / notify(channelId, state)          events.watch channels; POST a push (X-Goog-* headers, no body) to the address.
+ *                                                  autoNotify (default true) sends "sync" on creation and "exists" on each change;
+ *                                                  pushTarget rewrites addresses (public https → local test server)
+ * Routes check the token's scopes like Google (consentAs { scopes } simulates granular consent → 403
+ * ACCESS_TOKEN_SCOPE_INSUFFICIENT): calendarList needs calendar.calendarlist(.readonly), events calendar.events,
+ * freeBusy calendar.events.freebusy (or the broad calendar scopes). events.list: syncToken (400 next to timeMin/timeMax/q/
+ * orderBy/iCalUID/updatedMin/…, or a different singleEvents; deletions come back as id-only "cancelled" items),
+ * pageToken/maxResults (nextSyncToken on the last page only), timeMin/timeMax overlap, q, iCalUID, showDeleted,
+ * singleEvents (expands RRULE DAILY/WEEKLY with INTERVAL, COUNT, UNTIL, BYDAY and EXDATE, in UTC; instance ids
+ * `<series>_<YYYYMMDDTHHMMSSZ>`) and orderBy=startTime. PATCH/DELETE honor If-Match (412) and answer 410 for deleted
+ * events; invitees may only change their own response (403 forbiddenForNonOrganizer); insert with an id that exists → 409.
+ *
  * Gmail search (`q`) supports label:, in:, is:, from:, to:, cc:, subject:, has:attachment, newer_than:, older_than:,
  * after:, before:, rfc822msgid:, quoted phrases, free text, -negation, OR, AND, (…) and {…}.
  * messages.send / drafts.create parse the raw RFC 5322 (headers, encoded-words, multipart, base64/QP, attachments)
@@ -61,10 +85,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import addressparser from "nodemailer/lib/addressparser";
-import type { Account } from "../shared/types.ts";
+import type { Account, CalendarAccessRole, CalendarResponseStatus } from "../shared/types.ts";
 import type { Config } from "../server/config.ts";
 import type { AppContext } from "../server/context.ts";
 import type { EventsService, NewEvent } from "../server/events/types.ts";
+import type { CalendarAttendeeRaw, CalendarDateTimeRaw, CalendarEventRaw, CalendarListEntryRaw, FreeBusyResult } from "../server/google/calendar.ts";
 import type { GmailHeader, GmailHistoryRecord, GmailLabelRaw, GmailMessage, GmailPart } from "../server/google/types.ts";
 
 export const FAKE_CLIENT = {
@@ -116,7 +141,7 @@ export interface FakeGoogle {
   expireAccessTokens(email: string): void;
   expireHistory(email: string): void;
   orgPolicyBlocksIam(on: boolean): void;
-  disableApi(api: "gmail" | "pubsub", on: boolean): void;
+  disableApi(api: "gmail" | "pubsub" | "calendar", on: boolean): void;
   failNext(rule: FailRule): void;
   sent(email: string): GmailMessage[];
   drafts(email: string): { id: string; message: GmailMessage }[];
@@ -134,6 +159,44 @@ export interface FakeGoogle {
   abortedPulls: number;
   revoked: string[];
   requests: { method: string; path: string }[];
+  /** Google Calendar (routes under /calendar/v3). See the header comment. */
+  calendar: FakeCalendar;
+}
+
+/** An email Google Calendar would have sent for a write (sendUpdates). */
+export interface FakeCalendarMail {
+  to: string;
+  kind: "invite" | "update" | "cancel" | "reply";
+  eventId: string;
+}
+
+export interface FakeChannel {
+  id: string;
+  resourceId: string;
+  token: string | null;
+  address: string;
+  email: string;
+  calendarId: string;
+  /** Epoch ms. */
+  expiration: number;
+}
+
+export interface FakeCalendar {
+  addCalendar(email: string, opts: { name: string; accessRole?: CalendarAccessRole; id?: string; timeZone?: string }): string;
+  putEvent(email: string, calendarId: string, event: Partial<CalendarEventRaw>): CalendarEventRaw;
+  invite(organizer: string, attendees: string[], event: Partial<CalendarEventRaw>): CalendarEventRaw;
+  respond(email: string, eventId: string, status: CalendarResponseStatus): void;
+  cancelEvent(email: string, calendarId: string, eventId: string): void;
+  events(email: string, calendarId: string): CalendarEventRaw[];
+  event(email: string, calendarId: string, id: string): CalendarEventRaw | null;
+  expireSyncTokens(email: string, calendarId?: string): void;
+  mailsSent(email: string): FakeCalendarMail[];
+  channels(): FakeChannel[];
+  notify(channelId: string, state: "sync" | "exists" | "not_exists"): Promise<number>;
+  /** Send "sync" when a channel is created and "exists" on every change to a watched calendar (default true). */
+  autoNotify: boolean;
+  /** Rewrites channel addresses before posting (e.g. a public https address → the local test server). */
+  pushTarget: ((address: string) => string) | null;
 }
 
 // ───────────── MIME (fake side) ─────────────
@@ -388,6 +451,7 @@ const STATUS_TEXT: Record<number, string> = {
   403: "PERMISSION_DENIED",
   404: "NOT_FOUND",
   409: "ALREADY_EXISTS",
+  412: "FAILED_PRECONDITION",
   429: "RESOURCE_EXHAUSTED",
   500: "INTERNAL",
   503: "UNAVAILABLE",
@@ -404,12 +468,18 @@ const apiError = (status: number, message: string, reason?: string, extra: { sta
     },
   });
 
-const serviceDisabled = (service: "gmail" | "pubsub") => {
-  const name = service === "gmail" ? "Gmail API" : "Cloud Pub/Sub API";
-  const host = `${service}.googleapis.com`;
+const SERVICES = {
+  gmail: { name: "Gmail API", host: "gmail.googleapis.com" },
+  pubsub: { name: "Cloud Pub/Sub API", host: "pubsub.googleapis.com" },
+  calendar: { name: "Google Calendar API", host: "calendar-json.googleapis.com" },
+} as const;
+
+const serviceDisabled = (service: keyof typeof SERVICES) => {
+  const { name, host } = SERVICES[service];
+  const activationUrl = `https://console.developers.google.com/apis/api/${host}/overview?project=123456789`;
   return apiError(
     403,
-    `${name} has not been used in project 123456789 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/${host}/overview?project=123456789 then retry.`,
+    `${name} has not been used in project 123456789 before or it is disabled. Enable it by visiting ${activationUrl} then retry.`,
     "accessNotConfigured",
     {
       details: [
@@ -417,7 +487,8 @@ const serviceDisabled = (service: "gmail" | "pubsub") => {
           "@type": "type.googleapis.com/google.rpc.ErrorInfo",
           reason: "SERVICE_DISABLED",
           domain: "googleapis.com",
-          metadata: { service: host, consumer: "projects/123456789" },
+          // Newer error bodies carry the enable link (activationUrl is optional in Google's ErrorInfo).
+          metadata: { service: host, consumer: "projects/123456789", ...(service === "calendar" ? { activationUrl, serviceTitle: name } : {}) },
         },
       ],
     },
@@ -1244,6 +1315,591 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     return {};
   });
 
+  // ───── Calendar ─────
+
+  const CAL = "https://www.googleapis.com/auth/calendar";
+  /** Scopes that cover each Calendar method (any one is enough), per Google's method reference pages. */
+  const CAL_SCOPES = {
+    list: [CAL, `${CAL}.readonly`, `${CAL}.calendarlist`, `${CAL}.calendarlist.readonly`],
+    read: [CAL, `${CAL}.readonly`, `${CAL}.events`, `${CAL}.events.readonly`],
+    write: [CAL, `${CAL}.events`],
+    freebusy: [CAL, `${CAL}.readonly`, `${CAL}.events.freebusy`, `${CAL}.freebusy`],
+  };
+  /** events.list parameters Google refuses next to a syncToken (400). */
+  const NOT_WITH_SYNC_TOKEN = ["iCalUID", "orderBy", "q", "timeMin", "timeMax", "updatedMin", "privateExtendedProperty", "sharedExtendedProperty"];
+  const DAY = 86_400_000;
+  const WEEKDAYS = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+
+  interface FakeCal {
+    entry: CalendarListEntryRaw;
+    owner: string;
+    /** Event id → current version and its position in the change log (deleted events stay as "cancelled"). */
+    events: Map<string, { raw: CalendarEventRaw; seq: number }>;
+    /** Bumped by expireSyncTokens: tokens of an older generation get 410. */
+    gen: number;
+  }
+  /** Owner email → calendar id → calendar. */
+  const calendars = new Map<string, Map<string, FakeCal>>();
+  const calMails = new Map<string, FakeCalendarMail[]>();
+  const channels = new Map<string, FakeChannel & { messages: number }>();
+  let calSeq = 0;
+  let lastStamp = 0;
+
+  const calendarsOf = (email: string) => {
+    const c = calendars.get(email.toLowerCase());
+    if (!c) throw new Error(`fake-google: unknown account ${email}`);
+    return c;
+  };
+  /** The account's calendar (`primary` = its own); 404 like Google for anything else (or a test error with http=false). */
+  function calendarOf(email: string, calendarId: string, http = true): FakeCal {
+    const id = calendarId === "primary" ? email.toLowerCase() : calendarId;
+    const c = calendarsOf(email).get(id);
+    if (c) return c;
+    if (http) throw apiError(404, "Not Found", "notFound");
+    throw new Error(`fake-google: ${email} has no calendar ${calendarId}`);
+  }
+  const primaryOf = (email: string) => calendarsOf(email).get(email.toLowerCase())!;
+  const addCalendarTo = (owner: string, entry: CalendarListEntryRaw) => {
+    calendarsOf(owner).set(entry.id, { entry, owner, events: new Map(), gen: 0 });
+    return entry.id;
+  };
+  const canWrite = (c: FakeCal) => c.entry.accessRole === "owner" || c.entry.accessRole === "writer";
+
+  function calendarBearer(req: IncomingMessage, scopes: string[]): Token {
+    const t = accessTokens.get((req.headers.authorization ?? "").replace(/^Bearer\s+/i, ""));
+    if (!valid(t) || t.expiresAt < Date.now()) {
+      throw apiError(401, "Request had invalid authentication credentials. Expected OAuth 2 access token.", "authError");
+    }
+    if (!scopes.some((s) => t.scopes.includes(s))) {
+      throw apiError(403, "Request had insufficient authentication scopes.", "insufficientPermissions", {
+        details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT", domain: "googleapis.com" }],
+      });
+    }
+    if (disabled.has("calendar")) throw serviceDisabled("calendar");
+    return t;
+  }
+
+  /** Stores a new version: fresh `updated` and etag, a change-log position (what sync tokens read), then pings watch channels. */
+  function save(cal: FakeCal, raw: CalendarEventRaw): CalendarEventRaw {
+    const at = (lastStamp = Math.max(Date.now(), lastStamp + 1));
+    const seq = ++calSeq;
+    const stored: CalendarEventRaw = { ...structuredClone(raw), updated: new Date(at).toISOString(), etag: `"${at}${String(seq).padStart(4, "0")}"` };
+    cal.events.set(raw.id, { raw: stored, seq });
+    if (fake.calendar.autoNotify) {
+      for (const ch of channels.values()) if (ch.email === cal.owner && ch.calendarId === cal.entry.id) void notify(ch.id, "exists");
+    }
+    return structuredClone(stored);
+  }
+
+  const isResource = (email: string) => email.endsWith("@resource.calendar.google.com");
+
+  /** Google's attendee list: lowercased, the organizer listed (accepted), `self` on the owner's own entry. */
+  function attendeeList(owner: string, organizer: string, list: CalendarAttendeeRaw[] | undefined, prev: CalendarAttendeeRaw[] = []): CalendarAttendeeRaw[] | undefined {
+    if (!list?.length) return undefined;
+    const known = new Map(prev.map((a) => [a.email, a]));
+    const out = list
+      .filter((a) => a.email)
+      .map((a) => {
+        const email = a.email!.toLowerCase();
+        // Only each attendee changes their own response: the organizer's list keeps stored responses.
+        const response = known.get(email)?.responseStatus ?? a.responseStatus ?? (email === organizer ? "accepted" : "needsAction");
+        const { self: _s, organizer: _o, resource: _r, ...rest } = a;
+        return {
+          ...rest,
+          email,
+          responseStatus: response,
+          ...(email === organizer ? { organizer: true } : {}),
+          ...(email === owner ? { self: true } : {}),
+          ...(isResource(email) ? { resource: true } : {}),
+        };
+      });
+    if (!out.some((a) => a.email === organizer)) out.unshift({ email: organizer, organizer: true, responseStatus: "accepted", ...(organizer === owner ? { self: true } : {}) });
+    return out;
+  }
+
+  function conference(body: Partial<CalendarEventRaw>, version: string | null): Pick<CalendarEventRaw, "hangoutLink" | "conferenceData"> {
+    if (version !== "1" || !body.conferenceData?.createRequest) return body.conferenceData ? { conferenceData: body.conferenceData } : {};
+    const code = [3, 4, 3].map((n) => randomBytes(n).toString("hex").replace(/\d/g, (d) => "abcdefghij"[Number(d)]!).slice(0, n)).join("-");
+    const uri = `https://meet.google.com/${code}`;
+    return { hangoutLink: uri, conferenceData: { entryPoints: [{ entryPointType: "video", uri }] } };
+  }
+
+  /** A new event on `cal`, organized by the calendar (Google: the calendar id, `self` on its owner's copy). */
+  function newEvent(cal: FakeCal, body: Partial<CalendarEventRaw>, conferenceVersion: string | null = null): CalendarEventRaw {
+    const id = body.id ?? randomBytes(13).toString("hex");
+    const organizer = (body.organizer?.email ?? cal.entry.id).toLowerCase();
+    const own = organizer === cal.entry.id;
+    const mb = mailboxes.get(cal.owner);
+    return {
+      ...body,
+      id,
+      status: body.status ?? "confirmed",
+      created: body.created ?? new Date().toISOString(),
+      iCalUID: body.iCalUID ?? `${id}@google.com`,
+      htmlLink: `https://www.google.com/calendar/event?eid=${Buffer.from(`${id} ${cal.entry.id}`).toString("base64url")}`,
+      organizer: own
+        ? { email: organizer, displayName: cal.entry.primary ? mb?.name : cal.entry.summary, self: true }
+        : { email: organizer, ...(body.organizer?.displayName ? { displayName: body.organizer.displayName } : {}) },
+      creator: own ? { email: cal.owner, self: true } : { email: organizer },
+      attendees: attendeeList(cal.owner, organizer, body.attendees),
+      eventType: body.eventType ?? "default",
+      ...conference(body, conferenceVersion),
+    };
+  }
+
+  /** The invitee's copy: shared fields from the organizer's event, `self` on the invitee's own entry, private fields kept. */
+  function copyFor(source: CalendarEventRaw, email: string, existing?: CalendarEventRaw): CalendarEventRaw {
+    const { self: _o, ...organizer } = source.organizer ?? {};
+    const { self: _c, ...creator } = source.creator ?? {};
+    return {
+      ...existing,
+      ...structuredClone(source),
+      organizer,
+      creator,
+      attendees: source.attendees?.map(({ self: _s, ...a }) => (a.email === email ? { ...a, self: true } : a)),
+      ...(existing?.transparency ? { transparency: existing.transparency } : {}),
+    };
+  }
+
+  /** Mirrors the organizer's event onto fake attendees' primary calendars (Google adds invitations whatever sendUpdates says). */
+  function fanOut(source: CalendarEventRaw, before: string[] = []) {
+    const now = new Set((source.attendees ?? []).map((a) => a.email!));
+    for (const email of new Set([...before, ...now])) {
+      if (email === source.organizer?.email || !calendars.has(email)) continue;
+      const cal = primaryOf(email);
+      const existing = cal.events.get(source.id)?.raw;
+      if (!now.has(email) || source.status === "cancelled") {
+        if (existing && existing.status !== "cancelled") save(cal, { ...existing, status: "cancelled" });
+      } else save(cal, copyFor(source, email, existing));
+    }
+  }
+
+  /** An attendee's response, copied into every other copy of the event (the organizer's included). */
+  function propagateResponse(from: FakeCal, ev: CalendarEventRaw, email: string) {
+    const entry = ev.attendees?.find((a) => a.email === email);
+    if (!entry) return;
+    for (const cals of calendars.values()) {
+      for (const cal of cals.values()) {
+        const other = cal.events.get(ev.id)?.raw;
+        if (cal === from || !other || other.iCalUID !== ev.iCalUID || other.status === "cancelled") continue;
+        const attendees = other.attendees?.map((a) => (a.email === email ? { ...a, responseStatus: entry.responseStatus, ...(entry.comment ? { comment: entry.comment } : {}) } : a));
+        save(cal, { ...other, attendees });
+      }
+    }
+  }
+
+  /** Records the emails Google would send for a write by `actor` (sendUpdates all / externalOnly = non-Google guests). */
+  function mailOut(actor: string, sendUpdates: string | null, kind: FakeCalendarMail["kind"], eventId: string, to: string[]) {
+    if (sendUpdates !== "all" && sendUpdates !== "externalOnly") return;
+    const list = calMails.get(actor) ?? [];
+    for (const addr of new Set(to)) {
+      if (addr === actor || isResource(addr) || (sendUpdates === "externalOnly" && calendars.has(addr))) continue;
+      list.push({ to: addr, kind, eventId });
+    }
+    calMails.set(actor, list);
+  }
+  const guests = (e: CalendarEventRaw | undefined) => (e?.attendees ?? []).filter((a) => !a.organizer).map((a) => a.email!);
+
+  // Recurrence: RRULE FREQ=DAILY|WEEKLY with INTERVAL, COUNT, UNTIL and (weekly) BYDAY, plus EXDATE, in UTC.
+  const timeOf = (d: CalendarDateTimeRaw | undefined) => (d?.dateTime ? Date.parse(d.dateTime) : d?.date ? Date.parse(`${d.date}T00:00:00Z`) : NaN);
+  const isoBasic = (ms: number, allDay: boolean) => new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "").slice(0, allDay ? 8 : 16);
+  const dateTime = (ms: number, allDay: boolean, timeZone?: string): CalendarDateTimeRaw =>
+    allDay ? { date: new Date(ms).toISOString().slice(0, 10) } : { dateTime: new Date(ms).toISOString().replace(".000Z", "Z"), ...(timeZone ? { timeZone } : {}) };
+  function parseIcalTime(s: string, endOfDay = false): number {
+    const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z?)?$/.exec(s.trim());
+    if (!m) return NaN;
+    const t = Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +(m[4] ?? 0), +(m[5] ?? 0), +(m[6] ?? 0));
+    return endOfDay && !m[4] ? t + DAY - 1 : t;
+  }
+
+  /** Start times (ms) of a series' occurrences up to `until` (one for a plain event). */
+  function occurrences(e: CalendarEventRaw, until: number): number[] {
+    const start = timeOf(e.start);
+    const rule = e.recurrence?.find((r) => r.startsWith("RRULE:"));
+    if (!rule) return [start];
+    const p = Object.fromEntries(rule.slice(6).split(";").map((kv) => kv.split("=") as [string, string]));
+    if (p.FREQ !== "DAILY" && p.FREQ !== "WEEKLY") return [start];
+    const interval = Number(p.INTERVAL ?? 1) || 1;
+    const count = p.COUNT ? Number(p.COUNT) : Infinity;
+    const last = Math.min(until, p.UNTIL ? parseIcalTime(p.UNTIL, true) : Infinity, start + 3 * 365 * DAY);
+    const byDay = p.FREQ === "WEEKLY" ? (p.BYDAY?.split(",") ?? [WEEKDAYS[new Date(start).getUTCDay()]!]) : null;
+    const exdates = new Set(
+      e.recurrence!.filter((r) => r.startsWith("EXDATE")).flatMap((r) => r.slice(r.indexOf(":") + 1).split(",").map((x) => parseIcalTime(x))),
+    );
+    const weekStart = start - new Date(start).getUTCDay() * DAY;
+    const out: number[] = [];
+    for (let t = start, n = 0; t <= last && n < count; t += DAY) {
+      const due = byDay
+        ? byDay.includes(WEEKDAYS[new Date(t).getUTCDay()]!) && Math.floor((t - weekStart) / (7 * DAY)) % interval === 0
+        : Math.round((t - start) / DAY) % interval === 0;
+      if (!due) continue;
+      n++;
+      if (!exdates.has(t)) out.push(t);
+    }
+    return out;
+  }
+
+  /** singleEvents expansion: instance ids `<series>_<YYYYMMDD[THHMMSSZ]>`; stored exceptions replace (or cancel) their instance. */
+  function instances(cal: FakeCal, series: CalendarEventRaw, until: number): CalendarEventRaw[] {
+    const allDay = !series.start?.dateTime;
+    const length = timeOf(series.end) - timeOf(series.start);
+    const { recurrence: _r, ...base } = series;
+    return occurrences(series, until).flatMap((t) => {
+      const id = `${series.id}_${isoBasic(t, allDay)}`;
+      const exception = cal.events.get(id)?.raw;
+      if (exception) return exception.status === "cancelled" ? [] : [structuredClone(exception)];
+      const tz = series.start?.timeZone;
+      return [{ ...structuredClone(base), id, recurringEventId: series.id, originalStartTime: dateTime(t, allDay, tz), start: dateTime(t, allDay, tz), end: dateTime(t + length, allDay, series.end?.timeZone) }];
+    });
+  }
+
+  /** A stored event, or an instance of a stored series addressed by its instance id (null when neither exists). */
+  function findEvent(cal: FakeCal, id: string): CalendarEventRaw | null {
+    const stored = cal.events.get(id)?.raw;
+    if (stored) return structuredClone(stored);
+    const m = /^(.+)_(\d{8}(?:T\d{6}Z)?)$/.exec(id);
+    const series = m ? cal.events.get(m[1]!)?.raw : undefined;
+    if (!series?.recurrence || series.status === "cancelled") return null;
+    return instances(cal, series, parseIcalTime(m![2]!) + 1).find((i) => i.id === id) ?? null;
+  }
+
+  const overlaps = (e: CalendarEventRaw, min: number, max: number) => {
+    const length = timeOf(e.end) - timeOf(e.start);
+    return occurrences(e, max).some((t) => t + length > min && t < max);
+  };
+  const matchesText = (e: CalendarEventRaw, text: string) =>
+    [e.summary, e.description, e.location, e.organizer?.email, e.organizer?.displayName, ...(e.attendees ?? []).flatMap((a) => [a.email, a.displayName])]
+      .some((v) => v?.toLowerCase().includes(text));
+  /** What incremental results carry for a deleted event: little more than its id. */
+  const tombstone = (e: CalendarEventRaw): CalendarEventRaw => ({
+    id: e.id,
+    status: "cancelled",
+    etag: e.etag,
+    ...(e.recurringEventId ? { recurringEventId: e.recurringEventId, originalStartTime: e.originalStartTime } : {}),
+  });
+
+  interface SyncTokenData {
+    e: string;
+    c: string;
+    g: number;
+    s: number;
+    x: boolean;
+  }
+  const encode = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  function decode<T>(s: string, what: string): T {
+    try {
+      return JSON.parse(Buffer.from(s, "base64url").toString("utf8")) as T;
+    } catch {
+      throw apiError(400, `Invalid ${what} value.`, "invalid");
+    }
+  }
+
+  function listEvents(cal: FakeCal, q: URLSearchParams) {
+    const single = q.get("singleEvents") === "true";
+    let since: number | null = null;
+    const syncToken = q.get("syncToken");
+    if (syncToken) {
+      const bad = NOT_WITH_SYNC_TOKEN.find((p) => q.has(p));
+      if (bad) throw apiError(400, `The ${bad} parameter can't be used with syncToken.`, "invalid");
+      const t = decode<SyncTokenData>(syncToken, "sync token");
+      if (t.e !== cal.owner || t.c !== cal.entry.id || t.x !== single) throw apiError(400, "Invalid sync token value.", "invalid");
+      if (t.g !== cal.gen) throw apiError(410, "Sync token is no longer valid, a full sync is required.", "fullSyncRequired");
+      since = t.s;
+    }
+    if (q.get("orderBy") === "startTime" && !single) throw apiError(400, "The requested ordering is not available for the particular query.", "badRequest");
+    const pageToken = q.get("pageToken");
+    const pageState = pageToken ? decode<{ o: number; s: number }>(pageToken, "page token") : { o: 0, s: calSeq };
+    const min = q.get("timeMin") ? Date.parse(q.get("timeMin")!) : -Infinity;
+    const max = q.get("timeMax") ? Date.parse(q.get("timeMax")!) : Infinity;
+    const text = q.get("q")?.toLowerCase();
+    const iCalUID = q.get("iCalUID");
+    const showDeleted = since !== null || q.get("showDeleted") === "true";
+
+    let items: CalendarEventRaw[] = [];
+    for (const { raw, seq } of cal.events.values()) {
+      if (since !== null && seq <= since) continue;
+      if (raw.status === "cancelled") {
+        if (showDeleted) items.push(tombstone(raw));
+        continue;
+      }
+      if (iCalUID && raw.iCalUID !== iCalUID) continue;
+      if (text && !matchesText(raw, text)) continue;
+      // Exceptions of an expanded series come through its instances.
+      if (single && since === null && raw.recurringEventId && cal.events.has(raw.recurringEventId)) continue;
+      if (single && raw.recurrence?.length) items.push(...instances(cal, raw, max).filter((i) => overlaps(i, min, max)));
+      else if (overlaps(raw, min, max)) items.push(structuredClone(raw));
+    }
+    if (q.get("orderBy") === "startTime") items = items.sort((a, b) => timeOf(a.start) - timeOf(b.start));
+    const pageSize = Math.min(Number(q.get("maxResults") ?? 250) || 250, 2500);
+    const pageItems = items.slice(pageState.o, pageState.o + pageSize);
+    const more = pageState.o + pageSize < items.length;
+    return {
+      kind: "calendar#events",
+      summary: cal.entry.summary,
+      timeZone: cal.entry.timeZone,
+      items: pageItems,
+      ...(more
+        ? { nextPageToken: encode({ o: pageState.o + pageSize, s: pageState.s }) }
+        : { nextSyncToken: encode({ e: cal.owner, c: cal.entry.id, g: cal.gen, s: pageState.s, x: single } satisfies SyncTokenData) }),
+    };
+  }
+
+  /** The event a write targets; 404 when unknown, 410 when deleted, 412 when If-Match doesn't match its etag. */
+  function writable(req: IncomingMessage, cal: FakeCal, id: string): CalendarEventRaw {
+    if (!canWrite(cal)) throw apiError(403, "You need to have writer access to this calendar.", "requiredAccessLevel");
+    const ev = findEvent(cal, decodeURIComponent(id));
+    if (!ev) throw apiError(404, "Not Found", "notFound");
+    if (ev.status === "cancelled") throw apiError(410, "Resource has been deleted", "deleted");
+    const ifMatch = req.headers["if-match"];
+    if (ifMatch && ifMatch !== ev.etag) throw apiError(412, "Precondition Failed", "conditionNotMet");
+    return ev;
+  }
+
+  const SHARED_FIELDS = ["summary", "description", "location", "start", "end", "recurrence", "conferenceData", "visibility", "guestsCanModify"] as const;
+  const calRoute = (method: string, path: string, scopes: string[], h: (t: Token, url: URL, body: Buffer, m: RegExpExecArray, req: IncomingMessage) => unknown) =>
+    on(method, new RegExp(`^/calendar/v3${path}$`), (req, url, body, m) => h(calendarBearer(req, scopes), url, body, m, req));
+  const calParam = (m: RegExpExecArray) => decodeURIComponent(m[1]!);
+
+  calRoute("GET", "/users/me/calendarList", CAL_SCOPES.list, (t, url) => {
+    const roles = ["freeBusyReader", "reader", "writer", "owner"];
+    const min = roles.indexOf(url.searchParams.get("minAccessRole") ?? "freeBusyReader");
+    const all = [...calendarsOf(t.email).values()].map((c) => structuredClone(c.entry)).filter((e) => roles.indexOf(e.accessRole) >= min);
+    const { items, next } = page(all, url.searchParams, 100);
+    return { kind: "calendar#calendarList", items, ...(next ? { nextPageToken: next } : {}) };
+  });
+
+  calRoute("GET", "/calendars/([^/]+)/events", CAL_SCOPES.read, (t, url, _b, m) => listEvents(calendarOf(t.email, calParam(m)), url.searchParams));
+
+  calRoute("POST", "/calendars/([^/]+)/events", CAL_SCOPES.write, (t, url, body, m) => {
+    const cal = calendarOf(t.email, calParam(m));
+    if (!canWrite(cal)) throw apiError(403, "You need to have writer access to this calendar.", "requiredAccessLevel");
+    const input = json(body) as Partial<CalendarEventRaw>;
+    if (input.id && cal.events.has(input.id)) throw apiError(409, "The requested identifier already exists.", "duplicate");
+    if (!input.start || !input.end) throw apiError(400, "Missing end time.", "required");
+    const { organizer: _o, ...rest } = input;
+    const ev = save(cal, newEvent(cal, rest, url.searchParams.get("conferenceDataVersion")));
+    fanOut(ev);
+    mailOut(cal.owner, url.searchParams.get("sendUpdates"), "invite", ev.id, guests(ev));
+    return ev;
+  });
+
+  calRoute("GET", "/calendars/([^/]+)/events/([^/]+)", CAL_SCOPES.read, (t, _u, _b, m) => {
+    const ev = findEvent(calendarOf(t.email, calParam(m)), decodeURIComponent(m[2]!));
+    if (!ev) throw apiError(404, "Not Found", "notFound");
+    return ev;
+  });
+
+  calRoute("PATCH", "/calendars/([^/]+)/events/([^/]+)", CAL_SCOPES.write, (t, url, body, m, req) => {
+    const cal = calendarOf(t.email, calParam(m));
+    const ev = writable(req, cal, m[2]!);
+    const patch = json(body) as Partial<CalendarEventRaw>;
+    const sendUpdates = url.searchParams.get("sendUpdates");
+    if (!ev.organizer?.self) {
+      // An invitee may only answer (their own attendee entry); shared properties belong to the organizer.
+      if (SHARED_FIELDS.some((f) => f in patch)) throw apiError(403, "Shared properties can only be changed by the organizer of the event.", "forbiddenForNonOrganizer");
+      const mine = patch.attendees?.find((a) => a.self || a.email?.toLowerCase() === cal.owner);
+      const attendees = ev.attendees?.map((a) =>
+        a.email === cal.owner && mine ? { ...a, responseStatus: mine.responseStatus ?? a.responseStatus, ...(mine.comment !== undefined ? { comment: mine.comment } : {}) } : a,
+      );
+      const saved = save(cal, { ...ev, ...(patch.transparency ? { transparency: patch.transparency } : {}), attendees });
+      if (mine) {
+        propagateResponse(cal, saved, cal.owner);
+        if (ev.organizer?.email) mailOut(cal.owner, sendUpdates, "reply", ev.id, [ev.organizer.email]);
+      }
+      return saved;
+    }
+    const organizer = ev.organizer.email!;
+    const before = guests(ev);
+    const { attendees, attendeesOmitted: _a, id: _i, organizer: _o, ...fields } = patch;
+    const next: CalendarEventRaw = {
+      ...ev,
+      ...fields,
+      ...(attendees !== undefined ? { attendees: attendeeList(cal.owner, organizer, attendees, ev.attendees) } : {}),
+      ...(patch.conferenceData ? conference(patch, url.searchParams.get("conferenceDataVersion")) : {}),
+    };
+    const saved = save(cal, next);
+    fanOut(saved, before);
+    const after = guests(saved);
+    mailOut(cal.owner, sendUpdates, "invite", ev.id, after.filter((a) => !before.includes(a)));
+    mailOut(cal.owner, sendUpdates, "update", ev.id, after.filter((a) => before.includes(a)));
+    mailOut(cal.owner, sendUpdates, "cancel", ev.id, before.filter((a) => !after.includes(a)));
+    return saved;
+  });
+
+  calRoute("DELETE", "/calendars/([^/]+)/events/([^/]+)", CAL_SCOPES.write, (t, url, _b, m, req) => {
+    const cal = calendarOf(t.email, calParam(m));
+    const ev = writable(req, cal, m[2]!);
+    const saved = save(cal, { ...ev, status: "cancelled" });
+    if (ev.organizer?.self) {
+      fanOut(saved, guests(ev));
+      mailOut(cal.owner, url.searchParams.get("sendUpdates"), "cancel", ev.id, guests(ev));
+    }
+    return undefined;
+  });
+
+  calRoute("POST", "/freeBusy", CAL_SCOPES.freebusy, (t, _u, body) => {
+    const b = json(body) as { timeMin?: string; timeMax?: string; items?: { id?: string }[] };
+    const min = Date.parse(b.timeMin ?? "");
+    const max = Date.parse(b.timeMax ?? "");
+    if (!Number.isFinite(min) || !Number.isFinite(max)) throw apiError(400, "Missing timeMin or timeMax.", "required");
+    const out: FreeBusyResult["calendars"] = {};
+    for (const { id: asked = "" } of b.items ?? []) {
+      const id = asked === "primary" ? t.email : asked;
+      // Own calendars, or another (fake) user's primary calendar by address.
+      const cal = calendarsOf(t.email).get(id) ?? (calendars.has(id.toLowerCase()) ? primaryOf(id) : undefined);
+      if (!cal) {
+        out[asked] = { busy: [], errors: [{ domain: "global", reason: "notFound" }] };
+        continue;
+      }
+      const busy: [number, number][] = [];
+      for (const { raw } of cal.events.values()) {
+        if (raw.status === "cancelled" || raw.transparency === "transparent") continue;
+        if (raw.attendees?.find((a) => a.email === cal.owner)?.responseStatus === "declined") continue;
+        if (raw.recurringEventId && cal.events.has(raw.recurringEventId)) continue;
+        for (const i of raw.recurrence?.length ? instances(cal, raw, max) : [raw]) {
+          const s = timeOf(i.start);
+          const e = timeOf(i.end);
+          if (e > min && s < max) busy.push([Math.max(s, min), Math.min(e, max)]);
+        }
+      }
+      const merged: [number, number][] = [];
+      for (const iv of busy.sort((x, y) => x[0] - y[0])) {
+        const last = merged.at(-1);
+        if (last && iv[0] <= last[1]) last[1] = Math.max(last[1], iv[1]);
+        else merged.push([...iv]);
+      }
+      out[asked] = { busy: merged.map(([s, e]) => ({ start: new Date(s).toISOString(), end: new Date(e).toISOString() })) };
+    }
+    return { kind: "calendar#freeBusy", timeMin: b.timeMin, timeMax: b.timeMax, calendars: out };
+  });
+
+  calRoute("POST", "/calendars/([^/]+)/events/watch", CAL_SCOPES.read, (t, _u, body, m) => {
+    const cal = calendarOf(t.email, calParam(m));
+    const b = json(body) as { id?: string; type?: string; address?: string; token?: string; params?: { ttl?: string } };
+    if (!b.id || !b.address || b.type !== "web_hook") throw apiError(400, "Missing id, address or type web_hook.", "required");
+    if (channels.has(b.id)) throw apiError(400, `Channel id ${b.id} not unique`, "channelIdNotUnique");
+    const ttl = Number(b.params?.ttl ?? 604_800);
+    const ch = {
+      id: b.id,
+      resourceId: randomBytes(14).toString("base64url"),
+      token: b.token ?? null,
+      address: b.address,
+      email: t.email,
+      calendarId: cal.entry.id,
+      expiration: Date.now() + Math.min(ttl, 30 * 86_400) * 1000,
+      messages: 0,
+    };
+    channels.set(ch.id, ch);
+    // Google confirms a new channel with a "sync" message right away.
+    if (fake.calendar.autoNotify) setTimeout(() => void notify(ch.id, "sync"), 0);
+    return {
+      kind: "api#channel",
+      id: ch.id,
+      resourceId: ch.resourceId,
+      resourceUri: `${url}/calendar/v3/calendars/${encodeURIComponent(cal.entry.id)}/events?alt=json`,
+      ...(ch.token ? { token: ch.token } : {}),
+      expiration: String(ch.expiration),
+    };
+  });
+
+  calRoute("POST", "/channels/stop", CAL_SCOPES.read, (t, _u, body) => {
+    const b = json(body) as { id?: string; resourceId?: string };
+    const ch = channels.get(b.id ?? "");
+    if (!ch || ch.resourceId !== b.resourceId || ch.email !== t.email) throw apiError(404, `Channel '${b.id}' not found for project '123456789'`, "notFound");
+    channels.delete(ch.id);
+    return undefined;
+  });
+
+  /** POSTs a push notification for the channel to its address (no body, X-Goog-* headers). Resolves to the HTTP status, 0 when unreachable. */
+  async function notify(channelId: string, state: "sync" | "exists" | "not_exists"): Promise<number> {
+    const ch = channels.get(channelId);
+    if (!ch) throw new Error(`fake-google: unknown channel ${channelId}`);
+    const headers: Record<string, string> = {
+      "x-goog-channel-id": ch.id,
+      "x-goog-resource-id": ch.resourceId,
+      "x-goog-resource-state": state,
+      "x-goog-message-number": String(++ch.messages),
+      "x-goog-resource-uri": `${url}/calendar/v3/calendars/${encodeURIComponent(ch.calendarId)}/events?alt=json`,
+      "x-goog-channel-expiration": new Date(ch.expiration).toUTCString(),
+      ...(ch.token ? { "x-goog-channel-token": ch.token } : {}),
+    };
+    try {
+      const target = fake.calendar.pushTarget ? fake.calendar.pushTarget(ch.address) : ch.address;
+      const res = await fetch(target, { method: "POST", headers, signal: AbortSignal.timeout(5000) });
+      await res.body?.cancel();
+      return res.status;
+    } catch {
+      return 0;
+    }
+  }
+
+  const calendarApi: FakeCalendar = {
+    autoNotify: true,
+    pushTarget: null,
+    addCalendar(email, opts) {
+      const id = opts.id ?? `${randomBytes(16).toString("hex")}@group.calendar.google.com`;
+      return addCalendarTo(email.toLowerCase(), {
+        id,
+        summary: opts.name,
+        accessRole: opts.accessRole ?? "owner",
+        timeZone: opts.timeZone ?? "UTC",
+        backgroundColor: "#9fe1e7",
+        selected: true,
+      });
+    },
+    putEvent(email, calendarId, input) {
+      const cal = calendarOf(email, calendarId, false);
+      const existing = input.id ? cal.events.get(input.id)?.raw : undefined;
+      return save(cal, existing ? { ...existing, ...input, id: existing.id } : newEvent(cal, input));
+    },
+    invite(organizer, attendees, input) {
+      const org = organizer.toLowerCase();
+      const list = attendees.map((email) => ({ email: email.toLowerCase() }));
+      if (calendars.has(org)) {
+        const ev = save(primaryOf(org), newEvent(primaryOf(org), { ...input, attendees: list }));
+        fanOut(ev);
+        return ev;
+      }
+      // An outside organizer: only the fake attendees' copies exist here.
+      const id = input.id ?? randomBytes(13).toString("hex");
+      const source: CalendarEventRaw = {
+        ...input,
+        id,
+        status: input.status ?? "confirmed",
+        created: input.created ?? new Date().toISOString(),
+        iCalUID: input.iCalUID ?? `${id}@google.com`,
+        organizer: { email: org, ...(input.organizer?.displayName ? { displayName: input.organizer.displayName } : {}) },
+        creator: { email: org },
+        attendees: attendeeList("", org, list),
+        eventType: input.eventType ?? "default",
+      };
+      fanOut(source);
+      return structuredClone(source);
+    },
+    respond(email, eventId, status) {
+      const cal = primaryOf(email);
+      const ev = cal.events.get(eventId)?.raw;
+      if (!ev?.attendees?.some((a) => a.email === cal.owner)) throw new Error(`fake-google: ${email} isn't invited to ${eventId}`);
+      const saved = save(cal, { ...ev, attendees: ev.attendees.map((a) => (a.email === cal.owner ? { ...a, responseStatus: status } : a)) });
+      propagateResponse(cal, saved, cal.owner);
+    },
+    cancelEvent(email, calendarId, eventId) {
+      const cal = calendarOf(email, calendarId, false);
+      const ev = cal.events.get(eventId)?.raw;
+      if (!ev) throw new Error(`fake-google: no event ${eventId} on ${calendarId}`);
+      const saved = save(cal, { ...ev, status: "cancelled" });
+      if (ev.organizer?.self) fanOut(saved, guests(ev));
+    },
+    events: (email, calendarId) => [...calendarOf(email, calendarId, false).events.values()].filter((e) => e.raw.status !== "cancelled").map((e) => structuredClone(e.raw)),
+    event: (email, calendarId, id) => findEvent(calendarOf(email, calendarId, false), id),
+    expireSyncTokens(email, calendarId) {
+      for (const cal of calendarsOf(email).values()) if (!calendarId || cal.entry.id === calendarId || (calendarId === "primary" && cal.entry.primary)) cal.gen++;
+    },
+    mailsSent: (email) => [...(calMails.get(email.toLowerCase()) ?? [])],
+    channels: () => [...channels.values()].map(({ messages: _m, ...ch }) => ({ ...ch })),
+    notify,
+  };
+
   // ───── Server ─────
 
   const closers = new Set<() => void>();
@@ -1327,6 +1983,8 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
         nextLabel: 1,
         workspaceDomain: opts.workspaceDomain?.toLowerCase() ?? null,
       });
+      calendars.set(key, new Map());
+      addCalendarTo(key, { id: key, summary: key, accessRole: "owner", primary: true, timeZone: "UTC", backgroundColor: "#9fe1e7", selected: true });
     },
     addLabel(email, name) {
       const mb = box(email);
@@ -1412,6 +2070,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       return s ? { topic: s.topic, ackDeadlineSeconds: s.ackDeadlineSeconds, outstanding: s.outstanding.size, queued: s.queue.length } : null;
     },
     iamPolicy: (topic) => (topics.has(topic) ? structuredClone(topics.get(topic)!.policy) : null),
+    calendar: calendarApi,
   };
   return fake;
 }
@@ -1467,6 +2126,7 @@ export function recordingEvents() {
         accountId: e.accountId,
         accountEmail: "",
         message: e.message ?? null,
+        ...(e.calendarEvent ? { calendarEvent: e.calendarEvent } : {}),
         labelIds: e.labelIds,
         detail: e.detail,
         createdAt: new Date().toISOString(),

@@ -10,9 +10,10 @@ import { createCalendarSync } from "./sync.ts";
 import type { CalendarService } from "./types.ts";
 
 export function createCalendarService(ctx: AppContext): CalendarService {
-  const sync = createCalendarSync(ctx);
-  const setup = createCalendarSetup(ctx);
   const push = createCalendarPush(ctx);
+  // Push channels follow the set of synced calendars.
+  const sync = createCalendarSync(ctx, { onSyncSetChanged: (accountId) => void push.reconcile(accountId) });
+  const setup = createCalendarSetup(ctx);
   const approvals = createCalendarApprovals(ctx);
   return {
     kick: (accountId, calendarId) => sync.kick(accountId, calendarId),

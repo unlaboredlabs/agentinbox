@@ -6,6 +6,7 @@
 import type { CalendarAccessRole, CalendarResponseStatus } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { hasReason } from "./http.ts";
+import { googleRuntime, type RequestOptions } from "./runtime.ts";
 import { GoogleApiError } from "./types.ts";
 
 export const CALENDAR_API_SERVICE = "calendar-json.googleapis.com";
@@ -152,9 +153,94 @@ export interface CalendarClient {
   stopChannel(p: { id: string; resourceId: string }): Promise<void>;
 }
 
-/** Built by workstream A. Exposed as ctx.google.calendar(accountId) once wired (see GoogleService). */
-export function createCalendarClient(_ctx: AppContext, _accountId: string): CalendarClient {
-  throw new Error("Not implemented: Google Calendar client (workstream A, docs/calendar.md)");
+/** Pages of calendarList / events.list fetched per request (Google's maximums are 250 and 2500). */
+const LIST_PAGE = 250;
+
+const writeQuery = (o: WriteOptions) => ({ sendUpdates: o.sendUpdates, conferenceDataVersion: o.conferenceDataVersion });
+const ifMatch = (o: WriteOptions) => (o.ifMatchEtag ? { "if-match": o.ifMatchEtag } : undefined);
+
+/** ctx.google.calendar(accountId). Calendar calls aren't throttled by the Gmail quota bucket (cost 0). */
+export function createCalendarClient(ctx: AppContext, accountId: string): CalendarClient {
+  const rt = googleRuntime(ctx);
+  const call = <T>(path: string, opts: Omit<RequestOptions, "cost"> = {}) =>
+    rt.request<T>(accountId, ctx.config.google.calendarBase, `/calendar/v3${path}`, opts);
+  const id = encodeURIComponent;
+  const events = (calendarId: string) => `/calendars/${id(calendarId)}/events`;
+
+  return {
+    accountId,
+    async listCalendars() {
+      const out: CalendarListEntryRaw[] = [];
+      let pageToken: string | undefined;
+      do {
+        const r = await call<{ items?: CalendarListEntryRaw[]; nextPageToken?: string }>("/users/me/calendarList", {
+          query: { maxResults: LIST_PAGE, pageToken },
+        });
+        out.push(...(r?.items ?? []).filter((c) => !c.deleted && !c.hidden));
+        pageToken = r?.nextPageToken;
+      } while (pageToken);
+      return out;
+    },
+    async listEvents(calendarId, p) {
+      const r = await call<{ items?: CalendarEventRaw[]; nextPageToken?: string; nextSyncToken?: string; timeZone?: string }>(events(calendarId), {
+        query: {
+          syncToken: p.syncToken,
+          pageToken: p.pageToken,
+          timeMin: p.timeMin,
+          timeMax: p.timeMax,
+          q: p.q || undefined,
+          singleEvents: p.singleEvents,
+          orderBy: p.orderBy,
+          showDeleted: p.showDeleted,
+          maxResults: p.maxResults,
+          iCalUID: p.iCalUID,
+        },
+      });
+      return { items: r?.items ?? [], nextPageToken: r?.nextPageToken ?? null, nextSyncToken: r?.nextSyncToken ?? null, timeZone: r?.timeZone ?? null };
+    },
+    getEvent: (calendarId, eventId) => call<CalendarEventRaw>(`${events(calendarId)}/${id(eventId)}`),
+    insertEvent: (calendarId, event, opts) =>
+      call<CalendarEventRaw>(events(calendarId), {
+        method: "POST",
+        query: writeQuery(opts),
+        body: event,
+        idempotent: false,
+        ambiguousHint: "The event may have been created: check Google Calendar before retrying.",
+      }),
+    patchEvent: (calendarId, eventId, patch, opts) =>
+      call<CalendarEventRaw>(`${events(calendarId)}/${id(eventId)}`, { method: "PATCH", query: writeQuery(opts), body: patch, headers: ifMatch(opts) }),
+    async deleteEvent(calendarId, eventId, opts) {
+      try {
+        await call<void>(`${events(calendarId)}/${id(eventId)}`, { method: "DELETE", query: writeQuery(opts), headers: ifMatch(opts) });
+      } catch (err) {
+        // 410 "Resource has been deleted": already gone (e.g. a retry after Google acted on the first attempt).
+        if (!(err instanceof GoogleApiError && err.status === 410)) throw err;
+      }
+    },
+    async freeBusy(p) {
+      const r = await call<FreeBusyResult>("/freeBusy", {
+        method: "POST",
+        body: { timeMin: p.timeMin, timeMax: p.timeMax, timeZone: p.timeZone, items: p.items.map((i) => ({ id: i })) },
+      });
+      return { calendars: r?.calendars ?? {} };
+    },
+    async watchEvents(calendarId, p) {
+      const r = await call<{ id: string; resourceId: string; expiration?: string | number }>(`${events(calendarId)}/watch`, {
+        method: "POST",
+        body: { id: p.id, type: "web_hook", address: p.address, token: p.token, ...(p.ttlSeconds ? { params: { ttl: String(p.ttlSeconds) } } : {}) },
+        idempotent: false,
+        ambiguousHint: "The channel may have been created; it expires on its own.",
+      });
+      return { id: r.id, resourceId: r.resourceId, expiration: String(r.expiration ?? "") };
+    },
+    async stopChannel(p) {
+      try {
+        await call<void>("/channels/stop", { method: "POST", body: { id: p.id, resourceId: p.resourceId } });
+      } catch (err) {
+        if (!(err instanceof GoogleApiError && err.status === 404)) throw err;
+      }
+    },
+  };
 }
 
 // ───────────── Errors ─────────────
