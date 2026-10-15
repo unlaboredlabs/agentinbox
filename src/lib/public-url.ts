@@ -153,3 +153,17 @@ export function publicUrlError(v: string): string | undefined {
   return undefined;
 }
 
+
+/**
+ * The saved public URL's origin when the browser reached this same server under another loopback name
+ * (http://localhost:8425 vs http://127.0.0.1:8425): both work, but Google sign-in returns to the saved one.
+ * null when they match, or when they aren't the same computer and port.
+ */
+export function loopbackTwin(browserOrigin: string, publicUrl: string): string | null {
+  const b = analyzeUrl(browserOrigin);
+  const p = analyzeUrl(publicUrl);
+  // Only where Google returns straight to the saved address (localhost, 127.0.0.1, [::1] on http/https).
+  if (!b || !p || b.host !== "loopback" || p.host !== "loopback" || p.google !== "direct") return null;
+  if (b.url.origin === p.url.origin || b.url.protocol !== p.url.protocol || b.url.port !== p.url.port) return null;
+  return p.url.origin;
+}

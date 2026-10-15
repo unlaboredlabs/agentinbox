@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { Account, ApiError as ApiErrorBody, ConnectAccountResponse } from "../../shared/types.ts";
+import type { Account, ApiError as ApiErrorBody, ConnectAccountResponse, ConnectAttempt } from "../../shared/types.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
@@ -7,7 +7,7 @@ import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { type AccountRow, accountScopes, getRow, toAccount } from "./accounts.ts";
 import { callbackMode, clientCredentials, markRedirectVerified } from "./client.ts";
-import { buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
+import { asHttpError, buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
 import { provisioningPrincipal } from "./pubsub.ts";
 import { postToken, refreshExpiry, refreshExpiryKind, type TokenResponse } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
@@ -76,9 +76,29 @@ export function oauthErrorHint(code: string, redirectUri?: string): { message: s
   }
 }
 
+/** Google error codes oauthErrorHint explains; any other code is reported as "oauth_error" where it's stored. */
+export const KNOWN_OAUTH_ERRORS = new Set(["access_denied", "org_internal", "admin_policy_enforced", "redirect_uri_mismatch", "invalid_client", "unauthorized_client", "invalid_grant"]);
+
+/**
+ * An error Google reported (on the redirect or the token endpoint). The redirect's `error` and
+ * `error_description` come from the URL, so anyone holding a pending state can choose them: the
+ * attempt status (connectAttempt) keeps only `googleCode`'s fixed explanation, never the text.
+ */
+export class GoogleOAuthError extends HttpError {
+  constructor(
+    readonly googleCode: string,
+    message: string,
+    hint: string,
+    readonly redirectUri: string,
+  ) {
+    super(400, `oauth_${googleCode}`, message, hint);
+  }
+}
+
 const oauthError = (ctx: AppContext, code: string, description?: string | null, redirectUri?: string) => {
-  const { message, hint } = oauthErrorHint(code, redirectUri ?? callbackMode(ctx).redirectUri);
-  return new HttpError(400, `oauth_${code}`, description && !message.includes(description) ? `${message} (${description})` : message, hint);
+  const uri = redirectUri ?? callbackMode(ctx).redirectUri;
+  const { message, hint } = oauthErrorHint(code, uri);
+  return new GoogleOAuthError(code, description && !message.includes(description) ? `${message} (${description})` : message, hint, uri);
 };
 
 /**
@@ -147,6 +167,56 @@ export function rememberCompleted(ctx: AppContext, state: string, code: string, 
   const cutoff = Date.now() - COMPLETED_TTL_MS;
   for (const [k, v] of m) if (v.at < cutoff || m.size >= COMPLETED_MAX) m.delete(k);
   m.set(state, { codeHash: digest(code), accountId, at: Date.now() });
+}
+
+/**
+ * Failed connections, by state: the sign-in window can't always tell the console (another origin, a severed
+ * opener), so the console asks with POST /api/accounts/connect/status. Only states that were pending are
+ * recorded (never attacker-chosen ones), and never over a success. Same TTL, cap and lifetime as `completed`.
+ */
+const failed = new WeakMap<AppContext, Map<string, { code: string; error: string; hint: string | null; at: number }>>();
+
+const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/** What the attempt status reports for a failure: fixed text for Google's codes, capped lengths for the rest. */
+export function storedFailure(err: unknown): { code: string; error: string; hint: string | null } {
+  const e = asHttpError(err);
+  if (e instanceof GoogleOAuthError) {
+    if (!KNOWN_OAUTH_ERRORS.has(e.googleCode)) return { code: "oauth_error", error: "Google returned an error, so nothing was connected.", hint: "Start the connection again from the console." };
+    const { message, hint } = oauthErrorHint(e.googleCode, e.redirectUri);
+    return { code: `oauth_${e.googleCode}`, error: message, hint };
+  }
+  if (e instanceof HttpError) return { code: cap(e.code, 64), error: cap(e.message, 500), hint: e.hint ? cap(e.hint, 1000) : null };
+  return { code: "internal", error: "Something went wrong while finishing the connection.", hint: "Check the agentinbox server log, then try again." };
+}
+
+/** Records how a pending state failed (exported for tests). Never replaces a success for the same state. */
+export function rememberFailed(ctx: AppContext, state: string, err: unknown): void {
+  if (completed.get(ctx)?.has(state)) return;
+  let m = failed.get(ctx);
+  if (!m) failed.set(ctx, (m = new Map()));
+  const cutoff = Date.now() - COMPLETED_TTL_MS;
+  for (const [k, v] of m) if (v.at < cutoff || m.size >= COMPLETED_MAX) m.delete(k);
+  m.set(state, { ...storedFailure(err), at: Date.now() });
+}
+
+/**
+ * What became of the sign-in started with `state` (ConnectAccountResponse.state). Admin-only: the console
+ * that started it asks when the callback page's message can't reach it.
+ */
+export function connectAttempt(ctx: AppContext, state: string): ConnectAttempt {
+  if (!state) return { status: "unknown" };
+  const cutoff = Date.now() - COMPLETED_TTL_MS;
+  const ok = completed.get(ctx)?.get(state);
+  if (ok && ok.at >= cutoff) {
+    const row = getRow(ctx, ok.accountId);
+    if (row) return { status: "connected", accountId: row.id, email: row.email };
+  }
+  const bad = failed.get(ctx)?.get(state);
+  if (bad && bad.at >= cutoff) return { status: "failed", code: bad.code, error: bad.error, hint: bad.hint };
+  const pending = ctx.db.get<{ created_at: string }>("SELECT created_at FROM oauth_states WHERE state = ?", state);
+  if (pending && Date.parse(pending.created_at) + STATE_TTL_MS >= Date.now()) return { status: "pending" };
+  return { status: "unknown" };
 }
 
 /** The account a finished state + code connected, if it's recent and the account is still here. */
@@ -293,6 +363,15 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
   const done = completedAccount(ctx, state, code);
   if (done) throw new AlreadyConnectedError(done.email);
   const st = takeState(ctx, state);
+  try {
+    return await exchange(ctx, st, code, state);
+  } catch (err) {
+    rememberFailed(ctx, state, err);
+    throw err;
+  }
+}
+
+async function exchange(ctx: AppContext, st: StateRow, code: string, state: string): Promise<Account> {
   if (!code) throw new HttpError(400, "oauth_no_code", "Google didn't return an authorization code.", "Start the connection again from the console.");
   const { clientId, clientSecret } = clientCredentials(ctx);
   let tokens: TokenResponse;
@@ -434,8 +513,9 @@ export async function completeConnectFromUrl(ctx: AppContext, raw: string): Prom
   const error = q.get("error");
   if (error) {
     const state = q.get("state");
-    if (state) ctx.db.run("DELETE FROM oauth_states WHERE state = ?", state);
-    throw oauthError(ctx, error, q.get("error_description"));
+    const err = oauthError(ctx, error, q.get("error_description"));
+    if (state && ctx.db.run("DELETE FROM oauth_states WHERE state = ?", state).changes) rememberFailed(ctx, state, err);
+    throw err;
   }
   const code = q.get("code");
   const state = q.get("state");

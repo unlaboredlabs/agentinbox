@@ -1,10 +1,13 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { InfoIcon } from "lucide-react";
 import { useEffect } from "react";
 import { toast } from "sonner";
 import { AccountsList, ConnectAccountButton } from "@/components/accounts/accounts-list";
 import { PageHeader } from "@/components/common";
-import { keys } from "@/lib/queries";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { loopbackTwin } from "@/lib/public-url";
+import { keys, queries } from "@/lib/queries";
 
 export const Route = createFileRoute("/_app/accounts")({
   // The OAuth callback lands here when it can't hand back to the pop-up's opener.
@@ -36,7 +39,32 @@ function AccountsPage() {
         description="Mailboxes agentinbox syncs. Credentials stay here; agents get access per account through grants."
         actions={<ConnectAccountButton />}
       />
+      <LoopbackTwinHint />
       <AccountsList />
     </>
+  );
+}
+
+/** The console is open at localhost while the saved address is 127.0.0.1 (or the reverse): fine, but say where Google returns. */
+function LoopbackTwinHint() {
+  const settings = useQuery(queries.settings());
+  const here = window.location.origin;
+  const twin = settings.data ? loopbackTwin(here, settings.data.publicUrl) : null;
+  if (!twin) return null;
+  return (
+    <Alert variant="info" className="mb-4">
+      <InfoIcon />
+      <AlertTitle>Google sign-in returns to {twin}</AlertTitle>
+      <AlertDescription>
+        <p>
+          You opened the console at {here}, and its saved address is {twin}. Both reach agentinbox on this computer and connecting works from
+          either. For the smoothest sign-in, open the console at{" "}
+          <a href={`${twin}/accounts`} className="font-medium text-foreground underline underline-offset-4">
+            {twin}
+          </a>{" "}
+          (you may need to sign in there once).
+        </p>
+      </AlertDescription>
+    </Alert>
   );
 }

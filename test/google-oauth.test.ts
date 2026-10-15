@@ -9,7 +9,7 @@ import { googleApi } from "../server/api/google.ts";
 import { callbackPage, OAUTH_CALLBACK_SCRIPT, OAUTH_CALLBACK_SCRIPT_HASH, oauthRoutes } from "../server/api/oauth.ts";
 import type { AppContext } from "../server/context.ts";
 import { adminAuth } from "../server/auth/index.ts";
-import { AlreadyConnectedError, COMPLETED_MAX, COMPLETED_TTL_MS, completedAccount, rememberCompleted } from "../server/google/oauth.ts";
+import { AlreadyConnectedError, COMPLETED_MAX, COMPLETED_TTL_MS, completedAccount, connectAttempt, rememberCompleted, rememberFailed, storedFailure } from "../server/google/oauth.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../server/google/types.ts";
 import { HttpError } from "../server/util/errors.ts";
 import { connectFakeAccount, FAKE_CLIENT, type FakeGoogle, recordingEvents, startFakeGoogle } from "./fake-google.ts";
@@ -364,6 +364,39 @@ describe("connect", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("never lets a later failure overwrite a finished sign-in's status", async () => {
+    const acct = await connectFakeAccount(ctx, fake, "keep@example.com");
+    rememberCompleted(ctx, "state-keep", "code-keep", acct.id);
+    rememberFailed(ctx, "state-keep", new HttpError(400, "oauth_state", "This sign-in link has expired or was already used."));
+    expect(connectAttempt(ctx, "state-keep")).toEqual({ status: "connected", accountId: acct.id, email: "keep@example.com" });
+    rememberFailed(ctx, "state-lost", new HttpError(400, "oauth_no_code", "No code."));
+    expect(connectAttempt(ctx, "state-lost")).toMatchObject({ status: "failed", code: "oauth_no_code" });
+  });
+
+  it("stores only fixed text for Google's redirect errors, never the URL's error_description", async () => {
+    const evil = "<b>Call +1 555 0100 to restore access</b>".repeat(50);
+    for (const [error, code] of [
+      ["access_denied", "oauth_access_denied"],
+      ["org_internal", "oauth_org_internal"],
+      [`made_up_${"x".repeat(5000)}`, "oauth_error"],
+    ] as const) {
+      const { state } = ctx.google.startConnect();
+      const res = await oauthRoutes(ctx).request(`/oauth/callback?state=${state}&error=${encodeURIComponent(error)}&error_description=${encodeURIComponent(evil)}`);
+      expect(res.status).toBe(400);
+      const status = connectAttempt(ctx, state);
+      expect(status).toMatchObject({ status: "failed", code });
+      const text = JSON.stringify(status);
+      expect(text).not.toContain("555 0100");
+      expect(text).not.toContain("made_up");
+      expect(text.length).toBeLessThan(1500);
+    }
+    // Our own errors keep their text, capped.
+    const long = storedFailure(new HttpError(400, "x".repeat(200), "m".repeat(5000), "h".repeat(5000)));
+    expect(long.code.length).toBeLessThanOrEqual(64);
+    expect(long.error.length).toBeLessThanOrEqual(500);
+    expect(long.hint!.length).toBeLessThanOrEqual(1000);
   });
 
   it("escapes Google's error_description on the callback page", async () => {

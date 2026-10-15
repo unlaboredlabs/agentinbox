@@ -2,7 +2,7 @@
 // after the refresh token is revoked, and account removal revoking every agent's access.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Account, Agent, GoogleClientView, HealthResponse, MailEvent, Settings } from "../shared/types.ts";
+import type { Account, Agent, ConnectAccountResponse, ConnectAttempt, GoogleClientView, HealthResponse, MailEvent, Settings } from "../shared/types.ts";
 import { HAS_AGENTS } from "./e2e/features.ts";
 import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
 import { waitFor } from "./e2e/wait.ts";
@@ -173,6 +173,61 @@ describe("connect account", () => {
     expect(page.status).toBe(400);
     expect(await page.text()).toContain(`You were reconnecting ${email}, but signed in to Google as ${other}`);
     expect((await s.admin.get<Account[]>("/api/accounts")).some((a) => a.email === other)).toBe(false);
+  });
+});
+
+describe("connect attempt status (the console's fallback when the callback page can't reach it)", () => {
+  const status = (state: string) => s.admin.post<ConnectAttempt>("/api/accounts/connect/status", { state });
+
+  it("reports a reconnect of an already-working account, which the account list alone can't show", async () => {
+    const email = mailbox("twin");
+    const account = await s.connectAccount(email);
+    // Like the console's "Connect Gmail account" with an address that's already here, and like Reconnect.
+    for (const body of [{}, { reauthAccountId: account.id }]) {
+      const start = await s.admin.post<ConnectAccountResponse>("/api/accounts/connect", body);
+      expect(await status(start.state)).toEqual({ status: "pending" });
+      s.fake.consentAs(email);
+      const consent = await fetch(start.authUrl, { redirect: "manual" });
+      const callback = consent.headers.get("location")!;
+      expect((await fetch(callback)).status).toBe(200);
+      expect(await status(start.state)).toEqual({ status: "connected", accountId: account.id, email });
+      // A forged replay of the used state fails on the page but doesn't rewrite the result.
+      const forged = new URL(callback);
+      forged.searchParams.set("code", "forged");
+      expect((await fetch(forged)).status).toBe(400);
+      expect(await status(start.state)).toEqual({ status: "connected", accountId: account.id, email });
+    }
+    const audit = await s.admin.get<{ items: { action: string; accountId: string | null }[] }>("/api/audit");
+    expect(audit.items.filter((e) => e.action === "account.reconnect" && e.accountId === account.id).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports a failed sign-in with the same code as the callback page", async () => {
+    const email = mailbox("deny-status");
+    s.fake.addAccount(email);
+    const start = await s.admin.post<ConnectAccountResponse>("/api/accounts/connect");
+    s.fake.consentAs(email, { deny: true });
+    const consent = await fetch(start.authUrl, { redirect: "manual" });
+    expect((await fetch(consent.headers.get("location")!)).status).toBe(400);
+    expect(await status(start.state)).toMatchObject({ status: "failed", code: "oauth_access_denied", error: expect.stringContaining("Cancel") });
+
+    const owner = await s.connectAccount(mailbox("status-owner"));
+    const other = mailbox("status-intruder");
+    s.fake.addAccount(other);
+    const wrong = await s.admin.post<ConnectAccountResponse>("/api/accounts/connect", { reauthAccountId: owner.id });
+    s.fake.consentAs(other);
+    const c2 = await fetch(wrong.authUrl, { redirect: "manual" });
+    expect((await fetch(c2.headers.get("location")!)).status).toBe(400);
+    expect(await status(wrong.state)).toMatchObject({ status: "failed", code: "oauth_wrong_account" });
+  });
+
+  it("knows nothing about states it never issued, and is admin-only", async () => {
+    expect(await status("not-a-state")).toEqual({ status: "unknown" });
+    // An unknown state on the public callback doesn't get remembered as a failure.
+    await fetch(`${s.url}/oauth/callback?state=made-up&error=access_denied`);
+    expect(await status("made-up")).toEqual({ status: "unknown" });
+    const start = await s.admin.post<ConnectAccountResponse>("/api/accounts/connect");
+    const anon = await s.admin.request("/api/accounts/connect/status", { json: { state: start.state }, cookie: false });
+    expect(anon.status).toBe(401);
   });
 });
 

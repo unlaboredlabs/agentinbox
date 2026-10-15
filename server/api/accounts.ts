@@ -9,6 +9,7 @@ const ConnectInput = z.object({
   /** ["pubsub"]: incremental consent for Pub/Sub on the provisioning account (default: the account provisioning uses). */
   scopes: z.array(z.enum(["pubsub"])).optional(),
 });
+const AttemptInput = z.object({ state: z.string().min(1).max(200) });
 const CompleteInput = z.object({ url: z.string().trim().min(1, "Paste the URL you landed on after approving access") });
 
 const google = async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -35,6 +36,12 @@ export function accountsApi(ctx: AppContext) {
   r.post("/accounts/connect/complete", async (c) => {
     const { url } = await readBody(c, CompleteInput);
     return c.json(await google(() => ctx.google.completeConnectFromUrl(url)));
+  });
+
+  // POST so the state (a secret of this sign-in) stays out of URLs and access logs.
+  r.post("/accounts/connect/status", async (c) => {
+    const { state } = await readBody(c, AttemptInput);
+    return c.json(ctx.google.connectAttempt(state));
   });
 
   r.post("/accounts/:id/resync", async (c) => {

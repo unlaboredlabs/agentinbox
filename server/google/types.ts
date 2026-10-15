@@ -7,6 +7,7 @@ import type {
   Address,
   Attachment,
   ConnectAccountResponse,
+  ConnectAttempt,
   GmailLabel,
   GoogleClientCheck,
   GoogleClientConfig,
@@ -271,6 +272,8 @@ export interface GoogleService extends Lifecycle {
   completeConnect(code: string, state: string): Promise<Account>;
   /** Paste mode: the full URL the user landed on after consent. */
   completeConnectFromUrl(url: string): Promise<Account>;
+  /** What became of the sign-in started with this state (the callback page can't always tell the console). */
+  connectAttempt(state: string): ConnectAttempt;
 
   /** FROZEN. Gmail client for an account (cheap; may be cached). */
   gmail(accountId: string): GmailClient;

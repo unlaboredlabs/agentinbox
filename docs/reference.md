@@ -22,7 +22,8 @@ running agentinbox in production, scripting it, and understanding what it does.
 - **MCP for every agent.** Streamable HTTP at `/mcp`: `search_threads`, `get_thread`, `reply`, `send_message`,
   `modify_labels`, `wait_for_events` and more. Each agent sees only the tools its grants allow.
 - **Real-time delivery.** New mail, replies to threads you sent into, and label changes arrive within seconds through
-  Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or by polling with zero extra setup.
+  Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or within the poll interval (30 seconds by
+  default) by polling with zero extra setup.
   [`agentinbox listen`](listen.md) wakes agents on a laptop behind NAT.
 - **Webhooks.** Filter by account, label, sender, recipient, subject or attachments. Payloads are signed per
   [Standard Webhooks](https://www.standardwebhooks.com), retried with backoff, logged, and replayable.

@@ -6,6 +6,7 @@ import { useState } from "react";
 import { StatusDot, TimeAgo } from "@/components/common";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { connectCommands } from "@/lib/cli";
+import { ArrivalSpeed } from "@/hooks/use-delivery-speed";
 import { fmtNumber } from "@/lib/format";
 import { queries } from "@/lib/queries";
 import { useAgentOrigin } from "./agent-status";
@@ -29,8 +30,8 @@ export function AgentListeners({ agent }: { agent: Agent }) {
           <BellRingIcon className="size-4 text-muted-foreground" /> Listeners
         </CardTitle>
         <CardDescription>
-          A listener keeps an outbound connection open from the agent's machine and wakes the agent the moment mail arrives. No open ports or
-          public URL needed on that machine.
+          A listener keeps an outbound connection open from the agent's machine and wakes the agent <ArrivalSpeed of="new mail arriving" neutral="when new mail arrives" />. No
+          open ports or public URL needed on that machine.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
