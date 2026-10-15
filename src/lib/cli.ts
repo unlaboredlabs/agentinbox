@@ -86,26 +86,59 @@ export function transportOf(publicUrl: string): Transport {
 // ───────────── Commands ─────────────
 
 export interface ConnectCommands {
+  /** `connect <url> --tool <tool> --setup-mcp`: pairing, then the MCP setup in the tool. */
   connect: string;
-  listen: string;
-  selfSetup: string;
+  /** Register the MCP server in the tool again (after connect without --setup-mcp, or a reinstall). */
+  setupMcp: string;
+  /** How to see that the tool has the server, when it has a command for that. */
+  mcpCheck: string | null;
+  /** Install the agentinbox skill for this tool. */
   skillInstall: string;
+  /** Try the listener in the foreground first (Ctrl-C stops it). `--save` keeps the command for the service. */
+  listenTry: string;
+  /** Then keep it running in the background (systemd / launchd). */
+  listenService: string;
+  /** Prompt for an agent that sets itself up from the skill. */
+  selfSetup: string;
   insecure: boolean;
 }
 
-/** `acceptInsecure`: the human explicitly accepted plain http; only then is --insecure added. */
+/** A listener command that only acknowledges events: proves delivery without starting anything. */
+export const LISTEN_TEST_EXEC = "cat > /dev/null";
+
+const SKILL_TARGET: Partial<Record<AgentTool, string>> = {
+  "claude-code": "claude",
+  codex: "codex",
+  cursor: "agents",
+  hermes: "~/.hermes/skills/email",
+};
+
+const MCP_CHECK: Partial<Record<AgentTool, string>> = {
+  "claude-code": "claude mcp list",
+  codex: "codex mcp list",
+  hermes: "hermes mcp test agentinbox",
+};
+
+/**
+ * Commands for one tool, in the order `connect` itself prints them (server/listen/connect.ts).
+ * `acceptInsecure`: the human explicitly accepted plain http; only then is --insecure added.
+ */
 export function connectCommands(publicUrl: string, tool: AgentTool, acceptInsecure = false): ConnectCommands {
   const insecure = transportOf(publicUrl) === "insecure";
   const flag = insecure && acceptInsecure ? " --insecure" : "";
-  const toolFlags = tool === "other" ? "" : ` --tool ${tool} --setup-mcp`;
+  const url = shellQuote(publicUrl);
+  const exec = tool === "other" ? "/path/to/handle-email.sh" : `"$(${NPX} listen --print-recipe ${tool})"`;
+  const target = SKILL_TARGET[tool];
+  // Claude Code's web fetch refuses localhost, so point loopback setups at curl.
+  const fetchSkill = transportOf(publicUrl) === "loopback" ? `Run curl -s ${publicUrl}/skill.md and follow it` : `Read ${publicUrl}/skill.md and follow it`;
   return {
-    connect: `${NPX} connect ${shellQuote(publicUrl)}${toolFlags}${flag}`,
-    listen:
-      tool === "other"
-        ? `${NPX} listen service install --exec /path/to/handle-email.sh${flag}`
-        : `${NPX} listen service install --exec "$(${NPX} listen --print-recipe ${tool})"${flag}`,
-    selfSetup: `Read ${publicUrl}/skill.md and set yourself up with agentinbox.`,
-    skillInstall: `${NPX} skill install --url ${shellQuote(publicUrl)}`,
+    connect: `${NPX} connect ${url} --tool ${tool}${tool === "other" ? "" : " --setup-mcp"}${flag}`,
+    setupMcp: `${NPX} setup-mcp --tool ${tool}`,
+    mcpCheck: MCP_CHECK[tool] ?? null,
+    skillInstall: target ? `${NPX} skill install --target ${target} --url ${url}` : `${NPX} skill print --url ${url} > SKILL.md`,
+    listenTry: tool === "other" ? `${NPX} listen --exec ${shellQuote(LISTEN_TEST_EXEC)}${flag}` : `${NPX} listen --save --exec ${exec}${flag}`,
+    listenService: `${NPX} listen service install --exec ${exec}${flag}`,
+    selfSetup: `${fetchSkill} to set yourself up with agentinbox.`,
     insecure,
   };
 }

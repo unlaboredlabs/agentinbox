@@ -3,17 +3,20 @@ import type { Agent } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { BellRingIcon } from "lucide-react";
 import { useState } from "react";
-import { CodeBlock, StatusDot, TimeAgo } from "@/components/common";
+import { StatusDot, TimeAgo } from "@/components/common";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { connectCommands, RECIPES } from "@/lib/cli";
+import { connectCommands } from "@/lib/cli";
 import { fmtNumber } from "@/lib/format";
 import { queries } from "@/lib/queries";
-import { InsecureTransportAlert, ToolTabs } from "./connect-agent-guide";
+import { useAgentOrigin } from "./agent-status";
+import { InsecureTransportAlert, ListenCommands, ToolTabs } from "./connect-agent-guide";
 
 /** `agentinbox listen` instances for this agent, and how to add one. */
 export function AgentListeners({ agent }: { agent: Agent }) {
   const settings = useQuery(queries.settings());
-  const [tool, setTool] = useState<AgentTool>("claude-code");
+  const origin = useAgentOrigin(agent);
+  const [picked, setTool] = useState<AgentTool | null>(null);
+  const tool = picked ?? origin.tool ?? "claude-code";
   const [acceptInsecure, setAcceptInsecure] = useState(false);
   const publicUrl = settings.data?.publicUrl ?? window.location.origin;
   const c = connectCommands(publicUrl, tool, acceptInsecure);
@@ -78,14 +81,13 @@ export function AgentListeners({ agent }: { agent: Agent }) {
 
         <div className="space-y-3">
           <div className="text-sm font-medium">{listeners.length ? "Add or update a listener" : "Start a listener"}</div>
+          <p className="text-sm text-muted-foreground">
+            Run these on the machine where this agent was connected with <code className="font-mono text-foreground">npx agentinbox-cli connect</code>:
+            the listener uses the key connect saved there. For an agent created here with a copied key, use a webhook instead.
+          </p>
           <ToolTabs value={tool} onChange={setTool} />
           <InsecureTransportAlert publicUrl={publicUrl} accepted={acceptInsecure} onAcceptedChange={setAcceptInsecure} />
-          <CodeBlock code={c.listen} wrap />
-          <p className="text-xs text-muted-foreground">{RECIPES[tool].note}</p>
-          <p className="text-xs text-muted-foreground">
-            Run it on the machine where this agent was connected with <code className="font-mono text-foreground">npx agentinbox-cli connect</code>
-            : the listener uses the key that connect saved there. For an agent created here with a copied key, use a webhook instead.
-          </p>
+          <ListenCommands c={c} tool={tool} />
         </div>
       </CardContent>
     </Card>

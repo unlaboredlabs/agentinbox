@@ -14,16 +14,16 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { DEFAULT_GRANT, type GrantFields, grantProblem, sameGrant, toGrantFields, validateAddressGlob } from "@/lib/grants";
-import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
+import { CAPABILITY_INFO } from "@/lib/labels";
 import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { grantInWords } from "./grant-words";
 import { LabelScopePicker } from "./label-scope-picker";
 import { SendModeControl } from "./send-mode-control";
 
 function summary(g: GrantFields) {
-  const parts: string[] = [g.capabilities.map((c) => CAPABILITY_INFO[c].label).join(", ") || "No capabilities"];
-  if (g.capabilities.includes("send")) parts.push(SEND_MODE_INFO[g.sendMode].short);
+  const parts: string[] = [grantInWords(g)];
   if (g.labelScope) parts.push(`${g.labelScope.length} label${g.labelScope.length === 1 ? "" : "s"}`);
   if (g.allowTo.length) parts.push(`${g.allowTo.length} allowed recipient${g.allowTo.length === 1 ? "" : "s"}`);
   if (g.replyOnly) parts.push("replies only");

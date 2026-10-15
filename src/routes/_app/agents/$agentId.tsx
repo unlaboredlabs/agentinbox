@@ -6,11 +6,10 @@ import { ConnectAccountButton } from "@/components/accounts/accounts-list";
 import { AgentActivity } from "@/components/agents/agent-activity";
 import { AgentHeader } from "@/components/agents/agent-header";
 import { AgentListeners } from "@/components/agents/agent-listeners";
+import { AgentTools } from "@/components/agents/agent-tools";
 import { AgentWebhooks } from "@/components/agents/agent-webhooks";
-import { ConnectSnippets } from "@/components/agents/connect-snippets";
 import { GrantEditor } from "@/components/agents/grant-editor";
 import { KeyReveal } from "@/components/agents/key-reveal";
-import { TestConnection } from "@/components/agents/test-connection";
 import { QueryError } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -97,19 +96,7 @@ function AgentPage() {
         )}
       </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Give it the tools</CardTitle>
-          <CardDescription>
-            Add agentinbox as an MCP server in your agent with this agent's key, then test the connection. Agents connected by pairing already have
-            this set up.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <ConnectSnippets apiKey={apiKey} />
-          <TestConnection agentId={a.id} />
-        </CardContent>
-      </Card>
+      <AgentTools agent={a} apiKey={apiKey} />
 
       <AgentListeners agent={a} />
 
