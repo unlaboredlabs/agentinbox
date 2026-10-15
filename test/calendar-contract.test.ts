@@ -307,7 +307,8 @@ describe("calendar helpers", () => {
       checked: ["a@x.com"],
     });
     expect(attendeeImpact({ ...base, kind: "update", before: ["a@x.com", "b@x.com"], after: ["a@x.com", "c@x.com"] }).emailed).toEqual(["a@x.com", "c@x.com", "b@x.com"]);
-    expect(attendeeImpact({ ...base, notify: false, kind: "update", before: ["a@x.com"], after: ["a@x.com", "c@x.com"] })).toEqual({ emailed: [], checked: ["c@x.com"] });
+    // Without notify nobody is emailed, but everyone who can see the event still has to pass allowTo.
+    expect(attendeeImpact({ ...base, notify: false, kind: "update", before: ["a@x.com"], after: ["a@x.com", "c@x.com"] })).toEqual({ emailed: [], checked: ["a@x.com", "c@x.com"] });
     expect(attendeeImpact({ ...base, kind: "delete", before: ["a@x.com"], after: [], organizerSelf: false }).emailed).toEqual([]);
   });
 });

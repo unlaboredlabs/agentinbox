@@ -33,7 +33,7 @@ import { reserveSend } from "../policy/enforce.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
 import { HttpError, PolicyDenied } from "../util/errors.ts";
 import { addedAttendees, applyChange, type CalendarWriteKind } from "./approvals.ts";
-import { eventDescriptionContent } from "./content.ts";
+import { cleanEventDescription } from "./content.ts";
 import { selfAttendee, summarizeEvent } from "./summary.ts";
 
 export interface CalendarAccess {
@@ -131,8 +131,9 @@ export function validateEventInput(input: CalendarEventInput, kind: "create" | "
         throw bad("start and end must be date-times like 2026-10-20T09:00:00+02:00, or dates like 2026-10-20 for all-day events.");
       }
       if ((!s[1] || !e[1]) && !out.timeZone) throw bad("Date-times without an offset need time_zone (e.g. \"Europe/Berlin\").");
-      // Without offsets both are wall-clock times in the same zone, so the strings compare like the times.
-      const ordered = s[1] && e[1] ? Date.parse(start) < Date.parse(end) : start < end;
+      // Without offsets both are wall-clock times in the same zone, so the strings compare like the times
+      // (with one offset only, Google judges).
+      const ordered = s[1] && e[1] ? Date.parse(start) < Date.parse(end) : !s[1] && !e[1] ? start < end : true;
       if (!ordered) throw bad("end must be after start.");
     } else {
       if (Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end))) throw bad("start and end must be real dates.");
@@ -314,7 +315,7 @@ export class AgentCalendar {
     this.trace.target = id;
     this.trace.detail = { calendarId: cal };
     const raw = await this.fetchEvent(a, cal, id);
-    const content = eventDescriptionContent(raw, { accountEmail: a.account.email, maxChars: this.ctx.settings.get().maxBodyChars });
+    const content = await cleanEventDescription(this.ctx, raw, { accountEmail: a.account.email, maxChars: this.ctx.settings.get().maxBodyChars });
     return { account: a.account, event: summarizeEvent(raw, cal), content };
   }
 
@@ -552,7 +553,7 @@ function translate(a: CalendarAccess, err: unknown, missing?: string): unknown {
   }
   if (kind === "scope_missing") return notGranted(a.account.email);
   if (err.status === 412) {
-    return new ToolError("event_changed", "The event changed in Google Calendar since you read it, so nothing was changed. Fetch it again with get_calendar_event and retry.");
+    return new ToolError("calendar_conflict", "The event changed in Google Calendar since you read it, so nothing was changed. Fetch it again with get_calendar_event and retry.");
   }
   if (missing && (err.status === 404 || err.status === 410)) return new ToolError("not_found", missing);
   return err;
