@@ -95,7 +95,7 @@ export const AUDIT_OUTCOME: Record<AuditOutcome, { label: string; tone: Tone }> 
   error: { label: "Error", tone: "bad" },
 };
 
-/** Plain-language explanations for guardrail denial reasons. */
+/** Plain-language explanations for guardrail denial reasons (and why a tool call was rejected). */
 export const DENIAL_REASONS: Record<string, string> = {
   allow_to: "A recipient isn't on the grant's allowlist",
   label_scope: "The message is outside the agent's label scope",
@@ -111,6 +111,10 @@ export const DENIAL_REASONS: Record<string, string> = {
   pending_cap: "Too many pairing requests are already waiting",
   lockout: "Too many wrong codes or keys from this address",
   not_found: "The item doesn't exist or is outside the agent's access",
+  // Tool calls rejected before the tool ran (outcome "error").
+  invalid_arguments: "The agent's arguments don't match the tool's schema",
+  unknown_tool: "No such tool for this agent (unknown, or its grants don't include it)",
+  invalid_request: "The agent sent a malformed tool call",
 };
 
 export const KIND_LABEL = { send: "New message", reply: "Reply", forward: "Forward" } as const;
