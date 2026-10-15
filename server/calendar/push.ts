@@ -82,9 +82,11 @@ interface ChannelRow {
  * Anything else (5xx, 429, network, one account's scopes) is retried on the next reconcile.
  */
 export function addressRejected(err: unknown): boolean {
-  if (!(err instanceof GoogleApiError) || err.status !== 400) return false;
+  if (!(err instanceof GoogleApiError) || ![400, 401, 403].includes(err.status)) return false;
   const reasons = [err.reason, ...(err.details.reasons ?? [])].filter(Boolean) as string[];
-  return reasons.some((r) => r.startsWith("push.webhookUrl")) || /webhook|callback|certificate|https/i.test(err.message);
+  if (reasons.some((r) => r.startsWith("push.webhookUrl"))) return true;
+  // Older answers say it only in words, as a 400.
+  return err.status === 400 && /webhook|callback|certificate/i.test(err.message);
 }
 
 /** Compared against when the channel is unknown, so both answers take the same time. */

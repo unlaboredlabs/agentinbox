@@ -203,10 +203,12 @@ describe("push channels", () => {
     expect(cal.stopped).toHaveLength(2);
   });
 
-  it("stays on polling when Google refuses the address", async () => {
-    cal.failWatch(
-      new GoogleApiError(400, `Unauthorized WebHook callback channel: ${PUBLIC}${CALENDAR_PUSH_PATH}`, "push.webhookUrlUnauthorized", { reasons: ["push.webhookUrlUnauthorized"] }),
-    );
+  it.each([
+    [new GoogleApiError(400, `Unauthorized WebHook callback channel: ${PUBLIC}${CALENDAR_PUSH_PATH}`, "push.webhookUrlUnauthorized", { reasons: ["push.webhookUrlUnauthorized"] })],
+    [new GoogleApiError(403, "Unauthorized", "push.webhookUrlUnauthorized", { reasons: ["push.webhookUrlUnauthorized"] })],
+    [new GoogleApiError(400, "WebHook callback must be HTTPS", "badRequest")],
+  ])("stays on polling when Google refuses the address (%s)", async (err) => {
+    cal.failWatch(err);
     await push.reconcile();
     expect(rows().every((r) => r.channel_id === null)).toBe(true);
     cal.failWatch(null);
@@ -219,6 +221,7 @@ describe("push channels", () => {
     ["a rate limit", new GoogleApiError(429, "Rate Limit Exceeded", "rateLimitExceeded")],
     ["a network error", new GoogleApiError(0, "connect ECONNRESET", "network")],
     ["one account's missing scope", new GoogleApiError(403, "Request had insufficient authentication scopes.", "ACCESS_TOKEN_SCOPE_INSUFFICIENT")],
+    ["a 400 that only mentions https", new GoogleApiError(400, "Invalid value for: https is not a valid calendar id", "invalid")],
   ])("retries after %s instead of giving up on push", async (_what, err) => {
     cal.failWatch(err);
     await push.reconcile();
