@@ -8,6 +8,7 @@ import type {
   Attachment,
   ConnectAccountResponse,
   GmailLabel,
+  GoogleClientCheck,
   GoogleClientConfig,
   GoogleClientImportInput,
   GoogleClientImportResult,
@@ -253,7 +254,9 @@ export interface GoogleService extends Lifecycle {
   clientView(): GoogleClientView;
   setClient(input: GoogleClientConfig): GoogleClientView;
   /** Imports Google's downloaded client-secret JSON (Web application clients only). */
-  importClient(input: GoogleClientImportInput): GoogleClientImportResult;
+  importClient(input: GoogleClientImportInput): Omit<GoogleClientImportResult, "check">;
+  /** Asks Google whether the saved client ID, secret and redirect URI work (GoogleClientCheck). */
+  checkClient(): Promise<GoogleClientCheck>;
   redirectUri(): string;
   /** Setup problems derived from the client config and connected accounts (SetupState.warnings). */
   setupWarnings(): SetupWarning[];
@@ -284,6 +287,7 @@ export interface GoogleService extends Lifecycle {
 
   // Pub/Sub
   pubsubState(): PubsubState;
-  provisionPubsub(): Promise<PubsubState>;
+  /** `accountId` chooses (and saves) the principal account; default: the current principal. */
+  provisionPubsub(opts?: { accountId?: string }): Promise<PubsubState>;
   testPubsub(): Promise<PubsubTestResult>;
 }

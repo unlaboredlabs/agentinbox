@@ -66,6 +66,9 @@ describe("OAuth client config", () => {
       appType: "external",
       redirectUri: `http://localhost:${ctx.config.port}/oauth/callback`,
       callbackMode: "direct",
+      secretHint: FAKE_CLIENT.clientSecret.slice(-4),
+      warnings: [],
+      check: { clientId: "ok", redirectUri: "ok", secret: "ok", warnings: [] },
     });
     expect(JSON.stringify(view)).not.toContain(FAKE_CLIENT.clientSecret);
     expect(JSON.stringify(ctx.settings.getState("google.client"))).not.toContain(FAKE_CLIENT.clientSecret);

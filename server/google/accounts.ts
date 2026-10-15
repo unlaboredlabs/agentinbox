@@ -119,7 +119,13 @@ export function createAccountsService(ctx: AppContext): AccountsService {
         ctx.db.run("DELETE FROM sent_threads WHERE account_id = ?", id);
         ctx.db.run("DELETE FROM accounts WHERE id = ?", id);
         const pubsub = ctx.settings.getState("pubsub");
-        if (pubsub?.principalAccountId === id) ctx.settings.setState("pubsub", { ...pubsub, principalAccountId: null });
+        if (pubsub && (pubsub.principalAccountId === id || pubsub.pendingPrincipalAccountId === id)) {
+          ctx.settings.setState("pubsub", {
+            ...pubsub,
+            principalAccountId: pubsub.principalAccountId === id ? null : pubsub.principalAccountId,
+            pendingPrincipalAccountId: pubsub.pendingPrincipalAccountId === id ? null : (pubsub.pendingPrincipalAccountId ?? null),
+          });
+        }
       });
       ctx.audit.record({
         ...ADMIN_ACTOR,

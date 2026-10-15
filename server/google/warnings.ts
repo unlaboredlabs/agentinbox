@@ -1,7 +1,7 @@
 import type { SetupWarning } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { type AccountRow, allRows } from "./accounts.ts";
-import { redirectWarning } from "./client.ts";
+import { clientWarnings, redirectWarning } from "./client.ts";
 
 type Ctx = Pick<AppContext, "db" | "settings" | "config" | "crypto">;
 
@@ -29,6 +29,7 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
   const audienceUrl = `https://console.cloud.google.com/auth/audience${project}`;
   const rows = allRows(ctx);
 
+  out.push(...clientWarnings(ctx));
   const redirect = redirectWarning(ctx);
   if (redirect) out.push(redirect);
 

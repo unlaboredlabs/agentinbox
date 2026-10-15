@@ -54,7 +54,17 @@ describe("Pub/Sub provisioning", () => {
     const a = await connectFakeAccount(ctx, fake, "ops@example.com", { pubsub: true });
     const b = await connectFakeAccount(ctx, fake, "sales@example.com");
     const state = await ctx.google.provisionPubsub();
-    expect(state).toEqual({ mode: "pubsub", topic: TOPIC, subscription: SUB, lastError: null, lastMessageAt: null });
+    expect(state).toEqual({
+      mode: "pubsub",
+      topic: TOPIC,
+      subscription: SUB,
+      lastError: null,
+      lastMessageAt: null,
+      principalAccountId: a.id,
+      principalEmail: "ops@example.com",
+      pendingPrincipalAccountId: null,
+      pendingPrincipalEmail: null,
+    });
     expect(ctx.settings.get().ingestMode).toBe("pubsub");
     expect(ctx.settings.getState("pubsub")?.principalAccountId).toBe(a.id);
     expect(fake.iamPolicy(TOPIC)?.bindings).toEqual([
@@ -82,7 +92,11 @@ describe("Pub/Sub provisioning", () => {
     expect(err.message).toMatch(/iam\.allowedPolicyMemberDomains/);
     expect(err.message).toMatch(/Domain Restricted Sharing/);
     expect(err.hint).toMatch(/poll mode/);
-    expect(err.hint).toMatch(/exception/);
+    expect(err.code).toBe("pubsub_org_policy");
+    expect(err.hint).toContain("serviceAccount:gmail-api-push@system.gserviceaccount.com");
+    expect(err.hint).toContain(`https://console.cloud.google.com/iam-admin/orgpolicies?project=${FAKE_CLIENT.projectId}`);
+    expect(err.hint).toContain("roles/orgpolicy.policyAdmin");
+    expect(err.hint).toMatch(/alternative is polling/);
     expect(ctx.settings.get().ingestMode).toBe("poll");
     const state = ctx.google.pubsubState();
     expect(state.mode).toBe("poll");
@@ -110,8 +124,13 @@ describe("Pub/Sub provisioning", () => {
     fake.addAccount("intern@example.com", { projectAccess: false });
     await connectFakeAccount(ctx, fake, "intern@example.com", { pubsub: true });
     const err = await provisionError();
-    expect(err.message).toMatch(/intern@example\.com doesn't have permission to manage Pub\/Sub/);
-    expect(err.hint).toMatch(/Owner or Pub\/Sub Admin/);
+    expect(err.code).toBe("pubsub_permission_denied");
+    expect(err.message).toMatch(/intern@example\.com lacks the Google Cloud IAM role/);
+    expect(err.hint).toMatch(/roles\/pubsub\.admin\) or Owner/);
+    expect(err.hint).toContain(`https://console.cloud.google.com/iam-admin/iam?project=${FAKE_CLIENT.projectId}`);
+    expect(err.hint).toContain(
+      `gcloud projects add-iam-policy-binding ${FAKE_CLIENT.projectId} --member=user:intern@example.com --role=roles/pubsub.admin`,
+    );
     expect(err.hint).not.toMatch(/Editor or/);
   });
 
@@ -121,7 +140,7 @@ describe("Pub/Sub provisioning", () => {
     const err = await provisionError();
     expect(err.status).toBe(409);
     expect(err.code).toBe("pubsub_scope_required");
-    expect(err.message).toMatch(/permission to manage Pub\/Sub as a@example\.com/);
+    expect(err.message).toMatch(/needs access to Pub\/Sub as a@example\.com/);
 
     // The console's "Grant Pub/Sub access" button: POST /api/accounts/connect {scopes:["pubsub"]}.
     fake.consentAs("a@example.com");

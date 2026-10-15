@@ -77,7 +77,7 @@ describe("setup state", () => {
       googleClientConfigured: true,
       gcpProjectId: "proj-1",
       googleAppType: "external",
-      pubsub: { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null },
+      pubsub: { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null, principalAccountId: null, principalEmail: null, pendingPrincipalAccountId: null, pendingPrincipalEmail: null },
       accountsConnected: 0,
       agentsCreated: 0,
       complete: false,

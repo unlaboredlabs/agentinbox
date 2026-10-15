@@ -42,14 +42,17 @@ describe("onboarding wizard", () => {
 
   it("imports the client JSON and flags a missing redirect URI until it is registered", async () => {
     const redirectUri = `${s.url}/oauth/callback`;
+    s.fake.registeredRedirectUris = [`${s.url}/oauth/callback/`]; // what Google has: the trailing slash typo
     const first = await s.admin.post<GoogleClientImportResult>("/api/google/client/import", { json: clientJson([`${s.url}/oauth/callback/`]), appType: "external" });
     expect(first).toMatchObject({ clientId: FAKE_CLIENT.clientId, hasSecret: true, projectId: FAKE_CLIENT.projectId, appType: "external", redirectUri });
     expect(first.warnings.map((w) => w.code)).toEqual(["redirect_uri_missing"]);
     expect(first.warnings[0]!.message).toContain(redirectUri);
+    expect(first.check).toMatchObject({ clientId: "ok", redirectUri: "missing", secret: "ok" });
     let state = await s.admin.get<SetupState>("/api/setup/state");
     expect(state.googleClientConfigured).toBe(true);
     expect(state.warnings.map((w) => w.code)).toEqual(["redirect_uri_missing"]);
 
+    s.fake.registeredRedirectUris = [redirectUri];
     const fixed = await s.admin.post<GoogleClientImportResult>("/api/google/client/import", { json: clientJson([redirectUri]) });
     expect(fixed.warnings).toEqual([]);
     expect(fixed.appType).toBe("external"); // kept when omitted
