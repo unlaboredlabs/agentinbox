@@ -382,18 +382,22 @@ export function serviceMainPid(ops: ServiceOps): number | null {
 
 /**
  * Refuses (before anything is touched) while agentinbox already runs outside the service: in a
- * terminal on this data directory (its instance lock), or anything on the port when no service is
- * installed yet. The service could only fail to start, and the health check would hear the other one.
+ * terminal on this data directory (its instance lock), or anything on the port while the service
+ * isn't running. The service could only fail to start, and the health check would hear the other one.
+ * A lock holder is the service when its lock says so, or (early nightlies didn't write that flag)
+ * when, with a unit installed, it is the service manager's main process.
  */
-export async function assertNothingElseRunning(config: Pick<ServiceConfig, "dataDir" | "host" | "port">, ops: ServiceOps, serviceInstalled: boolean): Promise<void> {
+export async function assertNothingElseRunning(config: Pick<ServiceConfig, "dataDir" | "host" | "port">, ops: ServiceOps, unitInstalled: boolean): Promise<void> {
   const other = ops.instance(config.dataDir);
-  if (other && !other.service) {
+  const mainPid = unitInstalled ? serviceMainPid(ops) : null;
+  if (other && !other.service && other.pid !== mainPid) {
     throw new Error(
       `agentinbox is already running in a terminal (pid ${other.pid}${other.port ? `, port ${other.port}` : ""}): stop it with Ctrl-C, then run this again. ` +
         `The service uses the same data directory (${config.dataDir}), and only one agentinbox can use it at a time. Nothing was changed.`,
     );
   }
-  if (!other && !serviceInstalled && (await ops.portInUse(config.host, config.port))) {
+  // A running service (on whatever data directory) may hold the port; reinstalling stops it first.
+  if (!other && mainPid === null && (await ops.portInUse(config.host, config.port))) {
     throw new Error(
       `Port ${config.port} is already in use: by agentinbox running in a terminal with another --data directory, or by another program. ` +
         `Stop it (Ctrl-C in its terminal), or choose another port with --port. Nothing was changed.`,
@@ -402,16 +406,17 @@ export async function assertNothingElseRunning(config: Pick<ServiceConfig, "data
 }
 
 /**
- * Whether the agentinbox that answered the health check is the service's own process: it holds the
- * data directory's lock as a service, it is the service manager's main process (when that is known),
- * and it isn't the process that held the lock before the install. Null when it is; else why not.
+ * After the health check answered: whether the data directory's lock holder is the new service's own
+ * process. It must be the service manager's main process (or, when that pid is unknown, say in its lock
+ * that it is the service), and not the process that held the lock before the install. This checks the
+ * lock holder, not who answered: agentinbox binds its port before taking the lock and exits when the
+ * port is taken, so a service that holds the lock is the one listening. Null when it is; else why not.
  */
 export function notTheService(owner: InstanceInfo | null, before: InstanceInfo | null, mainPid: number | null): string | null {
-  if (!owner) return "the agentinbox that answered doesn't hold the data directory";
+  if (!owner) return "no agentinbox holds the data directory";
   const same = before && owner.pid === before.pid && owner.startedAt === before.startedAt;
-  if (!owner.service || same || (mainPid !== null && owner.pid !== mainPid)) {
-    return `the agentinbox that answered (pid ${owner.pid}) is not the service${mainPid ? ` (pid ${mainPid})` : ""}`;
-  }
+  const isService = mainPid !== null ? owner.pid === mainPid : !!owner.service;
+  if (same || !isService) return `the agentinbox holding the data directory (pid ${owner.pid}) is not the service${mainPid ? ` (pid ${mainPid})` : ""}`;
   return null;
 }
 

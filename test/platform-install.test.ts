@@ -10,6 +10,7 @@ import {
   installService,
   isHealthResponse,
   notTheService,
+  serviceMainPid,
   renderSystemdUnit,
   serviceHints,
   type ServiceOps,
@@ -67,6 +68,14 @@ describe("1: Node version check", () => {
 
 const SERVICE_PID = 4242;
 
+type FakeOps = ServiceOps & {
+  calls: string[];
+  owner: InstanceInfo | null;
+  busyPort: boolean;
+  /** systemd's MainPID for the unit; undefined: SERVICE_PID while `owner` is a service, else none. */
+  mainPid: number | null | undefined;
+};
+
 /**
  * Fake systemd: `enable --now` starts the service, whose process takes the data directory's lock as a
  * service (pid SERVICE_PID, also systemd's MainPID); `disable --now` stops it. `owner` is that lock.
@@ -75,13 +84,18 @@ function fakeOps(
   dir: string,
   failOn?: (cmd: string, args: string[]) => boolean,
   ready = true,
-): ServiceOps & { calls: string[]; owner: InstanceInfo | null; busyPort: boolean } {
+): FakeOps {
   const calls: string[] = [];
   let starts = 0;
-  const ops: ServiceOps & { calls: string[]; owner: InstanceInfo | null; busyPort: boolean } = {
+  const ops: FakeOps = {
     owner: null,
     busyPort: false,
-    capture: (cmd, args) => (cmd === "systemctl" && args.includes("MainPID") && ops.owner?.service ? `${SERVICE_PID}\n` : ""),
+    mainPid: undefined,
+    capture: (cmd, args) => {
+      if (cmd !== "systemctl" || !args.includes("MainPID")) return "";
+      const pid = ops.mainPid !== undefined ? ops.mainPid : ops.owner?.service ? SERVICE_PID : null;
+      return `${pid ?? 0}\n`;
+    },
     calls,
     platform: "linux",
     root: false,
@@ -236,18 +250,112 @@ describe("3: service install", () => {
       ops.calls.push(`${cmd} ${args.join(" ")}`);
       if (cmd === "systemctl" && args.includes("enable")) ops.owner = { pid: 999, host: "127.0.0.1", port: 0, startedAt: "fg", service: false };
     };
-    await expect(installService(config, ops)).rejects.toThrow(/answered \(pid 999\) is not the service.*Rolled back to no service/s);
+    await expect(installService(config, ops)).rejects.toThrow(/data directory \(pid 999\) is not the service.*Rolled back to no service/s);
     expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
     expect(log.mock.calls.flat().join("\n")).not.toMatch(/Installed|Running at/);
+  });
+
+  it("treats an unflagged lock holder as the service when it is systemd's main process (early nightlies)", async () => {
+    const config = setup();
+    mkdirSync(join(config.dataDir, "units"), { recursive: true });
+    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "old unit\n");
+    const ops = fakeOps(config.dataDir);
+    ops.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: "old" };
+    ops.mainPid = SERVICE_PID;
+    ops.exec = (cmd, args) => {
+      ops.calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd !== "systemctl") return;
+      if (args.includes("disable")) ops.owner = null;
+      if (args.includes("enable") && args.includes("--now")) ops.owner = { pid: SERVICE_PID + 1, host: "127.0.0.1", port: 0, startedAt: "new", service: true };
+    };
+    ops.capture = (cmd, args) => (cmd === "systemctl" && args.includes("MainPID") ? `${ops.owner?.pid ?? 0}\n` : "");
+    await installService(config, ops);
+    expect(ops.owner).toMatchObject({ pid: SERVICE_PID + 1 });
+    // Without a unit, the same unflagged holder is a terminal instance.
+    const fresh = setup();
+    const other = fakeOps(fresh.dataDir);
+    other.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: "old" };
+    other.mainPid = SERVICE_PID;
+    await expect(installService(fresh, other)).rejects.toThrow(/already running in a terminal \(pid 4242/);
+  });
+
+  it("probes the port unless the service is actually running", async () => {
+    // A unit is installed but its service isn't running: whatever holds the port isn't it.
+    const config = setup();
+    mkdirSync(join(config.dataDir, "units"), { recursive: true });
+    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "stopped unit\n");
+    const ops = fakeOps(config.dataDir);
+    ops.busyPort = true;
+    ops.mainPid = null;
+    await expect(installService(config, ops)).rejects.toThrow(/Port \d+ is already in use/);
+    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("stopped unit\n");
+    // Running (on another data directory, say): it holds the port, and reinstalling stops it first.
+    const running = fakeOps(config.dataDir);
+    running.busyPort = true;
+    running.capture = (cmd, args) =>
+      cmd === "systemctl" && args.includes("MainPID") ? `${running.owner ? SERVICE_PID : running.calls.some((c) => c.includes("disable")) ? 0 : 31337}\n` : "";
+    await installService(config, running);
+    expect(running.owner).toMatchObject({ pid: SERVICE_PID, service: true });
+  });
+
+  it("rolls a reinstall back to the previous unit, re-enabled, when someone else holds the data directory", async () => {
+    const config = setup();
+    mkdirSync(join(config.dataDir, "units"), { recursive: true });
+    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "previous unit\n");
+    mkdirSync(join(config.dataDir, "app"), { recursive: true });
+    writeFileSync(join(config.dataDir, "app/marker"), "old app");
+    const ops = fakeOps(config.dataDir);
+    ops.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: "old", service: true };
+    let enables = 0;
+    ops.exec = (cmd, args) => {
+      ops.calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd !== "systemctl") return;
+      if (args.includes("disable")) ops.owner = null;
+      if (args.includes("enable") && args.includes("--now")) {
+        // First the new service starts, but a terminal instance got the data directory; then the previous one comes back.
+        ops.owner = ++enables === 1 ? { pid: 999, host: "127.0.0.1", port: 0, startedAt: "fg", service: false } : { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: "again", service: true };
+      }
+    };
+    const log = vi.spyOn(console, "log");
+    await expect(installService(config, ops)).rejects.toThrow(/\(pid 999\) is not the service.*Rolled back to the previous install/s);
+    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("previous unit\n");
+    expect(readFileSync(join(config.dataDir, "app/marker"), "utf8")).toBe("old app");
+    expect(enables).toBe(2);
+    expect(ops.calls.filter((c) => c === "systemctl --user enable --now agentinbox")).toHaveLength(2);
+    expect(log.mock.calls.flat().join("\n")).not.toMatch(/Installed|Running at/);
+  });
+
+  it("reads the service's main pid from systemd and launchd", () => {
+    const ops = fakeOps("/tmp/x");
+    ops.capture = (cmd, args) => (cmd === "systemctl" && args.join(" ") === "--user show -p MainPID --value agentinbox" ? "1234\n" : "");
+    expect(serviceMainPid(ops)).toBe(1234);
+    ops.capture = () => "0\n";
+    expect(serviceMainPid(ops)).toBeNull();
+    const mac = { ...fakeOps("/tmp/x"), platform: "darwin" as const, uid: 501 };
+    const seen: string[][] = [];
+    mac.capture = (cmd, args) => {
+      seen.push([cmd, ...args]);
+      return `gui/501/com.unlaboredlabs.agentinbox = {\n\tactive count = 1\n\tpath = /Users/me/Library/LaunchAgents/com.unlaboredlabs.agentinbox.plist\n\tstate = running\n\tprogram = /usr/local/bin/node\n\tpid = 8123\n\timmediate reason = speculative\n}\n`;
+    };
+    expect(serviceMainPid(mac)).toBe(8123);
+    expect(seen).toEqual([["launchctl", "print", "gui/501/com.unlaboredlabs.agentinbox"]]);
+    mac.capture = () => "gui/501/com.unlaboredlabs.agentinbox = {\n\tstate = not running\n}\n";
+    expect(serviceMainPid(mac)).toBeNull();
+    mac.capture = () => {
+      throw new Error("Could not find service");
+    };
+    expect(serviceMainPid(mac)).toBeNull();
   });
 
   it("only counts the service's own process as ready", () => {
     const svc = (pid: number, startedAt = "a"): InstanceInfo => ({ pid, host: "h", port: 1, startedAt, service: true });
     expect(notTheService(svc(10), null, 10)).toBeNull();
     expect(notTheService(svc(10), null, null)).toBeNull();
-    expect(notTheService(null, null, 10)).toMatch(/doesn't hold the data directory/);
+    expect(notTheService(null, null, 10)).toMatch(/no agentinbox holds the data directory/);
     expect(notTheService({ ...svc(11), service: false }, null, null)).toMatch(/pid 11\) is not the service/);
-    expect(notTheService(svc(11), null, 10)).toBe("the agentinbox that answered (pid 11) is not the service (pid 10)");
+    expect(notTheService(svc(11), null, 10)).toBe("the agentinbox holding the data directory (pid 11) is not the service (pid 10)");
+    // The service manager's own process counts, even from a build that didn't flag its lock.
+    expect(notTheService({ ...svc(10), service: false }, null, 10)).toBeNull();
     // The previous service's process still holding the lock: the new one didn't take over.
     expect(notTheService(svc(10, "old"), svc(10, "old"), null)).not.toBeNull();
     expect(notTheService(svc(12, "new"), svc(10, "old"), 12)).toBeNull();
