@@ -73,7 +73,9 @@ describe("client JSON import", () => {
       appType: "internal",
       redirectUri: redirectUri(),
       callbackMode: "direct",
+      secretHint: FAKE_CLIENT.clientSecret.slice(-4),
       warnings: [],
+      check: { clientId: "ok", redirectUri: "ok", secret: "ok", warnings: [] },
       registeredRedirectUris: [redirectUri()],
     });
     expect(JSON.stringify(body)).not.toContain(FAKE_CLIENT.clientSecret);
@@ -121,6 +123,7 @@ describe("client JSON import", () => {
   });
 
   it("saves a client whose JSON lacks the redirect URI, with a warning that clears once a connection works", async () => {
+    fake.registeredRedirectUris = ["https://example.com/oauth/callback"];
     const { status, body } = await importJson(clientJson({ redirect_uris: ["https://example.com/oauth/callback"] }), "internal");
     expect(status).toBe(200);
     expect(body.hasSecret).toBe(true);
@@ -139,6 +142,7 @@ describe("client JSON import", () => {
     expect(warnings("redirect_uri_missing")).toHaveLength(1);
 
     // The operator added the URI in Google without re-downloading; a successful connection proves it.
+    fake.registeredRedirectUris = null;
     await connectFakeAccount(ctx, fake, "a@example.com");
     expect(warnings("redirect_uri_missing")).toEqual([]);
 
@@ -148,6 +152,7 @@ describe("client JSON import", () => {
   });
 
   it("drops redirect knowledge when a different client is entered manually", async () => {
+    fake.registeredRedirectUris = [];
     await importJson(clientJson({ redirect_uris: [] }));
     expect(warnings("redirect_uri_missing")[0]!.message).toMatch(/It lists none/);
     ctx.google.setClient({ clientId: "other.apps.googleusercontent.com", clientSecret: "s", projectId: "", appType: "internal" });

@@ -1,4 +1,4 @@
-import type { GoogleAppType, IngestMode, PubsubState, Settings } from "../shared/types.ts";
+import type { GoogleAppType, GoogleClientCheck as ClientCheck, IngestMode, PubsubState, Settings } from "../shared/types.ts";
 import type { Bus } from "./bus.ts";
 import type { Config } from "./config.ts";
 import { type Db, json } from "./db/index.ts";
@@ -20,6 +20,10 @@ export interface InternalState {
     importedRedirectUris?: string[];
     /** Redirect URI of the last successful account connection: proves it is registered on the client. */
     verifiedRedirectUri?: string | null;
+    /** Last 4 characters of the secret, for display (GoogleClientView.secretHint). */
+    secretHint?: string;
+    /** Result of the last client check (server/google/check.ts) for this exact client ID + secret; dropped on save. */
+    check?: { clientId: ClientCheck["clientId"]; redirectUri: ClientCheck["redirectUri"]; secret: ClientCheck["secret"]; redirectUriTested: string; at: string };
   };
   /** Pub/Sub resources and health. `mode` is not stored here: it is Settings.ingestMode. */
   pubsub: Omit<PubsubState, "mode" | "principalAccountId" | "principalEmail"> & {

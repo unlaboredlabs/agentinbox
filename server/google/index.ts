@@ -1,6 +1,7 @@
 import type { GmailLabel } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { createAccountsService } from "./accounts.ts";
+import { checkClient } from "./check.ts";
 import { clientView, callbackMode, importClient, setClient } from "./client.ts";
 import { createGmailClient } from "./gmail.ts";
 import { mimeTools } from "./mime.ts";
@@ -29,6 +30,7 @@ export function createGoogleService(ctx: AppContext): GoogleService {
     clientView: () => clientView(ctx),
     setClient: (input) => setClient(ctx, input),
     importClient: (input) => importClient(ctx, input),
+    checkClient: () => checkClient(ctx),
     redirectUri: () => callbackMode(ctx).redirectUri,
     setupWarnings: () => setupWarnings(ctx),
 

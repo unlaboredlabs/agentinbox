@@ -29,6 +29,8 @@
  *   failNext({ method?, path, status, reason?, message?, retryAfter?, times?, afterProcessing? })  inject errors for matching
  *                                                  requests (afterProcessing: the request takes effect, then the error is returned)
  *   accessTokenTtl                                 seconds for newly issued access tokens (default 3600)
+ *   registeredRedirectUris                         null (default): any redirect URI is accepted. A list emulates the client's
+ *                                                  Authorized redirect URIs: others get Google's redirect_uri_mismatch error page
  *   refreshTokenTtl                                null (default): long-lived refresh tokens. A number simulates an External app in
  *                                                  Testing: new refresh tokens expire after that many seconds (Google: 604800) and
  *                                                  token responses carry refresh_token_expires_in (time left, on refreshes too)
@@ -39,6 +41,11 @@
  * Inspection
  *   sent(email) / drafts(email) / messages(email) / message(email, id)   format=full Gmail JSON (+ drafts as {id, message})
  *   watch(email)  topics()  subscription(name)  iamPolicy(topic)  revoked (tokens)  requests ({method, path} log)
+ *
+ * Consent screen like Google's for a signed-out browser: an unknown client_id or unregistered redirect URI
+ * redirects to /signin/oauth/error/v2?authError=<base64 "Error 401: invalid_client" / "Error 400: redirect_uri_mismatch">;
+ * a request without PKCE (not agentinbox's connect flow, e.g. the client check) redirects to /v3/signin/identifier.
+ * The token endpoint answers invalid_client for a wrong client id or secret before looking at the code.
  *
  * OAuth grants are per user (like Google): revoking any token of a user revokes all of that user's tokens, and
  * consent with include_granted_scopes=true adds to the scopes granted before. Unknown routes (or wrong verbs)
@@ -121,6 +128,7 @@ export interface FakeGoogle {
   iamPolicy(topic: string): { bindings: { role: string; members: string[] }[] } | null;
   accessTokenTtl: number;
   refreshTokenTtl: number | null;
+  registeredRedirectUris: string[] | null;
   pullWaitMs: number;
   /** Long-poll pulls the client cancelled while they were waiting (seen by the server). */
   abortedPulls: number;
@@ -800,9 +808,25 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   on("GET", /^\/o\/oauth2\/v2\/auth$/, (_req, url, _b, _m, res) => {
     const q = url.searchParams;
     const redirect = q.get("redirect_uri");
-    if (q.get("client_id") !== FAKE_CLIENT.clientId) throw new HttpFail(401, "Error 401: invalid_client");
+    const errorPage = (text: string) => {
+      const target = new URL("/signin/oauth/error/v2", url);
+      target.searchParams.set("authError", Buffer.from(text).toString("base64"));
+      target.searchParams.set("client_id", q.get("client_id") ?? "");
+      res.writeHead(302, { location: `${target.pathname}${target.search}` }).end();
+    };
+    if (q.get("client_id") !== FAKE_CLIENT.clientId) return errorPage("Error 401: invalid_client\nThe OAuth client was not found.");
     if (!redirect || q.get("response_type") !== "code") throw new HttpFail(400, "Error 400: invalid_request");
-    if (q.get("code_challenge_method") !== "S256" || !q.get("code_challenge")) throw new HttpFail(400, "Error 400: PKCE required");
+    if (fake.registeredRedirectUris && !fake.registeredRedirectUris.includes(redirect)) {
+      return errorPage(`Error 400: redirect_uri_mismatch\nYou can't sign in because this app sent an invalid request. redirect_uri=${redirect}`);
+    }
+    if (!q.get("code_challenge")) {
+      // Not agentinbox's connect flow (it always uses PKCE): behave like a signed-out browser.
+      const target = new URL("/v3/signin/identifier", url);
+      target.searchParams.set("continue", `${url.pathname}${url.search}`);
+      res.writeHead(302, { location: `${target.pathname}${target.search}` }).end();
+      return;
+    }
+    if (q.get("code_challenge_method") !== "S256") throw new HttpFail(400, "Error 400: PKCE required");
     const consent = consents.shift() ?? (mailboxes.size === 1 ? { email: [...mailboxes.keys()][0]! } : null);
     if (!consent) throw new HttpFail(400, "fake-google: no consent queued (call consentAs)");
     const target = new URL(redirect);
@@ -823,6 +847,14 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     }
     if (state) target.searchParams.set("state", state);
     res.writeHead(302, { location: target.toString() }).end();
+  });
+
+  on("GET", /^\/signin\/oauth\/error\/v2$/, (_req, url) => {
+    const text = Buffer.from(url.searchParams.get("authError") ?? "", "base64").toString("utf8");
+    throw new HttpFail(400, `<!doctype html><title>Error</title><h1>Access blocked: authorization error</h1><p>${text}</p>`);
+  });
+  on("GET", /^\/v3\/signin\/identifier$/, (_req, _url, _b, _m, res) => {
+    res.writeHead(200, { "content-type": "text/html" }).end("<!doctype html><title>Sign in - Google Accounts</title><h1>Sign in</h1>");
   });
 
   on("POST", /^\/token$/, (_req, url, body) => {
@@ -1267,6 +1299,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     google: { oauthBase: url, authBase: url, gmailBase: url, pubsubBase: url },
     accessTokenTtl: 3600,
     refreshTokenTtl: null,
+    registeredRedirectUris: null,
     pullWaitMs: 1000,
     abortedPulls: 0,
     revoked: [],

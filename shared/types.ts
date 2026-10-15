@@ -117,15 +117,19 @@ export interface SetupState {
  *   "internal" but a personal (non-Workspace) Google account is connected (so the app is really External); "info" when it is
  *   "external" and every account is a Workspace account of one domain (Internal would avoid the 7-day
  *   Testing expiry and verification entirely).
- * - redirect_uri_missing: the imported client JSON doesn't list the exact redirect URI (see
- *   GoogleClientImportResult). Clears on a re-import that lists it, or once an account connects
- *   successfully through the current redirect URI (proof it is registered). Severity "error".
+ * - redirect_uri_missing: Google said the redirect URI isn't registered (GoogleClientCheck), or, when the
+ *   check couldn't tell, the imported client JSON doesn't list it. Clears on a check or re-import that
+ *   finds it, or once an account connects through the current redirect URI. Severity "error".
+ * - client_invalid: the last GoogleClientCheck found Google doesn't know the client ID. "error".
+ * - client_secret_invalid: the last GoogleClientCheck found Google rejects the secret. "error".
  * - needs_reauth: an account's sign-in was rejected; one per account (accountId set). Severity "error".
  * - pubsub_failing: ingest mode is pubsub and Pub/Sub has an error (hint carries the remediation). "error".
  */
 export type SetupWarningCode =
   | "testing_mode"
   | "sign_in_expires"
+  | "client_invalid"
+  | "client_secret_invalid"
   | "app_type_mismatch"
   | "redirect_uri_missing"
   | "needs_reauth"
@@ -209,9 +213,35 @@ export interface GoogleClientImportInput {
 }
 
 /**
- * Result of POST /api/google/client/import. The client is saved whenever the ID and secret are valid;
- * problems that don't prevent saving come back as `warnings` (currently only `redirect_uri_missing`,
- * severity "error": connecting will fail on Google's page until the URI is registered).
+ * POST /api/google/client/check (also run automatically by PUT /api/google/client and
+ * POST /api/google/client/import): asks Google whether the saved client works, so problems show up
+ * before connecting (Google reports them on its own page and never redirects back).
+ * Undocumented Google behavior, classified conservatively: "unknown" means "couldn't tell", not "bad".
+ * Each probe times out after 5 s. Results are kept for GET /api/setup/state warnings until the client is
+ * saved again or an account connects (which proves everything).
+ */
+export interface GoogleClientCheck {
+  /** "invalid": Google doesn't know this client ID (deleted, mistyped, other project). */
+  clientId: "ok" | "invalid" | "unknown";
+  /** "missing": GoogleClientView.redirectUri isn't an Authorized redirect URI of the client. */
+  redirectUri: "ok" | "missing" | "unknown";
+  /** "invalid": Google rejected the secret. "unknown" whenever clientId is "invalid". */
+  secret: "ok" | "invalid" | "unknown";
+  /** client_invalid | client_secret_invalid | redirect_uri_missing (all severity "error"). */
+  warnings: SetupWarning[];
+}
+
+/** Returned by PUT /api/google/client: the saved client plus the automatic check. */
+export interface GoogleClientSaveResult extends GoogleClientView {
+  /** Same as `check.warnings` (for import also the JSON's redirect URI list when the check couldn't tell). */
+  warnings: SetupWarning[];
+  check: GoogleClientCheck;
+}
+
+/**
+ * Result of POST /api/google/client/import. The client is saved whenever the ID and secret are present;
+ * problems that don't prevent saving come back as `warnings` (client_invalid, client_secret_invalid,
+ * redirect_uri_missing: all severity "error", connecting will fail until fixed).
  *
  * Errors (400, ApiError.code):
  * - client_json_invalid: not JSON, or not a Google OAuth client file, or a malformed client ID
@@ -219,8 +249,7 @@ export interface GoogleClientImportInput {
  * - client_secret_missing: the file has no client_secret and none is stored for this client ID
  * - bad_request: invalid project_id (same validation as PUT /api/google/client)
  */
-export interface GoogleClientImportResult extends GoogleClientView {
-  warnings: SetupWarning[];
+export interface GoogleClientImportResult extends GoogleClientSaveResult {
   /** The redirect URIs listed in the imported JSON (what Google had registered when it was downloaded). */
   registeredRedirectUris: string[];
 }
@@ -239,6 +268,8 @@ export interface GoogleClientView {
    * asks the user to paste the URL they land on after consent.
    */
   callbackMode: "direct" | "paste";
+  /** Last 4 characters of the saved secret (to recognize which one is saved), or null without a secret. */
+  secretHint: string | null;
 }
 
 // ───────────────────────────── Accounts ─────────────────────────────
@@ -632,8 +663,9 @@ export interface ApiError {
 //   PATCH  /api/settings Partial<Settings>            → Settings
 //   POST   /api/auth/password {current,next}          → 204
 //   GET    /api/google/client                         → GoogleClientView
-//   PUT    /api/google/client GoogleClientConfig      → GoogleClientView   (manual entry; fallback to import)
-//   POST   /api/google/client/import GoogleClientImportInput → GoogleClientImportResult
+//   PUT    /api/google/client GoogleClientConfig      → GoogleClientSaveResult   (manual entry; fallback to import; runs the check)
+//   POST   /api/google/client/check                   → GoogleClientCheck   (400 google_client_missing when nothing is saved)
+//   POST   /api/google/client/import GoogleClientImportInput → GoogleClientImportResult   (runs the check)
 //          400 client_json_invalid | client_json_desktop | client_secret_missing | bad_request (see GoogleClientImportResult)
 //   POST   /api/google/pubsub/provision {accountId?}  → PubsubState   (creates topic + IAM + subscription using the principal account's token;
 //          `accountId` chooses the principal and is saved even if provisioning then fails, so the follow-up

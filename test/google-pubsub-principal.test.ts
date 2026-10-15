@@ -3,7 +3,7 @@
 import type { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ApiError, ConnectAccountResponse, PubsubState } from "../shared/types.ts";
+import type { ApiError, PubsubState } from "../shared/types.ts";
 import { googleApi } from "../server/api/google.ts";
 import type { AppEnv } from "../server/api/util.ts";
 import type { AppContext } from "../server/context.ts";

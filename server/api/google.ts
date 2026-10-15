@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { GoogleClientCheck, GoogleClientImportResult, GoogleClientSaveResult } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { asHttpError } from "../google/http.ts";
 import { HttpError } from "../util/errors.ts";
@@ -30,18 +31,40 @@ export function googleApi(ctx: AppContext) {
   r.put("/google/client", async (c) => {
     const input = await readBody(c, ClientInput);
     const view = ctx.google.setClient(input);
+    const check = await checkAfterSave();
     ctx.audit.record({
       ...ADMIN_ACTOR,
       action: "google.client.update",
       outcome: "ok",
-      detail: { clientId: view.clientId, projectId: view.projectId, appType: view.appType, secretChanged: Boolean(input.clientSecret?.trim()) },
+      detail: {
+        clientId: view.clientId,
+        projectId: view.projectId,
+        appType: view.appType,
+        secretChanged: Boolean(input.clientSecret?.trim()),
+        check: { clientId: check.clientId, redirectUri: check.redirectUri, secret: check.secret },
+      },
     });
-    return c.json(view);
+    return c.json<GoogleClientSaveResult>({ ...ctx.google.clientView(), warnings: check.warnings, check });
   });
+
+  r.post("/google/client/check", async (c) => c.json<GoogleClientCheck>(await ctx.google.checkClient()));
+
+  /** The check never blocks saving: anything unexpected degrades to "unknown". */
+  const checkAfterSave = async (): Promise<GoogleClientCheck> => {
+    try {
+      return await ctx.google.checkClient();
+    } catch (err) {
+      ctx.log.child("google").warn("OAuth client check failed", { error: err instanceof Error ? err.message : String(err) });
+      return { clientId: "unknown", redirectUri: "unknown", secret: "unknown", warnings: [] };
+    }
+  };
 
   r.post("/google/client/import", async (c) => {
     const input = await readBody(c, ImportInput);
-    const result = ctx.google.importClient(input);
+    const imported = ctx.google.importClient(input);
+    const check = await checkAfterSave();
+    // The check's warnings include the JSON's redirect list as a fallback when Google's answer was unclear.
+    const result: GoogleClientImportResult = { ...imported, ...ctx.google.clientView(), warnings: check.warnings, check };
     ctx.audit.record({
       ...ADMIN_ACTOR,
       action: "google.client.import",
@@ -52,6 +75,7 @@ export function googleApi(ctx: AppContext) {
         appType: result.appType,
         redirectUris: result.registeredRedirectUris,
         warnings: result.warnings.map((w) => w.code),
+        check: { clientId: check.clientId, redirectUri: check.redirectUri, secret: check.secret },
       },
     });
     return c.json(result);

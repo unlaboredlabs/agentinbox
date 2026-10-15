@@ -41,7 +41,17 @@ export function clientView(ctx: Ctx): GoogleClientView {
     appType: c?.appType ?? null,
     redirectUri,
     callbackMode: mode,
+    secretHint: c?.clientSecretEnc ? (c.secretHint ?? secretTail(ctx, c.clientSecretEnc)) : null,
   };
+}
+
+/** Last 4 characters of a stored secret (for clients saved before secretHint was recorded). */
+function secretTail(ctx: Ctx, enc: string): string | null {
+  try {
+    return ctx.crypto.decrypt(enc).slice(-4);
+  } catch {
+    return null;
+  }
 }
 
 const PROJECT_ID = /^([a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -81,6 +91,8 @@ function saveClient(
   // valid while it is the same client; manual entry keeps it, a different client ID drops it.
   const same = prev?.clientId === clientId;
   const importedRedirectUris = input.importedRedirectUris ?? (same ? prev?.importedRedirectUris : undefined);
+  const secretHint = secret ? secret.slice(-4) : same ? prev?.secretHint : undefined;
+  // `check` is dropped: the console API re-runs it right after saving (server/google/check.ts).
   ctx.settings.setState("google.client", {
     clientId,
     clientSecretEnc,
@@ -88,6 +100,7 @@ function saveClient(
     appType: input.appType,
     ...(importedRedirectUris ? { importedRedirectUris } : {}),
     verifiedRedirectUri: same ? (prev?.verifiedRedirectUri ?? null) : null,
+    ...(secretHint ? { secretHint } : {}),
   });
   return clientView(ctx);
 }
@@ -105,7 +118,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
  * warning (and stays in setup state) rather than an error, because the JSON is only a snapshot: the
  * operator may have added the URI after downloading it.
  */
-export function importClient(ctx: Ctx, input: GoogleClientImportInput): GoogleClientImportResult {
+export function importClient(ctx: Ctx, input: GoogleClientImportInput): Omit<GoogleClientImportResult, "check"> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(input.json.trim());
@@ -150,33 +163,86 @@ export function importClient(ctx: Ctx, input: GoogleClientImportInput): GoogleCl
   return { ...view, warnings: warning ? [warning] : [], registeredRedirectUris: registered };
 }
 
+const clientsUrl = (projectId: string) => `https://console.cloud.google.com/auth/clients${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`;
+
 /**
- * `redirect_uri_missing` when the last imported JSON doesn't list the exact redirect URI and no
- * account has connected through it since (which proves Google has it registered).
+ * `redirect_uri_missing`, from the strongest evidence available for the current redirect URI: a
+ * successful connection through it (registered), else the last client check (Google's own answer),
+ * else the redirect_uris in the last imported JSON.
  */
 export function redirectWarning(ctx: Ctx): SetupWarning | null {
   const c = ctx.settings.getState("google.client");
-  const registered = c?.importedRedirectUris;
-  if (!c?.clientId || !registered) return null;
+  if (!c?.clientId) return null;
   const uri = callbackMode(ctx).redirectUri;
-  if (registered.includes(uri) || c.verifiedRedirectUri === uri) return null;
-  const listed = registered.length ? `It lists: ${registered.join(", ")}.` : "It lists none.";
-  const project = c.projectId ? `?project=${encodeURIComponent(c.projectId)}` : "";
+  if (c.verifiedRedirectUri === uri) return null;
+  const checked = c.check?.redirectUriTested === uri ? c.check.redirectUri : "unknown";
+  if (checked === "ok") return null;
+  const hint =
+    `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, add ${uri} exactly (no trailing slash) and save. ` +
+    "You don't need to download the JSON again (it's only used here to read the ID and secret): this warning clears as soon as an account connects, or re-check now.";
+  const registered = c.importedRedirectUris;
+  const listed = registered ? (registered.length ? ` It lists: ${registered.join(", ")}.` : " It lists none.") : "";
+  if (checked === "missing") {
+    return {
+      code: "redirect_uri_missing",
+      severity: "error",
+      message: `Google says ${uri} isn't an Authorized redirect URI of your OAuth client, so it will refuse to connect accounts.${listed}`,
+      hint,
+      url: clientsUrl(c.projectId),
+    };
+  }
+  if (!registered || registered.includes(uri)) return null;
   return {
     code: "redirect_uri_missing",
     severity: "error",
-    message: `Your OAuth client's Authorized redirect URIs don't include ${uri}, so Google will refuse to connect accounts. ${listed}`,
-    hint:
-      `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, add ${uri} exactly (no trailing slash) and save. ` +
-      "You don't need to download the JSON again (it's only used here to read the ID and secret): this warning clears as soon as an account connects, or re-import the new JSON to re-check now.",
-    url: `https://console.cloud.google.com/auth/clients${project}`,
+    message: `Your OAuth client's Authorized redirect URIs don't include ${uri}, so Google will refuse to connect accounts.${listed}`,
+    hint,
+    url: clientsUrl(c.projectId),
   };
 }
 
-/** Records that Google accepted `redirectUri` for the saved client (an account just connected through it). */
+/** client_invalid / client_secret_invalid from the last client check. */
+export function clientWarnings(ctx: Ctx): SetupWarning[] {
+  const c = ctx.settings.getState("google.client");
+  if (!c?.clientId || !c.check) return [];
+  if (c.check.clientId === "invalid") {
+    return [
+      {
+        code: "client_invalid",
+        severity: "error",
+        message: `Google doesn't recognize the OAuth client ID ${c.clientId}.`,
+        hint:
+          "Copy the Client ID again from Google Cloud → Google Auth Platform → Clients (or re-import the client's JSON). " +
+          "If the client was deleted, create a new Web application client.",
+        url: clientsUrl(c.projectId),
+      },
+    ];
+  }
+  if (c.check.secret === "invalid") {
+    return [
+      {
+        code: "client_secret_invalid",
+        severity: "error",
+        message: `Google rejected the client secret${c.secretHint ? ` ending in ${c.secretHint}` : ""} for this OAuth client.`,
+        hint:
+          "Re-import the client JSON downloaded when the client was created, or open the client in Google Cloud → Google Auth Platform → Clients, " +
+          "click Add secret, and enter the new secret here.",
+        url: clientsUrl(c.projectId),
+      },
+    ];
+  }
+  return [];
+}
+
+/**
+ * Records that Google accepted `redirectUri` for the saved client (an account just connected through
+ * it). A successful connection also proves the client ID and secret, so a stale check is dropped.
+ */
 export function markRedirectVerified(ctx: Ctx, redirectUri: string): void {
   const c = ctx.settings.getState("google.client");
-  if (c && c.verifiedRedirectUri !== redirectUri) ctx.settings.setState("google.client", { ...c, verifiedRedirectUri: redirectUri });
+  if (!c || (c.verifiedRedirectUri === redirectUri && !c.check)) return;
+  const { check: _check, ...rest } = c;
+  ctx.settings.setState("google.client", { ...rest, verifiedRedirectUri: redirectUri });
 }
 
 export function clientCredentials(ctx: Ctx): { clientId: string; clientSecret: string } {
