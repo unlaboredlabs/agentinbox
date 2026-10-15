@@ -57,8 +57,8 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
           A Google Workspace admin must trust the app: admin.google.com →{" "}
           <Path items={["Security", "Access and data control", "API controls", "Manage Third-Party App Access", "Configure new app"]} />, search for
           the client ID{v?.clientId ? <span className="font-mono break-all"> {v.clientId}</span> : ""}, and set it to{" "}
-          <strong className="text-foreground">Trusted</strong>. If the admin blocks only Google Calendar, turn off “Also add Google Calendar” and
-          connect mail now.
+          <strong className="text-foreground">Trusted</strong>. If the admin blocks only Google Calendar, connect with mail only (the connect dialog
+          offers it), or turn Calendar off in <Path items={["Settings", "Google Calendar", "Turn off"]} />.
         </Item>
         <Item title="“Error 401: invalid_client” or “deleted_client”">
           The client ID is wrong, or the client was deleted (Google deletes clients unused for 6 months). Create a new client and import it in step 4.

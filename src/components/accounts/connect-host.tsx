@@ -1,4 +1,4 @@
-import type { Account, CalendarSetupState, ConnectAccountResponse, ConnectAttempt, ExtraScopeName, OAuthCallbackMessage } from "@shared/types";
+import type { Account, ConnectAccountResponse, ConnectAttempt, ExtraScopeName, OAuthCallbackMessage } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { CheckCircle2Icon, ExternalLinkIcon, InfoIcon, RotateCwIcon } from "lucide-react";
@@ -12,7 +12,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api, ApiError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { useStreamListener } from "@/lib/stream";
-import { answerApplies, handsBack, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
+import { answerApplies, handsBack, offersMailOnly, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
 import { PasteCallback } from "./paste-callback";
 import { GoogleErrorHelp } from "./google-error-help";
 
@@ -28,6 +28,8 @@ interface ConnectRequest {
    * clicked "I'm done, check again", so the caller re-checks without assuming anything was granted.
    */
   onDone?: (confirmed: boolean) => void;
+  /** Ask Google for mail only (no Calendar), e.g. when a Workspace admin blocks Calendar for this app. */
+  mailOnly?: boolean;
   /** The caller shows the outcome itself ("Add Google Calendar"): close as soon as Google reports back, instead of a "connected" screen. */
   handBack?: boolean;
   /**
@@ -127,8 +129,7 @@ export function ConnectAccountHost() {
     }
   });
 
-  /** `prep`: runs while the pop-up opens, before the sign-in link is made (it must not wait: pop-ups need the click). */
-  const start = async (r: ConnectRequest, prep?: () => Promise<unknown>) => {
+  const start = async (r: ConnectRequest) => {
     setCheckNote(null);
     setReq(r);
     reqRef.current = r;
@@ -148,9 +149,12 @@ export function ConnectAccountHost() {
     // those reconnects finish only on the callback page's own result.
     reauthFromBroken.current = !!r.reauthAccountId && accounts.some((a) => a.id === r.reauthAccountId && a.status === "needs_reauth");
     try {
-      await prep?.();
       const res = await api<ConnectAccountResponse>("/api/accounts/connect", {
-        body: { ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}), ...(r.scopes?.length ? { scopes: r.scopes } : {}) },
+        body: {
+          ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}),
+          ...(r.scopes?.length ? { scopes: r.scopes } : {}),
+          ...(r.mailOnly ? { mailOnly: true } : {}),
+        },
       });
       if (popup && res.callbackMode === "direct") popup.location.href = res.authUrl;
       else popup?.close();
@@ -301,8 +305,8 @@ export function ConnectAccountHost() {
 
   const retry = () => void start(req);
   // A Workspace admin may block Calendar for unconfigured apps: Google then refuses the whole sign-in.
-  const mailOnly = () =>
-    void start(req, async () => qc.setQueryData(keys.calendarSetup, await api<CalendarSetupState>("/api/google/calendar", { method: "PATCH", body: { enabled: false } })));
+  // This one sign-in asks for mail only; Calendar stays on for the install (Settings can turn it off).
+  const mailOnly = () => void start({ ...req, mailOnly: true });
   const reauthEmail = req.email;
 
   const pubsub = !!req.scopes?.includes("pubsub");
@@ -319,7 +323,7 @@ export function ConnectAccountHost() {
   }, [kind]);
 
   const code = phase?.kind === "error" && phase.error instanceof ApiError ? phase.error.code : undefined;
-  const calendarBlocked = code === "oauth_admin_policy_enforced" && calendarOn && !req.scopes?.length;
+  const calendarBlocked = offersMailOnly(code, req, calendarOn);
   const clientProblem = code === "oauth_invalid_client" || code === "oauth_unauthorized_client" || code === "oauth_redirect_uri_mismatch" || code === "google_client_missing";
 
   return (
@@ -382,7 +386,7 @@ export function ConnectAccountHost() {
             />
             {calendarBlocked && (
               <p className="text-sm text-muted-foreground">
-                If the admin blocks only Google Calendar, connect mail now and add Calendar once it's allowed: mail isn't affected.
+                If the admin blocks only Google Calendar, connect with mail only now and add Calendar once it's allowed.
               </p>
             )}
             {code === "oauth_redirect_uri_mismatch" && client.data && (
@@ -463,7 +467,7 @@ export function ConnectAccountHost() {
               )}
               {calendarBlocked && (
                 <Button variant="outline" onClick={mailOnly}>
-                  Turn Calendar off and connect mail only
+                  Connect with mail only
                 </Button>
               )}
               <Button onClick={retry} ref={primaryRef}>
