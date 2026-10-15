@@ -141,7 +141,7 @@ export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentToo
         <p className="text-xs text-muted-foreground">
           {tool === "other"
             ? "This test command only confirms each email (a ✓ line per email). Swap in your own script for the service."
-            : `Starts ${label} for each new email. ${RECIPES[tool].note}`}
+            : `Starts ${label} for each new email you receive (not mail you send; --types adds other events). ${RECIPES[tool].note}`}
         </p>
       </li>
       <li className="space-y-1.5">

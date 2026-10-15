@@ -135,13 +135,20 @@ export function ensureConsumerSlot(ctx: AppContext, agentId: string, consumer: s
 }
 
 /**
- * Evidence that some agent works end to end (SetupState.verified): an agent's tool called /mcp, or
- * a listener acked an event past where its cursor started (a new consumer starts at the head, so
- * acked_seq alone isn't proof; start_seq is NULL for cursors from before migration 4 or made by an ack).
+ * Evidence that some agent works end to end (SetupState.verified), for old installs and browsers
+ * that never ran the wizard's last step: a successful audited MCP tool call, or a listener that
+ * acked an event past where its cursor started (a new consumer starts at the head, so acked_seq
+ * alone isn't proof; start_seq is NULL for cursors from before migration 4 or made by an ack).
+ * Merely connecting doesn't count: `claude mcp list`'s health check sets last_mcp_at with only
+ * initialize/tools/list, which aren't audited. Only tool calls are audited with snake_case actions
+ * (other agent actions, like pairing.key_delivered, are dotted). Per agent, so audit_actor is used.
  */
 export function anyAgentVerified(db: Db): boolean {
   return !!db.get(
-    `SELECT 1 AS ok WHERE EXISTS (SELECT 1 FROM agents WHERE last_mcp_at IS NOT NULL)
+    `SELECT 1 AS ok WHERE EXISTS (
+         SELECT 1 FROM agents ag WHERE EXISTS (
+           SELECT 1 FROM audit_log l WHERE l.actor_id = ag.id AND l.actor_type = 'agent' AND l.outcome = 'ok'
+             AND l.action NOT IN ('initialize', 'tools/list') AND instr(l.action, '.') = 0 AND instr(l.action, '/') = 0))
        OR EXISTS (SELECT 1 FROM listener_cursors WHERE acked_seq > COALESCE(start_seq, 0))`,
   );
 }

@@ -5,7 +5,7 @@ import { replayDead } from "../server/listen/admin.ts";
 import { Dispatcher, type Job } from "../server/listen/dispatcher.ts";
 import { matchesLocal } from "../server/listen/event.ts";
 import { runListener } from "../server/listen/listen.ts";
-import { resolveListen } from "../server/listen/options.ts";
+import { describeFilter, resolveListen } from "../server/listen/options.ts";
 import { deadPath } from "../server/listen/paths.ts";
 import { loadProfile, saveProfile } from "../server/listen/profile.ts";
 import { readDead } from "../server/listen/state.ts";
@@ -84,6 +84,26 @@ describe("local filter", () => {
     expect(() => resolveListen("default", profile, { subject: "(" })).toThrow(/regular expression/);
     expect(() => resolveListen("default", profile, { types: "message.received,nope" })).toThrow(/Unknown event type nope/);
     expect(() => resolveListen("default", profile, { forward: "http://example.com/x" })).toThrow(/this machine/);
+  });
+
+  it("wakes only on new mail unless --types or the profile asks for more", () => {
+    const profile = { url: "https://x", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c", exec: "run" };
+    // One test email produces message.sent and message.received: only the latter starts the agent.
+    expect(resolveListen("default", profile, {}).config.types).toEqual(["message.received"]);
+    // --save without --types keeps following the default (nothing saved).
+    expect(resolveListen("default", profile, { save: true, exec: "run" }).next.types).toBeUndefined();
+    // Opting in: a list, or all; both are saved.
+    const opted = resolveListen("default", profile, { save: true, types: "message.received,thread.reply_received" });
+    expect(opted.config.types).toEqual(["message.received", "thread.reply_received"]);
+    expect(opted.next.types).toEqual(["message.received", "thread.reply_received"]);
+    expect(resolveListen("default", { ...profile, types: ["message.sent"] }, {}).config.types).toEqual(["message.sent"]);
+    const all = resolveListen("default", profile, { types: "all" }).config;
+    expect(all.types).toContain("message.sent");
+    expect(all.types).toContain("sync.gap");
+    expect(describeFilter(all)).toBe("all event types");
+    expect(describeFilter(resolveListen("default", profile, {}).config)).toBe("types message.received");
+    expect(() => resolveListen("default", profile, { types: "" })).toThrow(/at least one event type/);
+    expect(() => resolveListen("default", profile, { types: "all,message.sent" })).toThrow(/can't be combined/);
   });
 });
 

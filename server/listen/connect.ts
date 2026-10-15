@@ -419,10 +419,11 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
   out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
   out(`       ${pc.cyan(`${NPX} listen${p} --save --exec ${execArg}`)}`);
+  out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. For more, add --types, e.g. --types message.received,thread.reply_received.`));
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   for (const note of r.notes) out(pc.gray(`     ${note}`));
   out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
-  out(`     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by ${pc.green("✓")} once ${label} handled it.`);
+  out(`     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by one ${pc.green("✓")} line once ${label} handled it.`);
   out(`  ${n++}. Then keep it running in the background (systemd / launchd, starts at login; stop the foreground one first):`);
   out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
   out(`       ${pc.cyan(`${NPX} listen status${p}`)}  ${pc.gray("(connection, cursor, recent events and the access granted)")}`);

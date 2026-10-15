@@ -38,7 +38,8 @@ export interface ListenFlags {
 export interface EffectiveConfig {
   exec: string | null;
   forward: { url: string; secret: string } | null;
-  types: EventType[] | undefined;
+  /** Never empty: DEFAULT_LISTEN_TYPES unless --types or the profile says otherwise. */
+  types: EventType[];
   filter: WebhookFilter | undefined;
   includeBody: boolean;
   concurrency: number;
@@ -53,11 +54,24 @@ export interface EffectiveConfig {
 
 export const DEFAULTS = { concurrency: 2, timeoutSeconds: 300, maxAttempts: 5 } as const;
 
+/**
+ * Event types a listener gets when neither --types nor the profile names any: new mail only. Each
+ * event can start a paid agent run, so mail the account sends (message.sent, also the console's
+ * test email) and label changes don't wake it unless asked for with --types.
+ */
+export const DEFAULT_LISTEN_TYPES: readonly EventType[] = ["message.received"];
+
+/** Comma-separated event types; "all" means every type. */
 export function parseTypes(value: string): EventType[] {
   const list = value
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  if (!list.length) throw new Error(`--types needs at least one event type (or "all"). Choose from: ${EVENT_TYPES.join(", ")}.`);
+  if (list.includes("all")) {
+    if (list.length > 1) throw new Error(`--types all can't be combined with other types.`);
+    return [...EVENT_TYPES];
+  }
   const bad = list.filter((t) => !(EVENT_TYPES as readonly string[]).includes(t));
   if (bad.length) throw new Error(`Unknown event type${bad.length > 1 ? "s" : ""} ${bad.join(", ")}. Choose from: ${EVENT_TYPES.join(", ")}.`);
   return [...new Set(list)] as EventType[];
@@ -146,7 +160,8 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
   }
   if (forward) validateForwardUrl(forward.url);
 
-  const types = flags.types !== undefined ? parseTypes(flags.types) : profile.types;
+  // Saved as given (no types saved = the default), so the profile follows the default if it changes.
+  const types = flags.types !== undefined ? parseTypes(flags.types) : profile.types?.length ? profile.types : [...DEFAULT_LISTEN_TYPES];
   const filter = filterFromFlags(flags) ?? profile.filter;
   const includeBody = flags.includeBody ?? profile.includeBody ?? false;
   const concurrency = positiveInt(flags.concurrency, "--concurrency", 32) ?? profile.concurrency ?? DEFAULTS.concurrency;
@@ -165,7 +180,7 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
       next.forward = forward ?? undefined;
       if (forward) delete next.forwardSecret;
     }
-    if (flags.types !== undefined) next.types = types?.length ? types : undefined;
+    if (flags.types !== undefined) next.types = types;
     if (filterFromFlags(flags)) next.filter = filter;
     if (flags.includeBody !== undefined) next.includeBody = includeBody;
     if (flags.concurrency !== undefined) next.concurrency = concurrency;
@@ -182,7 +197,7 @@ export function resolveListen(profileName: string, profile: Profile, flags: List
 /** One-line description of the filter for the console. */
 export function describeFilter(c: Pick<EffectiveConfig, "types" | "filter">): string {
   const parts: string[] = [];
-  if (c.types?.length) parts.push(`types ${c.types.join(", ")}`);
+  if (c.types?.length) parts.push(c.types.length === EVENT_TYPES.length ? "all event types" : `types ${c.types.join(", ")}`);
   const f = c.filter ?? {};
   if (f.from?.length) parts.push(`from ${f.from.join(" | ")}`);
   if (f.to?.length) parts.push(`to ${f.to.join(" | ")}`);

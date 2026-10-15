@@ -3,11 +3,12 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentTool } from "../shared/agent-api.ts";
-import type { AuditEntry, ListenerInfo, MailEvent } from "../shared/types.ts";
+import type { AuditEntry, ListenerInfo, MailEvent, SetupState } from "../shared/types.ts";
 import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
 import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
+import { allStepsDone, type SetupDraft, STEP_META, stepStatuses } from "../src/components/setup/steps.ts";
 import { activeTest, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
 
@@ -222,6 +223,10 @@ describe("connectCommands matches what `connect` prints", () => {
     // connect prints the bare service install (after --save); the console repeats --exec so it also works alone.
     expect(cli).toContain(`${NPX} listen service install`);
     expect(c.listenService).toBe(`${NPX} listen service install --exec ${sub}`);
+    // Neither passes --types: listen's default (new mail only) applies, and connect says so.
+    expect(c.listenTry).not.toContain("--types");
+    expect(c.listenService).not.toContain("--types");
+    expect(cli.some((l) => l.includes("Only new mail wakes it (message.received), not mail you send"))).toBe(true);
   });
 
   it("other: the service runs the same script connect suggests; the try command is a harmless test", () => {
@@ -261,5 +266,42 @@ describe("grantInWords", () => {
   });
   it("nothing granted", () => {
     expect(grantInWords({ capabilities: [], sendMode: "direct" })).toBe("No access");
+  });
+});
+
+// ───────────── Stepper: when "Check that it works" is done ─────────────
+
+describe("stepStatuses: the verify step", () => {
+  const state = (verified: boolean): SetupState => ({
+    claimed: true,
+    googleClientConfigured: true,
+    gcpProjectId: "p-123456",
+    googleAppType: "external",
+    pubsub: { mode: "poll", topic: null, subscription: null, lastError: null, lastMessageAt: null, principalAccountId: null, principalEmail: null, pendingPrincipalAccountId: null, pendingPrincipalEmail: null },
+    accountsConnected: 1,
+    agentsCreated: 1,
+    verified,
+    complete: true,
+    warnings: [],
+  });
+  const verify = (verified: boolean, draft: SetupDraft) => stepStatuses(state(verified), draft).verify;
+
+  it("follows the server for browsers that never opened the step (old installs, other browsers)", () => {
+    expect(verify(true, {})).toBe("done");
+    expect(verify(false, {})).toBe("todo");
+  });
+
+  it("stays todo once this browser started the step, until Finish", () => {
+    // The server has evidence (a tool call) long before the listener and the test email.
+    expect(verify(true, { verifyStarted: true })).toBe("todo");
+    expect(allStepsDone(stepStatuses(state(true), { verifyStarted: true, pubsubSkipped: true }))).toBe(false);
+    // "Finish setup" or "Finish without checking".
+    expect(verify(true, { verifyStarted: true, verified: true })).toBe("done");
+    expect(verify(false, { verifyStarted: true, verified: true })).toBe("done");
+  });
+
+  it("calls setup done without the optional real-time delivery step", () => {
+    expect(allStepsDone(stepStatuses(state(true), {}))).toBe(true);
+    expect(STEP_META.pubsub.short).toBe("Real-time delivery");
   });
 });

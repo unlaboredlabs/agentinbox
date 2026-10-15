@@ -86,7 +86,8 @@ export function AppSidebar() {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {setup.state && !setup.allDone && (
+        {/* Stays while the wizard is open, even once everything is green: it goes on navigating away. */}
+        {setup.state && (!setup.allDone || pathname.startsWith("/get-started")) && (
           <SidebarGroup>
             <SidebarGroupContent>
               <SidebarMenu>

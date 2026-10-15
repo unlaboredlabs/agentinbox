@@ -19,7 +19,7 @@ import { api, apiGet } from "@/lib/api";
 import { connectCommands, LISTEN_TEST_EXEC, shellQuote } from "@/lib/cli";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { updateDraft } from "./progress";
+import { readDraft, updateDraft, useSetupProgress } from "./progress";
 import { activeTest, TEST_SUBJECT, type VerifyTest, verifyChecks } from "./verify-checks";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
@@ -78,6 +78,12 @@ function useLatch(on: boolean) {
 
 
 export function StepVerify({ index, onBack, onNext }: StepProps) {
+  const { statuses } = useSetupProgress();
+  // Opening the step while it is still unfinished: from now on only Finish completes it (see stepStatuses).
+  const verifyTodo = statuses.verify === "todo";
+  useEffect(() => {
+    if (verifyTodo && !readDraft().verifyStarted) updateDraft({ verifyStarted: true });
+  }, [verifyTodo]);
   // Listener connect/ack and MCP use arrive on the console stream (`agent` messages); the slow refetch is a fallback.
   const agents = useQuery({ ...queries.agents(), refetchInterval: 30_000 });
   const state = useVerifyState();
@@ -367,7 +373,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
                 "Agents created with a copied key can't run a listener. Use a webhook from the agent's page instead."
               )
             ) : listenDone ? (
-              "It keeps a connection open and runs your command for each new email."
+              "It keeps a connection open and runs your command for each new email you receive."
             ) : undefined
           }
         >
@@ -380,7 +386,8 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
                   ? "This test command only confirms each email (a ✓ line per email); it starts nothing."
                   : (
                     <>
-                      Starts {label} for each new email, with only the agentinbox tools. Just testing delivery?{" "}
+                      Starts {label} for each new email you receive (not mail you send), with only the agentinbox tools. Add{" "}
+                      <code className="font-mono whitespace-nowrap text-foreground">--types</code> to wake it for other events too. Just testing delivery?{" "}
                       <code className="font-mono whitespace-nowrap text-foreground">--exec {shellQuote(LISTEN_TEST_EXEC)}</code> only confirms each email.
                     </>
                   )}
@@ -440,11 +447,11 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
           }
           detail={
             delivered
-              ? "Its terminal shows a ✓ line for the email."
+              ? "Its terminal shows one ✓ line for the email."
               : !skipListen && receivedDone
                 ? resendForListener
                   ? "The listener wasn't running when this email was sent, so it starts after it. Send another test email now that the listener is running."
-                  : "Look for a ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
+                  : "Look for one ✓ line in the listener's terminal. If it shows an error, the command failed and is retried."
                 : undefined
           }
         />
@@ -537,6 +544,8 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
       // Only listeners known now can be credited with delivering it (see VerifyTest.listenersAtSend). A briefly
       // disconnected one keeps its cursor and handles the mail when it reconnects, so it counts too.
       writeState({ test: { ...res, accountId, listenersAtSend: agent.listeners.map((l) => l.consumer) } });
+      // A test in flight: the step isn't done until Finish, even if the server already had evidence.
+      if (!readDraft().verified && !readDraft().verifyStarted) updateDraft({ verifyStarted: true });
     } catch (err) {
       setError(err);
     } finally {

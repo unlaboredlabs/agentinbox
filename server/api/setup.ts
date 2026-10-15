@@ -131,10 +131,18 @@ export function setupState(ctx: AppContext, opts: { warnings?: boolean } = {}): 
     pubsub,
     accountsConnected,
     agentsCreated: count("agents"),
-    verified: anyAgentVerified(ctx.db),
+    verified: isVerified(ctx),
     complete: claimed && googleClientConfigured && accountsConnected > 0,
     warnings: opts.warnings === false ? [] : (attempt(ctx, () => ctx.google.setupWarnings()) ?? []),
   };
+}
+
+/** anyAgentVerified, remembered once true: its evidence (audit rows, cursors) can be pruned or deleted later. */
+function isVerified(ctx: AppContext): boolean {
+  if (ctx.settings.getState("setup.verifiedAt")) return true;
+  if (!anyAgentVerified(ctx.db)) return false;
+  ctx.settings.setState("setup.verifiedAt", new Date().toISOString());
+  return true;
 }
 
 function attempt<T>(ctx: AppContext, fn: () => T): T | null {

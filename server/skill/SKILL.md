@@ -57,7 +57,8 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    again any time with `npx -y agentinbox-cli listen status` (the `Access` line) or the `list_accounts` tool.
 4. To be woken when mail arrives, install the listener (ask the user first: it's a background service on their
    machine). It keeps an outbound connection to agentinbox (no open ports), starts with mail that arrives from now on,
-   and runs your command once per event with the event as JSON on stdin, in a private working directory:
+   and runs your command once per new email (`message.received` only: mail the account sends doesn't wake you; the
+   user can add others with `--types`) with the event as JSON on stdin, in a private working directory:
 
    ```sh
    npx -y agentinbox-cli listen service install --exec "$(npx -y agentinbox-cli listen --print-recipe <tool>)"
@@ -221,7 +222,7 @@ For agents without an HTTP endpoint. Your position is kept on the server, per ag
 
 ### Woken by `agentinbox listen`
 
-When the listener starts you for an event, stdin (and the file named by `$AGENTINBOX_EVENT_FILE`) holds
+When the listener starts you for an event (by default only `message.received`), stdin (and the file named by `$AGENTINBOX_EVENT_FILE`) holds
 `{ "notice": "…", "event": <webhook payload> }`, in the same shape as the webhook payload below. Only ids are in the
 environment (`AGENTINBOX_EVENT_ID`, `AGENTINBOX_EVENT_TYPE`, `AGENTINBOX_ACCOUNT`, `AGENTINBOX_THREAD_ID`,
 `AGENTINBOX_MESSAGE_ID`, …). Fetch the thread with the MCP tools, do the work, and exit. Exiting non-zero or timing out
