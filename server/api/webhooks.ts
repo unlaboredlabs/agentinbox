@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { DeliveryStatus } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { badRequest } from "../util/errors.ts";
+import { cursorParam } from "../events/repo.ts";
 import { webhookInputSchema, webhookPatchSchema } from "../webhooks/filter.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
@@ -50,7 +51,7 @@ export function webhooksApi(ctx: AppContext) {
         ctx.webhooks.listDeliveries({
           webhookId: c.req.query("webhookId") || undefined,
           status: (status as DeliveryStatus) || undefined,
-          cursor: c.req.query("cursor") || null,
+          cursor: cursorParam(c.req.query("cursor")),
           limit: limit.success ? limit.data : undefined,
         }),
       );

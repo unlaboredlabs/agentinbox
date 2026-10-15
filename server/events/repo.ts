@@ -1,5 +1,6 @@
 import type { EventType, MailEvent, MessageSummary } from "../../shared/types.ts";
 import { type Db, json } from "../db/index.ts";
+import { badRequest } from "../util/errors.ts";
 import type { StoredEvent } from "./types.ts";
 
 /**
@@ -53,4 +54,11 @@ export function toMailEvent(e: StoredEvent): MailEvent {
 export function eventBySeq(db: Db, seq: number): StoredEvent | null {
   const row = db.get<EventRow>(`${EVENT_SELECT} WHERE e.seq = ?`, seq);
   return row ? toStoredEvent(row) : null;
+}
+
+/** Console list cursors are positive integers (a seq or row id). Throws HttpError(400) otherwise. */
+export function cursorParam(value: string | undefined): string | null {
+  if (!value) return null;
+  if (!/^\d{1,15}$/.test(value)) throw badRequest("Invalid cursor", "Pass the nextCursor value from the previous page.");
+  return value;
 }

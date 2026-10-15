@@ -31,6 +31,9 @@ describe("normalizeIp", () => {
     expect(normalizeIp("64:ff9b::a9fe:a9fe")).toBe("169.254.169.254");
     expect(normalizeIp("::1")).toBe("::1");
     expect(normalizeIp("FD00:EC2:0:0:0:0:0:254")).toBe("fd00:ec2::254");
+    expect(normalizeIp("::ffff:0:a00:1")).toBe("10.0.0.1"); // SIIT
+    expect(normalizeIp("2002:7f00:1::")).toBe("127.0.0.1"); // 6to4
+    expect(normalizeIp("2002:a9fe:a9fe::1")).toBe("169.254.169.254");
   });
 });
 
@@ -54,9 +57,14 @@ describe("isBlockedAddress", () => {
     "ff02::1",
     "::ffff:192.168.0.1",
     "::ffff:7f00:1",
+    "::ffff:0:7f00:1",
+    "2002:7f00:1::",
+    "2002:a00:1::1",
+    "64:ff9b:1::a00:1",
+    "2001:0:4136:e378:8000:63bf:3fff:fdd2",
   ])("blocks %s", (ip) => expect(isBlockedAddress(ip)).toBe(true));
 
-  it.each(["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8"])("allows %s", (ip) =>
+  it.each(["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "2002:808:808::1"])("allows %s", (ip) =>
     expect(isBlockedAddress(ip)).toBe(false),
   );
 });
@@ -111,6 +119,33 @@ describe("resolveTarget", () => {
     await refused(check("http://[fd00:ec2::254]/", ["fc00::/7"]));
     await refused(check("http://meta.example.com/", ["meta.example.com"], { "meta.example.com": ["169.254.169.254"] }));
     await expect(check("http://169.254.169.254/", ["169.254.169.254"])).resolves.toBeTruthy();
+  });
+
+  it("refuses IPv6 ranges that embed private IPv4 addresses", async () => {
+    await refused(check("https://[2002:7f00:1::]/"));
+    expect((await refused(check("https://[2002:a9fe:a9fe::]/", ["169.254.0.0/16"]))).message).toMatch(/metadata/);
+    await refused(check("https://[64:ff9b:1::a00:1]/"));
+    await refused(check("https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/"));
+    await refused(check("https://[::ffff:0:a00:1]/"));
+    await expect(check("https://[2002:a00:1::]/", ["10.0.0.0/8"])).resolves.toBeTruthy();
+  });
+
+  it("requires https unless the target is loopback or allowlisted", async () => {
+    const err = await refused(check("http://hooks.example.com/", [], { "hooks.example.com": ["93.184.216.34"] }));
+    expect(err.message).toMatch(/https/);
+    expect(err.hint).toMatch(/allowlist/);
+    await refused(check("http://93.184.216.34/"));
+    await expect(check("http://127.0.0.1:9/", ["127.0.0.0/8"])).resolves.toBeTruthy();
+    await expect(check("http://[::1]:9/", ["::1"])).resolves.toBeTruthy();
+    await expect(check("http://hooks.example.com/", ["hooks.example.com"], { "hooks.example.com": ["93.184.216.34"] })).resolves.toBeTruthy();
+    await expect(check("http://10.1.1.1/", ["10.0.0.0/8"])).resolves.toBeTruthy();
+    // Loopback without an allowlist entry is still refused by the private-address rule.
+    await refused(check("http://127.0.0.1/"));
+  });
+
+  it("never matches hostname wildcards against IP literals", async () => {
+    await refused(check("http://127.0.0.1/", ["*.0.0.1"]));
+    await refused(check("https://[::ffff:10.0.0.1]/", ["*.0.1"]));
   });
 
   it("reports unresolvable hosts and bad schemes", async () => {

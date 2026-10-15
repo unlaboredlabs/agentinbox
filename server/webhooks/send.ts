@@ -6,7 +6,8 @@ import type { ResolvedTarget } from "./ssrf.ts";
 
 /** Standard Webhooks secret: "whsec_" + base64 of 24 random bytes. */
 export const newSecret = (): string => `whsec_${randomBytes(24).toString("base64")}`;
-export const secretPrefix = (secret: string): string => secret.slice(0, 12);
+/** "whsec_" plus 4 characters: enough to tell secrets apart, too little to help guess one. */
+export const secretPrefix = (secret: string): string => secret.slice(0, 10);
 
 /**
  * Standard Webhooks signature (https://www.standardwebhooks.com): base64 HMAC-SHA256 over

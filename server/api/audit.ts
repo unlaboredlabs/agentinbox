@@ -1,6 +1,7 @@
 import type { AuditOutcome } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { badRequest } from "../util/errors.ts";
+import { cursorParam } from "../events/repo.ts";
 import { router } from "./util.ts";
 
 const OUTCOMES: AuditOutcome[] = ["ok", "denied", "error"];
@@ -17,7 +18,7 @@ export function auditApi(ctx: AppContext) {
         accountId: q.accountId || undefined,
         outcome: (q.outcome as AuditOutcome) || undefined,
         action: q.action || undefined,
-        cursor: q.cursor || null,
+        cursor: cursorParam(q.cursor),
         limit: Number.isInteger(limit) && limit > 0 ? limit : undefined,
       }),
     );

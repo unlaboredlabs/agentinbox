@@ -130,12 +130,14 @@ describe("agent feed", () => {
     expect(scoped.events.map((e) => e.message?.id)).toEqual(["a"]);
     // Cursor moves past the invisible b and c.
     expect(scoped.cursor).toBe(c.seq);
-    expect(ctx.events.feed("agt_scoped", { after: scoped.cursor })).toEqual({ events: [], cursor: c.seq, ackedSeq: 0 });
+    expect(ctx.events.feed("agt_scoped", { after: scoped.cursor })).toEqual({ events: [], cursor: c.seq, ackedSeq: 0, hasMore: false });
 
     // With a limit, the cursor stops at the last returned event.
     const limited = ctx.events.feed("agt_all", { limit: 1 });
     expect(limited.events).toHaveLength(1);
     expect(limited.cursor).toBe(a.seq);
+    expect(limited.hasMore).toBe(true);
+    expect(all.hasMore).toBe(false);
   });
 
   it("filters by type and account", () => {
@@ -182,7 +184,7 @@ describe("agent feed", () => {
     const t0 = Date.now();
     const timedOut = await ctx.events.wait("agt_scoped", { timeoutMs: 50 });
     expect(Date.now() - t0).toBeGreaterThanOrEqual(45);
-    expect(timedOut).toEqual({ events: [], cursor: hidden.seq, ackedSeq: 0 });
+    expect(timedOut).toEqual({ events: [], cursor: hidden.seq, ackedSeq: 0, hasMore: false });
 
     const ac = new AbortController();
     const p = ctx.events.wait("agt_scoped", { timeoutMs: 10_000, signal: ac.signal });
@@ -203,15 +205,77 @@ describe("agent feed", () => {
   });
 });
 
+describe("feed scan bound", () => {
+  /** Bulk-inserts events the scoped agent can't see, bypassing emit for speed. */
+  function insertInvisible(ctx: AppContext, n: number) {
+    ctx.db.tx(() => {
+      const ts = new Date().toISOString();
+      for (let i = 0; i < n; i++) {
+        ctx.db.run(
+          "INSERT INTO events (id, type, account_id, label_ids, dedupe_key, created_at) VALUES (?, 'message.received', 'acc_1', '[\"INBOX\"]', ?, ?)",
+          `evt_bulk${i}`,
+          `bulk${i}`,
+          ts,
+        );
+      }
+    });
+  }
+
+  it("reports hasMore when the scan stops at its bound", () => {
+    const ctx = setup();
+    insertInvisible(ctx, 5001);
+    const visible = emit(ctx, received("visible", ["Label_ok"]));
+    const first = ctx.events.feed("agt_scoped");
+    expect(first.events).toEqual([]);
+    expect(first.hasMore).toBe(true);
+    expect(first.cursor).toBe(5000);
+    const second = ctx.events.feed("agt_scoped", { after: first.cursor });
+    expect(second.events.map((e) => e.id)).toEqual([visible.id]);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it("wait keeps scanning past the bound and resolves with the visible event", async () => {
+    const ctx = setup();
+    insertInvisible(ctx, 5001);
+    const visible = emit(ctx, received("visible", ["Label_ok"]));
+    const r = await ctx.events.wait("agt_scoped", { timeoutMs: 5000 });
+    expect(r.events.map((e) => e.id)).toEqual([visible.id]);
+  });
+
+  it("wait stops rescanning when aborted", async () => {
+    const ctx = setup();
+    insertInvisible(ctx, 12_000);
+    const ac = new AbortController();
+    const p = ctx.events.wait("agt_scoped", { timeoutMs: 5000, signal: ac.signal });
+    ac.abort();
+    const r = await p;
+    expect(r.events).toEqual([]);
+    expect(r.hasMore).toBe(true);
+    expect(ctx.bus.listenerCount("event")).toBe(0);
+  });
+});
+
+describe("emit inside a transaction", () => {
+  it("throws instead of publishing before the outer commit", () => {
+    const ctx = setup();
+    const seen: MailEvent[] = [];
+    ctx.bus.on("event", (e) => seen.push(e));
+    expect(() => ctx.db.tx(() => ctx.events.emit(received("m1")))).toThrow(/inside a transaction/);
+    expect(seen).toEqual([]);
+    expect(ctx.events.list({}).items).toEqual([]);
+    expect(emit(ctx, received("m1"))).toBeTruthy();
+  });
+});
+
 describe("events.prune", () => {
-  it("deletes old events but keeps ones with pending deliveries", () => {
+  it("deletes old events but keeps ones still referenced by a delivery", () => {
     const ctx = setup();
     const old = emit(ctx, received("old"));
     const pending = emit(ctx, received("pending"));
     emit(ctx, received("new"));
     ctx.db.run("UPDATE events SET created_at = '2000-01-01T00:00:00.000Z' WHERE seq IN (?, ?)", old.seq, pending.seq);
     ctx.db.run("INSERT INTO webhooks (id, agent_id, name, url, secret_enc, secret_prefix, event_types, created_at) VALUES ('whk_1', 'agt_all', 'w', 'http://x', 'x', 'x', '[]', ?)", new Date().toISOString());
-    ctx.db.run("INSERT INTO deliveries (id, webhook_id, event_seq, status, created_at, updated_at) VALUES ('dlv_1', 'whk_1', ?, 'failed', 'x', 'x')", pending.seq);
+    ctx.db.run("INSERT INTO deliveries (id, webhook_id, event_seq, status, created_at, updated_at) VALUES ('dlv_1', 'whk_1', ?, 'succeeded', 'x', 'x')", pending.seq);
     expect(ctx.events.prune("2001-01-01T00:00:00.000Z")).toBe(1);
     expect(ctx.events.get(old.id)).toBeNull();
     expect(ctx.events.get(pending.id)).not.toBeNull();

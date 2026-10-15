@@ -6,8 +6,8 @@ export interface DeliveryRow {
   id: string;
   webhook_id: string;
   event_seq: number;
-  event_id: string | null;
-  event_type: EventType | null;
+  event_id: string;
+  event_type: EventType;
   status: DeliveryStatus;
   attempts: number;
   next_attempt_at: string | null;
@@ -19,15 +19,15 @@ export interface DeliveryRow {
   updated_at: string;
 }
 
-/** The event may have been pruned by retention; the delivery row still renders. */
+/** Events outlive their deliveries (events.prune skips referenced events), so the join always matches. */
 export const DELIVERY_SELECT = `SELECT d.rowid AS rid, d.*, e.id AS event_id, e.type AS event_type
-  FROM deliveries d LEFT JOIN events e ON e.seq = d.event_seq`;
+  FROM deliveries d JOIN events e ON e.seq = d.event_seq`;
 
 export const toDelivery = (r: DeliveryRow): Delivery => ({
   id: r.id,
   webhookId: r.webhook_id,
-  eventId: r.event_id ?? "",
-  eventType: r.event_type ?? "message.received",
+  eventId: r.event_id,
+  eventType: r.event_type,
   status: r.status,
   attempts: r.attempts,
   nextAttemptAt: r.next_attempt_at,
