@@ -95,6 +95,29 @@ describe("verifyChecks", () => {
     expect(other.delivered).toBe(false);
   });
 
+  it("counts a recorded listener that is disconnected now but acked past the event", () => {
+    const r = verifyChecks({ ...base, test: test0, events: [event(7, "message.received")], listeners: [listener("host-default", 7, false)] });
+    expect(r.delivered).toBe(true);
+    expect(r.resendForListener).toBe(false);
+  });
+
+  it("waits for a recorded listener that is disconnected and behind, without asking for a resend", () => {
+    // Recorded at send time (even while disconnected): it keeps its cursor and handles the mail on reconnect.
+    const r = verifyChecks({ ...base, test: test0, events: [event(7, "message.received")], listeners: [listener("host-default", 5, false)] });
+    expect(r.delivered).toBe(false);
+    expect(r.resendForListener).toBe(false);
+  });
+
+  it("asks for a resend when no recorded listener is connected but another one is", () => {
+    const events = [event(7, "message.received")];
+    const r = verifyChecks({ ...base, test: test0, events, listeners: [listener("host-default", 5, false), listener("laptop-default", 9)] });
+    expect(r.delivered).toBe(false);
+    expect(r.resendForListener).toBe(true);
+    // …but not while a recorded listener is connected and still catching up.
+    const catchingUp = verifyChecks({ ...base, test: test0, events, listeners: [listener("host-default", 5), listener("laptop-default", 9)] });
+    expect(catchingUp.resendForListener).toBe(false);
+  });
+
   it("doesn't ask for a resend when the listener is skipped", () => {
     const r = verifyChecks({ ...base, skipListen: true, test: { ...test0, listenersAtSend: [] }, events: [event(7, "message.received")], listeners: [listener("x", 9)] });
     expect(r.resendForListener).toBe(false);

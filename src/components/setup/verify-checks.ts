@@ -13,7 +13,7 @@ export const READ_TOOLS = new Set(["search_threads", "get_thread", "get_message"
 export interface VerifyTest extends TestEmailResult {
   accountId: string;
   /**
-   * Consumers of the listeners connected when the test was sent. Only these count for delivery: a
+   * Consumers of the listeners that existed (connected or not) when the test was sent. Only these count for delivery: a
    * listener that connects later starts its cursor at the newest event, so its ackedSeq passes the
    * test email without ever having handled it.
    */
@@ -40,7 +40,7 @@ export interface VerifyResult {
   received: MailEvent | undefined;
   /** A listener that was connected at send time has acknowledged the test email. */
   delivered: boolean;
-  /** Received, nobody was listening at send time, and a listener is connected now: send another. */
+  /** Received and not delivered, none of the listeners known at send time is connected, but another one is: send another. */
   resendForListener: boolean;
   /** The agent read mail over MCP (successfully) after the test was sent. */
   readIt: boolean;
@@ -58,7 +58,8 @@ export function verifyChecks({ test, events, listeners, calls, skipListen }: Ver
     sent: true,
     received,
     delivered,
-    resendForListener: !!received && !skipListen && !delivered && atSend.size === 0 && listeners.some((l) => l.connected),
+    resendForListener:
+      !!received && !skipListen && !delivered && !listeners.some((l) => atSend.has(l.consumer) && l.connected) && listeners.some((l) => l.connected),
     readIt: calls.some((e) => e.outcome === "ok" && READ_TOOLS.has(e.action) && e.ts >= test.sentAt),
   };
 }

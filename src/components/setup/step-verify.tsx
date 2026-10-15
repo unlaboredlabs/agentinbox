@@ -533,8 +533,9 @@ function SendTest({ agent, sent, blocked }: { agent: Agent; sent: boolean; /** T
     setError(null);
     try {
       const res = await api<TestEmailResult>(`/api/accounts/${encodeURIComponent(accountId)}/test-email`, { method: "POST" });
-      // Only listeners connected now can be credited with delivering it (see VerifyTest.listenersAtSend).
-      writeState({ test: { ...res, accountId, listenersAtSend: agent.listeners.filter((l) => l.connected).map((l) => l.consumer) } });
+      // Only listeners known now can be credited with delivering it (see VerifyTest.listenersAtSend). A briefly
+      // disconnected one keeps its cursor and handles the mail when it reconnects, so it counts too.
+      writeState({ test: { ...res, accountId, listenersAtSend: agent.listeners.map((l) => l.consumer) } });
     } catch (err) {
       setError(err);
     } finally {
