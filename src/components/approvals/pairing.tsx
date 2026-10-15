@@ -1,0 +1,592 @@
+import type { AgentTool } from "@shared/agent-api";
+import type { Account, Agent, PairingRequest } from "@shared/types";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import {
+  CheckCircle2Icon,
+  CheckIcon,
+  ClockIcon,
+  GlobeIcon,
+  InfoIcon,
+  KeyRoundIcon,
+  LaptopIcon,
+  MessageSquareQuoteIcon,
+  SearchIcon,
+  ShieldCheckIcon,
+  TerminalIcon,
+  XIcon,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { AccountAvatar, AccountStatusBadge } from "@/components/accounts/account-status";
+import { GrantFieldsForm } from "@/components/agents/grant-editor";
+import { ErrorAlert, SectionLabel, TimeAgo, ToneBadge } from "@/components/common";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
+import { useNow } from "@/hooks/use-now";
+import { api, ApiError, toastError } from "@/lib/api";
+import { TOOL_LABEL } from "@/lib/cli";
+import { fmtDuration } from "@/lib/format";
+import { GRANT_PRESETS, type GrantFields, presetGrant } from "@/lib/grants";
+import { type Choice, ChoiceCards } from "@/components/choice-cards";
+import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
+import { keys, queries } from "@/lib/queries";
+import { cn } from "@/lib/utils";
+
+/** "jxgr xd93" → "JXGR-XD93". Codes are 8 characters from an alphabet without 0/O/1/I/L. */
+export function normalizeCode(raw: string): string {
+  const s = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+  return s.length > 4 ? `${s.slice(0, 4)}-${s.slice(4)}` : s;
+}
+
+/** What a new pairing starts with, regardless of what the agent asked for. */
+const PAIRING_DEFAULT: GrantFields = {
+  capabilities: ["read"],
+  labelScope: null,
+  sendMode: "draft_only",
+  allowTo: [],
+  replyOnly: false,
+  maxSendsPerHour: null,
+  maxSendsPerDay: null,
+};
+
+const toolLabel = (t: string | undefined) => (t && t in TOOL_LABEL ? TOOL_LABEL[t as AgentTool] : t) || null;
+
+/** Whether the request asks for anything beyond read + draft-only. */
+function asksForMore(p: PairingRequest): string[] {
+  const more: string[] = [];
+  const caps = p.requested.capabilities ?? [];
+  for (const c of caps) if (c !== "read" && c !== "draft") more.push(CAPABILITY_INFO[c].label);
+  if (p.requested.sendMode && p.requested.sendMode !== "draft_only") more.push(SEND_MODE_INFO[p.requested.sendMode].label);
+  return more;
+}
+
+export function ExpiresIn({ at }: { at: string }) {
+  const now = useNow(1000);
+  const left = Date.parse(at) - now;
+  if (left <= 0) return <span className="text-critical">Expired</span>;
+  return <span className={cn("tabular", left < 120_000 && "font-medium text-warning")}>Expires in {fmtDuration(left)}</span>;
+}
+
+function ClientFacts({ p }: { p: PairingRequest }) {
+  const tool = toolLabel(p.client.tool);
+  const facts = [
+    { icon: LaptopIcon, label: "Host", value: [p.client.hostname, p.client.platform].filter(Boolean).join(" · ") || null },
+    { icon: TerminalIcon, label: "Tool", value: [tool, p.client.version && `CLI ${p.client.version}`].filter(Boolean).join(" · ") || null },
+  ];
+  const rows = [
+    ...facts.map((f) => ({ ...f, node: f.value ? <span className="font-mono text-[13px] break-all">{f.value}</span> : null })),
+    {
+      icon: GlobeIcon,
+      label: "From",
+      node: (
+        <span className="text-[13px]">
+          <span className="font-mono">{p.ip ?? "unknown address"}</span>
+          <span className="text-muted-foreground">
+            {" "}
+            · requested <TimeAgo date={p.createdAt} />
+          </span>
+        </span>
+      ),
+    },
+  ];
+  return (
+    <dl className="space-y-2 text-sm">
+      {rows.map((f) => (
+        <div key={f.label} className="flex items-baseline gap-3">
+          <dt className="flex w-16 shrink-0 items-center gap-1.5 self-center text-muted-foreground">
+            <f.icon className="size-3.5" /> {f.label}
+          </dt>
+          <dd className="min-w-0">{f.node ?? <span className="text-muted-foreground">not given</span>}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function AskedFor({ p, accounts }: { p: PairingRequest; accounts: Account[] }) {
+  const r = p.requested;
+  const known = new Set(accounts.map((a) => a.email.toLowerCase()));
+  const rows: [string, React.ReactNode][] = [];
+  if (r.accounts?.length)
+    rows.push([
+      "Accounts",
+      r.accounts.map((e, i) => (
+        <span key={e}>
+          {i > 0 && ", "}
+          {e}
+          {!known.has(e.toLowerCase()) && <span className="text-muted-foreground"> (not connected)</span>}
+        </span>
+      )),
+    ]);
+  if (r.capabilities?.length) rows.push(["Capabilities", r.capabilities.map((c) => CAPABILITY_INFO[c].label).join(", ")]);
+  if (r.sendMode) rows.push(["Sending", SEND_MODE_INFO[r.sendMode].label]);
+  return (
+    <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+      <SectionLabel>Asked for</SectionLabel>
+      {rows.length ? (
+        <dl className="grid grid-cols-[6.5rem_1fr] gap-y-1 text-sm">
+          {rows.map(([k, v]) => (
+            <div key={k} className="contents">
+              <dt className="text-muted-foreground">{k}</dt>
+              <dd className="min-w-0 break-words">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="text-sm text-muted-foreground">Nothing specific. You decide what it gets.</p>
+      )}
+      {r.reason && (
+        <div className="flex gap-2 border-t pt-2 text-sm">
+          <MessageSquareQuoteIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <p className="whitespace-pre-wrap break-words">{r.reason}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A pending pairing request: who is asking, from where, and for what. */
+export function PairingCard({
+  p,
+  accounts,
+  highlighted,
+  onApprove,
+}: {
+  p: PairingRequest;
+  accounts: Account[];
+  highlighted?: boolean;
+  onApprove: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [denying, setDenying] = useState(false);
+  const [note, setNote] = useState("");
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (highlighted) ref.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [highlighted]);
+
+  const deny = async () => {
+    setBusy(true);
+    try {
+      await api(`/api/pairings/${encodeURIComponent(p.id)}/deny`, { body: note.trim() ? { note: note.trim() } : {} });
+      toast.success(`Denied ${p.name}`, { description: "The agent's terminal shows that it was denied, with your note." });
+      void qc.invalidateQueries({ queryKey: keys.pairings });
+    } catch (err) {
+      toastError(err, "Couldn't deny the request");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card ref={ref} className={cn("scroll-mt-24 transition-shadow", highlighted && "ring-2 ring-chart-1/60")}>
+      <CardHeader className="gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-base font-semibold break-words">{p.name}</span>
+              <Badge variant="outline" className="font-normal text-muted-foreground">
+                self-reported by the agent
+              </Badge>
+              {highlighted && <Badge className="bg-chart-1 font-normal text-white">Opened from your terminal</Badge>}
+            </div>
+            {p.description && <p className="text-sm break-words whitespace-pre-wrap text-muted-foreground">{p.description}</p>}
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ClockIcon className="size-3.5" />
+            <ExpiresIn at={p.expiresAt} />
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-4 lg:grid-cols-2">
+        <ClientFacts p={p} />
+        <AskedFor p={p} accounts={accounts} />
+      </CardContent>
+      {denying && (
+        <CardContent className="pt-4">
+          <Field>
+            <FieldLabel htmlFor={`deny-${p.id}`}>Note for the agent (optional)</FieldLabel>
+            <Textarea
+              id={`deny-${p.id}`}
+              autoFocus
+              rows={2}
+              value={note}
+              maxLength={500}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. Ask in #ops first, or use the shared triage agent."
+            />
+          </Field>
+        </CardContent>
+      )}
+      <CardFooter className="flex-wrap justify-between gap-3 border-t">
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <KeyRoundIcon className="size-3.5 shrink-0" />
+          To approve, you'll type the code shown in the agent's terminal.
+        </p>
+        <div className="flex gap-2">
+          {denying ? (
+            <>
+              <Button variant="ghost" onClick={() => setDenying(false)} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={() => void deny()} disabled={busy}>
+                {busy ? <Spinner /> : <XIcon />} Deny request
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={() => setDenying(true)}>
+                <XIcon /> Deny
+              </Button>
+              <Button onClick={onApprove}>
+                <ShieldCheckIcon /> Review and approve
+              </Button>
+            </>
+          )}
+        </div>
+      </CardFooter>
+    </Card>
+  );
+}
+
+/** Find a pending request by the code shown in the agent's terminal. */
+export function FindByCode({ pending, onFound }: { pending: PairingRequest[]; onFound: (p: PairingRequest, code: string) => void }) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const c = normalizeCode(code);
+    if (c.length < 9) return setError("Codes have 8 characters, like K7QM-2XPD.");
+    const match = pending.find((p) => p.userCode === c);
+    if (!match) return setError("No waiting request has this code. Codes last 10 minutes; if it expired, run connect again.");
+    setError(null);
+    setCode("");
+    onFound(match, c);
+  };
+  return (
+    <form onSubmit={submit} className="space-y-1.5">
+      <label htmlFor="find-code" className="text-sm font-medium">
+        Have a code from your agent's terminal?
+      </label>
+      <div className="flex max-w-md gap-2">
+        <Input
+          id="find-code"
+          value={code}
+          onChange={(e) => {
+            setCode(normalizeCode(e.target.value));
+            setError(null);
+          }}
+          placeholder="XXXX-XXXX"
+          autoComplete="off"
+          spellCheck={false}
+          className="font-mono tracking-widest uppercase"
+          aria-invalid={!!error}
+          aria-describedby="find-code-error"
+        />
+        <Button type="submit" variant="outline">
+          <SearchIcon /> Find request
+        </Button>
+      </div>
+      {error && (
+        <p id="find-code-error" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+interface AccountChoice {
+  on: boolean;
+  preset: string;
+  fields: GrantFields;
+}
+
+const presetById = (id: string) => GRANT_PRESETS.find((p) => p.id === id);
+const PAIRING_CHOICES: Choice<string>[] = [
+  { value: "read", title: "Read only", description: "Search and read mail, get events. Can't change or send anything.", badge: <Badge variant="secondary">Default</Badge> },
+  { value: "drafts", title: "Read and draft", description: "Anything it sends becomes a Gmail draft for you to send." },
+  { value: "approval", title: "Send with my approval", description: "Each send waits in Approvals until you approve it." },
+  { value: "custom", title: "Custom", description: "Pick capabilities, labels, recipients and limits." },
+];
+
+/**
+ * Approve a pairing: the human types the code from the agent's terminal (never pre-filled from the
+ * link), names the agent, and builds its grants starting from read-only + draft-only sending.
+ */
+export function PairingApproveDialog({
+  p,
+  initialCode,
+  accounts,
+  onOpenChange,
+}: {
+  p: PairingRequest | null;
+  /** Only when the human already typed it in the "find by code" box. */
+  initialCode?: string;
+  accounts: Account[];
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [approved, setApproved] = useState<{ agent: Agent; request: PairingRequest } | null>(null);
+  const open = !!p || !!approved;
+  const close = () => {
+    setApproved(null);
+    onOpenChange(false);
+  };
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && close()}>
+      <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl" onInteractOutside={(e) => e.preventDefault()}>
+        {approved ? (
+          <ApprovedState agent={approved.agent} onClose={close} />
+        ) : p ? (
+          <ApproveForm key={p.id} p={p} initialCode={initialCode} accounts={accounts} onApproved={(agent) => setApproved({ agent, request: p })} onCancel={close} />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ApprovedState({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+  return (
+    <>
+      <div className="flex flex-col items-center gap-3 py-4 text-center">
+        <span className="flex size-12 items-center justify-center rounded-full bg-success/15 text-success">
+          <CheckCircle2Icon className="size-6" />
+        </span>
+        <DialogTitle className="text-lg">{agent.name} is approved</DialogTitle>
+        <DialogDescription className="max-w-md">
+          The agent's terminal will receive its key automatically. The key is never shown here. If the terminal was closed, the key expires unused
+          and the agent is removed.
+        </DialogDescription>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" asChild>
+          <Link to="/agents/$agentId" params={{ agentId: agent.id }} onClick={onClose}>
+            Open agent
+          </Link>
+        </Button>
+        <Button onClick={onClose}>Done</Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+function ApproveForm({
+  p,
+  initialCode,
+  accounts,
+  onApproved,
+  onCancel,
+}: {
+  p: PairingRequest;
+  initialCode?: string;
+  accounts: Account[];
+  onApproved: (a: Agent) => void;
+  onCancel: () => void;
+}) {
+  const qc = useQueryClient();
+  const [code, setCode] = useState(initialCode ?? "");
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const codeRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (codeError) codeRef.current?.focus();
+  }, [codeError]);
+  const [name, setName] = useState(p.name);
+  const usable = accounts.filter((a) => a.status !== "paused");
+  const [choices, setChoices] = useState<Record<string, AccountChoice>>(() =>
+    // Pre-select only when there's a single working account; never from what the agent asked for.
+    Object.fromEntries(usable.map((a) => [a.id, { on: usable.filter((x) => x.status === "active").length === 1 && a.status === "active", preset: "read", fields: { ...PAIRING_DEFAULT } }])),
+  );
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const more = asksForMore(p);
+  const selected = usable.filter((a) => choices[a.id]?.on);
+  const scopeEmpty = selected.some((a) => choices[a.id]!.fields.labelScope?.length === 0);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const typed = normalizeCode(code);
+    if (typed.length < 9) return setCodeError("Type the full 8-character code from the agent's terminal.");
+    if (typed !== p.userCode) {
+      return setCodeError("That's not this request's code. If your terminal shows a different code, this request isn't from your agent: deny it.");
+    }
+    if (!selected.length) return setError(new Error("Choose at least one account for the agent."));
+    setBusy(true);
+    setError(null);
+    try {
+      const agent = await api<Agent>(`/api/pairings/${encodeURIComponent(p.id)}/approve`, {
+        body: {
+          userCode: typed,
+          name: name.trim() || p.name,
+          grants: selected.map((a) => ({ accountId: a.id, ...choices[a.id]!.fields })),
+        },
+      });
+      void qc.invalidateQueries({ queryKey: keys.pairings });
+      void qc.invalidateQueries({ queryKey: keys.agents });
+      onApproved(agent);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) setCodeError(err.message);
+      else setError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={(e) => void submit(e)} className="contents" noValidate>
+      <DialogHeader>
+        <DialogTitle>Approve agent access</DialogTitle>
+        <DialogDescription>
+          <span className="font-medium text-foreground">{p.name}</span> from <span className="font-mono">{p.ip ?? "an unknown address"}</span> wants
+          access. Nothing is granted until you confirm the code.
+        </DialogDescription>
+      </DialogHeader>
+
+      <Field data-invalid={!!codeError}>
+        <FieldLabel htmlFor="pairing-code">Code from your agent's terminal</FieldLabel>
+        <Input
+          id="pairing-code"
+          ref={codeRef}
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+          value={code}
+          onChange={(e) => {
+            setCode(normalizeCode(e.target.value));
+            setCodeError(null);
+          }}
+          placeholder="XXXX-XXXX"
+          className="h-12 max-w-64 text-center font-mono text-2xl tracking-[0.2em] uppercase md:text-2xl"
+          aria-invalid={!!codeError}
+        />
+        {codeError ? (
+          <FieldError>{codeError}</FieldError>
+        ) : (
+          <FieldDescription>Type the code your agent's terminal shows. If you didn't start this request yourself, deny it.</FieldDescription>
+        )}
+      </Field>
+
+      <Field>
+        <FieldLabel htmlFor="pairing-name">Agent name</FieldLabel>
+        <Input id="pairing-name" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
+      </Field>
+
+      <AskedFor p={p} accounts={accounts} />
+      {more.length > 0 && (
+        <p className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
+          <InfoIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+          <span>
+            It asked for more ({more.join(", ")}). Access below starts at <span className="font-medium">Read</span> with sending as{" "}
+            <span className="font-medium">Draft only</span>; add more only if you trust this agent.
+          </span>
+        </p>
+      )}
+
+      <div className="space-y-2">
+        <SectionLabel>What it gets</SectionLabel>
+        {usable.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No Gmail account is connected yet. <Link to="/accounts" className="font-medium text-foreground underline">Connect one</Link> first.
+          </p>
+        ) : (
+          usable.map((a) => {
+            const c = choices[a.id]!;
+            const set = (patch: Partial<AccountChoice>) => setChoices((all) => ({ ...all, [a.id]: { ...all[a.id]!, ...patch } }));
+            return (
+              <div key={a.id} className={cn("rounded-lg border", c.on && "bg-card")}>
+                <label className="flex cursor-pointer items-center gap-3 p-3">
+                  <Checkbox checked={c.on} onCheckedChange={(v) => set({ on: v === true })} />
+                  <AccountAvatar email={a.email} className="size-7" />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{a.email}</span>
+                  {a.status !== "active" && <AccountStatusBadge status={a.status} />}
+                </label>
+                {c.on && (
+                  <div className="space-y-4 border-t p-3">
+                    <ChoiceCards
+                      columns={2}
+                      aria-label={`Access to ${a.email}`}
+                      value={c.preset}
+                      choices={PAIRING_CHOICES}
+                      onChange={(preset) => {
+                        const pr = presetById(preset);
+                        set({ preset, fields: pr ? presetGrant(pr) : c.fields });
+                      }}
+                    />
+                    {c.preset === "custom" && (
+                      <div className="space-y-6 rounded-lg border p-3">
+                        <GrantFieldsForm
+                          idPrefix={`pair-${a.id}`}
+                          accountId={a.id}
+                          value={c.fields}
+                          onChange={(patch) => set({ fields: { ...c.fields, ...patch } })}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {error != null && <ErrorAlert error={error} title="Couldn't approve" />}
+
+      <DialogFooter>
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        {!selected.length && <span className="mr-auto self-center text-xs text-muted-foreground">Choose at least one account.</span>}
+        <Button type="submit" disabled={busy || !selected.length || scopeEmpty}>
+          {busy ? <Spinner /> : <CheckIcon />} Approve and send key to terminal
+        </Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
+const STATUS_TONE = { approved: "good", denied: "idle", expired: "idle", pending: "warn" } as const;
+
+/** The last few decided requests, so "what happened to it?" has an answer. */
+export function RecentPairings({ items }: { items: PairingRequest[] }) {
+  const agents = useQuery(queries.agents());
+  if (!items.length) return null;
+  return (
+    <div className="space-y-2">
+      <SectionLabel>Recent requests</SectionLabel>
+      <Card className="gap-0 py-0">
+        <ul className="divide-y">
+          {items.map((p) => {
+            const agentExists = p.agentId && agents.data?.some((a) => a.id === p.agentId);
+            return (
+              <li key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm">
+                <ToneBadge tone={STATUS_TONE[p.status]}>{p.status[0]!.toUpperCase() + p.status.slice(1)}</ToneBadge>
+                <span className="min-w-0 flex-1 truncate font-medium">
+                  {agentExists ? (
+                    <Link to="/agents/$agentId" params={{ agentId: p.agentId! }} className="hover:underline">
+                      {p.name}
+                    </Link>
+                  ) : (
+                    p.name
+                  )}
+                </span>
+                {p.decisionNote && <span className="max-w-xs truncate text-muted-foreground">“{p.decisionNote}”</span>}
+                <span className="font-mono text-xs text-muted-foreground">{p.ip}</span>
+                <TimeAgo date={p.decidedAt ?? p.expiresAt} className="text-xs text-muted-foreground" />
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
+    </div>
+  );
+}

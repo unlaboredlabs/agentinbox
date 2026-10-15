@@ -299,7 +299,7 @@ async function ensurePendingPairing() {
     void ensurePendingPairing();
   })();
 }
-const r_delay = () => 90_000;
+const r_delay = () => 45_000;
 await ensurePendingPairing();
 
 // ───────────── Webhooks ─────────────
@@ -443,10 +443,10 @@ await sup.close();
 const cc = await mcp(claudeKey);
 for (const mins of [1260, 900, 610, 380, 175, 60, 12]) {
   await at(mins, () => cc.call("list_events", {}));
-  await at(mins - 1, () => cc.call("search_threads", { query: "is:unread" }));
+  await at(mins - 1, () => cc.call("search_threads", { account: OPS, query: "is:unread" }));
 }
-await at(170, () => cc.call("get_thread", { thread_id: msgIds["datadog-alert"]!.threadId }));
-await at(8, () => cc.call("send_message", { to: ["jules@acme.dev"], subject: "Heads up", body: "Latency alert fired." })); // no send capability
+await at(170, () => cc.call("get_thread", { account: OPS, thread_id: msgIds["datadog-alert"]!.threadId }));
+await at(8, () => cc.call("send_message", { account: OPS, to: ["jules@acme.dev"], subject: "Heads up", body: "Latency alert fired." })); // no send capability
 await cc.close();
 
 const bill = await mcp(billing.apiKey);
@@ -489,15 +489,15 @@ await at(31, () =>
     reason: "Acknowledge Northwind invoice INV-2291 and explain the partial payment",
   }),
 );
-await at(18, () => bill.call("send_message", { to: ["ap@acme.dev"], subject: "One more thing", body: "…", reason: "Follow-up" })); // rate_limit denial
+await at(5, () => bill.call("send_message", { to: ["ap@acme.dev"], subject: "One more thing", body: "…", reason: "Follow-up" })); // rate_limit denial
 await bill.close();
 
 const approvals = await api<Approval[]>("GET", "/api/approvals?status=pending");
 const byTo = (addr: string) => approvals.find((a) => a.to.some((t) => t.email === addr) && a.kind === "send");
 const ar = byTo("ap@acme.dev");
 const pay = byTo("dana@northwind.io");
-if (ar) await at(38, () => api("POST", `/api/approvals/${ar.id}/approve`, { note: "Looks right." }));
-if (pay) await at(36, () => api("POST", `/api/approvals/${pay.id}/reject`, { note: "Don't confirm dates by email; finance sends remittance from the bank portal." }));
+if (ar) await at(7, () => api("POST", `/api/approvals/${ar.id}/approve`, { note: "Looks right." }));
+if (pay) await at(6, () => api("POST", `/api/approvals/${pay.id}/reject`, { note: "Don't confirm dates by email; finance sends remittance from the bank portal." }));
 log("agent activity recorded");
 
 // Turn the old digest agent off (its webhook keeps failing).
@@ -512,11 +512,15 @@ await waitFor("first delivery attempts", () => ctx.db.get<{ n: number }>("SELECT
 // ───────────── Backdate, so timelines look like a day of real traffic ─────────────
 
 ctx.db.tx(() => {
-  const events = ctx.db.all<{ seq: number; gmail_message_id: string | null }>("SELECT seq, gmail_message_id FROM events");
+  // Planned messages get their delivery time; everything else (labels, sends, auth failure) follows in
+  // sequence order, so the event feed stays chronological.
+  const events = ctx.db.all<{ seq: number; gmail_message_id: string | null; type: string }>("SELECT seq, gmail_message_id, type FROM events ORDER BY seq");
+  let prev = Date.now() - 24 * HOUR;
   for (const e of events) {
-    const h = e.gmail_message_id ? planned.get(e.gmail_message_id) : undefined;
-    if (h === undefined) continue;
-    const at = iso(h * HOUR);
+    const h = e.gmail_message_id && e.type === "message.received" ? planned.get(e.gmail_message_id) : e.gmail_message_id ? planned.get(e.gmail_message_id) : undefined;
+    const t = h !== undefined && Date.now() - h * HOUR >= prev ? Date.now() - h * HOUR : Math.min(prev + 40_000, Date.now() - 60_000);
+    prev = t;
+    const at = new Date(t).toISOString();
     ctx.db.run("UPDATE events SET created_at = ? WHERE seq = ?", at, e.seq);
     ctx.db.run(
       "UPDATE deliveries SET created_at = ?, updated_at = ? WHERE event_seq = ?",
@@ -542,9 +546,16 @@ ctx.db.tx(() => {
   ctx.db.run("UPDATE agents SET created_at = ? WHERE id = ?", iso(26 * HOUR), claudeAgentId);
   ctx.db.run("UPDATE webhooks SET created_at = ?", iso(2 * 24 * HOUR));
   ctx.db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", iso(9 * 24 * HOUR), digest.agent.id);
-  for (const a of ctx.db.all<{ id: string; status: string }>("SELECT id, status FROM approvals")) {
-    const created = a.status === "pending" ? iso(31 * 60_000) : iso(45 * 60_000);
-    ctx.db.run("UPDATE approvals SET created_at = ?, expires_at = ? WHERE id = ?", created, new Date(Date.parse(created) + 72 * HOUR).toISOString(), a.id);
+  for (const a of ctx.db.all<{ id: string; status: string; subject: string }>("SELECT id, status, COALESCE(json_extract(payload, '$.subject'), '') AS subject FROM approvals")) {
+    const created = a.status === "pending" ? iso(31 * 60_000) : a.subject.startsWith("AR") ? iso(50 * 60_000) : iso(44 * 60_000);
+    const decided = a.status === "pending" ? null : a.subject.startsWith("AR") ? iso(7 * 60_000) : iso(6 * 60_000);
+    ctx.db.run(
+      "UPDATE approvals SET created_at = ?, expires_at = ?, decided_at = ? WHERE id = ?",
+      created,
+      new Date(Date.parse(created) + 72 * HOUR).toISOString(),
+      decided,
+      a.id,
+    );
   }
 });
 

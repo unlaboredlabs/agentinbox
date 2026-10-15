@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { KeyRoundIcon } from "lucide-react";
 import { CodeBlock, ExternalLink } from "@/components/common";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { NPX } from "@/lib/cli";
 import { queries } from "@/lib/queries";
 
 export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
@@ -18,7 +19,8 @@ export function snippets(publicUrl: string, key: string) {
       null,
       2,
     ),
-    skill: `npx agentinbox skill install --url ${publicUrl}`,
+    hermes: `mcp_servers:\n  agentinbox:\n    url: "${mcp}"\n    headers:\n      Authorization: "Bearer ${key}"`,
+    skill: `${NPX} skill install --url ${publicUrl}`,
     mcpUrl: mcp,
     skillUrl: `${publicUrl}/skill.md`,
   };
@@ -50,6 +52,7 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
             <TabsTrigger value="claude">Claude Code</TabsTrigger>
             <TabsTrigger value="codex">Codex</TabsTrigger>
             <TabsTrigger value="cursor">Cursor</TabsTrigger>
+            <TabsTrigger value="hermes">Hermes</TabsTrigger>
             <TabsTrigger value="generic">Other MCP</TabsTrigger>
             <TabsTrigger value="skill">Skill</TabsTrigger>
           </TabsList>
@@ -72,6 +75,12 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
             <code className="font-mono text-foreground">.cursor/mcp.json</code>):
           </p>
           <CodeBlock code={s.cursor} title="~/.cursor/mcp.json" />
+        </TabsContent>
+        <TabsContent value="hermes" className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Add to <code className="font-mono text-foreground">~/.hermes/config.yaml</code>, then restart Hermes:
+          </p>
+          <CodeBlock code={s.hermes} title="~/.hermes/config.yaml" />
         </TabsContent>
         <TabsContent value="generic" className="space-y-2">
           <p className="text-sm text-muted-foreground">

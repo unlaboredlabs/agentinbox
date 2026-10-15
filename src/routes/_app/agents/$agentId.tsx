@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ConnectAccountButton } from "@/components/accounts/accounts-list";
 import { AgentActivity } from "@/components/agents/agent-activity";
 import { AgentHeader } from "@/components/agents/agent-header";
+import { AgentListeners } from "@/components/agents/agent-listeners";
 import { AgentWebhooks } from "@/components/agents/agent-webhooks";
 import { ConnectSnippets } from "@/components/agents/connect-snippets";
 import { GrantEditor } from "@/components/agents/grant-editor";
@@ -98,14 +99,19 @@ function AgentPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Connect your agent</CardTitle>
-          <CardDescription>Add agentinbox as an MCP server in your agent, then test the connection.</CardDescription>
+          <CardTitle>Give it the tools</CardTitle>
+          <CardDescription>
+            Add agentinbox as an MCP server in your agent with this agent's key, then test the connection. Agents connected by pairing already have
+            this set up.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           <ConnectSnippets apiKey={apiKey} />
           <TestConnection agentId={a.id} />
         </CardContent>
       </Card>
+
+      <AgentListeners agent={a} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <AgentWebhooks agentId={a.id} />

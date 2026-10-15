@@ -67,7 +67,7 @@ function LoginPage() {
                   aria-invalid={!!error && !locked}
                 />
                 <FieldDescription>
-                  Forgot it? Run <code className="font-mono text-foreground">npx agentinbox reset-password</code> on the server.
+                  Forgot it? Run <code className="font-mono text-foreground">npx agentinbox-cli reset-password</code> on the server.
                 </FieldDescription>
               </Field>
               {error && (

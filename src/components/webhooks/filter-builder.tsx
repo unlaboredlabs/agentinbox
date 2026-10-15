@@ -100,7 +100,7 @@ export function FilterBuilder({
       </div>
 
       <Field data-invalid={!!subjectError}>
-        <FieldLabel htmlFor="wf-subject">Subject matches</FieldLabel>
+        <FieldLabel htmlFor="wf-subject">Subject pattern (RE2 regular expression)</FieldLabel>
         <Input
           id="wf-subject"
           className="font-mono"
@@ -111,9 +111,12 @@ export function FilterBuilder({
           aria-invalid={!!subjectError}
         />
         {subjectError ? (
-          <FieldError>Not a valid regular expression: {subjectError}</FieldError>
+          <FieldError>Not a valid pattern: {subjectError}</FieldError>
         ) : (
-          <FieldDescription>A regular expression, case-insensitive. Leave empty for any subject.</FieldDescription>
+          <FieldDescription>
+            Case-insensitive, checked against the first 256 characters of the subject. RE2 syntax: no lookarounds or backreferences. Leave empty for any
+            subject.
+          </FieldDescription>
         )}
       </Field>
 

@@ -1,11 +1,12 @@
 import type { Webhook } from "@shared/types";
 import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon } from "lucide-react";
+import { ToneBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { EVENT_TYPE_INFO } from "@/lib/labels";
 import { WebhookStateBadge, WebhookStats } from "./webhook-bits";
 
-export function WebhookRow({ webhook: w, agentName }: { webhook: Webhook; agentName?: string }) {
+export function WebhookRow({ webhook: w, agentName, agentDisabled }: { webhook: Webhook; agentName?: string; agentDisabled?: boolean }) {
   return (
     <Link
       to="/webhooks/$webhookId"
@@ -21,6 +22,7 @@ export function WebhookRow({ webhook: w, agentName }: { webhook: Webhook; agentN
               <BotIcon className="size-3.5" /> {agentName}
             </span>
           )}
+          {agentDisabled && <ToneBadge tone="idle">Agent disabled: nothing is sent</ToneBadge>}
         </div>
         <div className="truncate font-mono text-xs text-muted-foreground">{w.url}</div>
         <div className="flex flex-wrap gap-1">

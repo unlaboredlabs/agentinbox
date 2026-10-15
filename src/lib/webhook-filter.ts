@@ -1,13 +1,24 @@
 import type { Account, EventType, WebhookFilter, WebhookInput } from "@shared/types";
 import { EVENT_TYPE_INFO } from "./labels";
 
+/**
+ * Live check for the subject pattern. The server matches with RE2 (linear time), which is stricter
+ * than JS RegExp: no lookarounds, no backreferences, repeat counts up to 1000.
+ */
 export function regexError(pattern: string | undefined): string | null {
   if (!pattern) return null;
+  if (/\(\?<?[=!]/.test(pattern)) return "lookarounds like (?=…) or (?!…) aren't supported (RE2). Match the text directly instead.";
+  if (/\\[1-9]|\\k</.test(pattern)) return "backreferences like \\1 aren't supported (RE2).";
+  for (const m of pattern.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
+    if (Number(m[1]) > 1000 || (m[2] && Number(m[2]) > 1000)) return "repeat counts above 1000 aren't supported (RE2).";
+  }
+  // Approximate the remaining syntax check with JS RegExp, after mapping RE2-only forms it lacks.
+  const js = pattern.replace(/\(\?[imsU]+\)/g, "").replace(/\(\?[imsU-]+:/g, "(?:").replace(/\(\?P</g, "(?<");
   try {
-    new RegExp(pattern, "i");
+    new RegExp(js, "i");
     return null;
   } catch (err) {
-    return (err as Error).message.replace(/^Invalid regular expression: /, "");
+    return (err as Error).message.replace(/^Invalid regular expression: \/.*\/[a-z]*: /, "").replace(/^Invalid regular expression: /, "");
   }
 }
 

@@ -1,6 +1,6 @@
-import type { Account, Approval } from "@shared/types";
+import type { Account, Approval, PairingRequest } from "@shared/types";
 import { Link } from "@tanstack/react-router";
-import { AlertTriangleIcon, ArrowRightIcon, StampIcon, UnplugIcon } from "lucide-react";
+import { AlertTriangleIcon, ArrowRightIcon, KeyRoundIcon, StampIcon, UnplugIcon } from "lucide-react";
 import { AccountStatusBadge } from "@/components/accounts/account-status";
 import { connectAccount } from "@/components/accounts/connect-host";
 import { Button } from "@/components/ui/button";
@@ -63,6 +63,37 @@ export function ApprovalsCallout({ approvals }: { approvals: Approval[] }) {
         </div>
         <Button asChild>
           <Link to="/approvals">
+            Review <ArrowRightIcon />
+          </Link>
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Agents waiting for access via `npx agentinbox-cli connect`. */
+export function PairingCallout({ pairings }: { pairings: PairingRequest[] }) {
+  const waiting = pairings.filter((p) => p.status === "pending");
+  if (!waiting.length) return null;
+  const first = waiting[0]!;
+  return (
+    <Card className="border-warning/40 bg-warning/[0.06]">
+      <CardContent className="flex flex-wrap items-center gap-3">
+        <span className="flex size-9 items-center justify-center rounded-lg bg-warning/20">
+          <KeyRoundIcon className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">
+            {waiting.length === 1 ? "An agent is asking for access" : `${waiting.length} agents are asking for access`}
+          </div>
+          <p className="truncate text-sm text-muted-foreground">
+            {first.name}
+            {first.client.hostname && ` · ${first.client.hostname}`}
+            {waiting.length > 1 && " and more"}
+          </p>
+        </div>
+        <Button asChild>
+          <Link to="/approvals" search={{ tab: "access" }}>
             Review <ArrowRightIcon />
           </Link>
         </Button>

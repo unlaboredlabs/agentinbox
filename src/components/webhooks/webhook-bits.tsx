@@ -19,14 +19,15 @@ export function WebhookStateBadge({ enabled }: { enabled: boolean }) {
 /** "12 delivered · 1 failed (24h) · last 3 min ago" */
 export function WebhookStats({ webhook: w, className }: { webhook: Webhook; className?: string }) {
   return (
-    <span className={cn("flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground", className)}>
+    <span className={cn("flex flex-wrap gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground", className)}>
+      <span>Last 24h:</span>
       <span className="tabular">
         <span className="text-foreground">{w.stats.succeeded24h}</span> delivered
       </span>
       <span className={cn("tabular", w.stats.failed24h > 0 && "text-critical")}>
-        <span className={w.stats.failed24h > 0 ? "font-medium" : "text-foreground"}>{w.stats.failed24h}</span> failed
+        · <span className={w.stats.failed24h > 0 ? "font-medium" : "text-foreground"}>{w.stats.failed24h}</span> failed
       </span>
-      <span>(24h)</span>
+      <span>·</span>
       <span>
         Last delivery <TimeAgo date={w.stats.lastDeliveryAt} fallback="never" />
       </span>

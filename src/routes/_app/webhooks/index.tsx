@@ -75,7 +75,7 @@ function WebhooksPage() {
       ) : (
         <Card className="gap-0 divide-y py-0">
           {webhooks.data.map((w) => (
-            <WebhookRow key={w.id} webhook={w} agentName={agents.data?.find((a) => a.id === w.agentId)?.name} />
+            <WebhookRow key={w.id} webhook={w} agentName={agents.data?.find((a) => a.id === w.agentId)?.name} agentDisabled={agents.data?.find((a) => a.id === w.agentId)?.disabled} />
           ))}
         </Card>
       )}

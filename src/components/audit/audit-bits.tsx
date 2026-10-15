@@ -10,7 +10,8 @@ export function OutcomeBadge({ outcome }: { outcome: AuditEntry["outcome"] }) {
 
 export function Actor({ entry: e }: { entry: AuditEntry }) {
   const Icon = e.actorType === "agent" ? BotIcon : e.actorType === "admin" ? UserIcon : CpuIcon;
-  const name = e.actorName ?? (e.actorType === "admin" ? "Admin" : e.actorType === "system" ? "System" : (e.actorId ?? "Unknown agent"));
+  const name =
+    e.actorType === "admin" ? "Admin" : e.actorType === "system" ? (e.actorName ?? "System") : (e.actorName ?? e.actorId ?? "Unknown agent");
   return (
     <span className="flex min-w-0 items-center gap-1.5">
       <Icon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -20,12 +21,13 @@ export function Actor({ entry: e }: { entry: AuditEntry }) {
 }
 
 /** Denial reason in plain language, highlighted. */
-export function DenialReason({ reason }: { reason: string | null }) {
+export function DenialReason({ reason, action }: { reason: string | null; action?: string }) {
   if (!reason) return null;
+  const text = action?.startsWith("pairing.") && reason === "rate_limit" ? "Too many requests from this address" : DENIAL_REASONS[reason];
   return (
     <span className="inline-flex items-center gap-1.5 rounded-md bg-warning/15 px-1.5 py-0.5 text-xs">
       <code className="font-mono">{reason}</code>
-      {DENIAL_REASONS[reason] && <span className="text-muted-foreground">{DENIAL_REASONS[reason]}</span>}
+      {text && <span className="text-muted-foreground">{text}</span>}
     </span>
   );
 }

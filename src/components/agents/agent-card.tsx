@@ -1,14 +1,16 @@
 import type { Account, Agent } from "@shared/types";
 import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon, KeyRoundIcon, MailIcon } from "lucide-react";
-import { TimeAgo, ToneBadge } from "@/components/common";
+import { StatusDot, TimeAgo, ToneBadge } from "@/components/common";
 import { Card } from "@/components/ui/card";
-import { SEND_MODE_INFO } from "@/lib/labels";
+import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
+import { cn } from "@/lib/utils";
 
 export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Account[] }) {
   const emailOf = (id: string) => accounts.find((x) => x.id === id)?.email ?? "Removed account";
+  const live = a.listeners.filter((l) => l.connected);
   return (
-    <Card className="gap-0 py-0 transition-colors hover:bg-muted/30">
+    <Card className={cn("gap-0 py-0 transition-colors hover:bg-muted/30", a.disabled && "bg-muted/20")}>
       <Link
         to="/agents/$agentId"
         params={{ agentId: a.id }}
@@ -20,7 +22,7 @@ export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Acco
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="truncate font-medium">{a.name}</span>
+              <span className={cn("truncate font-medium", a.disabled && "text-muted-foreground")}>{a.name}</span>
               {a.disabled && <ToneBadge tone="idle">Disabled</ToneBadge>}
             </div>
             <p className="line-clamp-2 text-xs text-muted-foreground">{a.description || "No description"}</p>
@@ -30,12 +32,15 @@ export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Acco
         <div className="space-y-1.5 text-xs">
           {a.grants.length ? (
             a.grants.map((g) => (
-              <div key={g.id} className="flex items-center gap-2 text-muted-foreground">
-                <MailIcon className="size-3.5 shrink-0" />
-                <span className="truncate text-foreground">{emailOf(g.accountId)}</span>
-                <span className="shrink-0">
-                  · {g.capabilities.length} capabilit{g.capabilities.length === 1 ? "y" : "ies"}
-                  {g.capabilities.includes("send") && ` · ${SEND_MODE_INFO[g.sendMode].short.toLowerCase()}`}
+              <div key={g.id} className="flex min-w-0 items-start gap-2 text-muted-foreground">
+                <MailIcon className="mt-px size-3.5 shrink-0" />
+                <span className="min-w-0">
+                  <span className="block truncate text-foreground">{emailOf(g.accountId)}</span>
+                  <span className="block truncate">
+                    {g.capabilities.map((c) => CAPABILITY_INFO[c].label).join(", ") || "No capabilities"}
+                    {g.capabilities.includes("send") && ` · ${SEND_MODE_INFO[g.sendMode].label.toLowerCase()}`}
+                    {g.labelScope && ` · ${g.labelScope.length} label${g.labelScope.length === 1 ? "" : "s"}`}
+                  </span>
                 </span>
               </div>
             ))
@@ -51,6 +56,12 @@ export function AgentCard({ agent: a, accounts }: { agent: Agent; accounts: Acco
           <span>
             Last used <TimeAgo date={a.lastUsedAt} fallback="never" />
           </span>
+          {live.length > 0 && (
+            <span className="flex min-w-0 items-center gap-1.5 text-foreground">
+              <StatusDot tone="good" />
+              <span className="truncate">Listening on {live.map((l) => l.client.hostname ?? l.consumer).join(", ")}</span>
+            </span>
+          )}
         </div>
       </Link>
     </Card>
