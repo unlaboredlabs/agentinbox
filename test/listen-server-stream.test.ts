@@ -351,14 +351,16 @@ describe("stream hardening", () => {
     const deadline = Date.now() + 2000;
     while (s.ctx.policy.getAgent(s.agent.id)!.listeners.find((l) => l.consumer === "a")!.connected && Date.now() < deadline) await new Promise((x) => setTimeout(x, 10));
     expect((await s.ack("c", 0)).status).toBe(200); // 3 consumers: a (idle), b, c
-    // A 4th consumer evicts the longest-idle one (a); with all others connected or fresh, it's 409 once none is idle.
-    expect((await s.ack("d", 0)).status).toBe(200);
-    expect(s.ctx.policy.getAgent(s.agent.id)!.listeners.map((l) => l.consumer)).toEqual(["b", "c", "d"]);
-    await s.open("?consumer=c");
-    s.ctx.db.run("UPDATE listener_cursors SET connected = 1 WHERE consumer = 'd'");
-    const full = await s.ack("e", 0);
+    // Recently seen consumers are never evicted: a reconnecting listener must not restart at the head.
+    const full = await s.ack("d", 0);
     expect(full.status).toBe(409);
     expect(((await full.json()) as { error: { code: string } }).error.code).toBe("too_many_consumers");
+    // Once idle past the retention period, the longest-idle one makes room.
+    const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+    s.ctx.db.run("UPDATE listener_cursors SET last_seen_at = ?, updated_at = ? WHERE consumer IN ('a', 'c')", old, old);
+    s.ctx.db.run("UPDATE listener_cursors SET last_seen_at = ? WHERE consumer = 'a'", new Date(Date.now() - 50 * 86_400_000).toISOString());
+    expect((await s.ack("d", 0)).status).toBe(200);
+    expect(s.ctx.policy.getAgent(s.agent.id)!.listeners.map((l) => l.consumer)).toEqual(["b", "c", "d"]);
   });
 
   it("refuses browser requests on the stream", async () => {

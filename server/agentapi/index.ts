@@ -12,7 +12,7 @@ import { clientKey, LoginLimiter } from "../auth/lockout.ts";
 import type { AppContext } from "../context.ts";
 import { HttpError, notFound } from "../util/errors.ts";
 import { type AgentApiEnv, agentAuth } from "./auth.ts";
-import { agentRequestGuard } from "./guard.ts";
+import { agentRequestGuard, isLocalAddress } from "./guard.ts";
 import { ackListener, newestVisibleSeq, parseConsumer } from "./listeners.ts";
 import { createPairingService, type PairingOptions, type PairingService, pairingStartSchema, pollSchema } from "./pairing.ts";
 import { OncePer, RateLimiter, tooManyRequests } from "./ratelimit.ts";
@@ -132,7 +132,9 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
     }
     const body = await readBody(c, pairingStartSchema);
     s.pairings.sweep();
-    const cap = s.pairings.capReached(source);
+    // The owner on this machine can always pair: a remote flood only fills the global caps.
+    const local = isLocalAddress(ip);
+    const cap = s.pairings.capReached(source, local);
     if (cap) {
       denied("pairing.requested", cap === "global" ? "pending_cap" : "pending_cap_source", cap === "global" ? "*" : source, { ip, name: body.name });
       return tooManyRequests(
@@ -143,7 +145,7 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
         "Approve or deny the waiting requests in the console, or let them expire.",
       );
     }
-    const global = s.globalStarts.take("*");
+    const global = local ? { ok: true, retryAfter: 0 } : s.globalStarts.take("*");
     if (!global.ok) {
       denied("pairing.requested", "global_rate_limit", "*", { ip });
       return tooManyRequests(c, "rate_limited", "Too many pairing requests right now", global.retryAfter, "Try again later, or create the agent in the console.");

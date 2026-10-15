@@ -122,8 +122,8 @@ const toPairing = (r: PairingRow): PairingRequest => ({
 export interface PairingService {
   /** Base poll interval in seconds. */
   readonly intervalSeconds: number;
-  /** Which pending cap a new request from this source would exceed, if any. */
-  capReached(source: string): "global" | "source" | null;
+  /** Which pending cap a new request from this source would exceed, if any. `local` sources skip the global cap. */
+  capReached(source: string, local?: boolean): "global" | "source" | null;
   start(input: z.infer<typeof pairingStartSchema>, ip: string): PairingStart;
   /** Unknown device codes return null (the caller counts them toward the per-IP lockout). */
   poll(deviceCode: string): PairingPoll | null;
@@ -256,9 +256,9 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
   return {
     intervalSeconds,
 
-    capReached(source) {
+    capReached(source, local = false) {
       const ips = db.all<{ ip: string | null }>("SELECT ip FROM pairings WHERE status = 'pending' AND expires_at > ?", iso());
-      if (ips.length >= maxPending) return "global";
+      if (!local && ips.length >= maxPending) return "global";
       return ips.filter((r) => clientKey(r.ip ?? "") === source).length >= maxPerSource ? "source" : null;
     },
 

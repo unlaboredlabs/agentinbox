@@ -9,7 +9,7 @@ import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
 import { buildPayload, scopeBodyCheck } from "../webhooks/payload.ts";
 import type { AgentApiEnv } from "./auth.ts";
 import { cleanText } from "./pairing.ts";
-import { accessProblem, ackedSeq, ensureConsumerSlot, newestVisibleSeq, parseConsumer, type RevokeReason } from "./listeners.ts";
+import { accessProblem, ackedSeq, ensureConsumerSlot, newestGrantedSeq, parseConsumer, type RevokeReason } from "./listeners.ts";
 
 export const HEARTBEAT_MS = 15_000;
 const BATCH = 100;
@@ -107,7 +107,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
 
   const { db } = ctx;
   const log = ctx.log.child("listen");
-  ensureConsumerSlot(db, agentId, consumer, opts.maxConsumers ?? 20);
+  ensureConsumerSlot(ctx, agentId, consumer, opts.maxConsumers ?? 20);
   const touch = (delta: number) =>
     db.run(
       "UPDATE listener_cursors SET connected = MAX(0, connected + ?), last_seen_at = ? WHERE agent_id = ? AND consumer = ?",
@@ -118,7 +118,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
     );
   // A new consumer starts at the head (only new mail), unless it asks for start=beginning; an
   // existing one resumes from its cursor.
-  const newest = newestVisibleSeq(ctx, agentId);
+  const newest = newestGrantedSeq(ctx, agentId);
   const isNew = !db.get("SELECT 1 FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, consumer);
   const t = new Date().toISOString();
   db.run(

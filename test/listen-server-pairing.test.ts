@@ -324,22 +324,14 @@ describe("browser and DNS-rebinding guard", () => {
     if (lan) expect(await hostAllowed(s.h.ctx, lan.address.toLowerCase())).toBe(true);
   });
 
-  it("accepts this machine's Tailscale name, or a *.ts.net name resolving only to local addresses", async () => {
+  it("accepts only the Tailscale name that tailscale status reports", async () => {
     const { hostAllowed } = await import("../server/agentapi/guard.ts");
     const s = await setup();
-    const addrs: Record<string, string[]> = {
-      "box.tail1234.ts.net": ["127.0.0.1"],
-      "other.tail1234.ts.net": ["100.101.102.103"],
-      "mixed.tail1234.ts.net": ["127.0.0.1", "100.101.102.103"],
-      "evil.example": ["127.0.0.1"],
-    };
-    const deps = (name: string | null) => ({ tailscaleName: async () => name, resolve: async (h: string) => addrs[h] ?? [] });
+    const deps = (name: string | null) => ({ tailscaleName: async () => name });
     expect(await hostAllowed(s.h.ctx, "me.tail1234.ts.net", deps("me.tail1234.ts.net"))).toBe(true);
-    expect(await hostAllowed(s.h.ctx, "box.tail1234.ts.net", deps(null))).toBe(true);
-    expect(await hostAllowed(s.h.ctx, "other.tail1234.ts.net", deps(null))).toBe(false);
-    expect(await hostAllowed(s.h.ctx, "mixed.tail1234.ts.net", deps(null))).toBe(false);
-    // Only Tailscale names get the resolve check: a rebinding domain pointing here stays refused.
-    expect(await hostAllowed(s.h.ctx, "evil.example", deps(null))).toBe(false);
+    expect(await hostAllowed(s.h.ctx, "other.tail1234.ts.net", deps("me.tail1234.ts.net"))).toBe(false);
+    expect(await hostAllowed(s.h.ctx, "me.tail1234.ts.net", deps(null))).toBe(false);
+    expect(await hostAllowed(s.h.ctx, "evil.example", deps("me.tail1234.ts.net"))).toBe(false);
   });
 });
 
@@ -394,6 +386,17 @@ describe("pairing limits", () => {
     expect(res.status).toBe(429);
     expect((await s.start("10.0.0.4")).status).toBe(429);
     expect(s.actions("pairing.requested").filter((e) => e.outcome === "denied")).toMatchObject([{ reason: "global_rate_limit" }]);
+  });
+
+  it("exempts this machine from the global caps but not from the per-source ones", async () => {
+    const s = await setup({ maxPending: 2, globalStartsPerHour: 2, maxPendingPerSource: 3 });
+    expect((await s.start("203.0.113.1")).status).toBe(200);
+    expect((await s.start("203.0.113.2")).status).toBe(200);
+    expect((await s.start("203.0.113.3")).status).toBe(429); // global pending cap
+    for (let i = 0; i < 3; i++) expect((await s.start("127.0.0.1")).status).toBe(200);
+    const own = await s.start("127.0.0.1");
+    expect(own.status).toBe(429);
+    expect((await json(own)).error.message).toMatch(/This address/);
   });
 
   it("refuses pairing when it is turned off", async () => {

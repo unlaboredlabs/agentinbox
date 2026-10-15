@@ -42,11 +42,25 @@ export const ackedSeq = (db: Db, agentId: string, consumer: string): number =>
 const VISIBLE_SCAN_MAX = 2000;
 
 /**
- * The newest event seq this agent may see, or 0 if it can see none. Cursors are capped at it, so a
- * client can neither skip future events by acking ahead nor learn other mailboxes' activity. When
- * the scan budget runs out (narrow label scope on a busy mailbox), the newest seq in its granted
- * accounts stands in: everything scanned was invisible, so capping there never skips a visible
- * event and only reveals seqs in accounts the agent already reads.
+ * Cursor cap: the newest event seq in the accounts this agent can read (one indexed lookup per
+ * account, no label check). Capping acks, `after` and Last-Event-ID there means a client can't skip
+ * future events by acking ahead, and only learns seqs of accounts it already reads. Anything between
+ * the newest visible event and this cap is invisible to the agent, so a new consumer starts here too.
+ */
+export function newestGrantedSeq(ctx: AppContext, agentId: string): number {
+  let max = 0;
+  for (const g of ctx.policy.grants(agentId)) {
+    if (!g.capabilities.includes("read")) continue;
+    const r = ctx.db.get<{ m: number | null }>("SELECT MAX(seq) AS m FROM events WHERE account_id = ? AND seq > 0", g.accountId);
+    max = Math.max(max, r?.m ?? 0);
+  }
+  return max;
+}
+
+/**
+ * The newest event seq this agent may actually see (label scope included), or 0 if none: reported
+ * as /me `headSeq`. When the scan budget runs out (narrow scope on a busy mailbox), the newest
+ * granted seq stands in: everything scanned was invisible, so nothing visible lies above it.
  */
 export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
   const accounts = ctx.policy
@@ -56,11 +70,9 @@ export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
   if (!accounts.length) return 0;
   const sql = `${EVENT_SELECT} WHERE e.seq > 0 AND e.seq < ? AND e.account_id IN (${accounts.map(() => "?").join(", ")}) ORDER BY e.seq DESC LIMIT 200`;
   let before = Number.MAX_SAFE_INTEGER;
-  let top = 0;
   for (let scanned = 0; ; ) {
-    if (scanned >= VISIBLE_SCAN_MAX) return top;
+    if (scanned >= VISIBLE_SCAN_MAX) return newestGrantedSeq(ctx, agentId);
     const rows = ctx.db.all<EventRow>(sql, before, ...accounts);
-    top ||= rows[0]?.seq ?? 0;
     for (const r of rows) {
       const ev = toStoredEvent(r);
       if (ctx.policy.canSeeEvent(agentId, ev)) return ev.seq;
@@ -73,28 +85,38 @@ export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
 }
 
 /**
- * Makes room for a new consumer: at most `max` per agent. The longest-idle disconnected consumer
- * is dropped; if all are connected, 409.
+ * Makes room for a new consumer: at most `max` per agent. The longest-idle disconnected consumer is
+ * dropped only if it hasn't been seen within the retention window (its cursor is stale anyway);
+ * otherwise 409, so a listener that reconnects later never silently restarts at the head.
  */
-export function ensureConsumerSlot(db: Db, agentId: string, consumer: string, max: number): void {
+export function ensureConsumerSlot(ctx: AppContext, agentId: string, consumer: string, max: number): void {
+  const { db } = ctx;
   if (db.get("SELECT 1 FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, consumer)) return;
   const { n } = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM listener_cursors WHERE agent_id = ?", agentId)!;
   if (n < max) return;
+  const staleBefore = new Date(Date.now() - ctx.settings.get().retentionDays * 86_400_000).toISOString();
   const idle = db.get<{ consumer: string }>(
-    "SELECT consumer FROM listener_cursors WHERE agent_id = ? AND connected = 0 ORDER BY COALESCE(last_seen_at, updated_at) ASC LIMIT 1",
+    `SELECT consumer FROM listener_cursors WHERE agent_id = ? AND connected = 0 AND COALESCE(last_seen_at, updated_at) < ?
+     ORDER BY COALESCE(last_seen_at, updated_at) ASC LIMIT 1`,
     agentId,
+    staleBefore,
   );
   if (!idle) {
-    throw new HttpError(409, "too_many_consumers", `This agent already has ${max} listener consumers`, "Reuse an existing consumer name, or stop one of the running listeners.");
+    throw new HttpError(
+      409,
+      "too_many_consumers",
+      `This agent already has ${max} listener consumers`,
+      "Reuse an existing consumer name. Unused consumers are freed once they haven't connected for the retention period.",
+    );
   }
   db.run("DELETE FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, idle.consumer);
 }
 
-/** Moves the consumer's cursor forward only, and never past the newest event the agent can see. */
+/** Moves the consumer's cursor forward only, and never past the newest event in its granted accounts. */
 export function ackListener(ctx: AppContext, agentId: string, consumer: string, seq: number, maxConsumers: number): { ackedSeq: number } {
   const { db } = ctx;
-  ensureConsumerSlot(db, agentId, consumer, maxConsumers);
-  const target = Math.min(Math.max(0, Math.floor(seq)), newestVisibleSeq(ctx, agentId));
+  ensureConsumerSlot(ctx, agentId, consumer, maxConsumers);
+  const target = Math.min(Math.max(0, Math.floor(seq)), newestGrantedSeq(ctx, agentId));
   const t = new Date().toISOString();
   db.run(
     `INSERT INTO listener_cursors (agent_id, consumer, acked_seq, updated_at) VALUES (?, ?, ?, ?)

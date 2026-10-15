@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { hostname as osHostname, networkInterfaces } from "node:os";
 import type { MiddlewareHandler } from "hono";
@@ -10,12 +9,11 @@ const LOOPBACK_NAMES = new Set(["localhost", "127.0.0.1", "::1"]);
 const WILDCARD_HOSTS = new Set(["", "0.0.0.0", "::"]);
 const INTERFACES_TTL_MS = 30_000;
 const TAILSCALE_TTL_MS = 5 * 60_000;
-const RESOLVE_TTL_MS = 60_000;
 
 let interfaceCache: { at: number; addrs: Set<string> } | null = null;
 
 /** IP addresses of this machine's interfaces (LAN, Tailscale, …), cached briefly. */
-function localAddresses(): Set<string> {
+export function localAddresses(): Set<string> {
   const t = Date.now();
   if (!interfaceCache || t - interfaceCache.at > INTERFACES_TTL_MS) {
     const addrs = new Set<string>();
@@ -37,8 +35,6 @@ export function hostOf(value: string): string | null {
 export interface HostDeps {
   /** This machine's Tailscale MagicDNS name ("box.tailnet.ts.net"), or null. */
   tailscaleName: () => Promise<string | null>;
-  /** All addresses a name resolves to. */
-  resolve: (host: string) => Promise<string[]>;
 }
 
 let tailscaleCache: { at: number; name: Promise<string | null> } | null = null;
@@ -63,36 +59,24 @@ function tailscaleName(): Promise<string | null> {
   return tailscaleCache.name;
 }
 
-const resolveCache = new Map<string, { at: number; addrs: Promise<string[]> }>();
-
-function resolveCached(host: string): Promise<string[]> {
-  const t = Date.now();
-  const hit = resolveCache.get(host);
-  if (hit && t - hit.at < RESOLVE_TTL_MS) return hit.addrs;
-  const addrs = dnsLookup(host, { all: true }).then(
-    (list) => list.map((a) => a.address.toLowerCase()),
-    () => [],
-  );
-  resolveCache.set(host, { at: t, addrs });
-  if (resolveCache.size > 100) resolveCache.delete(resolveCache.keys().next().value!);
-  return addrs;
-}
-
-const DEFAULT_DEPS: HostDeps = { tailscaleName, resolve: resolveCached };
+const DEFAULT_DEPS: HostDeps = { tailscaleName };
 
 /**
  * Host names this daemon answers to on /agent/v1: the public URL's host, loopback names, the bound
  * host, this machine's hostname, IP literals of local interfaces, and this machine's Tailscale
- * name (`tailscale status`; failing that, a `*.ts.net` name that resolves only to local interface
- * addresses). Anything else (a foreign name resolving here, as in DNS rebinding) is refused.
+ * MagicDNS name as reported by `tailscale status`. Anything else (a foreign name resolving here,
+ * as in DNS rebinding) is refused.
  */
 export async function hostAllowed(ctx: AppContext, host: string, deps: HostDeps = DEFAULT_DEPS): Promise<boolean> {
   if (hostAllowedSync(ctx, host)) return true;
-  if (!host.endsWith(".ts.net")) return false;
-  if ((await deps.tailscaleName()) === host) return true;
-  const addrs = await deps.resolve(host);
-  const local = localAddresses();
-  return addrs.length > 0 && addrs.every((a) => local.has(a));
+  // Only the name Tailscale itself reports (no DNS lookups on behalf of unauthenticated callers).
+  return host.endsWith(".ts.net") && (await deps.tailscaleName()) === host;
+}
+
+/** Loopback or one of this machine's own interface addresses. */
+export function isLocalAddress(ip: string): boolean {
+  const addr = ip.replace(/%.*$/, "").replace(/^::ffff:/, "").toLowerCase();
+  return addr === "::1" || /^127\.\d+\.\d+\.\d+$/.test(addr) || localAddresses().has(addr);
 }
 
 function hostAllowedSync(ctx: AppContext, host: string): boolean {
