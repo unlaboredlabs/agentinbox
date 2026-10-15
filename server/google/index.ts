@@ -54,7 +54,7 @@ export function createGoogleService(ctx: AppContext): GoogleService {
     sendTestEmail: (accountId) => sendTestEmail(ctx, accountId),
 
     pubsubState: () => pubsubState(ctx),
-    provisionPubsub: () => provisionPubsub(ctx),
+    provisionPubsub: (opts) => provisionPubsub(ctx, opts),
     testPubsub: () => testPubsub(ctx),
   };
 }

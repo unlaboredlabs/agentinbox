@@ -118,5 +118,7 @@ function storedPubsub(ctx: AppContext): PubsubState {
     subscription: s?.subscription ?? null,
     lastError: s?.lastError ?? null,
     lastMessageAt: s?.lastMessageAt ?? null,
+    principalAccountId: s?.principalAccountId ?? null,
+    principalEmail: null,
   };
 }

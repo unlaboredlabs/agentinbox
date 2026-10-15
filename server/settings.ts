@@ -22,7 +22,7 @@ export interface InternalState {
     verifiedRedirectUri?: string | null;
   };
   /** Pub/Sub resources and health. `mode` is not stored here: it is Settings.ingestMode. */
-  pubsub: Omit<PubsubState, "mode"> & {
+  pubsub: Omit<PubsubState, "mode" | "principalAccountId" | "principalEmail"> & {
     /** Account whose OAuth token provisions and pulls the subscription (it needs IAM on the project). */
     principalAccountId: string | null;
   };

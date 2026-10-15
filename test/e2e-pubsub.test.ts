@@ -86,7 +86,7 @@ describe("pub/sub provisioning", () => {
 
     const fail = await s.admin.failure(s.admin.post("/api/google/pubsub/provision"));
     expect(fail.status).toBe(400);
-    expect(fail.code).toBe("pubsub_provision_failed");
+    expect(fail.code).toBe("pubsub_org_policy");
     expect(fail.body!.error.message).toMatch(/organization policy/i);
     expect(fail.body!.error.message).toContain("iam.allowedPolicyMemberDomains");
     expect(fail.body!.error.hint).toMatch(/poll mode/i);

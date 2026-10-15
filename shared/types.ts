@@ -157,6 +157,14 @@ export interface PubsubState {
   lastError: string | null;
   /** Last time a Pub/Sub message was pulled (proves the pipeline works end-to-end). */
   lastMessageAt: string | null;
+  /**
+   * The connected account whose Google identity provisions and pulls the subscription ("Pub/Sub is set
+   * up with <principalEmail>"). Before provisioning it is the account provisioning would use: the one chosen
+   * with POST /api/google/pubsub/provision {accountId}, else the first active account with the Pub/Sub
+   * scope, else the first active account. null when no active account exists.
+   */
+  principalAccountId: string | null;
+  principalEmail: string | null;
 }
 
 export interface Settings {
@@ -627,7 +635,15 @@ export interface ApiError {
 //   PUT    /api/google/client GoogleClientConfig      → GoogleClientView   (manual entry; fallback to import)
 //   POST   /api/google/client/import GoogleClientImportInput → GoogleClientImportResult
 //          400 client_json_invalid | client_json_desktop | client_secret_missing | bad_request (see GoogleClientImportResult)
-//   POST   /api/google/pubsub/provision               → PubsubState   (creates topic + IAM + subscription using a connected account's token)
+//   POST   /api/google/pubsub/provision {accountId?}  → PubsubState   (creates topic + IAM + subscription using the principal account's token;
+//          `accountId` chooses the principal and is saved even if provisioning then fails, so the follow-up
+//          POST /api/accounts/connect {scopes:["pubsub"]} targets it)
+//          409 pubsub_scope_required (the principal hasn't granted the Pub/Sub scope: run that incremental consent, retry)
+//          409 needs_reauth | 409 account_paused (chosen account unusable) | 404 not_found (unknown accountId)
+//          400 pubsub_permission_denied (principal lacks roles/pubsub.admin or Owner; hint: IAM link + gcloud command)
+//              | pubsub_billing | pubsub_org_policy (Domain Restricted Sharing; hint: org policy link, polling alternative)
+//              | pubsub_api_disabled | gmail_api_disabled | pubsub_publish_denied | pubsub_project_not_found
+//              | pubsub_project_missing | pubsub_no_account | pubsub_provision_failed (anything else)
 //   POST   /api/google/pubsub/test                    → PubsubTestResult
 //   GET    /api/accounts                              → Account[]
 //   POST   /api/accounts/connect                      → ConnectAccountResponse

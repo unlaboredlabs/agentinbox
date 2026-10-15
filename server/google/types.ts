@@ -284,6 +284,7 @@ export interface GoogleService extends Lifecycle {
 
   // Pub/Sub
   pubsubState(): PubsubState;
-  provisionPubsub(): Promise<PubsubState>;
+  /** `accountId` chooses (and saves) the principal account; default: the current principal. */
+  provisionPubsub(opts?: { accountId?: string }): Promise<PubsubState>;
   testPubsub(): Promise<PubsubTestResult>;
 }

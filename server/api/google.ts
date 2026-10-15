@@ -1,11 +1,17 @@
 import { z } from "zod";
 import type { AppContext } from "../context.ts";
 import { asHttpError } from "../google/http.ts";
+import { HttpError } from "../util/errors.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
 const ImportInput = z.object({
   json: z.string().min(1, "Paste the contents of the downloaded client JSON file").max(64_000, "That file is too large to be an OAuth client JSON"),
   appType: z.enum(["internal", "external"]).optional(),
+});
+
+const ProvisionInput = z.object({
+  /** Account whose Google identity provisions and pulls (saved as the Pub/Sub principal). */
+  accountId: z.string().trim().min(1).optional(),
 });
 
 const ClientInput = z.object({
@@ -52,17 +58,25 @@ export function googleApi(ctx: AppContext) {
   });
 
   r.post("/google/pubsub/provision", async (c) => {
+    const { accountId } = await readBody(c, ProvisionInput);
     try {
-      const state = await ctx.google.provisionPubsub();
-      ctx.audit.record({ ...ADMIN_ACTOR, action: "pubsub.provision", outcome: "ok", detail: { topic: state.topic, subscription: state.subscription } });
+      const state = await ctx.google.provisionPubsub({ accountId });
+      ctx.audit.record({
+        ...ADMIN_ACTOR,
+        action: "pubsub.provision",
+        accountId: state.principalAccountId,
+        outcome: "ok",
+        detail: { topic: state.topic, subscription: state.subscription, principal: state.principalEmail },
+      });
       return c.json(state);
     } catch (err) {
       const e = asHttpError(err);
       ctx.audit.record({
         ...ADMIN_ACTOR,
         action: "pubsub.provision",
+        accountId: ctx.google.pubsubState().principalAccountId,
         outcome: "error",
-        detail: { error: e instanceof Error ? e.message : String(e) },
+        detail: { error: e instanceof Error ? e.message : String(e), code: e instanceof HttpError ? e.code : undefined },
       });
       throw e;
     }

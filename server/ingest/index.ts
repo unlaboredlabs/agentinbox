@@ -3,7 +3,7 @@ import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type AccountRow, allRows, getRow, updateRow } from "../google/accounts.ts";
 import { isAbortError, sleep } from "../google/http.ts";
-import { ackPubsub, explainPubsubError, type PulledMessage, pullPubsub, readPubsub, writePubsub } from "../google/pubsub.ts";
+import { ackPubsub, explainPubsubError, type PulledMessage, pubsubPrincipal, pullPubsub, readPubsub, writePubsub } from "../google/pubsub.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import { conflict, errorMessage } from "../util/errors.ts";
 import type { IngestService } from "./types.ts";
@@ -327,7 +327,7 @@ class Ingest implements IngestService {
         if (signal.aborted) break;
         if (isAbortError(err)) continue; // long-poll timeout
         const failures = ++this.pullFailures;
-        const { message, hint } = explainPubsubError(err, this.ctx.settings.getState("google.client")?.projectId ?? null);
+        const { message, hint } = explainPubsubError(err, this.ctx.settings.getState("google.client")?.projectId ?? null, pubsubPrincipal(this.ctx)?.email);
         this.lastError = `Pub/Sub pull failed: ${message} ${hint}`.trim();
         writePubsub(this.ctx, { lastError: this.lastError });
         if (failures === 1) this.log.warn("Pub/Sub pull failed; polling until it recovers", { error: errorMessage(err) });

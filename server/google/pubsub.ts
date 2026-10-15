@@ -3,7 +3,7 @@ import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
 import { ensureWatches } from "../ingest/watch.ts";
 import type { InternalState } from "../settings.ts";
-import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
+import { badRequest, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { randomToken } from "../util/ids.ts";
 import { accountScopes, allRows, getRow } from "./accounts.ts";
 import { projectId } from "./client.ts";
@@ -33,48 +33,80 @@ export function writePubsub(ctx: AppContext, patch: Partial<StoredPubsub>): Stor
 
 export function pubsubState(ctx: AppContext): PubsubState {
   const { principalAccountId: _p, ...rest } = readPubsub(ctx);
-  return { mode: ctx.settings.get().ingestMode, ...rest };
+  const principal = pubsubPrincipal(ctx);
+  return { mode: ctx.settings.get().ingestMode, ...rest, principalAccountId: principal?.id ?? null, principalEmail: principal?.email ?? null };
 }
 
-/** Human-readable explanation with a remediation hint for a provisioning/test/watch failure. */
-export function explainPubsubError(err: unknown, project: string | null, email?: string): { message: string; hint: string } {
+export interface PubsubProblem {
+  /**
+   * ApiError code: pubsub_scope_required | pubsub_permission_denied | pubsub_billing | pubsub_org_policy |
+   * pubsub_api_disabled | gmail_api_disabled | pubsub_publish_denied | pubsub_project_not_found | needs_reauth |
+   * pubsub_provision_failed (anything else).
+   */
+  code: string;
+  message: string;
+  hint: string;
+}
+
+/**
+ * Explanation with a remediation hint for a provisioning/test/watch/pull failure. `email` is the
+ * principal account (whose token made the call). Messages for different codes are worded so they can't
+ * be mistaken for each other by text: only pubsub_scope_required talks about granting agentinbox access.
+ */
+export function explainPubsubError(err: unknown, project: string | null, email?: string): PubsubProblem {
   const p = project ?? "your project";
+  const q = project ? `?project=${encodeURIComponent(project)}` : "";
+  const who = email ?? "the account agentinbox uses for Pub/Sub";
   if (err instanceof AccountNeedsReauthError) {
-    return { message: `${err.email} needs to be reconnected.`, hint: "Reconnect it on the Accounts page, then retry." };
+    return { code: "needs_reauth", message: `${err.email} needs to be reconnected.`, hint: "Reconnect it on the Accounts page, then retry." };
   }
-  if (err instanceof HttpError) return { message: err.message, hint: err.hint ?? "" };
-  if (!(err instanceof GoogleApiError)) return { message: errorMessage(err), hint: "Check the server log for details, then retry." };
+  if (err instanceof HttpError) return { code: err.code, message: err.message, hint: err.hint ?? "" };
+  if (!(err instanceof GoogleApiError)) {
+    return { code: "pubsub_provision_failed", message: errorMessage(err), hint: "Check the server log for details, then retry." };
+  }
   const msg = err.message;
   const service = err.details.metadata?.service ?? "";
+  if (hasReason(err, "BILLING_DISABLED", "billingNotEnabled", "UREQ_PROJECT_BILLING_NOT_FOUND") || /billing/i.test(msg)) {
+    return {
+      code: "pubsub_billing",
+      message: `Google requires billing to be enabled on project ${p} to use Cloud Pub/Sub.`,
+      hint:
+        `Link a billing account at https://console.cloud.google.com/billing/linkedaccount${q} (Billing → Link a billing account), wait a minute, then retry. ` +
+        "Gmail notifications stay far inside Pub/Sub's free tier. Or skip Pub/Sub: polling needs no billing.",
+    };
+  }
   if (hasReason(err, "SERVICE_DISABLED", "accessNotConfigured") || /has not been used in project|is disabled/i.test(msg)) {
     if (/gmail/i.test(service) || (!service && /gmail/i.test(msg))) {
       return {
+        code: "gmail_api_disabled",
         message: "The Gmail API isn't enabled in the Google Cloud project.",
         hint: `Enable it at https://console.cloud.google.com/apis/library/gmail.googleapis.com?project=${p}, wait a minute, then retry.`,
       };
     }
     return {
+      code: "pubsub_api_disabled",
       message: "The Cloud Pub/Sub API isn't enabled in the Google Cloud project.",
       hint: `Enable it at https://console.cloud.google.com/apis/library/pubsub.googleapis.com?project=${p}, wait a minute, then retry.`,
     };
   }
   if (hasReason(err, "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions") || /insufficient authentication scopes/i.test(msg)) {
-    return {
-      message: `${email ?? "The account"} didn't grant agentinbox access to Pub/Sub.`,
-      hint: "Reconnect the account on the Accounts page and keep every permission checked on Google's consent screen, then retry.",
-    };
+    return scopeRequired(who, project);
   }
   if (hasReason(err, "constraints/iam.allowedPolicyMemberDomains") || /allowedPolicyMemberDomains|permitted customer|Domain Restricted Sharing/i.test(msg)) {
     return {
+      code: "pubsub_org_policy",
       message:
-        "Your Google Workspace organization policy (Domain Restricted Sharing, iam.allowedPolicyMemberDomains) blocks granting Gmail's push service account access to the topic.",
+        "Your Google Workspace organization policy (Domain Restricted Sharing, iam.allowedPolicyMemberDomains) blocks granting Gmail's push service account publish rights on the topic.",
       hint:
-        "Ingest keeps working in poll mode, so you can simply stay on polling. For real-time Pub/Sub, ask your org admin to allow an exception for " +
-        `project ${p} (override iam.allowedPolicyMemberDomains on the project), or use a project outside the organization.`,
+        `The alternative is polling: ingest keeps working in poll mode, so you can simply stay on it. For real-time Pub/Sub, an org admin with the ` +
+        `Organization Policy Administrator role (roles/orgpolicy.policyAdmin) must override iam.allowedPolicyMemberDomains for project ${p} ` +
+        `at https://console.cloud.google.com/iam-admin/orgpolicies${q} to allow the principal ${GMAIL_PUSH_MEMBER} ` +
+        "(or allow all values on this project), then retry provisioning.",
     };
   }
   if (/Error sending test message to Cloud PubSub/i.test(msg)) {
     return {
+      code: "pubsub_publish_denied",
       message: "Gmail couldn't publish to the Pub/Sub topic.",
       hint: `Make sure ${GMAIL_PUSH_MEMBER.slice("serviceAccount:".length)} has the Pub/Sub Publisher role on projects/${p}/topics/${TOPIC_ID}, then retry provisioning.`,
     };
@@ -82,20 +114,40 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
   // A JSON NOT_FOUND means the project/topic is missing; an HTML 404 (no reason) is a wrong URL or verb.
   if (err.status === 404 && err.reason) {
     return {
+      code: "pubsub_project_not_found",
       message: `Google Cloud project "${p}" or its Pub/Sub resources were not found.`,
       hint: "Check the project ID in the Google step of the setup wizard (the ID, not the name or number), then retry provisioning.",
     };
   }
   if (err.status === 403 || hasReason(err, "PERMISSION_DENIED")) {
+    const member = email ? `user:${email}` : "user:<email>";
     return {
-      message: `${email ?? "The account"} doesn't have permission to manage Pub/Sub in project ${p}.`,
-      hint: "Grant that account Owner or Pub/Sub Admin (roles/pubsub.admin) on the project in IAM & Admin (Editor can't change topic permissions), or connect an account that has it, then retry.",
+      code: "pubsub_permission_denied",
+      message: `${who} lacks the Google Cloud IAM role needed to create the topic and subscription in project ${p}.`,
+      hint:
+        `In IAM (https://console.cloud.google.com/iam-admin/iam${q}), grant ${who} the Pub/Sub Admin role (roles/pubsub.admin) or Owner ` +
+        `(Editor can't change topic permissions), or run: gcloud projects add-iam-policy-binding ${p} --member=${member} --role=roles/pubsub.admin. ` +
+        "Then retry, or provision with an account that already has the role (for example the project owner's).",
     };
   }
-  return { message: `Google returned an error: ${msg}`, hint: "Retry in a minute. If it persists, check the server log." };
+  return { code: "pubsub_provision_failed", message: `Google returned an error: ${msg}`, hint: "Retry in a minute. If it persists, check the server log." };
 }
 
-/** The account whose token manages and pulls the subscription: the stored one if usable, else the first active account. */
+function scopeRequired(email: string, project: string | null): PubsubProblem {
+  return {
+    code: "pubsub_scope_required",
+    message: `agentinbox needs access to Pub/Sub as ${email}.`,
+    hint:
+      `Grant Pub/Sub access for ${email} on Google's consent screen, then provision again. ` +
+      `The account also needs Owner or Pub/Sub Admin on project ${project ?? "your project"}.`,
+  };
+}
+
+/**
+ * The account whose token manages and pulls the subscription: the stored one (chosen explicitly or used
+ * by the last provisioning) if active, else the first active account with the Pub/Sub scope, else the
+ * first active account.
+ */
 export function pubsubPrincipal(ctx: AppContext) {
   const stored = readPubsub(ctx).principalAccountId;
   const row = stored ? getRow(ctx, stored) : undefined;
@@ -123,32 +175,49 @@ interface IamPolicy {
   bindings?: { role: string; members: string[] }[];
 }
 
-export async function provisionPubsub(ctx: AppContext): Promise<PubsubState> {
+/**
+ * Creates the topic, grants Gmail's push service account publish rights, creates the pull subscription
+ * and starts watches, as the principal account. `accountId` chooses the principal; the choice is saved
+ * (principalAccountId) before anything else, so a following incremental consent
+ * (POST /api/accounts/connect {scopes: ["pubsub"]}) targets it even if this attempt fails.
+ */
+export async function provisionPubsub(ctx: AppContext, opts: { accountId?: string } = {}): Promise<PubsubState> {
   const project = projectId(ctx);
   if (!project) {
-    throw badRequest("Set your Google Cloud project ID first.", "Add the project ID in the Google step of the setup wizard.");
+    throw new HttpError(400, "pubsub_project_missing", "Set your Google Cloud project ID first.", "Add the project ID in the Google step of the setup wizard.");
+  }
+  if (opts.accountId) {
+    const chosen = getRow(ctx, opts.accountId);
+    if (!chosen) throw notFound("Account");
+    if (chosen.status === "needs_reauth") {
+      throw new HttpError(409, "needs_reauth", `${chosen.email} needs to be reconnected first.`, "Reconnect it on the Accounts page, then provision again.");
+    }
+    if (chosen.status !== "active") {
+      throw new HttpError(409, "account_paused", `${chosen.email} is ${chosen.status === "paused" ? "paused" : "not active"}.`, "Resume it on the Accounts page, or choose another account.");
+    }
+    if (readPubsub(ctx).principalAccountId !== chosen.id) {
+      writePubsub(ctx, { principalAccountId: chosen.id });
+      ctx.log.child("google").info("Pub/Sub principal chosen", { principal: chosen.email });
+    }
   }
   const acct = pubsubPrincipal(ctx);
-  if (!acct) throw badRequest("Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
+  if (!acct) {
+    throw new HttpError(400, "pubsub_no_account", "Connect a Gmail account first.", "Pub/Sub is provisioned with a connected account's permissions.");
+  }
   const topic = `projects/${project}/topics/${TOPIC_ID}`;
   const subscription = `projects/${project}/subscriptions/${SUBSCRIPTION_ID}`;
   const fail = (err: unknown): never => {
     if (isAbortError(err)) throw err;
-    const { message, hint } = explainPubsubError(err, project, acct.email);
+    const { code, message, hint } = explainPubsubError(err, project, acct.email);
     writePubsub(ctx, { lastError: `${message} ${hint}`.trim() });
-    ctx.log.child("google").warn("Pub/Sub provisioning failed", { error: errorMessage(err) });
-    throw new HttpError(400, "pubsub_provision_failed", message, hint);
+    ctx.log.child("google").warn("Pub/Sub provisioning failed", { error: errorMessage(err), principal: acct.email });
+    throw new HttpError(code === "needs_reauth" ? 409 : 400, code, message, hint);
   };
 
   if (!accountScopes(acct).includes(PUBSUB_SCOPE)) {
     // Pub/Sub access is requested only for the provisioning account, on demand (incremental consent).
-    throw new HttpError(
-      409,
-      "pubsub_scope_required",
-      `agentinbox needs permission to manage Pub/Sub as ${acct.email}.`,
-      `Grant Pub/Sub access for ${acct.email} on Google's consent screen, then provision again. ` +
-        `The account also needs Owner or Pub/Sub Admin on project ${project}.`,
-    );
+    const { code, message, hint } = scopeRequired(acct.email, project);
+    throw new HttpError(409, code, message, hint);
   }
   try {
     await idempotent(() => pubsubCall(ctx, acct.id, topic, { method: "PUT", body: {} }));
