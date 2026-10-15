@@ -31,6 +31,7 @@ export function createMailService(ctx: AppContext): MailService {
     approve: (id, note) => approvals.approve(id, note),
     reject: (id, note) => approvals.reject(id, note),
     expireApprovals: () => approvals.expireOverdue(),
+    prune: (beforeIso) => approvals.prune(beforeIso),
 
     start() {
       approvals.recoverInterrupted();

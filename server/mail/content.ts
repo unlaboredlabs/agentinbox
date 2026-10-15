@@ -187,7 +187,10 @@ function childContext(el: DomElement, style: Style, parent: Inherited, state: Cl
   const visibility = style.get("visibility");
   const ownBg = backgroundColor(style, el);
   const bg = ownBg && ownBg !== "transparent" ? ownBg : null;
-  const sheetColour = state.sheet.allColourUncertain || state.sheet.colourStyled.has(el);
+  const sheetColour =
+    state.sheet.allColourUncertain ||
+    state.sheet.colourStyled.has(el) ||
+    (state.sheet.classedColourUncertain && (el.hasAttribute("class") || el.hasAttribute("id")));
   const clip = style.get("background-clip") ?? style.get("-webkit-background-clip");
   return {
     color: normalizeColor(style.get("color")) ?? (tag === "FONT" ? normalizeColor(el.getAttribute("color")) : null) ?? parent.color,
@@ -366,14 +369,20 @@ function isDataTable(table: DomElement): boolean {
 
 const cellsOf = (row: DomElement) => Array.from(row.childNodes).filter((n): n is DomElement => n.nodeName === "TD" || n.nodeName === "TH");
 
-function tableToMarkdown(table: DomElement): string {
+/** Data-table cells with markup converted through turndown per document; later ones keep only their text. */
+const MAX_CONVERTED_CELLS = 2_000;
+
+function cellMarkdown(cell: DomElement, budget: { cells: number }): string {
+  // Plain-text cells (most of them) skip the full conversion.
+  const plain = Array.from(cell.childNodes).every((n) => n.nodeType === TEXT);
+  const md = plain || budget.cells-- <= 0 ? turndown().escape(cell.textContent ?? "") : turndown().turndown(cell.innerHTML);
+  return md.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+function tableToMarkdown(table: DomElement, budget: { cells: number }): string {
   const rows = Array.from(table.querySelectorAll("tr")).map((r) =>
     cellsOf(r).flatMap((c) => {
-      const text = turndown()
-        .turndown(c.innerHTML)
-        .replace(/\s*\n+\s*/g, " ")
-        .replace(/\|/g, "\\|")
-        .trim();
+      const text = cellMarkdown(c, budget);
       // A spanned cell keeps its columns: the content, then empty cells.
       const span = Math.min(Math.max(parseInt(c.getAttribute("colspan") ?? "1", 10) || 1, 1), 20);
       return [text, ...Array<string>(span - 1).fill("")];
@@ -390,9 +399,10 @@ function prepareTables(doc: DomDocument, root: DomElement): Map<string, string> 
   const placeholders = new Map<string, string>();
   const tables = Array.from(root.querySelectorAll("table"));
   const data = new Set(tables.filter(isDataTable));
+  const budget = { cells: MAX_CONVERTED_CELLS };
   for (const table of data) {
     const key = `AIBTABLE${placeholders.size}X`;
-    placeholders.set(key, tableToMarkdown(table));
+    placeholders.set(key, tableToMarkdown(table, budget));
     const p = doc.createElement("p");
     p.append(key);
     table.replaceWith(p);
@@ -593,7 +603,7 @@ export interface BuiltContent extends MessageContent {
 const UNCONVERTIBLE = "[The HTML body of this message could not be converted to text.]";
 const TOO_COMPLEX_NOTE = "[The HTML version of this message is too complex to display safely; showing the plain-text version.]";
 /** Larger HTML bodies are not converted (bounded work per message); the text/plain part is used instead. */
-export const MAX_HTML_CHARS = 1_000_000;
+export const MAX_HTML_CHARS = 500_000;
 
 /**
  * Cleaned, markdown-converted content with signals. Prefers HTML (more faithful), else text/plain. The

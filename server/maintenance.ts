@@ -31,7 +31,9 @@ export function runMaintenance(ctx: AppContext): MaintenanceResult {
     audit: step("audit log", () => ctx.audit.prune(before)),
     sessions: step("sessions", () => adminAuth(ctx).sessions.pruneExpired()),
   };
-  if (Object.values(result).some((n) => n > 0)) log.info("Pruned old data", { ...result });
+  // Decided approvals keep full message bodies; they follow the same retention.
+  const approvals = step("approvals", () => ctx.mail.prune(before));
+  if (approvals > 0 || Object.values(result).some((n) => n > 0)) log.info("Pruned old data", { ...result, approvals });
   return result;
 }
 

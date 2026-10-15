@@ -76,7 +76,7 @@ describe("content pool", () => {
       deepNesting: "<div>".repeat(19_000) + "x",
       tooManyElements: "<div>".repeat(50_000) + "x",
       flatInline: "<b>x</b>".repeat(50_000),
-      rulesTimesElements: `<style>${Array.from({ length: 8000 }, (_, i) => `.c${i}{display:none}`).join("")}</style>${'<div class="c1 a b">t</div>'.repeat(10_000)}`,
+      rulesTimesElements: `<style>${Array.from({ length: 8000 }, (_, i) => `.c${i}{display:none}`).join("")}</style>${'<div class="c5000 a b">t</div>'.repeat(10_000)}`,
       longWhitespace: `<pre>a${" ".repeat(400_000)}b</pre>`,
     };
     for (const [name, html] of Object.entries(hostile)) {
@@ -117,5 +117,33 @@ describe("linear-time helpers on 40k-character inputs", () => {
   ])("%s", (_name, fn) => {
     fn();
     expect(time(fn)).toBeLessThan(20);
+  });
+});
+
+describe("review inputs finish well inside the deadline", () => {
+  const big = {
+    "20k unclosed divs": "<div>".repeat(20_000) + "x",
+    "60k unclosed divs": "<div>".repeat(60_000) + "x",
+    "90k closed divs": "<div>".repeat(90_000) + "x" + "</div>".repeat(90_000),
+    "10k small tables": Array.from({ length: 10_000 }, (_, i) => `<table><tr><th>a${i}</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>`).join(""),
+    "30k-row table": `<table><tr><th>a</th><th>b</th></tr>${"<tr><td>1</td><td>2</td></tr>".repeat(30_000)}</table>`,
+    "6.6k-row table with links": `<table><tr><th>a</th><th>b</th></tr>${'<tr><td><a href="https://x.io">1</a></td><td>2</td></tr>'.repeat(6_600)}</table>`,
+    // Just under the element cap, so it's really converted (2,000 cells through turndown, the rest as text).
+    "4.9k-row table with links": `<table><tr><th>a</th><th>b</th></tr>${'<tr><td><a href="https://x.io">1</a></td><td>2</td></tr>'.repeat(4_900)}</table>`,
+    "19.9k unclosed divs": "<div>".repeat(19_900) + "x",
+  };
+  it.each(Object.entries(big))("%s in-process", (_name, html) => {
+    const t0 = performance.now();
+    buildContent(message(html, "text"), OPTS);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+  });
+  it("all of them through the pool, without fallbacks", async () => {
+    const p = pool();
+    for (const [name, html] of Object.entries(big)) {
+      const m = await measure(() => p.content(message(html, "text"), OPTS));
+      expect(m.ms, name).toBeLessThan(2_000);
+      expect(m.lag, name).toBeLessThan(250);
+      expect(m.result.body, name).not.toMatch(/too complex to display safely; showing its plain-text/);
+    }
   });
 });

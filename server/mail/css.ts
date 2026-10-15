@@ -267,11 +267,25 @@ function stripCssComments(css: string): string {
   return out;
 }
 
-/** Splits CSS into rules; rules inside conditional groups are marked. Linear in the CSS size. */
+/**
+ * Media that can apply to someone reading the mail on a screen: not print-only, and no width bound no real
+ * viewport has (`max-width: 1px`, `min-width: 99999px`).
+ */
+function plausibleMedia(prelude: string): boolean {
+  if (!/^@media\b/i.test(prelude)) return true;
+  if (/^@media\s+(?:only\s+)?print\b/i.test(prelude) && !/\b(?:screen|all)\b/i.test(prelude)) return false;
+  for (const m of prelude.matchAll(/\((min|max)-(?:device-)?width\s*:\s*(\d+(?:\.\d+)?)(px|em|rem)?\s*\)/gi)) {
+    const px = parseFloat(m[2]!) * (m[3] && m[3].toLowerCase() !== "px" ? 16 : 1);
+    if (m[1]!.toLowerCase() === "max" ? px < 200 : px > 4000) return false;
+  }
+  return true;
+}
+
+/** Splits CSS (comments already stripped) into rules; rules inside conditional groups are marked. Linear. */
 function parseRules(css: string): { rules: Rule[]; truncated: boolean } {
   const rules: Rule[] = [];
   let truncated = false;
-  const text = stripCssComments(css).replace(/<!--|-->/g, " ");
+  const text = css;
   const block = (from: number): number => {
     // Index just past the "}" matching the "{" at `from`.
     let depth = 0;
@@ -289,8 +303,7 @@ function parseRules(css: string): { rules: Rule[]; truncated: boolean } {
       const prelude = text.slice(i, open).trim();
       const close = block(open);
       if (prelude.startsWith("@")) {
-        const printOnly = /^@media\s+(?:only\s+)?print\b/i.test(prelude) && !/\b(?:screen|all)\b/i.test(prelude);
-        if (/^@(media|supports|document|container)\b/i.test(prelude) && !conditional && !printOnly) walk(open + 1, close - 1, true);
+        if (/^@(media|supports|document|container)\b/i.test(prelude) && !conditional && plausibleMedia(prelude)) walk(open + 1, close - 1, true);
       } else if (rules.length >= MAX_RULES) {
         truncated = true;
         return;
@@ -324,6 +337,37 @@ function parseCompound(sel: string): Compound | null {
   };
 }
 
+/** One step up from the subject: `child` for ">", otherwise any ancestor (descendant combinator). */
+interface AncestorStep {
+  compound: Compound;
+  child: boolean;
+}
+
+/** Compounds joined by descendant/child combinators, as subject + ancestor steps (right to left). */
+function parseChain(sel: string): { subject: Compound; ancestors: AncestorStep[] } | null {
+  if (/[+~]/.test(sel)) return null;
+  const tokens = sel.trim().replace(/\s*>\s*/g, " > ").split(/\s+/);
+  const compounds: Compound[] = [];
+  const childLinks: boolean[] = [];
+  let child = false;
+  for (const tok of tokens) {
+    if (tok === ">") {
+      if (!compounds.length || child) return null;
+      child = true;
+      continue;
+    }
+    const c = parseCompound(tok);
+    if (!c) return null;
+    if (compounds.length) childLinks.push(child);
+    compounds.push(c);
+    child = false;
+  }
+  if (!compounds.length || child) return null;
+  const subject = compounds.pop()!;
+  const ancestors = compounds.reverse().map((compound, i) => ({ compound, child: childLinks[childLinks.length - 1 - i]! }));
+  return { subject, ancestors };
+}
+
 /**
  * The element a complex selector applies to, over-approximated: its last compound with attribute and
  * pseudo parts dropped (`td > a.btn:hover` → `a.btn`). "any" when that leaves nothing specific.
@@ -339,11 +383,13 @@ const indexKey = (c: Compound) => (c.id ? `#${c.id}` : c.classes.length ? `.${c.
 
 interface Entry {
   compound: Compound;
-  /** Apply these hiding declarations (exact simple selectors in top-level rules only). */
+  /** Ancestor steps that must also match for `hide` (greedy, nearest ancestor first). */
+  ancestors: AncestorStep[];
+  /** Apply these hiding declarations (top-level rules with tag/class/id selectors and ' '/'>' combinators). */
   hide: Style | null;
   /** Sets colour or background: the element's colours can't be known from inline styles. */
   colour: boolean;
-  /** A conditional rule that makes hidden content visible again on some device. */
+  /** A conditional rule that makes hidden content visible again on some device (subject over-approximated). */
   reveal: boolean;
   order: number;
 }
@@ -363,27 +409,68 @@ const VISIBLE_VALUES: Record<string, (v: string) => boolean> = {
 const reveals = (decls: Style) => [...decls].some(([p, v]) => VISIBLE_VALUES[p]?.(v));
 
 export interface SheetEffects {
-  /** Hiding declarations per element, from top-level rules with simple selectors. */
+  /** Hiding declarations per element, from top-level rules. */
   hiding: Map<DomElement, Style>;
   /** Elements whose colour/background a rule may set. */
   colourStyled: Set<DomElement>;
-  /** Rules were skipped or a colour rule targets anything: treat every background as uncertain. */
+  /** A colour rule targets anything: treat every background as uncertain. */
   allColourUncertain: boolean;
+  /** Some rules were not read (size/count/work limits): backgrounds of class/id elements are uncertain. */
+  classedColourUncertain: boolean;
+}
+
+interface ElementKey {
+  tag: string;
+  id: string | null;
+  classes: string[];
+}
+
+function keyOf(el: DomElement): ElementKey {
+  return {
+    tag: el.tagName.toUpperCase(),
+    id: el.getAttribute("id"),
+    classes: (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean).slice(0, 50),
+  };
+}
+
+const compoundMatches = (c: Compound, k: ElementKey) =>
+  (!c.tag || c.tag === k.tag) && (!c.id || c.id === k.id) && c.classes.every((x) => k.classes.includes(x));
+
+/** Greedy right-to-left ancestor check; counts every step against the shared budget. */
+function ancestorsMatch(el: DomElement, steps: AncestorStep[], budget: { ops: number }): boolean {
+  let node = el.parentNode as DomElement | null;
+  for (const step of steps) {
+    if (step.child) {
+      budget.ops++;
+      if (!node || node.nodeType !== 1 || !compoundMatches(step.compound, keyOf(node))) return false;
+    } else {
+      while (node && node.nodeType === 1 && !compoundMatches(step.compound, keyOf(node))) {
+        if (++budget.ops > MAX_MATCH_OPS) return false;
+        node = node.parentNode as DomElement | null;
+      }
+      if (!node || node.nodeType !== 1) return false;
+    }
+    node = node.parentNode as DomElement | null;
+  }
+  return true;
 }
 
 export function stylesheetEffects(doc: DomDocument): SheetEffects {
-  const out: SheetEffects = { hiding: new Map(), colourStyled: new Set(), allColourUncertain: false };
+  const out: SheetEffects = { hiding: new Map(), colourStyled: new Set(), allColourUncertain: false, classedColourUncertain: false };
   const root = doc.documentElement;
-  const css = Array.from(root.querySelectorAll("style"))
-    .map((s) => s.textContent ?? "")
-    .join("\n");
+  let css = stripCssComments(
+    Array.from(root.querySelectorAll("style"))
+      .map((s) => s.textContent ?? "")
+      .join("\n"),
+  ).replace(/<!--|-->/g, " ");
   if (!css.trim()) return out;
   if (css.length > MAX_CSS_CHARS) {
-    out.allColourUncertain = true;
-    return out;
+    // Read the rules that fit; whatever was cut may style classed elements.
+    css = css.slice(0, css.lastIndexOf("}", MAX_CSS_CHARS) + 1);
+    out.classedColourUncertain = true;
   }
   const { rules, truncated } = parseRules(css);
-  if (truncated) out.allColourUncertain = true;
+  if (truncated) out.classedColourUncertain = true;
 
   const index = new Map<string, Entry[]>();
   let selectors = 0;
@@ -395,46 +482,57 @@ export function stylesheetEffects(doc: DomDocument): SheetEffects {
     if (!colour && !reveal && (rule.conditional || !hide.size)) continue;
     for (const sel of rule.selectors) {
       if (++selectors > MAX_SELECTORS) {
-        out.allColourUncertain = true;
+        out.classedColourUncertain = true;
         break;
       }
       // Long or deeply combined selectors are skipped outright (bounded work, and never hiding rules).
       if (sel.length > MAX_SELECTOR_CHARS || (sel.match(/[\s>+~]+/g)?.length ?? 0) > MAX_COMBINATORS) {
-        if (colour) out.allColourUncertain = true;
+        if (colour) out.classedColourUncertain = true;
         continue;
       }
-      const exact = parseCompound(sel);
-      const subject = exact ?? subjectOf(sel);
+      const chain = parseChain(sel);
+      const subject = chain?.subject ?? subjectOf(sel);
       if (subject === "any") {
         // Over-approximation is only safe for "keep visible" effects.
         if (colour) out.allColourUncertain = true;
         if (!reveal) continue;
       }
       const compound = subject === "any" ? { tag: null, id: null, classes: [] } : subject;
-      const entry: Entry = { compound, hide: !rule.conditional && exact && hide.size ? hide : null, colour, reveal, order: order++ };
+      const entry: Entry = {
+        compound,
+        ancestors: chain?.ancestors ?? [],
+        hide: !rule.conditional && chain && hide.size ? hide : null,
+        colour,
+        reveal,
+        order: order++,
+      };
       if (!entry.hide && !entry.colour && !entry.reveal) continue;
       const key = indexKey(compound);
-      index.set(key, [...(index.get(key) ?? []), entry]);
+      const list = index.get(key);
+      if (list) list.push(entry);
+      else index.set(key, [entry]);
     }
   }
   if (!index.size) return out;
 
   // One walk: each element only checks the rules indexed under its id, classes, tag and "*".
-  let ops = 0;
+  const budget = { ops: 0 };
   for (const el of Array.from(root.querySelectorAll("*"))) {
-    const tag = el.tagName.toUpperCase();
-    const id = el.getAttribute("id");
-    const classes = (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean).slice(0, 50);
-    const keys = [...(id ? [`#${id}`] : []), ...classes.map((c) => `.${c}`), tag, "*"];
+    const k = keyOf(el);
+    const keys = [...(k.id ? [`#${k.id}`] : []), ...k.classes.map((c) => `.${c}`), k.tag, "*"];
     const matched: Entry[] = [];
     for (const key of keys) {
       for (const e of index.get(key) ?? []) {
-        if (++ops > MAX_MATCH_OPS) {
-          out.allColourUncertain = true;
+        if (++budget.ops > MAX_MATCH_OPS) {
+          out.classedColourUncertain = true;
           return out;
         }
-        const c = e.compound;
-        if ((c.tag && c.tag !== tag) || (c.id && c.id !== id) || !c.classes.every((x) => classes.includes(x))) continue;
+        if (!compoundMatches(e.compound, k)) continue;
+        // Ancestors only gate hiding; a rule's colour effect stays over-approximated by its subject.
+        if (e.hide && e.ancestors.length && !ancestorsMatch(el, e.ancestors, budget)) {
+          if (e.colour) matched.push({ ...e, hide: null });
+          continue;
+        }
         matched.push(e);
       }
     }

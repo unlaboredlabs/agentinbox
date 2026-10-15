@@ -211,6 +211,14 @@ export class Approvals {
     return count;
   }
 
+  /** Deletes decided approvals older than `beforeIso` (pending and in-flight ones are kept). */
+  prune(beforeIso: string): number {
+    return this.ctx.db.run(
+      "DELETE FROM approvals WHERE status IN ('sent', 'rejected', 'failed', 'expired') AND COALESCE(decided_at, created_at) < ?",
+      beforeIso,
+    ).changes;
+  }
+
   /** Approvals stuck in "approved" (the process died between claiming and sending) go back to pending. */
   recoverInterrupted(olderThanMs = STUCK_AFTER_MS): number {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();

@@ -19,4 +19,6 @@ export interface MailService extends Lifecycle {
   reject(id: string, note?: string | null): Promise<Approval>;
   /** Marks overdue pending approvals expired and deletes their drafts. Returns how many. */
   expireApprovals(): Promise<number>;
+  /** Deletes decided approvals (sent, rejected, failed, expired) decided before `beforeIso`. Returns how many. */
+  prune(beforeIso: string): number;
 }

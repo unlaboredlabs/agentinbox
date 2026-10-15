@@ -318,6 +318,17 @@ describe("approval robustness", () => {
     expect((await s.ctx.mail.approve(s.id)).status).toBe("pending");
   });
 
+  it("prunes decided approvals past retention, never pending ones", async () => {
+    const s = await queued();
+    const second = JSON.parse((await s.call("send_message", { to: "b@client.com", subject: "Two", body: "b" })).text).approvalId as string;
+    await s.ctx.mail.reject(second);
+    const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+    s.ctx.db.run("UPDATE approvals SET created_at = ?, decided_at = CASE WHEN decided_at IS NULL THEN NULL ELSE ? END", old, old);
+    expect(s.ctx.mail.prune(new Date(Date.now() - 30 * 86_400_000).toISOString())).toBe(1);
+    expect(s.ctx.mail.getApproval(second)).toBeNull();
+    expect(s.ctx.mail.getApproval(s.id)!.status).toBe("pending");
+  });
+
   it("get_send_status is read-only: overdue requests read as expired without changing them", async () => {
     const s = await queued();
     s.ctx.db.run("UPDATE approvals SET expires_at = ? WHERE id = ?", new Date(Date.now() - 1000).toISOString(), s.id);

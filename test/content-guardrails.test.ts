@@ -219,3 +219,36 @@ describe("stylesheets: bounded work, precise effects", () => {
     expect(buildContent({ ...parsed, text: null }, { accountEmail: "me@acme.com", maxChars: 0 }).body).toMatch(/too large to convert \(\d+ KB\)\.\]$/);
   });
 });
+
+describe("stylesheets: review round 3", () => {
+  it("measures CSS after stripping comments and still reads the first rules of oversized CSS", () => {
+    const padded = `<style>/*${"x".repeat(210_000)}*/ .h{display:none}</style><p>ok</p><p class="h">SECRET</p>`;
+    expect(htmlToMarkdown(padded).markdown).toBe("ok");
+    const huge = `<style>.h{display:none} ${".pad{margin:0} ".repeat(8_000)}</style><p>ok</p><p class="h">SECRET</p>`;
+    expect(htmlToMarkdown(huge).markdown).toBe("ok");
+  });
+
+  it("keeps the inline same-colour check for unclassed elements when CSS was cut", () => {
+    const html = `<style>${".pad{margin:0} ".repeat(8_000)}</style><div style="background:#fff"><span style="color:#fff">SECRET</span></div><p>ok</p>`;
+    expect(htmlToMarkdown(html).markdown).toBe("ok");
+  });
+
+  it("applies descendant and child selectors by checking ancestors", () => {
+    const html = `<style>.wrap .h{display:none} .box > p{font-size:0}</style>
+      <div class="wrap"><div><p class="h">SECRET1</p></div></div><p class="h">Outside wrap</p>
+      <div class="box"><p>SECRET2</p><div><p>Grandchild</p></div></div>`;
+    const md = htmlToMarkdown(html).markdown;
+    expect(md).not.toMatch(/SECRET/);
+    expect(md).toContain("Outside wrap");
+    expect(md).toContain("Grandchild");
+  });
+
+  it("a descendant hiding rule is still undone by a revealing @media rule", () => {
+    expect(htmlToMarkdown("<style>.wrap .m{display:none} @media (max-width:600px){.m{display:block}}</style><div class=\"wrap\"><p class=\"m\">Mobile</p></div>").markdown).toBe("Mobile");
+  });
+
+  it("ignores @media blocks no screen can match", () => {
+    expect(htmlToMarkdown("<style>.h{display:none} @media (max-width:1px){.h{display:block}}</style><p>ok</p><p class=\"h\">SECRET</p>").markdown).toBe("ok");
+    expect(htmlToMarkdown("<style>.h{display:none} @media (min-width:99999px){.h{display:block}}</style><p>ok</p><p class=\"h\">SECRET</p>").markdown).toBe("ok");
+  });
+});

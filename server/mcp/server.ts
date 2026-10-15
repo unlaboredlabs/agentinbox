@@ -440,7 +440,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
       "reply",
       {
         title: "Reply",
-        description: `Reply to a message inside its thread (threading headers and "Re:" subject are handled). reply_all also includes the original To and Cc. ${modes} Reply-only access limits you to replies, not who receives them: whoever wrote into the thread can be answered (the recipient allowlist is what restricts recipients).`,
+        description: `Reply to a message inside its thread (threading headers and "Re:" subject are handled). reply_all also copies everyone else on the original (its To and Cc recipients go in Cc). ${modes} Reply-only access limits you to replies, not who receives them: whoever wrote into the thread can be answered (the recipient allowlist is what restricts recipients).`,
         input: {
           account,
           message_id: messageId,
