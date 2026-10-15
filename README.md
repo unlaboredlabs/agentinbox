@@ -83,10 +83,11 @@ the exact values to paste; in short:
      disconnect. You don't need Google's verification for your own use: on consent, click *Advanced → Go to
      (app name)* past the "unverified app" warning.
 4. **Create an OAuth client** of type *Web application*, add the redirect URI the console shows
-   (`<public URL>/oauth/callback`), and paste the client ID and secret into the console.
+   (`<public URL>/oauth/callback`), and paste the client ID and secret into the console. If the public URL is plain
+   HTTP on a non-localhost address, Google won't redirect to it: the console then shows a `localhost` redirect URI and,
+   when connecting, asks you to paste the URL you land on.
 5. **Connect accounts.** Each one goes through Google's consent screen and grants `gmail.modify` plus `openid email
-   profile`, nothing more. If the console is on plain HTTP at a non-localhost address, Google can't redirect back to
-   it; the console then asks you to paste the URL you land on instead.
+   profile`, nothing more.
 6. **Choose how new mail arrives:**
    - **Pub/Sub (recommended):** one click creates the topic, grants Gmail's push service
      (`gmail-api-push@system.gserviceaccount.com`) permission to publish, and creates a pull subscription. It asks one
