@@ -5,6 +5,7 @@ import { BotIcon, CheckIcon, MessageSquareQuoteIcon, StickyNoteIcon, XIcon } fro
 import { useState } from "react";
 import { toast } from "sonner";
 import { TimeAgo } from "@/components/common";
+import { HiddenCharsWarning, hasHidden, Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
@@ -64,18 +65,27 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {hasHidden(
+          a.subject,
+          a.body,
+          a.reason,
+          ...[...a.to, ...a.cc, ...a.bcc].flatMap((x) => [x.name, x.email]),
+          ...a.attachments.map((f) => f.filename),
+        ) && <HiddenCharsWarning />}
         {a.reason && (
           <div className="flex gap-2 rounded-lg border-l-2 border-chart-1 bg-chart-1/5 px-3 py-2 text-sm">
             <MessageSquareQuoteIcon className="mt-0.5 size-4 shrink-0 text-chart-1" />
             <div>
               <div className="text-xs font-medium text-muted-foreground">Agent's reason</div>
-              <p className="whitespace-pre-wrap">{a.reason}</p>
+              <p className="whitespace-pre-wrap break-words">
+                <Visible text={a.reason} />
+              </p>
             </div>
           </div>
         )}
         <Recipients approval={a} />
         <div className="space-y-2">
-          <div className="text-base font-semibold break-words">{a.subject || <span className="text-muted-foreground italic">(no subject)</span>}</div>
+          <div className="text-base font-semibold break-words">{a.subject ? <Visible text={a.subject} /> : <span className="text-muted-foreground italic">(no subject)</span>}</div>
           <BodyPreview body={a.body} />
         </div>
         <Attachments items={a.attachments} />
@@ -83,6 +93,7 @@ export function ApprovalCard({ approval: a }: { approval: Approval }) {
           <Textarea
             autoFocus
             rows={2}
+            maxLength={2000}
             placeholder="Optional note. The agent sees it with your decision (e.g. why you rejected)."
             value={note}
             onChange={(e) => setNote(e.target.value)}

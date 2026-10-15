@@ -12,11 +12,20 @@ import { Spinner } from "@/components/ui/spinner";
 import { ApiError, api } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 
+/** Only a path on this console, never another origin (also rejects "//host" and "/\\host" tricks). */
+function safeRedirect(r: unknown): string | undefined {
+  if (typeof r !== "string" || !r.startsWith("/")) return undefined;
+  try {
+    const url = new URL(r, window.location.origin);
+    if (url.origin !== window.location.origin || !url.pathname.startsWith("/")) return undefined;
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return undefined;
+  }
+}
+
 export const Route = createFileRoute("/login")({
-  validateSearch: (s: Record<string, unknown>): { redirect?: string } => ({
-    // Only same-app paths, never another origin.
-    redirect: typeof s.redirect === "string" && s.redirect.startsWith("/") && !s.redirect.startsWith("//") ? s.redirect : undefined,
-  }),
+  validateSearch: (s: Record<string, unknown>): { redirect?: string } => ({ redirect: safeRedirect(s.redirect) }),
   beforeLoad: async ({ context }) => {
     const status = await context.queryClient.fetchQuery(queries.setupStatus());
     if (!status.claimed) throw redirect({ to: "/setup" });

@@ -18,7 +18,7 @@ export function CreateAgentDialog({ trigger }: { trigger?: React.ReactNode }) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(o) => (created && !o ? undefined : onOpenChange(o))}>
       <DialogTrigger asChild>
         {trigger ?? (
           <Button>
@@ -30,6 +30,8 @@ export function CreateAgentDialog({ trigger }: { trigger?: React.ReactNode }) {
         className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl"
         // Don't lose the one-time key to a stray click outside.
         onInteractOutside={(e) => created && e.preventDefault()}
+        onEscapeKeyDown={(e) => created && e.preventDefault()}
+        showCloseButton={!created}
       >
         {created ? (
           <>

@@ -1,4 +1,5 @@
 import type { Webhook, WebhookInput, WebhookWithSecret } from "@shared/types";
+import { useLabelNames } from "@/hooks/use-label-names";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { InfoIcon, SparklesIcon } from "lucide-react";
@@ -69,6 +70,7 @@ function WebhookForm({
 }) {
   const agents = useQuery(queries.agents());
   const accounts = useQuery(queries.accounts());
+  const labelName = useLabelNames(accounts.data ?? []);
   const [draft, setDraft] = useState<WebhookInput>(() =>
     webhook
       ? {
@@ -116,7 +118,8 @@ function WebhookForm({
     events: draft.eventTypes.length === 0,
     subject: regexError(draft.filter.subject),
   };
-  const valid = !errors.agent && !errors.name && !errors.url && !errors.events && !errors.subject;
+  const [filterTyping, setFilterTyping] = useState(false);
+  const valid = !errors.agent && !errors.name && !errors.url && !errors.events && !errors.subject && !filterTyping;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -196,7 +199,7 @@ function WebhookForm({
             <SectionLabel>Only when the message matches</SectionLabel>
             <p className="text-xs text-muted-foreground">All conditions you set must match. Leave everything empty to get every event.</p>
           </div>
-          <FilterBuilder value={draft.filter} onChange={(filter) => set({ filter })} accounts={accounts.data ?? []} />
+          <FilterBuilder value={draft.filter} onChange={(filter) => set({ filter })} accounts={accounts.data ?? []} onPendingChange={setFilterTyping} />
           <Separator />
           <IncludeBodyField value={draft.includeBody} onChange={(includeBody) => set({ includeBody })} />
 
@@ -204,7 +207,7 @@ function WebhookForm({
             <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <SparklesIcon className="size-3.5" /> In plain words
             </div>
-            <p>{describeWebhook(draft, accounts.data ?? []).join(", ")}.</p>
+            <p>{describeWebhook(draft, accounts.data ?? [], labelName).join(", ")}.</p>
           </div>
           {save.isError && <ErrorAlert error={save.error} title="Couldn't save the webhook" />}
         </FieldGroup>
@@ -213,7 +216,7 @@ function WebhookForm({
         <Button type="button" variant="ghost" onClick={onDone}>
           Cancel
         </Button>
-        <Button type="submit" disabled={save.isPending || (touched && !valid)}>
+        <Button type="submit" disabled={save.isPending || (touched && !valid) || filterTyping}>
           {save.isPending && <Spinner />}
           {webhook ? "Save changes" : "Create webhook"}
         </Button>

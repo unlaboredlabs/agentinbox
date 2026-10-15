@@ -13,8 +13,9 @@ import { CloudLink, Guide, GuideStep, StepCard, StepFooter } from "./wizard-shel
 export function StepClient({ index, onBack, onNext }: StepProps) {
   const { state, draft } = useSetupProgress();
   const client = useQuery(queries.googleClient());
-  const project = draft.projectId ?? state?.gcpProjectId ?? client.data?.projectId ?? "";
-  const appType = draft.appType ?? state?.googleAppType ?? client.data?.appType ?? undefined;
+  // Server values win; the draft only fills in what the server doesn't have yet.
+  const project = state?.gcpProjectId ?? client.data?.projectId ?? draft.projectId ?? "";
+  const appType = state?.googleAppType ?? client.data?.appType ?? draft.appType ?? undefined;
   const configured = !!client.data?.clientId && !!client.data.hasSecret;
   const v = client.data;
 

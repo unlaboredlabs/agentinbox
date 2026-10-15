@@ -128,7 +128,7 @@ export function CopyField({ value, className, size = "default" }: { value: strin
 }
 
 /** A multi-line snippet with a copy button. Plain text only. */
-export function CodeBlock({ code, className, title }: { code: string; className?: string; title?: React.ReactNode }) {
+export function CodeBlock({ code, className, title, wrap }: { code: string; className?: string; title?: React.ReactNode; /** Wrap long lines (shell commands) instead of scrolling. */ wrap?: boolean }) {
   return (
     <div className={cn("overflow-hidden rounded-lg border bg-muted/40", className)}>
       {title && (
@@ -138,7 +138,7 @@ export function CodeBlock({ code, className, title }: { code: string; className?
         </div>
       )}
       <div className="relative">
-        <pre className={cn("overflow-x-auto p-3 font-mono text-xs leading-relaxed", !title && "pr-10")}>{code}</pre>
+        <pre className={cn("overflow-x-auto p-3 font-mono text-xs leading-relaxed", !title && "pr-10", wrap && "whitespace-pre-wrap [overflow-wrap:anywhere]")}>{code}</pre>
         {!title && <CopyButton value={code} className="absolute top-1.5 right-1.5" />}
       </div>
     </div>

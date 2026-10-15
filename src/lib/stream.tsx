@@ -20,10 +20,9 @@ const STALE: Record<ConsoleStreamMessage["kind"], readonly (readonly string[])[]
   approval: [keys.approvals, keys.overview],
   audit: [keys.audit, keys.agents, keys.overview],
   account: [keys.accounts, keys.setupState, keys.overview],
-  // Approving a pairing creates an agent.
-  pairing: [keys.agents, keys.overview],
+  pairing: [keys.pairings, keys.agents],
 };
-const ALL_STALE = [...new Set(Object.values(STALE).flat())];
+const ALL_STALE = [...new Set([...Object.values(STALE).flat(), keys.eventHistory, keys.auditLog])];
 
 function isMessage(v: unknown): v is ConsoleStreamMessage {
   return !!v && typeof v === "object" && typeof (v as { kind?: unknown }).kind === "string" && "data" in v;

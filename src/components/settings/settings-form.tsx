@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { IngestMode, Settings, SystemInfo } from "@shared/types";
 import { useForm } from "@tanstack/react-form";
 import { useQueryClient } from "@tanstack/react-query";
@@ -11,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { api, toastError } from "@/lib/api";
 import { keys } from "@/lib/queries";
 
@@ -22,7 +24,6 @@ interface FormValues {
   retentionDays: string;
   approvalTtlHours: string;
   webhookAllowlist: string[];
-  /** Not edited here yet: carried through unchanged. */
   pairingEnabled: boolean;
 }
 
@@ -102,6 +103,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
   });
 
   const initial = JSON.stringify(toForm(settings));
+  const [allowTyping, setAllowTyping] = useState(false);
 
   return (
     <form
@@ -194,7 +196,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             </form.Field>
             <form.Field name="pollIntervalSeconds" validators={{ onChange: ({ value }) => intError("Poll interval", 5, 3600)(value) }}>
               {(field) => (
-                <NumberField field={field} label="Poll interval" unit="seconds" description="Used in polling mode, and as a safety net in real-time mode." />
+                <NumberField field={field} label="Poll interval" unit="seconds" description="How often polling checks each account. Real-time mode also polls at this interval while Pub/Sub isn't set up or is failing; otherwise it re-checks every 5 minutes." />
               )}
             </form.Field>
           </FieldGroup>
@@ -231,6 +233,33 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         </CardContent>
       </Card>
 
+      <Card id="pairing" className="scroll-mt-20">
+        <CardHeader>
+          <CardTitle>Agent pairing</CardTitle>
+          <CardDescription>
+            Lets an agent ask for access from its own terminal with <code className="font-mono text-xs">npx agentinbox-cli connect</code>, instead of you
+            copying an API key.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form.Field name="pairingEnabled">
+            {(field) => (
+              <Field orientation="horizontal" className="items-start">
+                <Switch id={field.name} checked={field.state.value} onCheckedChange={(v) => field.handleChange(v)} className="mt-0.5" />
+                <div className="space-y-1">
+                  <FieldLabel htmlFor={field.name}>Accept pairing requests</FieldLabel>
+                  <FieldDescription>
+                    {field.state.value
+                      ? "Requests wait under Approvals → Agent access. Nothing gets access until you approve the matching code and choose its permissions; the key goes straight to the agent's terminal."
+                      : "Off: connect is refused. You can still create agents under Agents and paste their key yourself."}
+                  </FieldDescription>
+                </div>
+              </Field>
+            )}
+          </form.Field>
+        </CardContent>
+      </Card>
+
       <Card id="webhook-allowlist" className="scroll-mt-20">
         <CardHeader>
           <CardTitle>Webhook allowlist</CardTitle>
@@ -244,7 +273,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
             {(field) => (
               <Field>
                 <FieldLabel htmlFor="allowlist">Allowed private hosts</FieldLabel>
-                <ChipsInput id="allowlist" value={field.state.value} onChange={field.handleChange} placeholder="e.g. 10.0.0.0/8, n8n.internal" validate={allowlistError} />
+                <ChipsInput id="allowlist" value={field.state.value} onChange={field.handleChange} placeholder="e.g. 10.0.0.0/8, n8n.internal" validate={allowlistError} onPendingChange={setAllowTyping} />
                 <FieldDescription className="flex items-start gap-1.5">
                   <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
                   <span>
@@ -262,12 +291,12 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         {([changed, canSubmit, submitting]) =>
           changed ? (
             <div className="sticky bottom-4 z-10 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-background/95 p-3 shadow-lg backdrop-blur">
-              <span className="text-sm">You have unsaved changes.</span>
+              <span className="text-sm">{allowTyping ? "Add or clear the host you're typing in the allowlist first." : "You have unsaved changes."}</span>
               <div className="flex gap-2">
                 <Button type="button" variant="ghost" onClick={() => form.reset()}>
                   Discard
                 </Button>
-                <Button type="submit" disabled={!canSubmit || submitting}>
+                <Button type="submit" disabled={!canSubmit || submitting || allowTyping}>
                   {submitting && <Spinner />} Save settings
                 </Button>
               </div>

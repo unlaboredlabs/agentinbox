@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
-import { DEFAULT_GRANT, type GrantFields, sameGrant, toGrantFields, validateAddressGlob } from "@/lib/grants";
+import { DEFAULT_GRANT, type GrantFields, grantProblem, sameGrant, toGrantFields, validateAddressGlob } from "@/lib/grants";
 import { CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib/labels";
 import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
@@ -73,9 +73,8 @@ export function GrantEditor({
 
   const dirty = !!draft && (!saved || !sameGrant(draft, saved));
   const set = (patch: Partial<GrantFields>) => setDraft((d) => ({ ...(d ?? DEFAULT_GRANT), ...patch }));
-  const toggleCap = (c: Capability, on: boolean) =>
-    set({ capabilities: CAPABILITIES.filter((x) => (x === c ? on : (draft?.capabilities ?? []).includes(x))) });
-  const scopeEmpty = draft?.labelScope?.length === 0;
+  const [typing, setTyping] = useState(false);
+  const problem = draft ? (typing ? "Add or clear the recipient you're typing first." : grantProblem(draft)) : null;
 
   const askRemove = () =>
     confirm({
@@ -86,8 +85,6 @@ export function GrantEditor({
       onConfirm: () => remove.mutateAsync(),
     });
 
-  const id = (s: string) => `${account.id}-${s}`;
-  const sends = !!draft?.capabilities.includes("send");
 
   return (
     <Card className="gap-0 py-0">
@@ -125,66 +122,7 @@ export function GrantEditor({
       {draft && open && (
         <div className="border-t p-4">
           <FieldGroup>
-            <FieldSet>
-              <FieldLegend variant="label">Capabilities</FieldLegend>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {CAPABILITIES.map((c) => (
-                  <label
-                    key={c}
-                    className="flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50 has-[[data-state=checked]]:bg-muted/40"
-                  >
-                    <Checkbox className="mt-0.5" checked={draft.capabilities.includes(c)} onCheckedChange={(v) => toggleCap(c, v === true)} />
-                    <span className="space-y-0.5">
-                      <span className="block text-sm font-medium">{CAPABILITY_INFO[c].label}</span>
-                      <span className="block text-xs text-muted-foreground">{CAPABILITY_INFO[c].description}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-              {draft.capabilities.length > 0 && !draft.capabilities.includes("read") && (
-                <FieldDescription className="text-warning">Without Read, the agent can't search or open messages, so most actions will fail.</FieldDescription>
-              )}
-            </FieldSet>
-
-            <FieldSet>
-              <FieldLegend variant="label">Which mail it can see</FieldLegend>
-              <FieldDescription>
-                Scoping works per thread: a thread is visible if any of its messages carries one of the labels. Searches are limited to the same scope.
-              </FieldDescription>
-              <LabelScopePicker accountId={account.id} value={draft.labelScope} onChange={(labelScope) => set({ labelScope })} />
-            </FieldSet>
-
-            <FieldSet disabled={!sends} className={cn(!sends && "opacity-60")}>
-              <FieldLegend variant="label">Sending</FieldLegend>
-              {!sends && <FieldDescription>Turn on the Send capability to configure how sending works.</FieldDescription>}
-              <SendModeControl value={draft.sendMode} onChange={(sendMode) => set({ sendMode })} disabled={!sends} />
-              <Field>
-                <FieldLabel htmlFor={id("allow")}>Allowed recipients</FieldLabel>
-                <ChipsInput
-                  id={id("allow")}
-                  value={draft.allowTo}
-                  onChange={(allowTo) => set({ allowTo })}
-                  placeholder="Anyone. Add addresses or *@company.com"
-                  validate={validateAddressGlob}
-                  aria-describedby={id("allow-hint")}
-                />
-                <FieldDescription id={id("allow-hint")}>
-                  Leave empty to allow any recipient. Use exact addresses or globs like <code className="font-mono">*@yourcompany.com</code>. Every
-                  to, cc and bcc address must match.
-                </FieldDescription>
-              </Field>
-              <Field orientation="horizontal">
-                <Switch id={id("reply")} checked={draft.replyOnly} onCheckedChange={(replyOnly) => set({ replyOnly })} />
-                <div className="space-y-0.5">
-                  <FieldLabel htmlFor={id("reply")}>Replies only</FieldLabel>
-                  <FieldDescription>Only allow replying inside threads the agent can already see; no new conversations.</FieldDescription>
-                </div>
-              </Field>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <CapInput id={id("hour")} label="Max sends per hour" value={draft.maxSendsPerHour} onChange={(maxSendsPerHour) => set({ maxSendsPerHour })} />
-                <CapInput id={id("day")} label="Max sends per day" value={draft.maxSendsPerDay} onChange={(maxSendsPerDay) => set({ maxSendsPerDay })} />
-              </div>
-            </FieldSet>
+            <GrantFieldsForm idPrefix={account.id} accountId={account.id} value={draft} onChange={set} onPendingChange={setTyping} />
 
             <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-4">
               {saved ? (
@@ -206,7 +144,8 @@ export function GrantEditor({
                     {saved ? "Discard changes" : "Cancel"}
                   </Button>
                 )}
-                <Button disabled={!dirty || save.isPending || scopeEmpty} onClick={() => save.mutate(draft)}>
+                {problem && dirty && <span className="self-center text-xs text-warning">{problem}</span>}
+                <Button disabled={!dirty || save.isPending || !!problem} onClick={() => save.mutate(draft)}>
                   {save.isPending && <Spinner />}
                   {saved ? "Save permissions" : "Grant access"}
                 </Button>
@@ -216,6 +155,93 @@ export function GrantEditor({
         </div>
       )}
     </Card>
+  );
+}
+
+/** The editable fields of a grant (capabilities, label scope, sending rules), without saving. */
+export function GrantFieldsForm({
+  idPrefix,
+  accountId,
+  value,
+  onChange,
+  onPendingChange,
+}: {
+  idPrefix: string;
+  accountId: string;
+  value: GrantFields;
+  onChange: (patch: Partial<GrantFields>) => void;
+  /** Recipient text typed but not added yet. */
+  onPendingChange?: (pending: boolean) => void;
+}) {
+  const set = onChange;
+  const id = (s: string) => `${idPrefix}-${s}`;
+  const sends = value.capabilities.includes("send");
+  const toggleCap = (c: Capability, on: boolean) => set({ capabilities: CAPABILITIES.filter((x) => (x === c ? on : value.capabilities.includes(x))) });
+  return (
+    <>
+      <FieldSet>
+        <FieldLegend variant="label">Capabilities</FieldLegend>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {CAPABILITIES.map((c) => (
+            <label
+              key={c}
+              className="flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50 has-[[data-state=checked]]:bg-muted/40"
+            >
+              <Checkbox className="mt-0.5" checked={value.capabilities.includes(c)} onCheckedChange={(v) => toggleCap(c, v === true)} />
+              <span className="space-y-0.5">
+                <span className="block text-sm font-medium">{CAPABILITY_INFO[c].label}</span>
+                <span className="block text-xs text-muted-foreground">{CAPABILITY_INFO[c].description}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        {value.capabilities.length > 0 && !value.capabilities.includes("read") && (
+          <FieldDescription className="text-warning">Without Read, the agent can't search or open messages, so most actions will fail.</FieldDescription>
+        )}
+      </FieldSet>
+
+      <FieldSet>
+        <FieldLegend variant="label">Which mail it can see</FieldLegend>
+        <FieldDescription>
+          Scoping works per thread: the agent sees a whole thread as soon as any message in it carries one of these labels, including
+          replies from outside that join the thread later. Searches are limited to the same scope.
+        </FieldDescription>
+        <LabelScopePicker accountId={accountId} value={value.labelScope} onChange={(labelScope) => set({ labelScope })} />
+      </FieldSet>
+
+      <FieldSet disabled={!sends} className={cn(!sends && "opacity-60")}>
+        <FieldLegend variant="label">Sending</FieldLegend>
+        {!sends && <FieldDescription>Turn on the Send capability to configure how sending works.</FieldDescription>}
+        <SendModeControl value={value.sendMode} onChange={(sendMode) => set({ sendMode })} disabled={!sends} />
+        <Field>
+          <FieldLabel htmlFor={id("allow")}>Allowed recipients</FieldLabel>
+          <ChipsInput
+            id={id("allow")}
+            value={value.allowTo}
+            onChange={(allowTo) => set({ allowTo })}
+            placeholder="Anyone. Add addresses or *@company.com"
+            validate={validateAddressGlob}
+            onPendingChange={onPendingChange}
+            aria-describedby={id("allow-hint")}
+          />
+          <FieldDescription id={id("allow-hint")}>
+            Leave empty to allow any recipient. Use exact addresses or globs like <code className="font-mono">*@yourcompany.com</code>. Every
+            to, cc and bcc address must match.
+          </FieldDescription>
+        </Field>
+        <Field orientation="horizontal">
+          <Switch id={id("reply")} checked={value.replyOnly} onCheckedChange={(replyOnly) => set({ replyOnly })} />
+          <div className="space-y-0.5">
+            <FieldLabel htmlFor={id("reply")}>Replies only</FieldLabel>
+            <FieldDescription>Only allow replying inside threads the agent can already see; no new conversations.</FieldDescription>
+          </div>
+        </Field>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CapInput id={id("hour")} label="Max sends per hour" value={value.maxSendsPerHour} onChange={(maxSendsPerHour) => set({ maxSendsPerHour })} />
+          <CapInput id={id("day")} label="Max sends per day" value={value.maxSendsPerDay} onChange={(maxSendsPerDay) => set({ maxSendsPerDay })} />
+        </div>
+      </FieldSet>
+    </>
   );
 }
 
@@ -232,7 +258,9 @@ function CapInput({ id, label, value, onChange }: { id: string; label: string; v
           const digits = e.target.value.replace(/\D/g, "");
           onChange(digits ? Math.min(100_000, Number(digits)) : null);
         }}
+        aria-invalid={value === 0}
       />
+      {value === 0 && <p className="text-xs text-destructive">Use at least 1, or leave empty for no limit.</p>}
     </Field>
   );
 }

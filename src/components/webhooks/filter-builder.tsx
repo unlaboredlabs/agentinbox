@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { type Account, EVENT_TYPES, type EventType, type WebhookFilter } from "@shared/types";
 import { ShieldAlertIcon } from "lucide-react";
 import { ChipsInput } from "@/components/chips-input";
@@ -44,11 +45,19 @@ export function FilterBuilder({
   value,
   onChange,
   accounts,
+  onPendingChange,
 }: {
   value: WebhookFilter;
   onChange: (f: WebhookFilter) => void;
   accounts: Account[];
+  /** Sender/recipient text typed but not added yet. */
+  onPendingChange?: (pending: boolean) => void;
 }) {
+  const [typing, setTyping] = useState({ from: false, to: false });
+  const pending = typing.from || typing.to;
+  useEffect(() => {
+    onPendingChange?.(pending);
+  }, [pending, onPendingChange]);
   const set = (patch: Partial<WebhookFilter>) => onChange({ ...value, ...patch });
   const accountIds = value.accountIds ?? [];
   const subjectError = regexError(value.subject);
@@ -85,14 +94,14 @@ export function FilterBuilder({
       <div className="grid gap-4 sm:grid-cols-2">
         <Field>
           <FieldLabel htmlFor="wf-from">From</FieldLabel>
-          <ChipsInput id="wf-from" value={value.from ?? []} onChange={(from) => set({ from })} placeholder="Any sender" validate={globError} />
+          <ChipsInput id="wf-from" value={value.from ?? []} onChange={(from) => set({ from })} placeholder="Any sender" validate={globError} onPendingChange={(v) => setTyping((t) => ({ ...t, from: v }))} />
           <FieldDescription>
             Globs like <code className="font-mono">*@stripe.com</code>
           </FieldDescription>
         </Field>
         <Field>
           <FieldLabel htmlFor="wf-to">To or Cc</FieldLabel>
-          <ChipsInput id="wf-to" value={value.to ?? []} onChange={(to) => set({ to })} placeholder="Any recipient" validate={globError} />
+          <ChipsInput id="wf-to" value={value.to ?? []} onChange={(to) => set({ to })} placeholder="Any recipient" validate={globError} onPendingChange={(v) => setTyping((t) => ({ ...t, to: v }))} />
           <FieldDescription>
             e.g. <code className="font-mono">support@yourco.com</code>
           </FieldDescription>
@@ -100,7 +109,7 @@ export function FilterBuilder({
       </div>
 
       <Field data-invalid={!!subjectError}>
-        <FieldLabel htmlFor="wf-subject">Subject matches</FieldLabel>
+        <FieldLabel htmlFor="wf-subject">Subject pattern (RE2 regular expression)</FieldLabel>
         <Input
           id="wf-subject"
           className="font-mono"
@@ -111,9 +120,12 @@ export function FilterBuilder({
           aria-invalid={!!subjectError}
         />
         {subjectError ? (
-          <FieldError>Not a valid regular expression: {subjectError}</FieldError>
+          <FieldError>Not a valid pattern: {subjectError}</FieldError>
         ) : (
-          <FieldDescription>A regular expression, case-insensitive. Leave empty for any subject.</FieldDescription>
+          <FieldDescription>
+            Case-insensitive, checked against the first 256 characters of the subject. RE2 syntax: no lookarounds or backreferences. Leave empty for any
+            subject.
+          </FieldDescription>
         )}
       </Field>
 
