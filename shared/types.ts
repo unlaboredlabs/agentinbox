@@ -1069,7 +1069,10 @@ export interface ApiError {
 //   POST   /api/accounts/connect ConnectAccountInput  → ConnectAccountResponse
 //          400 google_client_missing (no OAuth client saved yet)
 //          {reauthAccountId, scopes:["calendar"]}: the per-account "Add Google Calendar" consent (include_granted_scopes:
-//          mail keeps working throughout; denying or unticking Calendar changes nothing)
+//          mail keeps working throughout; denying or unticking Calendar changes nothing). Its completion fails with
+//          400 oauth_calendar_not_granted when Calendar was (partly) unticked, and a cancel's oauth_access_denied says
+//          nothing changed. While Calendar is enabled, oauth_admin_policy_enforced hints at turning it off
+//          (PATCH /api/google/calendar {enabled:false}) and connecting with mail only.
 //   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
 //   POST   /api/accounts/connect/status {state}       → ConnectAttempt (the console's fallback when the callback page can't post to it)
 //          Connect failures (same codes on this endpoint and in the callback page's OAuthCallbackMessage):

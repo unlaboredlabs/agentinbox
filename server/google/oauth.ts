@@ -114,7 +114,7 @@ const oauthError = (ctx: AppContext, code: string, description?: string | null, 
 /**
  * Starts a consent flow. `scopes: ["pubsub"]` adds the Pub/Sub scope for the provisioning account
  * (without `reauthAccountId` it targets the account provisioning would use). `scopes: ["calendar"]` adds
- * CALENDAR_SCOPES; with `reauthAccountId` that is "Add Calendar to <email>" (see calendarAdds). While
+ * CALENDAR_SCOPES; with `reauthAccountId` that is "Add Calendar to <email>" (see calendarAttempts). While
  * Calendar is part of this install (calendarEnabled), every connect and reconnect asks for it anyway.
  * Extra scopes are incremental (include_granted_scopes): Google asks only for what isn't granted yet.
  */
