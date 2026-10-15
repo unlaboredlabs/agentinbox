@@ -1,0 +1,130 @@
+import type { EventType, MailEvent } from "@shared/types";
+import {
+  AlertTriangleIcon,
+  ChevronRightIcon,
+  CornerDownRightIcon,
+  KeyRoundIcon,
+  MailIcon,
+  PaperclipIcon,
+  SendIcon,
+  TagIcon,
+} from "lucide-react";
+import { useState } from "react";
+import { CodeBlock, TimeAgo } from "@/components/common";
+import { Badge } from "@/components/ui/badge";
+import { fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
+import { EVENT_TYPE_INFO } from "@/lib/labels";
+import { cn } from "@/lib/utils";
+
+const ICON: Record<EventType, typeof MailIcon> = {
+  "message.received": MailIcon,
+  "message.sent": SendIcon,
+  "thread.reply_received": CornerDownRightIcon,
+  "label.added": TagIcon,
+  "label.removed": TagIcon,
+  "account.auth_failed": KeyRoundIcon,
+  "sync.gap": AlertTriangleIcon,
+};
+const ALERT_TYPES: EventType[] = ["account.auth_failed", "sync.gap"];
+
+export function EventIcon({ type, className }: { type: EventType; className?: string }) {
+  const Icon = ICON[type] ?? MailIcon;
+  return (
+    <span
+      className={cn(
+        "flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted",
+        ALERT_TYPES.includes(type) && "bg-warning/15 text-warning",
+        className,
+      )}
+      aria-hidden
+    >
+      <Icon className="size-4" />
+    </span>
+  );
+}
+
+/** Headline for an event: the subject for message events, a description otherwise. */
+function headline(e: MailEvent) {
+  if (e.message) return e.message.subject || "(no subject)";
+  if (e.type === "account.auth_failed") return "Google rejected the account's token. Reconnect it on the Accounts page.";
+  if (e.type === "sync.gap") return "Events may be missing: history was too old, so a bounded resync ran.";
+  return EVENT_TYPE_INFO[e.type]?.description ?? e.type;
+}
+
+/** One event, expandable to its full metadata. Message content is never rendered as HTML. */
+export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const m = e.message;
+  const info = EVENT_TYPE_INFO[e.type];
+  return (
+    <li className={cn(fresh && "animate-in duration-500 fade-in slide-in-from-top-1")}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-start gap-3 px-4 py-3 text-left outline-none hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+      >
+        <EventIcon type={e.type} />
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <Badge variant="outline" className="font-normal">
+              {info?.label ?? e.type}
+            </Badge>
+            <span className="truncate">{e.accountEmail}</span>
+            {m?.from && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="truncate">from {fmtAddressShort(m.from)}</span>
+              </>
+            )}
+            {m?.hasAttachments && <PaperclipIcon className="size-3.5" aria-label="Has attachments" />}
+          </div>
+          <div className={cn("truncate text-sm", m ? "font-medium" : "text-muted-foreground")}>{headline(e)}</div>
+          {m?.snippet && <div className="line-clamp-1 text-xs text-muted-foreground">{m.snippet}</div>}
+        </div>
+        <div className="flex shrink-0 items-center gap-1 pt-0.5 text-xs text-muted-foreground">
+          <TimeAgo date={e.createdAt} />
+          <ChevronRightIcon className={cn("size-4 transition-transform", open && "rotate-90")} />
+        </div>
+      </button>
+      {open && <EventDetail event={e} />}
+    </li>
+  );
+}
+
+function EventDetail({ event: e }: { event: MailEvent }) {
+  const m = e.message;
+  const rows: [string, React.ReactNode][] = [
+    ["Event", <code key="id" className="font-mono">{e.id} · #{e.seq}</code>],
+    ["When", fmtExact(e.createdAt)],
+    ["Account", e.accountEmail],
+  ];
+  if (m) {
+    rows.push(
+      ["From", fmtAddress(m.from)],
+      ["To", m.to.map(fmtAddress).join(", ") || "—"],
+      ...(m.cc.length ? ([["Cc", m.cc.map(fmtAddress).join(", ")]] as [string, string][]) : []),
+      ["Date", fmtExact(m.date)],
+      ["Labels", m.labelIds.join(", ") || "—"],
+      ["Message", <code key="msg" className="font-mono break-all">{m.id}</code>],
+      ["Thread", <code key="thread" className="font-mono break-all">{m.threadId}</code>],
+    );
+  }
+  if (e.labelIds?.length) rows.push([e.type === "label.removed" ? "Removed" : "Added", e.labelIds.join(", ")]);
+  return (
+    <div className="space-y-3 border-t bg-muted/20 px-4 py-3 sm:pl-15">
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
+        {rows.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-muted-foreground">{k}</dt>
+            <dd className="min-w-0 break-words">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {m?.snippet && (
+        <p className="rounded-md border bg-background p-2 text-xs whitespace-pre-wrap text-muted-foreground">{m.snippet}</p>
+      )}
+      {e.detail && Object.keys(e.detail).length > 0 && <CodeBlock code={JSON.stringify(e.detail, null, 2)} />}
+    </div>
+  );
+}
