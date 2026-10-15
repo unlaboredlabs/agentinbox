@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { ActivityIcon, BotIcon, MailIcon, ShieldAlertIcon, StampIcon, WebhookIcon, WrenchIcon } from "lucide-react";
 import { PageHeader, QueryError, StatCard } from "@/components/common";
 import { ActivityChart } from "@/components/overview/activity-chart";
@@ -8,7 +8,7 @@ import { RecentEvents } from "@/components/overview/recent-events";
 import { SetupChecklist } from "@/components/overview/setup-checklist";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { fmtNumber, plural } from "@/lib/format";
+import { accountsStat, fmtNumber, plural } from "@/lib/format";
 import { queries } from "@/lib/queries";
 
 export const Route = createFileRoute("/_app/")({
@@ -38,6 +38,7 @@ function Overview() {
   const pairingCount = pairings.data?.length ?? 0;
   const waiting = (s?.pendingApprovals ?? 0) + pairingCount;
   const loading = stats.isPending;
+  const acc = s && accountsStat(s.accounts);
 
   return (
     <>
@@ -55,8 +56,20 @@ function Overview() {
             label="Accounts"
             icon={MailIcon}
             loading={loading}
-            value={s ? (s.accounts.active === s.accounts.total ? fmtNumber(s.accounts.total) : `${s.accounts.active} of ${s.accounts.total}`) : null}
-            hint={s && (s.accounts.needsAttention ? <span className="text-critical">{s.accounts.needsAttention === 1 ? "1 needs attention" : `${s.accounts.needsAttention} need attention`}</span> : "all active")}
+            value={acc?.value ?? null}
+            hint={
+              acc &&
+              (acc.connect ? (
+                <>
+                  {acc.hint} ·{" "}
+                  <Link to="/accounts" className="font-medium whitespace-nowrap text-foreground underline underline-offset-4">
+                    Connect Gmail
+                  </Link>
+                </>
+              ) : (
+                <span className={acc.tone === "critical" ? "text-critical" : undefined}>{acc.hint}</span>
+              ))
+            }
           />
           <StatCard
             label="Agents"

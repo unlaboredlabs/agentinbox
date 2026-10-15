@@ -13,7 +13,7 @@ import { listenerHandled } from "../src/components/agents/listener-handled.ts";
 import { allStepsDone, type SetupDraft, showsSetupLink, STEP_META, STEP_IDS, startsVerify, type StepId, type StepStatus, stepStatuses, verifiedPatch, wizardStep } from "../src/components/setup/steps.ts";
 import { activeTest, checksComplete, TEST_SUBJECT, TEST_TTL_MS, type VerifyTest, verifyChecks } from "../src/components/setup/verify-checks.ts";
 import { connectCommands, NPX } from "../src/lib/cli.ts";
-import { agentOnHost, fmtAgo } from "../src/lib/format.ts";
+import { accountsStat, agentOnHost, fmtAgo } from "../src/lib/format.ts";
 
 // ───────────── Verify checks ─────────────
 
@@ -396,6 +396,16 @@ describe("stepStatuses: the verify step", () => {
 });
 
 // ───────────── Relative times ─────────────
+
+describe("accountsStat (Overview's Accounts tile)", () => {
+  it("asks to connect Gmail instead of saying 'all active' about no accounts", () => {
+    expect(accountsStat({ total: 0, active: 0, needsAttention: 0 })).toEqual({ value: "0", hint: "None connected yet", connect: true });
+    expect(accountsStat({ total: 1, active: 1, needsAttention: 0 })).toEqual({ value: "1", hint: "active" });
+    expect(accountsStat({ total: 3, active: 3, needsAttention: 0 })).toEqual({ value: "3", hint: "all active" });
+    expect(accountsStat({ total: 3, active: 2, needsAttention: 0 })).toEqual({ value: "2 of 3", hint: "1 paused" });
+    expect(accountsStat({ total: 3, active: 1, needsAttention: 2 })).toEqual({ value: "1 of 3", hint: "2 need attention", tone: "critical" });
+  });
+});
 
 describe("fmtAgo", () => {
   const now = Date.parse(SENT_AT);
