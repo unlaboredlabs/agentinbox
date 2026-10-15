@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GoogleService } from "../server/google/types.ts";
-import { lockPath } from "../server/instance.ts";
+import { type InstanceInfo, lockPath, serviceInstallCommand } from "../server/instance.ts";
 import { nodeVersionError } from "../server/node-check.ts";
 import {
   installService,
   isHealthResponse,
+  notTheService,
   renderSystemdUnit,
   serviceHints,
   type ServiceOps,
@@ -64,10 +65,23 @@ describe("1: Node version check", () => {
 
 // ───────────── 3: service install rollback ─────────────
 
-function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean, ready = true): ServiceOps & { calls: string[] } {
+const SERVICE_PID = 4242;
+
+/**
+ * Fake systemd: `enable --now` starts the service, whose process takes the data directory's lock as a
+ * service (pid SERVICE_PID, also systemd's MainPID); `disable --now` stops it. `owner` is that lock.
+ */
+function fakeOps(
+  dir: string,
+  failOn?: (cmd: string, args: string[]) => boolean,
+  ready = true,
+): ServiceOps & { calls: string[]; owner: InstanceInfo | null; busyPort: boolean } {
   const calls: string[] = [];
-  return {
-    capture: () => "",
+  let starts = 0;
+  const ops: ServiceOps & { calls: string[]; owner: InstanceInfo | null; busyPort: boolean } = {
+    owner: null,
+    busyPort: false,
+    capture: (cmd, args) => (cmd === "systemctl" && args.includes("MainPID") && ops.owner?.service ? `${SERVICE_PID}\n` : ""),
     calls,
     platform: "linux",
     root: false,
@@ -76,6 +90,11 @@ function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean,
     exec(cmd, args) {
       calls.push(`${cmd} ${args.join(" ")}`);
       if (failOn?.(cmd, args)) throw new Error(`Command failed: ${cmd} ${args.join(" ")}`);
+      if (cmd !== "systemctl") return;
+      if (args.includes("enable") && args.includes("--now") && !ops.owner) {
+        ops.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: `start-${++starts}`, service: true };
+      }
+      if (args.includes("disable") && ops.owner?.service) ops.owner = null;
     },
     stage(dataDir) {
       const staging = join(dataDir, "app.new");
@@ -85,7 +104,10 @@ function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean,
     },
     unitDir: () => join(dir, "units"),
     waitReady: async () => ready,
+    instance: () => ops.owner,
+    portInUse: async () => ops.busyPort,
   };
+  return ops;
 }
 
 describe("3: service install", () => {
@@ -169,6 +191,76 @@ describe("3: service install", () => {
     expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
     expect(existsSync(join(config.dataDir, "app"))).toBe(false);
     expect(ops.calls).toContain("systemctl --user disable --now agentinbox");
+  });
+
+  it("refuses while agentinbox runs in a terminal on the same data directory, and changes nothing", async () => {
+    const config = setup();
+    const ops = fakeOps(config.dataDir);
+    ops.owner = { pid: 777, host: "0.0.0.0", port: 8425, startedAt: "x", service: false };
+    let staged = false;
+    ops.stage = () => {
+      staged = true;
+      return "";
+    };
+    await expect(installService(config, ops)).rejects.toThrow(
+      "agentinbox is already running in a terminal (pid 777, port 8425): stop it with Ctrl-C, then run this again.",
+    );
+    expect(staged).toBe(false);
+    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(ops.calls).toEqual(["systemctl --user daemon-reload"]);
+  });
+
+  it("refuses when the port is taken and no service is installed yet", async () => {
+    const config = setup();
+    const ops = fakeOps(config.dataDir);
+    ops.busyPort = true;
+    await expect(installService(config, ops)).rejects.toThrow(/Port \d+ is already in use.*Nothing was changed/);
+    expect(existsSync(join(config.dataDir, "app"))).toBe(false);
+  });
+
+  it("reinstalls over a running service (its own lock is not a conflict)", async () => {
+    const config = setup();
+    const ops = fakeOps(config.dataDir);
+    await installService(config, ops);
+    ops.busyPort = true; // the service itself holds the port
+    await installService(config, ops);
+    expect(ops.owner).toMatchObject({ service: true, startedAt: "start-2" });
+  });
+
+  it("rolls back when a foreground agentinbox answers instead of the service", async () => {
+    const config = setup();
+    const ops = fakeOps(config.dataDir);
+    const log = vi.spyOn(console, "log");
+    // A terminal instance grabs the data directory and port just before the service starts; the service never gets them.
+    ops.exec = (cmd, args) => {
+      ops.calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd === "systemctl" && args.includes("enable")) ops.owner = { pid: 999, host: "127.0.0.1", port: 0, startedAt: "fg", service: false };
+    };
+    await expect(installService(config, ops)).rejects.toThrow(/answered \(pid 999\) is not the service.*Rolled back to no service/s);
+    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(log.mock.calls.flat().join("\n")).not.toMatch(/Installed|Running at/);
+  });
+
+  it("only counts the service's own process as ready", () => {
+    const svc = (pid: number, startedAt = "a"): InstanceInfo => ({ pid, host: "h", port: 1, startedAt, service: true });
+    expect(notTheService(svc(10), null, 10)).toBeNull();
+    expect(notTheService(svc(10), null, null)).toBeNull();
+    expect(notTheService(null, null, 10)).toMatch(/doesn't hold the data directory/);
+    expect(notTheService({ ...svc(11), service: false }, null, null)).toMatch(/pid 11\) is not the service/);
+    expect(notTheService(svc(11), null, 10)).toBe("the agentinbox that answered (pid 11) is not the service (pid 10)");
+    // The previous service's process still holding the lock: the new one didn't take over.
+    expect(notTheService(svc(10, "old"), svc(10, "old"), null)).not.toBeNull();
+    expect(notTheService(svc(12, "new"), svc(10, "old"), 12)).toBeNull();
+  });
+
+  it("tells you to re-run install with the same flags", async () => {
+    const config = setup();
+    config.port = 9123;
+    const log = vi.spyOn(console, "log");
+    await installService(config, fakeOps(config.dataDir));
+    const out = log.mock.calls.flat().join("\n");
+    expect(serviceInstallCommand(config)).toMatch(/service install --data .* --host 127\.0\.0\.1 --port 9123$/);
+    expect(out).toContain(`run \`${serviceInstallCommand(config)}\` again`);
   });
 
   it("finds the user unit dir via the user manager's environment and explains a missing user session", () => {
