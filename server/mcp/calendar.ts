@@ -7,7 +7,8 @@
 //
 // Tools (names in TOOL_NAMES):
 //   calendar.read:  list_calendars, list_calendar_events, get_calendar_event, get_free_busy
-//   calendar.write: create_calendar_event, update_calendar_event, delete_calendar_event, respond_to_invitation
+//   calendar.write: create_calendar_event
+//   calendar.read + calendar.write (one grant): update_calendar_event, delete_calendar_event, respond_to_invitation
 //   get_send_status is also registered for calendar.write (server/mcp/server.ts).
 
 import { z } from "zod";
@@ -298,17 +299,18 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
     );
   }
 
-  if (can.has("calendar.write")) {
-    // Writes can email people and can't be recalled once Google sent them: marked destructive like sends.
-    const annotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
+  // Writes can email people and can't be recalled once Google sent them: marked destructive like sends.
+  const annotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
 
+  if (can.has("calendar.write")) {
     register(
       "create_calendar_event",
       {
         title: "Create calendar event",
         description:
           `Create an event, optionally inviting attendees and adding a Meet link. ${NOTIFY_NOTE} ` +
-          `Depending on the account's settings the event is created at once or queued for human approval. ${WRITE_RESULTS} Only create events your user asked for.`,
+          `Depending on the account's settings the event is created at once or queued for human approval. ${WRITE_RESULTS} Only create events your user asked for. ` +
+          "If a create fails with write_uncertain, retry with the same details and the event_id the error names: it can't create a second event.",
         input: {
           account,
           calendar_id: calendarId,
@@ -317,22 +319,32 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
           end: eventTime("End (exclusive for all-day events: the day after the last day)"),
           notify_attendees: notifyAttendees,
           reason,
+          event_id: z
+            .string()
+            .regex(/^[a-v0-9]{5,1024}$/, "event_id is 5-1024 characters a-v and 0-9: only pass the one a write_uncertain error named.")
+            .optional()
+            .describe("Only to retry an uncertain create: the event_id the write_uncertain error named. Leave it out otherwise."),
         },
         annotations,
       },
       async (args, mail) => {
         const input = { ...eventInput(args), ...eventTimes(args) };
-        return formatCalendarWrite(await calendar(mail).createEvent(args.account, args.calendar_id, input, { notifyAttendees: args.notify_attendees, reason: args.reason }));
+        return formatCalendarWrite(
+          await calendar(mail).createEvent(args.account, args.calendar_id, input, { notifyAttendees: args.notify_attendees, reason: args.reason, eventId: args.event_id }),
+        );
       },
     );
+  }
 
+  // Changing an existing event means reading it first (attendees, etag), so these need both capabilities on one grant.
+  if (can.hasAll("calendar.read", "calendar.write")) {
     register(
       "update_calendar_event",
       {
         title: "Update calendar event",
         description:
           `Change an event: pass only the fields to change. To move it, pass start and end together. attendees replaces the whole guest list (read it first with get_calendar_event); ` +
-          `removed guests get a cancellation. On a recurring series the change applies to every occurrence; pass an occurrence's event_id to change only that one. ${NOTIFY_NOTE} ${WRITE_RESULTS}`,
+          `removed guests get a cancellation. Rooms already booked stay unless your list names rooms. On a recurring series the change applies to every occurrence; pass an occurrence's event_id to change only that one. ${NOTIFY_NOTE} ${WRITE_RESULTS}`,
         input: {
           account,
           calendar_id: calendarId,
@@ -344,7 +356,9 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
           end: eventTime("New end").optional(),
           all_day: fields.all_day,
           time_zone: fields.time_zone,
-          attendees: fields.attendees.describe("The full guest list after the change (emails). Omit to keep the guests as they are."),
+          attendees: fields.attendees.describe(
+            "The full guest list after the change (emails). Omit to keep the guests as they are. Booked rooms are kept unless this list names rooms.",
+          ),
           add_meet_link: fields.add_meet_link,
           recurrence: fields.recurrence,
           notify_attendees: notifyAttendees,

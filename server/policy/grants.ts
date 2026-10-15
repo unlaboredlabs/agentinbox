@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CALENDAR_WRITE_MODES, CAPABILITIES, type Grant, type GrantInput, SEND_MODES } from "../../shared/types.ts";
 import { bool, json } from "../db/index.ts";
 import { badRequest } from "../util/errors.ts";
+import { normalizeCalendarId } from "./calendar.ts";
 
 /** Address glob: exactly one "@" with a non-empty local part and domain; "*" wildcards allowed. */
 const ADDRESS_GLOB = /^[^\s@<>,;"()[\]\\]+@[^\s@<>,;"()[\]\\]+$/;
@@ -35,7 +36,15 @@ export const grantInputSchema = z.object({
   maxSendsPerDay: positiveCap,
   // Optional: omitted = unchanged on an existing grant, default on a new one (see GrantInput).
   calendarScope: z
-    .array(z.string().trim().min(1).max(320))
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(320)
+        .refine((id) => id.toLowerCase() !== "primary", 'Use the primary calendar\'s real id (the account email), not "primary"')
+        .transform(normalizeCalendarId),
+    )
     .min(1, "Calendar scope must list at least one calendar, or be null for every calendar")
     .max(200)
     .transform((ids) => [...new Set(ids)])
@@ -71,6 +80,8 @@ export interface GrantRow {
   created_at: string;
 }
 
+const stringList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
 export const toGrant = (r: GrantRow): Grant => ({
   id: r.id,
   agentId: r.agent_id,
@@ -82,7 +93,8 @@ export const toGrant = (r: GrantRow): Grant => ({
   replyOnly: bool(r.reply_only),
   maxSendsPerHour: r.max_sends_per_hour,
   maxSendsPerDay: r.max_sends_per_day,
-  calendarScope: r.calendar_scope === null ? null : json.parse<string[] | null>(r.calendar_scope, null),
+  // Unreadable JSON narrows to no calendar at all, never to every calendar.
+  calendarScope: r.calendar_scope === null ? null : stringList(json.parse<unknown>(r.calendar_scope, [])),
   calendarWriteMode: r.calendar_write_mode === "direct" ? "direct" : "approval",
   createdAt: r.created_at,
 });

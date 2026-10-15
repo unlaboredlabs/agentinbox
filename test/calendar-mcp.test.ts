@@ -10,6 +10,7 @@ import { eventDescriptionContent } from "../server/calendar/content.ts";
 import { summarizeEvent } from "../server/calendar/summary.ts";
 import type { CalendarEventRaw } from "../server/google/calendar.ts";
 import { GoogleApiError } from "../server/google/types.ts";
+import { ToolError } from "../server/mail/agent.ts";
 import { Approvals } from "../server/mail/approvals.ts";
 import { formatAccounts, formatWhen } from "../server/mcp/format.ts";
 import { CALENDAR_TOOL_NAMES, INSTRUCTIONS, TOOL_NAMES } from "../server/mcp/server.ts";
@@ -68,10 +69,19 @@ describe("registration", () => {
     );
 
     const writer = await setup([{ capabilities: ["calendar.write"] }]);
-    // get_send_status checks calendar approvals too.
-    expect(await names(writer.mcp)).toEqual(
-      ["create_calendar_event", "delete_calendar_event", "get_send_status", "list_accounts", "respond_to_invitation", "update_calendar_event"].sort(),
-    );
+    // get_send_status checks calendar approvals too; changing existing events needs calendar.read as well.
+    expect(await names(writer.mcp)).toEqual(["create_calendar_event", "get_send_status", "list_accounts"]);
+    // Both capabilities must be on one grant.
+    const t = mailTestContext();
+    cleanup.push(t.dispose);
+    t.addAccount("acc_a", ME);
+    t.addAccount("acc_b", "other@acme.com");
+    const split = t.addAgent("split", [grantInput("acc_a", { capabilities: ["calendar.read"] }), grantInput("acc_b", { capabilities: ["calendar.write"] })]);
+    const splitMcp = await connectAgent(t.ctx, split.agent.id);
+    cleanup.push(splitMcp.close);
+    expect((await names(splitMcp)).filter((n) => /update_calendar|delete_calendar|respond_to/.test(n))).toEqual([]);
+    const both = await setup([{ capabilities: ["calendar.read", "calendar.write"] }]);
+    expect((await names(both.mcp)).filter((n) => CALENDAR_TOOL_NAMES.includes(n as never))).toEqual([...CALENDAR_TOOL_NAMES].sort());
   });
 
   it("marks writes destructive and open-world, reads read-only", async () => {
@@ -323,8 +333,28 @@ describe("writes", () => {
     expect(codes).toContain("time_zone_required");
   });
 
-  it("update_calendar_event sends only the changed fields", async () => {
+  it("create_calendar_event retries an uncertain create with its event_id; write errors keep their codes", async () => {
     const t = await setup([{ capabilities: ["calendar.write"] }]);
+    const create = stub("createEvent", async () => {
+      throw new ToolError("write_uncertain", "The connection to Google Calendar failed, so the change may or may not have been applied.");
+    });
+    const args = { summary: "Sync", start: "2026-10-20T09:00:00Z", end: "2026-10-20T09:30:00Z" };
+    expect((await t.mcp.call("create_calendar_event", { ...args, event_id: "abc123vv" })).text).toMatch(/may or may not have been applied/);
+    expect(create.mock.calls[0]![3]).toEqual({ notifyAttendees: undefined, reason: undefined, eventId: "abc123vv" });
+    // Google base32hex only (a-v, 0-9), 5-1024 characters: rejected by the schema before AgentCalendar runs.
+    for (const bad of ["abc", "ABCDEF", "xyz12345", "abc-1234"]) expect((await t.mcp.call("create_calendar_event", { ...args, event_id: bad })).isError).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    create.mockImplementation(async () => Promise.reject(new ToolError("event_id_taken", "event_id abc123vv already belongs to a different event.")));
+    await t.mcp.call("create_calendar_event", { ...args, event_id: "abc123vv" });
+    // A raw 409 from Google (no AgentCalendar translation) reads the same.
+    create.mockImplementation(async () => Promise.reject(new GoogleApiError(409, "The requested identifier already exists.", "duplicate")));
+    expect((await t.mcp.call("create_calendar_event", { ...args, event_id: "abc123vv" })).text).toMatch(/already belongs to a different event/);
+    const reasons = t.audit().filter((a) => a.action === "create_calendar_event").map((a) => a.reason).reverse();
+    expect([reasons[0], ...reasons.slice(-2)]).toEqual(["write_uncertain", "event_id_taken", "event_id_taken"]);
+  });
+
+  it("update_calendar_event sends only the changed fields", async () => {
+    const t = await setup([{ capabilities: ["calendar.read", "calendar.write"] }]);
     const update = stub("updateEvent", async () => applied());
     await t.mcp.call("update_calendar_event", { event_id: "ev1", location: "Room 2", attendees: ["a@x.com"], notify_attendees: false });
     await t.mcp.call("update_calendar_event", { event_id: "ev1", start: "2026-10-21T09:00:00Z", end: "2026-10-21T09:30:00Z" });
@@ -341,7 +371,7 @@ describe("writes", () => {
   });
 
   it("delete_calendar_event and respond_to_invitation", async () => {
-    const t = await setup([{ capabilities: ["calendar.write"] }]);
+    const t = await setup([{ capabilities: ["calendar.read", "calendar.write"] }]);
     const del = stub("deleteEvent", async () => ({ status: "deleted", calendarId: ME, eventId: "ev1", notified: [] }));
     const respond = stub("respond", async () => applied({}, ["bob@other.com"]));
     expect(JSON.parse((await t.mcp.call("delete_calendar_event", { event_id: "ev1", reason: "Cancelled by the user" })).text)).toEqual({
@@ -446,6 +476,8 @@ describe("agent docs", () => {
     expect(TOOL_NAMES.filter((n) => !skill.includes(`\`${n}\``))).toEqual([]);
     expect(skill).toContain('<calendar_content organizer="…" untrusted>');
     expect(skill).toMatch(/pending_approval.*nothing reached Google Calendar yet/);
+    for (const code of ["write_uncertain", "event_id_taken"]) expect(skill).toContain(`\`${code}\``);
+    expect(skill).toContain("Rooms already booked stay unless your list names rooms");
     expect(INSTRUCTIONS).toMatch(/<calendar_content untrusted>/);
   });
 });

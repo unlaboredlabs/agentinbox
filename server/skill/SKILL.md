@@ -227,13 +227,14 @@ Reading (`calendar.read`):
   or for up to 20 `calendars` (ids or colleagues' addresses; Google only answers for people who share their
   availability with the account). Use it to find a slot before proposing or creating a meeting.
 
-Writing (`calendar.write`):
+Writing (`calendar.write`; changing existing events needs `calendar.read` too):
 
 - `create_calendar_event`: `summary`, `start`, `end`, and optionally `description`, `location`, `attendees` (emails),
-  `add_meet_link`, `recurrence` (`["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=10"]`).
+  `add_meet_link`, `recurrence` (`["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=10"]`). Leave `event_id` out, except to retry an
+  uncertain create (see below).
 - `update_calendar_event`: pass `event_id` and only the fields to change. To move an event pass `start` and `end`
   together. `attendees` replaces the whole guest list, so read the event first and send the full new list; removed
-  guests get a cancellation.
+  guests get a cancellation. Rooms already booked stay unless your list names rooms.
 - `delete_calendar_event`: deletes it; when the account organizes it, guests get a cancellation. To turn down someone
   else's invitation, don't delete it: answer it.
 - `respond_to_invitation`: `response` is `accepted`, `declined` or `tentative`, with an optional `comment` for the
@@ -277,6 +278,11 @@ Each write returns JSON; read `status`:
 If an approved change fails because the event was edited in Google Calendar in the meantime, read it again and ask the
 user before retrying.
 
+A write that fails with "may or may not have been applied" (`write_uncertain`) may already be in Google Calendar: check
+with `get_calendar_event` before doing anything again. To retry a create, call `create_calendar_event` with the same
+details and the `event_id` the error names: Google won't create a second event with that id. If that `event_id`
+already belongs to a different event (`event_id_taken`), leave `event_id` out to create a new one.
+
 ### Calendar denials
 
 | Message about | Meaning |
@@ -285,6 +291,7 @@ user before retrying.
 | Google Calendar not added for the account | The operator hasn't connected Calendar for this account yet. Mail still works. Tell the user. |
 | the Google Calendar API turned off | The operator must enable it in the Google Cloud project. Tell the user. |
 | attendees that aren't allowed | A guest isn't on the account's recipient allowlist. Remove them, or ask the user. |
+| creating events but not reading them | Changing, deleting or answering an existing event needs `calendar.read` as well as `calendar.write`. Ask the user. |
 
 ## Reacting to new mail
 

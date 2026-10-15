@@ -89,6 +89,8 @@ function abilities(ctx: AppContext, agentId: string) {
   const has = (cap: Capability) => grants.some((g) => g.capabilities.includes(cap));
   return {
     has,
+    /** Some single grant has every one of `caps` (e.g. changing an existing event needs calendar.read and calendar.write). */
+    hasAll: (...caps: Capability[]) => grants.some((g) => caps.every((c) => g.capabilities.includes(c))),
     sendNew: grants.some((g) => g.capabilities.includes("send") && !g.replyOnly),
   };
 }
@@ -126,6 +128,7 @@ function describeCalendarError(err: GoogleApiError): { outcome: "error"; reason:
     return e("calendar_not_granted", "This account hasn't given agentinbox access to Google Calendar. Ask the operator to add Google Calendar for it in the agentinbox console.");
   }
   if (err.status === 404 || err.status === 410) return e("not_found", "The requested event or calendar was not found or is not accessible to you.");
+  if (err.status === 409) return e("event_id_taken", "That event_id already belongs to a different event. Leave event_id out to create a new event.");
   if (err.status === 412) return e("calendar_conflict", "The event changed in Google Calendar meanwhile. Read it again with get_calendar_event, then retry if the change still makes sense.");
   if (err.status === 429) return e("calendar_rate_limit", "Google Calendar is rate limiting this account. Wait a minute, then retry.");
   if (err.status === 400) return e("calendar_bad_request", `Google Calendar rejected the request: ${err.message}`);
