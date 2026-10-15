@@ -13,7 +13,8 @@ import { createListenLogger, type ListenLogger } from "./logfile.ts";
 import { describeFilter, type EffectiveConfig, type ListenFlags, MAX_BATCH, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { describeGrants, grantsKey } from "./grants.ts";
-import { recipeOf, recipeToolFor, shellQuote, SILENT_MARKER, TOOL_LABELS } from "./recipes.ts";
+import { gatewayWarning } from "./hermes.ts";
+import { hermesChangeNote, isHermesRoute, recipeOf, recipeToolFor, shellQuote, SILENT_MARKER, TOOL_LABELS } from "./recipes.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
 import { acquireBackfillLock, acquireProfileLock } from "./lock.ts";
 import { appendDead, knownConsumers, rememberConsumer, StatusWriter } from "./state.ts";
@@ -123,11 +124,8 @@ const lastLines = (t: string, n = 3) =>
     .map((l) => `  │ ${safeText(l, 300)}`)
     .join("\n");
 
-/** The agent's reply was the triage prompt's "nothing to do". */
-const isSilent = (stdout: string) => {
-  const t = stdout.trim();
-  return t === "" || t.startsWith(SILENT_MARKER) || t.split("\n").at(-1)!.trim() === SILENT_MARKER;
-};
+/** The agent's whole reply was the triage prompt's "nothing to do" (anything more is shown). */
+export const isSilent = (stdout: string) => stdout.trim() === SILENT_MARKER;
 
 export async function runListener(opts: RunListenerOptions): Promise<number> {
   const profileName = validProfileName(opts.flags.profile ?? DEFAULT_PROFILE);
@@ -200,6 +198,11 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     const notes = typesNotes(config);
     for (const m of notes.info) log.info(m);
     for (const m of notes.warn) log.warn(m);
+    const change = hermesChangeNote(opts.flags.recipe, config.exec);
+    if (change) log.info(change);
+    if (config.forward && isHermesRoute(config.forward.url, profileName) && !dryRun) {
+      void gatewayWarning(config.forward.url).then((w) => w && log.warn(w));
+    }
     if (backfill && backfillHead === 0) {
       log.info(`Nothing to backfill: the listener (consumer "${config.consumer}") started with the oldest stored mail, so it handles all of it.`);
       return EXIT.ok;
@@ -289,6 +292,8 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     const timeoutMs = config.timeoutSeconds * 1000;
 
     const batched = config.batchSeconds > 0 && !!config.exec;
+    // The Hermes route reads the body as prompt text: send it the cleaned, notice-first form.
+    const wrapForward = !!config.forward && isHermesRoute(config.forward.url, profileName);
     const runTargets = async (job: Job, signal: AbortSignal): Promise<string[]> => {
       const errors: string[] = [];
       const tag = job.payloads.length === 1 ? `#${job.seq}` : `batch #${job.seq}–#${job.lastSeq} (${job.payloads.length} events)`;
@@ -304,6 +309,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
           log.debug(`${tag} command finished in ${formatDuration(r.durationMs)}`, meta);
           // What the agent said goes to the log (and the foreground console): the triage's only output channel.
           if (isSilent(r.stdoutTail)) log.info(pc.gray(`  ${tag}: nothing to do`));
+          else if (!r.stdoutTail.trim()) log.info(pc.gray(`  ${tag}: no output`));
           else log.info(`  ${tag} output:\n${lastLines(r.stdoutTail, 6)}`);
         } else {
           errors.push(`command: ${r.error}`);
@@ -316,7 +322,7 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
         let failed = false;
         for (const p of job.payloads) {
           if (job.forwarded.has(p.data.seq)) continue;
-          const r = await forwardEvent(config.forward.url, config.forward.secret, p, { timeoutMs: Math.min(timeoutMs, 30_000), signal });
+          const r = await forwardEvent(config.forward.url, config.forward.secret, p, { timeoutMs: Math.min(timeoutMs, 30_000), signal, wrap: wrapForward });
           const meta = { seq: p.data.seq, id: p.data.id, attempt: job.attempts, statusCode: r.statusCode, durationMs: r.durationMs, response: r.response };
           if (signal.aborted) {
             errors.push("stopped");

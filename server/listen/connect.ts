@@ -426,7 +426,7 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   if (tool === "hermes") {
     out(`  ${n++}. Create the Hermes gateway route the listener forwards to, saying where Hermes should tell you (once; needs the gateway's webhook platform on):`);
     out(`       ${pc.cyan(hermesRouteCommand(profileName))}`);
-    out(pc.gray(`     Or --deliver discord|slack|…, --deliver-chat-id <id>, or --cron-job <job> for an existing Hermes cron job. It passes the listener's secret to hermes without showing it.`));
+    out(pc.gray(`     Or --deliver discord|slack|…, or --deliver-chat-id <id>. It sets the listener's secret without showing it and limits the route to the agentinbox tools.`));
   }
   out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
   out(`       ${pc.cyan(`${NPX} listen${p} --save ${target}`)}`);

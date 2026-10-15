@@ -30,6 +30,8 @@ export interface ListenFlags {
   /** Gmail categories: skip none (`--all-categories`), or take one back from the default skip (`--include-category`). */
   allCategories?: boolean;
   includeCategory?: string[];
+  /** Back to the default category skip (promotions, social, forums). */
+  defaultCategories?: boolean;
   /** Collect events for this long (e.g. "60s") and run --exec once for the batch; "0" turns it off. */
   batch?: string;
   includeBody?: boolean;
@@ -193,10 +195,16 @@ function exclusionsFromFlags(f: ListenFlags): Exclusions | undefined {
 
 /** The categories skipped after --all-categories / --include-category, or undefined when neither was given. */
 function skipFromFlags(f: ListenFlags): string[] | undefined {
-  if (f.allCategories && f.includeCategory?.length) throw new Error("--all-categories already includes every category; drop --include-category.");
+  const given = [f.allCategories && "--all-categories", f.includeCategory?.length && "--include-category", f.defaultCategories && "--default-categories"].filter(Boolean);
+  if (given.length > 1) throw new Error(`${given.join(" and ")} can't be combined: each sets which Gmail categories are skipped.`);
+  if (f.defaultCategories) return [...DEFAULT_SKIP_CATEGORIES];
   if (f.allCategories) return [];
   if (!f.includeCategory?.length) return undefined;
   const back = new Set(f.includeCategory.map(categoryId));
+  const notSkipped = [...back].filter((c) => !DEFAULT_SKIP_CATEGORIES.includes(c));
+  if (notSkipped.length) {
+    throw new Error(`--include-category ${notSkipped.map(categoryName).join(", ")}: that category isn't skipped (only ${DEFAULT_SKIP_CATEGORIES.map(categoryName).join(", ")} are). To skip it, use --not-label ${notSkipped[0]}.`);
+  }
   return DEFAULT_SKIP_CATEGORIES.filter((c) => !back.has(c));
 }
 

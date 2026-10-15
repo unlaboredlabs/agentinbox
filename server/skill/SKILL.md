@@ -70,9 +70,11 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    **Hermes:** `--recipe hermes` doesn't start a Hermes run per email. It forwards each email to the user's running
    Hermes gateway (`http://127.0.0.1:8644/webhooks/agentinbox`), which triages it and tells the user where its route
    says. Create that route once (ask the user which platform Hermes should message them on):
-   `npx -y agentinbox-cli listen hermes --deliver telegram --run` (or `--cron-job <job>`). It passes the listener's
-   secret to hermes without showing it; never ask for or print the secret yourself. The old one-run-per-mail command
-   is `--recipe hermes-oneshot`.
+   `npx -y agentinbox-cli listen hermes --deliver telegram --run`. It sets the listener's secret without showing it
+   and limits the route to the agentinbox MCP server: without that, Hermes webhook runs get web tools (`web_search`,
+   `web_extract`, …) and every MCP server enabled in Hermes, so an email could make you leak mail. Never ask for or
+   print the secret yourself, and never remove the route's `toolsets`. `--cron-job <job>` only works for a job whose
+   `enabled_toolsets` is exactly `["agentinbox"]`. The old one-run-per-mail command is `--recipe hermes-oneshot`.
 
    To check it works end to end, ask the user to send a test email from the console's "Check that it works" step;
    `listen status` then shows it under recent events. Mail from before the listener started is not replayed;
@@ -89,7 +91,7 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
    | Claude Code | `claude -p "New mail from agentinbox: …" --tools "" --strict-mcp-config --mcp-config ~/.config/agentinbox/mcp/default.claude.json --allowedTools "mcp__agentinbox" --setting-sources user` | agentinbox tools only | the listener's log only; it can't notify the user by itself |
    | Codex | `codex exec -c features.shell_tool=false --skip-git-repo-check --sandbox read-only "New mail from agentinbox: …"` | no shell; Codex's other MCP servers remain | the listener's log only |
    | Cursor | `agent -p --trust --approve-mcps "New mail from agentinbox: …"` | not confined by the command: deny shell and file reads in `~/.cursor/cli-config.json` | the listener's log only |
-   | Hermes | forwards to the Hermes gateway route (`listen hermes`) | the route's webhook toolset in Hermes | Hermes delivers it (Telegram, Discord…, or the cron job's delivery); `[SILENT]` isn't delivered |
+   | Hermes | forwards to the Hermes gateway route (`listen hermes`) | only the agentinbox MCP server once `listen hermes --run` set the route's toolsets; before that, web tools and every MCP server in Hermes | Hermes delivers it (Telegram, Discord…, or the cron job's delivery); `[SILENT]` isn't delivered |
    | Hermes, one run per mail (`hermes-oneshot`) | `{ echo 'New mail from agentinbox: …'; cat; } \| hermes chat --oneshot -Q -t mcp-agentinbox --query-file -` | agentinbox toolset only | the listener's log only |
 
    (The Claude Code path shown is the default; `--recipe` uses the right one for your profile and `XDG_CONFIG_HOME`.

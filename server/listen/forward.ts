@@ -1,6 +1,7 @@
 import type { WebhookPayload } from "../../shared/types.ts";
 import { newSecret, sign } from "../webhooks/send.ts";
 import { describeFetchError, userAgent } from "./api.ts";
+import { commandInput } from "./event.ts";
 import { isLoopbackHost } from "./transport.ts";
 
 export { newSecret };
@@ -41,13 +42,20 @@ export function validateForwardUrl(raw: string): string {
 }
 
 /**
- * POSTs the WebhookPayload exactly like a daemon webhook (Standard Webhooks headers, signed with the
- * listener's own secret), so the same receiver code works for both. webhook-id is the event id and
- * stays the same across retries: dedupe on it. Redirects are not followed.
+ * The body for an agent that reads it as text (the Hermes route puts it into the prompt): the untrusted
+ * notice first and the event cleaned as for --exec, plus `type` so Hermes can name the event.
  */
-export async function forwardEvent(url: string, secret: string, payload: WebhookPayload, opts: { timeoutMs: number; signal?: AbortSignal }): Promise<ForwardResult> {
+export const wrappedBody = (payload: WebhookPayload) => JSON.stringify({ type: payload.type, ...commandInput(payload) });
+
+/**
+ * POSTs the WebhookPayload exactly like a daemon webhook (Standard Webhooks headers, signed with the
+ * listener's own secret), so the same receiver code works for both; with `wrap`, the cleaned
+ * { type, notice, event } form instead. webhook-id is the event id and stays the same across retries:
+ * dedupe on it. Redirects are not followed.
+ */
+export async function forwardEvent(url: string, secret: string, payload: WebhookPayload, opts: { timeoutMs: number; signal?: AbortSignal; wrap?: boolean }): Promise<ForwardResult> {
   const started = performance.now();
-  const body = JSON.stringify(payload);
+  const body = opts.wrap ? wrappedBody(payload) : JSON.stringify(payload);
   const timestamp = Math.floor(Date.now() / 1000);
   const id = payload.data.id;
   const timeout = AbortSignal.timeout(opts.timeoutMs);

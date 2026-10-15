@@ -24,7 +24,8 @@ import { acquireFileLock } from "./lock.ts";
 import { type ListenFlags, resolveListen } from "./options.ts";
 import { serviceNode, type ServiceNodeChoice } from "./mcpheader.ts";
 import { DEFAULT_PROFILE, dataDir, listenAppDir, logPath, profilePath, profileStateDir, validProfileName } from "./paths.ts";
-import { RECIPE_NAMES } from "./recipes.ts";
+import { gatewayWarning } from "./hermes.ts";
+import { hermesChangeNote, isHermesRoute, RECIPE_NAMES } from "./recipes.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
 import { pidAlive, readStatus } from "./state.ts";
 import { checkTransport } from "./transport.ts";
@@ -265,6 +266,8 @@ export interface ListenServiceDeps {
   node?: ServiceNodeChoice;
   /** launchd polling interval (tests). */
   pollMs?: number;
+  /** Probes the Hermes gateway (tests). */
+  gatewayCheck?: (url: string) => Promise<string | null>;
 }
 
 export async function installListenService(flags: ListenFlags, deps: ListenServiceDeps = {}): Promise<void> {
@@ -331,27 +334,36 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
       if (svc.pid !== pid) throw new Error(`the listener that started (pid ${pid}) isn't the service's process (${svc.detail})`);
       runningPid = pid;
     } catch (err) {
-      const quietly = (fn: () => void) => {
+      // Best effort, but reported as it went: never claim a rollback that didn't happen.
+      const failed: string[] = [];
+      const step = (what: string, fn: () => void) => {
         try {
           fn();
-        } catch {
-          // Best effort: report the original failure.
+        } catch (e) {
+          failed.push(`${what}: ${why(e)}`);
         }
       };
-      if (swap) quietly(() => swap!.restore());
+      if (swap) step("restoring the previous install", () => swap!.restore());
       // The settings this install saved go back too, so the restored listener runs as before.
-      quietly(() => saveProfile(profileName, profile));
-      quietly(() => rmSync(staging, { recursive: true, force: true }));
+      step("restoring the profile's settings", () => saveProfile(profileName, profile));
+      step("removing the staged install", () => rmSync(staging, { recursive: true, force: true }));
+      let outcome: string;
       if (previousUnit !== null) {
-        quietly(() => writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 }));
-        await startUnit(ops, profileName, file, deps.pollMs).catch(() => {});
+        step("restoring the previous unit file", () => writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 }));
+        const restarted = await startUnit(ops, profileName, file, deps.pollMs).then(
+          () => null,
+          (e: unknown) => why(e),
+        );
+        outcome = restarted
+          ? `Put the previous install back, but restarting it failed (${restarted}), so no listener service is running now`
+          : "Put the previous install back and restarted it";
       } else {
-        quietly(() => uninstallListenService(profileName, true, { ops }));
+        step("removing the new service", () => uninstallListenService(profileName, true, { ops }));
+        outcome = "Removed the new service again (no listener service is installed)";
       }
+      if (failed.length) outcome += `. These rollback steps failed too: ${failed.join("; ")}`;
       const hints = listenerHints(ops, profileName).map((h) => `    ${h}`).join("\n");
-      throw new Error(
-        `Starting the listener service failed (${(err instanceof Error ? err.message : String(err)).split("\n")[0]}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
-      );
+      throw new Error(`Starting the listener service failed (${why(err)}). ${outcome}.\n  To find out why:\n${hints}`);
     }
     swap.commit();
     enableLinger(ops);
@@ -375,6 +387,12 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   console.log(`    Node.js:   ${node.path} (v${node.version}): ${node.why}. If you remove it, run \`${NPX} listen service install${p}\` again.`);
   console.log(`    Settings:  ${profilePath(profileName)} (change them with \`${NPX} listen${p} … --save\`, then reinstall)`);
   console.log(`    Log:       ${logPath(profileName)}`);
+  const change = hermesChangeNote(flags.recipe, config.exec);
+  if (change) console.log(`    Note:      ${change}`);
+  if (config.forward && isHermesRoute(config.forward.url, profileName)) {
+    const w = await (deps.gatewayCheck ?? gatewayWarning)(config.forward.url);
+    if (w) console.log(pc.yellow(`    Warning:   ${w}`));
+  }
   console.log(`    Status:    ${NPX} listen status${p}`);
   if (ops.platform === "linux") console.log(`    Follow:    journalctl ${ops.root ? "" : "--user "}-u ${unitName(profileName)} -f`);
   console.log();

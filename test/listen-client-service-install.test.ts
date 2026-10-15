@@ -127,7 +127,7 @@ describe("listen service install (launchd)", () => {
   it("a bootstrap that keeps failing is reported (with launchd's reason) and rolled back, never 'Installed'", async () => {
     const ops = fakeLaunchd({ bootstrapFails: true });
     await expect(installListenService({}, { ops, stage, waitStarted: ok, node, pollMs: 1 })).rejects.toThrow(
-      /launchctl bootstrap failed: Bootstrap failed: 5: Input\/output error\)\. Rolled back to no service/,
+      /launchctl bootstrap failed: Bootstrap failed: 5: Input\/output error\)\. Removed the new service again \(no listener service is installed\)\./,
     );
     expect(ops.calls.filter((c) => c.startsWith("launchctl bootstrap")).length).toBe(5);
     expect(existsSync(plist())).toBe(false);
@@ -143,7 +143,7 @@ describe("listen service install (launchd)", () => {
 describe("listen service install", () => {
   it("first install that never starts rolls back to no service, no install, original settings", async () => {
     const ops = fakeOps();
-    await expect(installListenService({ exec: "new-cmd" }, { ops, stage, waitStarted: never })).rejects.toThrow(/Rolled back to no service/);
+    await expect(installListenService({ exec: "new-cmd" }, { ops, stage, waitStarted: never })).rejects.toThrow(/Removed the new service again/);
     expect(existsSync(unit("default"))).toBe(false);
     expect(existsSync(listenAppDir())).toBe(false);
     expect(loadProfile().exec).toBe("cat > /dev/null");
@@ -155,7 +155,7 @@ describe("listen service install", () => {
     await installListenService({}, { ops, stage, waitStarted: ok, node });
     const before = { unit: readFileSync(unit("default"), "utf8"), app: installed() };
     ops.calls.length = 0;
-    await expect(installListenService({ exec: "new-cmd", concurrency: 7 }, { ops, stage, waitStarted: never })).rejects.toThrow(/Rolled back to the previous install/);
+    await expect(installListenService({ exec: "new-cmd", concurrency: 7 }, { ops, stage, waitStarted: never })).rejects.toThrow(/Put the previous install back and restarted it\./);
     expect(readFileSync(unit("default"), "utf8")).toBe(before.unit);
     expect(installed()).toBe(before.app);
     expect(loadProfile()).toMatchObject({ exec: "cat > /dev/null" });
@@ -191,13 +191,33 @@ describe("listen service install", () => {
   it("checks that systemd itself runs the new listener: is-active and MainPID must match the listener that started", async () => {
     const log = vi.mocked(console.log);
     await expect(installListenService({}, { ops: fakeOps(undefined, { active: "failed", pid: 0 }), stage, waitStarted: ok, node })).rejects.toThrow(
-      /doesn't report it running \(systemd failed\)[\s\S]*Rolled back/,
+      /doesn't report it running \(systemd failed\)[\s\S]*Removed the new service again/,
     );
     // Another listener (not the unit's main process) answering doesn't count either.
     await expect(installListenService({}, { ops: fakeOps(undefined, { active: "active", pid: 777 }), stage, waitStarted: ok, node })).rejects.toThrow(/pid 4242\) isn't the service's process/);
     expect(log.mock.calls.flat().join("\n")).not.toContain("Installed");
     await installListenService({}, { ops: fakeOps(), stage, waitStarted: ok, node });
     expect(log.mock.calls.flat().join("\n")).toContain("it is running as pid 4242");
+  });
+
+  it("--recipe hermes: notes the change and warns when the Hermes gateway doesn't answer", async () => {
+    const checked: string[] = [];
+    const gatewayCheck = async (url: string) => (checked.push(url), "The Hermes gateway isn't answering at http://127.0.0.1:8644/health.");
+    await installListenService({ recipe: "hermes" }, { ops: fakeOps(), stage, waitStarted: ok, node, gatewayCheck });
+    expect(checked).toEqual(["http://127.0.0.1:8644/webhooks/agentinbox"]);
+    const text = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(text).toContain("--recipe hermes now forwards each email to your running Hermes gateway");
+    expect(text).toContain("Warning:   The Hermes gateway isn't answering");
+  });
+
+  it("says when restarting the previous install failed instead of claiming a rollback", async () => {
+    const ops = fakeOps();
+    await installListenService({}, { ops, stage, waitStarted: ok, node });
+    let restarts = 0;
+    const flaky = fakeOps((cmd, args) => cmd === "systemctl" && args.includes("restart") && ++restarts === 2);
+    await expect(installListenService({ exec: "new-cmd" }, { ops: flaky, stage, waitStarted: never, node })).rejects.toThrow(
+      /Put the previous install back, but restarting it failed \(Command failed: systemctl --user restart agentinbox-listen-default\), so no listener service is running now/,
+    );
   });
 
   it("runs the chosen stable node and says which and why", async () => {

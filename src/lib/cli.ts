@@ -39,7 +39,7 @@ export const RECIPES: Record<AgentTool, Recipe> = {
     note: "Cursor's CLI can't be confined by flags: deny other tools in its permissions config (see docs/listen.md) and give listener agents draft-only access. Its reply is only logged.",
   },
   hermes: {
-    note: "Each email goes to your running Hermes gateway, which triages it and tells you where the route says (Telegram, Discord…) only when it matters.",
+    note: "Each email goes to your running Hermes gateway, which triages it with only the agentinbox tools and tells you where the route says (Telegram, Discord…) only when it matters.",
   },
   other: {
     note: "Your command gets the event as JSON on stdin (also in $AGENTINBOX_EVENT_FILE). Exit 0 when done; anything else is retried.",

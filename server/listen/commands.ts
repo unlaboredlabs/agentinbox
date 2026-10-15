@@ -34,10 +34,11 @@ function listenFlags(cmd: Command): Command {
     .option("--to <glob>", "only when a to/cc address matches (repeatable)", collect)
     .option("--label <id>", "only messages with this Gmail label id, e.g. INBOX or Label_123 (repeatable)", collect)
     .option("--subject <regex>", "only subjects matching this case-insensitive regular expression")
-    .option("--not-from <glob>", 'skip senders matching this glob, e.g. "*@github.com" (repeatable)', collect)
+    .option("--not-from <glob>", 'skip senders matching this glob, e.g. "*@github.com" (repeatable; --not-from "" --save clears saved exclusions)', collect)
     .option("--not-label <id>", "skip messages with this Gmail label id, e.g. CATEGORY_UPDATES (repeatable)", collect)
     .option("--all-categories", "don't skip Gmail's Promotions, Social and Forums tabs (skipped by default)")
     .option("--include-category <name>", "take one category back from the default skip: promotions, social or forums (repeatable)", collect)
+    .option("--default-categories", "back to the default: skip Promotions, Social and Forums (undoes a saved --all-categories / --include-category)")
     .option("--batch <duration>", `collect events this long (e.g. 60s, 2m) and run --exec once for all of them (up to 20); 0 turns it off`)
     .option("--include-body", "include the cleaned message body in each event")
     .option("--no-include-body", "don't include bodies (overrides a saved setting)")
@@ -58,16 +59,25 @@ another profile the route is agentinbox-<profile>). Hermes verifies the Standard
 listener's secret, runs the triage, and delivers the result where this route says. Mail that isn't important gets
 a [SILENT] reply, which Hermes doesn't deliver.
 
-Without --run this prints the command (the secret is read from the profile when it runs, never shown). With --run
-agentinbox runs hermes itself and hides the secret in hermes' output. hermes takes the secret only as an argument,
-so other users on this machine could see it in \`ps\` for the moment hermes runs.
+A Hermes webhook run normally gets web tools (web_search, web_extract, vision_analyze, clarify) and every MCP
+server enabled in Hermes: with email as the trigger, an attacker could make it read your mail and send it out.
+--run therefore also limits the route to the agentinbox MCP server ("toolsets": ["mcp-agentinbox"] in
+~/.hermes/webhook_subscriptions.json, which \`hermes webhook subscribe\` can't set). It gives hermes a throwaway
+secret, then sets the real one and the toolsets together under Hermes' lock (python3), so the real secret is never
+in a command line and the route never runs unconfined. Re-run it after any \`hermes webhook subscribe\` for this
+route (that resets the toolsets).
 
-Needs the gateway's webhook platform (hermes gateway setup, or WEBHOOK_ENABLED=true in ~/.hermes/.env) and a
-running gateway. Check it: curl http://127.0.0.1:8644/health
+Without --run it prints both steps for you to do by hand; the toolsets edit is required.
+
+--cron-job hands the email to that job's own tools, so it is accepted only when the job's enabled_toolsets is
+exactly ["agentinbox"] (the bare server name; "mcp-agentinbox" doesn't narrow MCP servers for cron jobs).
+
+Needs python3, the gateway's webhook platform (hermes gateway setup, or WEBHOOK_ENABLED=true in ~/.hermes/.env) and
+a running gateway. Check it: curl http://127.0.0.1:8644/health
 
 Examples:
   ${NPX} listen hermes --deliver telegram --run
-  ${NPX} listen hermes --cron-job email-watch --run
+  ${NPX} listen hermes --cron-job email-watch --run    # only for a job limited to ["agentinbox"]
   ${NPX} listen service install --recipe hermes`;
 }
 
@@ -192,13 +202,13 @@ Example:
   profileOption(
     listen
       .command("hermes")
-      .description("create the Hermes gateway webhook route that --recipe hermes forwards to (runs `hermes webhook subscribe` with the listener's secret)"),
+      .description("create the Hermes gateway webhook route that --recipe hermes forwards to, limited to the agentinbox tools"),
   )
     .option("--deliver <target>", "where Hermes sends its triage: telegram, discord, slack… (a platform connected to your gateway), or log")
     .option("--deliver-chat-id <id>", "with --deliver: a specific chat instead of the platform's home channel")
-    .option("--cron-job <job>", "instead of --deliver: fire this existing Hermes cron job (id or name; `hermes cron list`); its prompt and delivery apply")
+    .option("--cron-job <job>", "instead of --deliver: fire this existing Hermes cron job (id or name; `hermes cron list`); its prompt, tools and delivery apply, so its enabled_toolsets must be exactly [\"agentinbox\"]")
     .option("--script <file>", "a Hermes filter script under ~/.hermes/scripts (runs before the agent; can drop events at no LLM cost)")
-    .option("--run", "run hermes now (the secret goes straight to hermes: not to your terminal or shell history)")
+    .option("--run", "set the route up now: run hermes, then set the real secret and limit the route to the agentinbox tools (recommended)")
     .addHelpText("after", hermesHelp())
     .action(async (_o: unknown, cmd: Command) => {
       const flags = all<HermesFlags>(cmd);

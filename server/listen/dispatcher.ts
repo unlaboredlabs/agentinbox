@@ -44,7 +44,7 @@ export interface DispatcherOptions {
 }
 
 export const defaultRetryDelay = (attempt: number) => Math.min(5000 * 2 ** (attempt - 1), 300_000) * (0.8 + Math.random() * 0.4);
-/** Rate-limited attempts that don't count against --max-attempts, per job; after that they do. */
+/** Rate-limited attempts that don't count against --max-attempts, per job (an event, or a whole batch); after that they do. */
 export const MAX_DEFERRALS = 20;
 
 /**
@@ -163,7 +163,8 @@ export class Dispatcher {
     } else {
       job.lastError = errors.join("; ") || "failed";
       // A rate-limited attempt doesn't use up an attempt (up to MAX_DEFERRALS): the receiver is fine, just busy.
-      const deferred = job.retryAfterMs !== undefined && job.deferrals < MAX_DEFERRALS;
+      // Only when the 429 was this attempt's only error: a failing command still counts.
+      const deferred = job.retryAfterMs !== undefined && errors.length === 1 && job.deferrals < MAX_DEFERRALS;
       if (deferred) {
         job.deferrals++;
         job.attempts--;

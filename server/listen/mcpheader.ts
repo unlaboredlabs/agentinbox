@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { MIN_NODE, nodeVersionError } from "../node-check.ts";
 import { writePrivateFile } from "./fsutil.ts";
@@ -82,6 +82,19 @@ export function nodeVersionOf(path: string): string | null {
   return r.status === 0 && v ? v : null;
 }
 
+/**
+ * A node binary the service may run: its real file is owned by root or by this user and isn't group- or
+ * world-writable (otherwise someone else could replace what the service runs at every login).
+ */
+export function trustedNodeFile(path: string, uid = process.getuid?.() ?? 0): boolean {
+  try {
+    const st = statSync(realpathSync(path));
+    return (st.uid === 0 || st.uid === uid) && (st.mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
 export interface ServiceNodeChoice extends NodeChoice {
   version: string;
   /** Why this node, in words (printed by `listen service install`). */
@@ -90,12 +103,18 @@ export interface ServiceNodeChoice extends NodeChoice {
 
 /**
  * The node the listener service runs on: the same stable-path preference as the header helper (a path
- * that survives fnm/nvm/Homebrew upgrades), but only a node new enough for agentinbox (MIN_NODE); else
- * this shell's node, reported as version-specific.
+ * that survives fnm/nvm/Homebrew upgrades), but only a candidate that is trusted (trustedNodeFile) and new
+ * enough for agentinbox (MIN_NODE); else this shell's node, reported as version-specific.
  */
-export function serviceNode(execPath = process.execPath, versionOf: (path: string) => string | null = nodeVersionOf, current = process.versions.node): ServiceNodeChoice {
+export function serviceNode(
+  execPath = process.execPath,
+  versionOf: (path: string) => string | null = nodeVersionOf,
+  current = process.versions.node,
+  trusted: (path: string) => boolean = trustedNodeFile,
+): ServiceNodeChoice {
   const versions = new Map<string, string | null>();
   const okVersion = (p: string) => {
+    if (!trusted(p)) return false;
     if (!versions.has(p)) versions.set(p, versionOf(p));
     const v = versions.get(p);
     return !!v && nodeVersionError(v) === null;

@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { helperNode, helperNodeChoice, serviceNode } from "../server/listen/mcpheader.ts";
+import { helperNode, helperNodeChoice, serviceNode, trustedNodeFile } from "../server/listen/mcpheader.ts";
 import { codexBlock, removeTomlServer, setupMcp, upsertYamlServer } from "../server/listen/mcpsetup.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { FAKE_KEY, isolateXdg } from "./listen-client-fake.ts";
@@ -85,11 +86,14 @@ describe("setup-mcp", () => {
     const fnmDefault = "/Users/w/Library/Application Support/fnm/aliases/default/bin/node";
     // Wynn's Mac: fnm v24 interactively, /usr/local/bin/node v22.20 installed too. fnm's default alias is too old here.
     const versions: Record<string, string> = { [fnmDefault]: "22.12.0", "/usr/local/bin/node": "22.20.0", "/usr/bin/node": "18.19.1" };
-    const chosen = serviceNode(fnm, (p) => versions[p] ?? null, "24.1.0");
+    const trusted = () => true;
+    const chosen = serviceNode(fnm, (p) => versions[p] ?? null, "24.1.0", trusted);
     expect(chosen).toMatchObject({ path: "/usr/local/bin/node", version: "22.20.0", versioned: false });
     expect(chosen.why).toBe(`a stable path that survives fnm/nvm upgrades (this shell's is ${fnm}, v24.1.0)`);
     // Only nodes too old for agentinbox around: this shell's node, flagged as version-specific.
-    const old = serviceNode(fnm, (p) => (p === "/usr/bin/node" ? "20.11.0" : null), "24.1.0");
+    const old = serviceNode(fnm, (p) => (p === "/usr/bin/node" ? "20.11.0" : null), "24.1.0", trusted);
+    // A candidate someone else could replace (not root's or ours, or group/world-writable) is skipped.
+    expect(serviceNode(fnm, (p) => versions[p] ?? null, "24.1.0", (p) => p !== "/usr/local/bin/node").path).toBe(fnm);
     expect(old).toMatchObject({ path: fnm, version: "24.1.0", versioned: true });
     expect(old.why).toContain("re-run install after upgrading or removing it");
     // A node that isn't a version manager's is used as is, without probing anything.
@@ -200,5 +204,21 @@ describe("setup-mcp", () => {
     expect(upsertYamlServer("a: 1\nmcp_servers: {}\n", "agentinbox", entry)).toBe('a: 1\nmcp_servers:\n  agentinbox:\n    url: "u"\n');
     expect(upsertYamlServer("mcp_servers: { x: 1 }\n", "agentinbox", entry)).toBeNull();
     expect(existsSync(join(home, ".hermes"))).toBe(false);
+  });
+});
+
+describe("trustedNodeFile", () => {
+  it("accepts only files owned by root or this user that aren't group- or world-writable (after symlinks)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aib-node-"));
+    const node = join(dir, "node");
+    writeFileSync(node, "");
+    chmodSync(node, 0o755);
+    symlinkSync(node, join(dir, "link"));
+    expect(trustedNodeFile(node)).toBe(true);
+    expect(trustedNodeFile(join(dir, "link"))).toBe(true);
+    expect(trustedNodeFile(node, 12345)).toBe(false); // someone else's file
+    chmodSync(node, 0o775);
+    expect(trustedNodeFile(join(dir, "link"))).toBe(false); // group-writable target
+    expect(trustedNodeFile(join(dir, "missing"))).toBe(false);
   });
 });
