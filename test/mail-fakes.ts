@@ -350,6 +350,9 @@ export function fakeAccounts(ctx: AppContext): AccountsService {
     watchExpiresAt: null,
     lastSyncAt: null,
     createdAt: r.created_at,
+    refreshTokenExpiresAt: null,
+    refreshTokenExpiryKind: null,
+    workspaceDomain: null,
   });
   const get = (id: string) => {
     const r = ctx.db.get<AccountRow>("SELECT * FROM accounts WHERE id = ?", id);

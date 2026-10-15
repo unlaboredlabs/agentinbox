@@ -2,10 +2,15 @@ import type { EventType } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type AccountRow, updateRow } from "../google/accounts.ts";
+import { TEST_EMAIL_HEADER } from "../google/testmail.ts";
 import { type GmailClient, GoogleApiError, type GmailHistoryRecord, type GmailMessage } from "../google/types.ts";
 
 export const HISTORY_TYPES = ["messageAdded", "labelAdded", "labelRemoved"];
-const METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"];
+const METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date", TEST_EMAIL_HEADER];
+
+/** The console's setup test email (POST /api/accounts/:id/test-email), addressed to the account itself. */
+const isTestEmail = (msg: GmailMessage) =>
+  (msg.labelIds ?? []).includes("INBOX") && !!msg.payload?.headers?.some((h) => h.name.toLowerCase() === TEST_EMAIL_HEADER.toLowerCase());
 /** New messages with these labels produce no events. */
 const SKIP_NEW = ["DRAFT", "SPAM", "CHAT"];
 /**
@@ -96,6 +101,9 @@ export class SyncPass {
         now(),
       );
       this.emit("message.sent", msg, threadLabels, `${msg.id}:message.sent`);
+      // Self-addressed mail is normally only a send; the setup test email also counts as received so
+      // the operator sees it reach webhooks and listeners filtered on message.received (the default).
+      if (isTestEmail(msg)) this.emit("message.received", msg, threadLabels, `${msg.id}:message.received`);
       return;
     }
     this.emit("message.received", msg, threadLabels, `${msg.id}:message.received`);

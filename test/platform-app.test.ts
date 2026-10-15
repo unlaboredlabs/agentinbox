@@ -81,6 +81,7 @@ describe("setup state", () => {
       accountsConnected: 0,
       agentsCreated: 0,
       complete: false,
+      warnings: [],
     });
     addAccount("acc_1", "active");
     state = await json(await h.request("/api/setup/state", { cookie }));

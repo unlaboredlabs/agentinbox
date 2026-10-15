@@ -1,12 +1,14 @@
 import type { GmailLabel } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { createAccountsService } from "./accounts.ts";
-import { clientView, callbackMode, setClient } from "./client.ts";
+import { clientView, callbackMode, importClient, setClient } from "./client.ts";
 import { createGmailClient } from "./gmail.ts";
 import { mimeTools } from "./mime.ts";
 import { completeConnect, completeConnectFromUrl, revokeAccount, startConnect } from "./oauth.ts";
 import { provisionPubsub, pubsubState, testPubsub } from "./pubsub.ts";
 import { googleRuntime } from "./runtime.ts";
+import { sendTestEmail } from "./testmail.ts";
+import { setupWarnings } from "./warnings.ts";
 import type { GmailClient, GoogleService } from "./types.ts";
 
 export { createAccountsService };
@@ -26,7 +28,9 @@ export function createGoogleService(ctx: AppContext): GoogleService {
   return {
     clientView: () => clientView(ctx),
     setClient: (input) => setClient(ctx, input),
+    importClient: (input) => importClient(ctx, input),
     redirectUri: () => callbackMode(ctx).redirectUri,
+    setupWarnings: () => setupWarnings(ctx),
 
     startConnect: (opts) => startConnect(ctx, opts),
     completeConnect: (code, state) => completeConnect(ctx, code, state),
@@ -47,6 +51,7 @@ export function createGoogleService(ctx: AppContext): GoogleService {
       return labels;
     },
     revoke: (accountId) => revokeAccount(ctx, accountId),
+    sendTestEmail: (accountId) => sendTestEmail(ctx, accountId),
 
     pubsubState: () => pubsubState(ctx),
     provisionPubsub: () => provisionPubsub(ctx),

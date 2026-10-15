@@ -22,7 +22,7 @@ export const SEND_MODES = ["direct", "draft_only", "approval"] as const;
 export type SendMode = (typeof SEND_MODES)[number];
 
 export const EVENT_TYPES = [
-  "message.received", // new message landed in the mailbox (not sent by the account)
+  "message.received", // new message landed in the mailbox (not sent by the account; except the console's setup test email)
   "message.sent", // message sent from the account (by an agent or by a human)
   "thread.reply_received", // received message in a thread the account previously sent into
   "label.added",
@@ -100,6 +100,53 @@ export interface SetupState {
   agentsCreated: number;
   /** All required steps done (claimed + client configured + ≥1 account). Pub/Sub is optional (poll fallback). */
   complete: boolean;
+  /**
+   * Problems with the setup as configured, most severe first (errors, then warnings, then info).
+   * Recomputed on every GET /api/setup/state; empty when everything looks right. See SetupWarning.
+   */
+  warnings: SetupWarning[];
+}
+
+/**
+ * - testing_mode: an account's refresh token was issued with a ~7-day lifetime (External app still in
+ *   Testing). One per affected account (accountId set); `url` opens the project's Audience page.
+ * - sign_in_expires: an account's refresh token expires for another reason (any other lifetime, e.g.
+ *   time-based access the user chose on Google's consent screen). Neutral: reconnect before the date.
+ *   One per account (accountId set). Both are "error" within 24 h of the expiry or after it.
+ * - app_type_mismatch: the app type saved here contradicts the connected accounts. "warning" when it is
+ *   "internal" but a personal (non-Workspace) Google account is connected (so the app is really External); "info" when it is
+ *   "external" and every account is a Workspace account of one domain (Internal would avoid the 7-day
+ *   Testing expiry and verification entirely).
+ * - redirect_uri_missing: the imported client JSON doesn't list the exact redirect URI (see
+ *   GoogleClientImportResult). Clears on a re-import that lists it, or once an account connects
+ *   successfully through the current redirect URI (proof it is registered). Severity "error".
+ * - needs_reauth: an account's sign-in was rejected; one per account (accountId set). Severity "error".
+ * - pubsub_failing: ingest mode is pubsub and Pub/Sub has an error (hint carries the remediation). "error".
+ */
+export type SetupWarningCode =
+  | "testing_mode"
+  | "sign_in_expires"
+  | "app_type_mismatch"
+  | "redirect_uri_missing"
+  | "needs_reauth"
+  | "pubsub_failing";
+
+export interface SetupWarning {
+  code: SetupWarningCode;
+  /** "error": something is broken or will break; "warning": will cause trouble later; "info": a suggestion. */
+  severity: "error" | "warning" | "info";
+  /** One sentence: what is wrong (names the account / date / URI when relevant). */
+  message: string;
+  /** What to do about it, with Google Cloud console click paths. */
+  hint: string;
+  /**
+   * Deep link for the fix (a Google Cloud console page, project preselected), when there is one. The
+   * hint always also names the menu path (e.g. "Google Auth Platform → Audience") in case the link
+   * lands elsewhere: show both.
+   */
+  url?: string;
+  /** Set for per-account warnings (testing_mode, sign_in_expires, needs_reauth, app_type_mismatch for a personal account). */
+  accountId?: string;
 }
 
 export interface PubsubState {
@@ -141,6 +188,35 @@ export interface GoogleClientConfig {
   appType: GoogleAppType;
 }
 
+/**
+ * POST /api/google/client/import: the client-secret JSON downloaded from Google Cloud
+ * (Google Auth Platform → Clients → your client → Download JSON), pasted or read from the file as text.
+ * Only Web application clients (`{"web": {...}}`) are accepted.
+ */
+export interface GoogleClientImportInput {
+  /** The file's contents, verbatim. */
+  json: string;
+  /** Omit to keep the app type saved before (null when there was none). */
+  appType?: GoogleAppType;
+}
+
+/**
+ * Result of POST /api/google/client/import. The client is saved whenever the ID and secret are valid;
+ * problems that don't prevent saving come back as `warnings` (currently only `redirect_uri_missing`,
+ * severity "error": connecting will fail on Google's page until the URI is registered).
+ *
+ * Errors (400, ApiError.code):
+ * - client_json_invalid: not JSON, or not a Google OAuth client file, or a malformed client ID
+ * - client_json_desktop: an "installed" (Desktop app) client; a Web application client is needed
+ * - client_secret_missing: the file has no client_secret and none is stored for this client ID
+ * - bad_request: invalid project_id (same validation as PUT /api/google/client)
+ */
+export interface GoogleClientImportResult extends GoogleClientView {
+  warnings: SetupWarning[];
+  /** The redirect URIs listed in the imported JSON (what Google had registered when it was downloaded). */
+  registeredRedirectUris: string[];
+}
+
 /** Returned by GET /api/google/client. */
 export interface GoogleClientView {
   clientId: string | null;
@@ -169,6 +245,27 @@ export interface Account {
   watchExpiresAt: string | null;
   lastSyncAt: string | null;
   createdAt: string;
+  /**
+   * When Google said the refresh token expires (token response `refresh_token_expires_in`), or null for a
+   * long-lived token. The account needs reconnecting before this time.
+   */
+  refreshTokenExpiresAt: string | null;
+  /**
+   * Why it expires (null when refreshTokenExpiresAt is null, or unknown): "testing" = issued with the ~7-day
+   * Testing lifetime (External app not published; publish it, then reconnect); "time_based" = any other
+   * lifetime (e.g. time-based access chosen on the consent screen).
+   */
+  refreshTokenExpiryKind: "testing" | "time_based" | null;
+  /** Google Workspace domain (id_token `hd` claim), or null for a personal (non-Workspace) Google account (or not yet known). */
+  workspaceDomain: string | null;
+}
+
+/** POST /api/accounts/:id/test-email: a self-addressed message sent through Gmail to prove delivery end to end. */
+export interface TestEmailResult {
+  /** Gmail message id of the sent message (matches MailEvent.message.id of the resulting events). */
+  messageId: string;
+  threadId: string;
+  sentAt: string;
 }
 
 export interface GmailLabel {
@@ -181,6 +278,22 @@ export interface GmailLabel {
 export interface PubsubTestResult {
   ok: boolean;
   message: string;
+}
+
+/**
+ * What the /oauth/callback page posts to its opener (window.postMessage) and on the
+ * BroadcastChannel "agentinbox-oauth". On failure, `error`/`code`/`hint` mirror the ApiError that
+ * POST /api/accounts/connect/complete returns for the same failure.
+ */
+export interface OAuthCallbackMessage {
+  type: "agentinbox:oauth";
+  ok: boolean;
+  email: string | null;
+  /** Human-readable message (null on success). */
+  error: string | null;
+  /** ApiError code, e.g. "oauth_access_denied" (null on success). See the route map for the list. */
+  code: string | null;
+  hint: string | null;
 }
 
 export interface ConnectAccountResponse {
@@ -500,7 +613,8 @@ export interface ApiError {
 //   POST   /api/setup/claim {token,password}          → 204 + session cookie (only while unclaimed)
 //   POST   /api/auth/login {password}                 → 204 + session cookie (5 failures/IP → 15 min lockout)
 //   POST   /api/auth/logout                           → 204
-//   GET    /oauth/callback?code&state                 → HTML (redirects to console /accounts?connected=…)
+//   GET    /oauth/callback?code&state                 → HTML result page; posts an OAuthCallbackMessage (ok/email or error/code/hint)
+//                                                       to its opener and on BroadcastChannel "agentinbox-oauth"
 //
 // Authenticated (admin session):
 //   GET    /api/setup/state                           → SetupState
@@ -510,16 +624,29 @@ export interface ApiError {
 //   PATCH  /api/settings Partial<Settings>            → Settings
 //   POST   /api/auth/password {current,next}          → 204
 //   GET    /api/google/client                         → GoogleClientView
-//   PUT    /api/google/client GoogleClientConfig      → GoogleClientView
+//   PUT    /api/google/client GoogleClientConfig      → GoogleClientView   (manual entry; fallback to import)
+//   POST   /api/google/client/import GoogleClientImportInput → GoogleClientImportResult
+//          400 client_json_invalid | client_json_desktop | client_secret_missing | bad_request (see GoogleClientImportResult)
 //   POST   /api/google/pubsub/provision               → PubsubState   (creates topic + IAM + subscription using a connected account's token)
 //   POST   /api/google/pubsub/test                    → PubsubTestResult
 //   GET    /api/accounts                              → Account[]
 //   POST   /api/accounts/connect                      → ConnectAccountResponse
+//          400 google_client_missing (no OAuth client saved yet)
 //   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
+//          Connect failures (same codes on this endpoint and in the callback page's OAuthCallbackMessage):
+//          400 oauth_access_denied (cancelled on Google's screen) | oauth_org_internal | oauth_admin_policy_enforced
+//              | oauth_redirect_uri_mismatch | oauth_invalid_client | oauth_unauthorized_client | oauth_invalid_grant
+//              | oauth_<other Google error> | oauth_state (expired/used link) | oauth_no_code | oauth_url_invalid
+//              | oauth_gmail_scope_missing | oauth_no_refresh_token | oauth_wrong_account | oauth_account_removed
+//              | gmail_api_disabled | google_client_missing;  502 google_error
 //   POST   /api/accounts/:id/resync                   → Account
 //   POST   /api/accounts/:id/pause | /resume          → Account
 //   DELETE /api/accounts/:id                          → 204 (stops watch, revokes token, deletes grants)
 //   GET    /api/accounts/:id/labels                   → GmailLabel[]
+//   POST   /api/accounts/:id/test-email               → TestEmailResult   (sends "agentinbox test: your setup works" from the
+//          account to itself, then processes new mail at once; the resulting events are message.sent and message.received
+//          (the latter only for this test message). Audited as account.test_email. 409 account_paused | 409 needs_reauth
+//          | 429 rate_limited (5 per account per 10 min; hint says when to retry))
 //   GET    /api/agents                                → Agent[]
 //   POST   /api/agents CreateAgentInput               → AgentWithKey
 //   GET    /api/agents/:id                            → Agent

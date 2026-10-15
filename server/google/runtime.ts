@@ -43,6 +43,8 @@ export class GoogleRuntime {
   readonly labelCache = new Map<string, { at: number; labels: GmailLabel[] }>();
   /** Pub/Sub test-message nonces → resolver (resolved by whichever pull sees the message). */
   readonly pubsubTests = new Map<string, () => void>();
+  /** accountId → send times (ms) of recent test emails, for the rate limit. */
+  readonly testEmails = new Map<string, number[]>();
   private readonly buckets = new Map<string, TokenBucket>();
 
   constructor(ctx: AppContext) {

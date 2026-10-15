@@ -70,7 +70,7 @@ describe("connect account", () => {
     const consent = await fetch(start.authUrl, { redirect: "manual" });
     const page = await fetch(consent.headers.get("location")!);
     expect(page.status).toBe(400);
-    expect(await page.text()).toContain("Access was denied");
+    expect(await page.text()).toContain("You cancelled on Google&#39;s screen.");
     expect((await s.admin.get<Account[]>("/api/accounts")).some((a) => a.email === email)).toBe(false);
   });
 

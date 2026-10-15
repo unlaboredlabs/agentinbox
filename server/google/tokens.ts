@@ -24,6 +24,37 @@ export interface TokenResponse {
   scope?: string;
   id_token?: string;
   token_type?: string;
+  /**
+   * Seconds until the refresh token expires. Google only sends it for tokens that expire: an External
+   * OAuth app in Testing (604800 = 7 days from consent), or time-based access the user chose on the
+   * consent screen (any duration). On refreshes it is the time left.
+   */
+  refresh_token_expires_in?: number;
+}
+
+const lifetime = (t: TokenResponse): number | null => {
+  const s = t.refresh_token_expires_in;
+  return typeof s === "number" && Number.isFinite(s) && s > 0 ? s : null;
+};
+
+/** Absolute refresh-token expiry from a token response, or null when Google didn't send one (long-lived). */
+export function refreshExpiry(t: TokenResponse): string | null {
+  const s = lifetime(t);
+  return s ? new Date(Date.now() + s * 1000).toISOString() : null;
+}
+
+const TESTING_LIFETIME_S = 604_800;
+const TESTING_TOLERANCE_S = 86_400;
+
+/**
+ * Why a freshly issued (code exchange) refresh token expires: "testing" when its lifetime is the
+ * Testing-mode 7 days (± 1 day), "time_based" for any other lifetime (e.g. user-chosen time-based
+ * access), null when it doesn't expire. Only meaningful for the code exchange: refreshes report the time left.
+ */
+export function refreshExpiryKind(t: TokenResponse): "testing" | "time_based" | null {
+  const s = lifetime(t);
+  if (!s) return null;
+  return Math.abs(s - TESTING_LIFETIME_S) <= TESTING_TOLERANCE_S ? "testing" : "time_based";
 }
 
 /** Refresh this long before the access token expires. */
@@ -129,6 +160,9 @@ export class TokenManager {
       access_expires_at: expiresAt,
       // Google may rotate refresh tokens.
       ...(res.refresh_token ? { refresh_token_enc: this.ctx.crypto.encrypt(res.refresh_token) } : {}),
+      // Testing-mode tokens report their remaining lifetime on every refresh. A response without it leaves
+      // the stored expiry alone: a token issued in Testing keeps expiring even after the app is published.
+      ...(refreshExpiry(res) ? { refresh_expires_at: refreshExpiry(res) } : {}),
     });
     return res.access_token;
   }

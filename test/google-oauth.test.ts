@@ -164,12 +164,14 @@ describe("connect", () => {
     const denied = await consentRedirect("carol@example.com", { deny: true });
     const err = await ctx.google.completeConnectFromUrl(denied.toString()).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HttpError);
-    expect((err as HttpError).message).toMatch(/denied/);
-    expect((err as HttpError).hint).toMatch(/test user/);
+    expect((err as HttpError).message).toMatch(/cancelled/);
+    expect((err as HttpError).code).toBe("oauth_access_denied");
+    expect((err as HttpError).hint).toMatch(/Continue\/Allow/);
 
     await expect(ctx.google.completeConnectFromUrl("http://localhost/oauth/callback")).rejects.toThrow(/doesn't contain an authorization code/);
     const org = await ctx.google.completeConnectFromUrl("http://localhost/oauth/callback?error=org_internal").catch((e: unknown) => e);
-    expect((org as HttpError).message).toMatch(/Internal: only accounts in its Workspace org/);
+    expect((org as HttpError).message).toMatch(/Internal, so only accounts in its own Google Workspace organization/);
+    expect((org as HttpError).code).toBe("oauth_org_internal");
   });
 
   it("errors with a hint when Google returns no refresh token", async () => {
@@ -265,7 +267,7 @@ describe("connect", () => {
     expect(OAUTH_CALLBACK_SCRIPT_HASH).toBe(`sha256-${createHash("sha256").update(OAUTH_CALLBACK_SCRIPT).digest("base64")}`);
     // Dynamic data is JSON in a data block with "<" escaped, so it can't close the element.
     const data = /<script type="application\/json" id="oauth-result">([^<]*)<\/script>/.exec(errHtml)![1]!;
-    expect(JSON.parse(data)).toEqual({ ok: false, email: null, error: "</script><script>alert(1)</script>", targetOrigin: "*" });
+    expect(JSON.parse(data)).toEqual({ ok: false, email: null, error: "</script><script>alert(1)</script>", code: "internal", hint: "h", targetOrigin: "*" });
     expect(errHtml).not.toContain("<script>alert(1)");
   });
 

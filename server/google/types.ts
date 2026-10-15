@@ -9,10 +9,14 @@ import type {
   ConnectAccountResponse,
   GmailLabel,
   GoogleClientConfig,
+  GoogleClientImportInput,
+  GoogleClientImportResult,
   GoogleClientView,
   MessageSummary,
   PubsubState,
   PubsubTestResult,
+  SetupWarning,
+  TestEmailResult,
 } from "../../shared/types.ts";
 import type { Lifecycle } from "../context.ts";
 
@@ -214,6 +218,8 @@ export interface ComposeInput {
   inReplyTo?: string | null;
   references?: string[];
   attachments?: { filename: string; contentType?: string; content: Buffer }[];
+  /** Extra header lines, e.g. { "X-Agentinbox-Test": "setup" }. */
+  headers?: Record<string, string>;
 }
 
 export interface MimeTools {
@@ -246,7 +252,11 @@ export interface GoogleService extends Lifecycle {
   // OAuth client
   clientView(): GoogleClientView;
   setClient(input: GoogleClientConfig): GoogleClientView;
+  /** Imports Google's downloaded client-secret JSON (Web application clients only). */
+  importClient(input: GoogleClientImportInput): GoogleClientImportResult;
   redirectUri(): string;
+  /** Setup problems derived from the client config and connected accounts (SetupState.warnings). */
+  setupWarnings(): SetupWarning[];
 
   // Connecting accounts (PKCE, access_type=offline, prompt=consent)
   /**
@@ -269,6 +279,8 @@ export interface GoogleService extends Lifecycle {
    */
   labels(accountId: string, opts?: { fresh?: boolean }): Promise<GmailLabel[]>;
   revoke(accountId: string): Promise<void>;
+  /** Sends a self-addressed test message from the account and kicks ingest. Rate limited (HttpError 429). */
+  sendTestEmail(accountId: string): Promise<TestEmailResult>;
 
   // Pub/Sub
   pubsubState(): PubsubState;
