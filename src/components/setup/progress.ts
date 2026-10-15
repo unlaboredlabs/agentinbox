@@ -1,0 +1,94 @@
+import type { GoogleAppType, SetupState } from "@shared/types";
+import { useQuery } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
+import { queries } from "@/lib/queries";
+
+/**
+ * Wizard answers the server can't store yet: the Google client endpoint only accepts the project id
+ * and app type together with the OAuth client, so those are kept here (per browser) until step 4
+ * saves everything. Also remembers acknowledgements like "public URL confirmed".
+ */
+export interface SetupDraft {
+  urlConfirmed?: boolean;
+  projectId?: string;
+  projectConfirmed?: boolean;
+  appType?: GoogleAppType;
+  productionConfirmed?: boolean;
+  pubsubSkipped?: boolean;
+}
+
+const KEY = "agentinbox.setup";
+const listeners = new Set<() => void>();
+let cache: SetupDraft | null = null;
+
+function read(): SetupDraft {
+  if (cache) return cache;
+  try {
+    cache = JSON.parse(localStorage.getItem(KEY) ?? "{}") as SetupDraft;
+  } catch {
+    cache = {};
+  }
+  return cache;
+}
+
+export function updateDraft(patch: Partial<SetupDraft>) {
+  cache = { ...read(), ...patch };
+  try {
+    localStorage.setItem(KEY, JSON.stringify(cache));
+  } catch {
+    /* private mode: keep in memory */
+  }
+  for (const l of listeners) l();
+}
+
+export function useSetupDraft(): SetupDraft {
+  return useSyncExternalStore(
+    (l) => (listeners.add(l), () => listeners.delete(l)),
+    read,
+  );
+}
+
+export const STEP_IDS = ["url", "project", "consent", "client", "accounts", "pubsub", "agent"] as const;
+export type StepId = (typeof STEP_IDS)[number];
+export type StepStatus = "done" | "skipped" | "todo";
+
+export const STEP_META: Record<StepId, { title: string; short: string; optional?: boolean }> = {
+  url: { title: "Confirm the public URL", short: "Public URL" },
+  project: { title: "Create a Google Cloud project", short: "Google Cloud project" },
+  consent: { title: "Configure the OAuth consent screen", short: "Consent screen" },
+  client: { title: "Create the OAuth client", short: "OAuth client" },
+  accounts: { title: "Connect Gmail accounts", short: "Gmail accounts" },
+  pubsub: { title: "Turn on real-time delivery", short: "Real-time delivery", optional: true },
+  agent: { title: "Create your first agent", short: "First agent" },
+};
+
+export const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+
+export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): Record<StepId, StepStatus> {
+  const s = state;
+  const clientDone = !!s?.googleClientConfigured;
+  const accountsDone = (s?.accountsConnected ?? 0) > 0;
+  const pubsubReady = s?.pubsub.mode === "pubsub" && !!s.pubsub.subscription;
+  return {
+    url: draft.urlConfirmed || clientDone || accountsDone ? "done" : "todo",
+    project: s?.gcpProjectId || (draft.projectConfirmed && draft.projectId && PROJECT_ID_RE.test(draft.projectId)) ? "done" : "todo",
+    consent:
+      s?.googleAppType || (draft.appType && (draft.appType === "internal" || draft.productionConfirmed)) ? "done" : "todo",
+    client: clientDone ? "done" : "todo",
+    accounts: accountsDone ? "done" : "todo",
+    pubsub: pubsubReady ? "done" : draft.pubsubSkipped ? "skipped" : "todo",
+    agent: (s?.agentsCreated ?? 0) > 0 ? "done" : "todo",
+  };
+}
+
+/** Setup checklist state shared by the wizard, the overview card and the sidebar. */
+export function useSetupProgress() {
+  const query = useQuery(queries.setupState());
+  const draft = useSetupDraft();
+  const statuses = stepStatuses(query.data, draft);
+  const finished = STEP_IDS.filter((id) => statuses[id] !== "todo").length;
+  const firstTodo = STEP_IDS.find((id) => statuses[id] === "todo");
+  // Pub/Sub is optional: setup counts as done once everything else is.
+  const allDone = STEP_IDS.every((id) => statuses[id] !== "todo" || STEP_META[id].optional);
+  return { query, state: query.data, draft, statuses, finished, total: STEP_IDS.length, firstTodo, allDone };
+}
