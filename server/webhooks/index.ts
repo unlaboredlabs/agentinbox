@@ -45,10 +45,11 @@ interface WebhookRow {
   last_delivery_at: string | null;
 }
 
-/** ?1 = the 24 h cutoff; further plain `?` params bind from 2. Stats leave out test deliveries. */
+/** The first two params are the 24 h cutoff (twice). Stats leave out test deliveries. Plain `?` only: Node 22's
+ * node:sqlite rejects mixing numbered and anonymous placeholders. */
 const WEBHOOK_SELECT = `SELECT w.*,
-  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.status = 'succeeded' AND d.updated_at >= ?1) AS succeeded_24h,
-  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.status IN ('failed', 'dead') AND d.updated_at >= ?1) AS failed_24h,
+  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.status = 'succeeded' AND d.updated_at >= ?) AS succeeded_24h,
+  (SELECT COUNT(*) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.status IN ('failed', 'dead') AND d.updated_at >= ?) AS failed_24h,
   (SELECT MAX(d.updated_at) FROM deliveries d WHERE d.webhook_id = w.id AND d.event_seq > 0 AND d.attempts > 0) AS last_delivery_at
   FROM webhooks w`;
 
@@ -100,11 +101,16 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
   let wakeQueued = false;
 
   const since24h = () => new Date(Date.now() - 24 * 3600_000).toISOString();
+  /** Bind params for WEBHOOK_SELECT's two cutoff placeholders. */
+  const statsCutoffs = () => {
+    const t = since24h();
+    return [t, t];
+  };
 
   // ───────────── CRUD ─────────────
 
   function row(id: string): WebhookRow | undefined {
-    return ctx.db.get<WebhookRow>(`${WEBHOOK_SELECT} WHERE w.id = ?`, since24h(), id);
+    return ctx.db.get<WebhookRow>(`${WEBHOOK_SELECT} WHERE w.id = ?`, ...statsCutoffs(), id);
   }
 
   function requireRow(id: string): WebhookRow {
@@ -115,8 +121,8 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
 
   function list(agentId?: string): Webhook[] {
     const rows = agentId
-      ? ctx.db.all<WebhookRow>(`${WEBHOOK_SELECT} WHERE w.agent_id = ? ORDER BY w.created_at DESC`, since24h(), agentId)
-      : ctx.db.all<WebhookRow>(`${WEBHOOK_SELECT} ORDER BY w.created_at DESC`, since24h());
+      ? ctx.db.all<WebhookRow>(`${WEBHOOK_SELECT} WHERE w.agent_id = ? ORDER BY w.created_at DESC`, ...statsCutoffs(), agentId)
+      : ctx.db.all<WebhookRow>(`${WEBHOOK_SELECT} ORDER BY w.created_at DESC`, ...statsCutoffs());
     return rows.map(toWebhook);
   }
 
