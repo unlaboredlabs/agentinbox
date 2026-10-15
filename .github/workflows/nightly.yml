@@ -66,4 +66,4 @@ jobs:
           version="${base}-nightly.${{ github.run_number }}"
           npm version "$version" --no-git-tag-version
           npm publish --tag latest --access public
-          echo "Published agentinbox@${version}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published agentinbox-cli@${version}" >> "$GITHUB_STEP_SUMMARY"
