@@ -8,6 +8,7 @@ import {
   isRetryable,
   MAX_ATTEMPTS,
   networkError,
+  OUTCOME_UNKNOWN,
   type Query,
   rejectedBeforeProcessing,
   REQUEST_TIMEOUT_MS,
@@ -32,6 +33,10 @@ export interface RequestOptions {
   idempotent?: boolean;
   /** Per-attempt timeout; 0 disables it (long-polling Pub/Sub pulls bound themselves). */
   timeoutMs?: number;
+  /** Extra request headers (e.g. Calendar's If-Match). */
+  headers?: Record<string, string>;
+  /** For non-idempotent requests: what may have happened when the outcome is unknown (default: a Gmail send). */
+  ambiguousHint?: string;
 }
 
 /**
@@ -61,6 +66,8 @@ export class GoogleRuntime {
     const idempotent = opts.idempotent ?? true;
     const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
     let forced = false;
+    /** An earlier attempt that may have reached Google (5xx, timeout, reset) before this one was sent. */
+    let uncertain: GoogleApiError | null = null;
     for (let attempt = 0; ; attempt++) {
       if (opts.cost) await this.bucket(accountId).take(opts.cost);
       const token = await this.tokens.accessToken(accountId, { force: forced });
@@ -71,6 +78,7 @@ export class GoogleRuntime {
           headers: {
             authorization: `Bearer ${token}`,
             accept: "application/json",
+            ...opts.headers,
             ...(opts.body !== undefined ? { "content-type": "application/json" } : {}),
           },
           body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
@@ -94,7 +102,15 @@ export class GoogleRuntime {
         continue;
       }
       const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
-      if (!retry || attempt >= MAX_ATTEMPTS - 1) throw idempotent ? err : ambiguous(err);
+      if (!retry || attempt >= MAX_ATTEMPTS - 1) {
+        // A write retried after an attempt that may have been applied, ending in a failed precondition (the first
+        // attempt may be what changed it) or in more server errors: its outcome is unknown.
+        if (uncertain && method !== "GET" && (err.status === 412 || isRetryable(err))) {
+          throw ambiguous(uncertain, opts.ambiguousHint ?? "The change may have been applied: check before retrying.");
+        }
+        throw idempotent ? err : ambiguous(err, opts.ambiguousHint);
+      }
+      if (!rejectedBeforeProcessing(err)) uncertain ??= err;
       await sleep(backoffMs(attempt, err.details.retryAfterMs), opts.signal);
       if (opts.signal?.aborted) throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
@@ -108,14 +124,9 @@ export class GoogleRuntime {
 }
 
 /** For non-idempotent calls, a timeout, dropped connection or 5xx may have happened after Google acted. */
-function ambiguous(err: GoogleApiError): GoogleApiError {
+function ambiguous(err: GoogleApiError, hint = "The message may have been sent: check Sent in Gmail before retrying."): GoogleApiError {
   if (rejectedBeforeProcessing(err) || (err.status !== 0 && err.status < 500)) return err;
-  return new GoogleApiError(
-    err.status,
-    `${err.message}. The message may have been sent: check Sent in Gmail before retrying.`,
-    err.reason,
-    err.details,
-  );
+  return new GoogleApiError(err.status, `${err.message}. ${hint}`, err.reason, { ...err.details, reasons: [...(err.details.reasons ?? []), OUTCOME_UNKNOWN] });
 }
 
 function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
