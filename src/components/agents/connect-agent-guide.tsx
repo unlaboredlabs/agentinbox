@@ -150,7 +150,7 @@ export function ListenCommands({ c, tool }: { c: ConnectCommands; tool: AgentToo
         <p className="text-xs text-muted-foreground">
           {tool === "other"
             ? "This test command only confirms each email (a ✓ line per email). Swap in your own script for the service."
-            : `Runs for each new email you receive (not mail you send; Promotions, Social and Forums are skipped). ${RECIPES[tool].note}`}
+            : `${tool === "hermes" ? `Forwards each new email you receive to ${label}` : `Starts ${label} for each new email you receive`} (not mail you send; Promotions, Social and Forums are skipped). ${RECIPES[tool].note}`}
         </p>
       </li>
       <li className="space-y-1.5">

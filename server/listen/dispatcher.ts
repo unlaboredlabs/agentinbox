@@ -192,7 +192,8 @@ export class Dispatcher {
 
   private advance(): void {
     let to = this.advancedTo;
-    while (this.jobs.length && this.jobs[0]!.state === "done") to = this.jobs.shift()!.lastSeq;
+    // max: a batch's lastSeq can be past the skipped events queued behind it.
+    while (this.jobs.length && this.jobs[0]!.state === "done") to = Math.max(to, this.jobs.shift()!.lastSeq);
     if (to > this.advancedTo) {
       this.advancedTo = to;
       this.opts.onAdvance(to);
