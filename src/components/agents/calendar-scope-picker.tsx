@@ -1,5 +1,5 @@
 import type { CalendarInfo } from "@shared/types";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ErrorAlert } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
@@ -23,10 +23,35 @@ export function calendarListProblem(err: unknown): React.ReactNode {
   return null;
 }
 
-/** Checkboxes over calendars, primary first. Ids in `value` that aren't listed (removed since) stay visible so they can be unticked. */
-export function CalendarChecklist({ calendars, value, onChange }: { calendars: CalendarInfo[]; value: string[]; onChange: (v: string[]) => void }) {
+/** The calendar lists of several accounts (live from Google; accounts that can't list them come back as errors). */
+export function useCalendars(accountIds: string[], enabled = true) {
+  const results = useQueries({ queries: accountIds.map((id) => ({ ...queries.accountCalendars(id), enabled })) });
+  return accountIds.map((accountId, i) => ({ accountId, query: results[i]! }));
+}
+
+/** Calendar id → name over several accounts' lists (the id while unknown). */
+export function useCalendarNames(accountIds: string[]): (id: string) => string {
+  const map = new Map(useCalendars(accountIds).flatMap((l) => (l.query.data ?? []).map((c) => [c.id, c.name] as const)));
+  return (id) => map.get(id) ?? id;
+}
+
+/**
+ * Checkboxes over calendars, primary first. Ids in `value` that aren't listed (removed since) stay visible so
+ * they can be unticked, unless `unlisted` is false (the caller shows them once for several lists).
+ */
+export function CalendarChecklist({
+  calendars,
+  value,
+  onChange,
+  unlisted = true,
+}: {
+  calendars: CalendarInfo[];
+  value: string[];
+  onChange: (v: string[]) => void;
+  unlisted?: boolean;
+}) {
   const listed = new Set(calendars.map((c) => c.id));
-  const missing = value.filter((id) => !listed.has(id));
+  const missing = unlisted ? value.filter((id) => !listed.has(id)) : [];
   const toggle = (id: string, on: boolean) => onChange(on ? [...new Set([...value, id])] : value.filter((x) => x !== id));
   const sorted = [...calendars].sort((a, b) => Number(b.primary) - Number(a.primary) || a.name.localeCompare(b.name));
   return (

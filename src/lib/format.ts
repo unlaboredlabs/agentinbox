@@ -109,6 +109,8 @@ export function accountsStat(a: OverviewStats["accounts"]): { value: string; hin
 }
 
 const DAY_MS = 86_400_000;
+/** Intl puts thin and narrow no-break spaces around range dashes and before AM/PM; plain spaces read (and test) the same. */
+const plainSpaces = (s: string) => s.replace(/[\u2009\u202f]/g, " ");
 
 /**
  * When a calendar event happens, in the console's time zone (or `timeZone`): "Tue, Oct 20, 2:00 – 3:00 PM",
@@ -130,7 +132,7 @@ export function fmtEventWhen(
     const year = start.getUTCFullYear() !== thisYear || last.getUTCFullYear() !== thisYear ? ("numeric" as const) : undefined;
     const sameDay = last.getTime() === start.getTime();
     const f = new Intl.DateTimeFormat(opts.locale, { timeZone: "UTC", month: "short", day: "numeric", year, weekday: sameDay ? "short" : undefined });
-    return `${sameDay ? f.format(start) : f.formatRange(start, last)} (all day)`;
+    return plainSpaces(`${sameDay ? f.format(start) : f.formatRange(start, last)} (all day)`);
   }
   const year = start.getFullYear() !== thisYear ? ("numeric" as const) : undefined;
   const f = new Intl.DateTimeFormat(opts.locale, {
@@ -142,5 +144,5 @@ export function fmtEventWhen(
     hour: "numeric",
     minute: "2-digit",
   });
-  return end.getTime() > start.getTime() ? f.formatRange(start, end) : f.format(start);
+  return plainSpaces(end.getTime() > start.getTime() ? f.formatRange(start, end) : f.format(start));
 }
