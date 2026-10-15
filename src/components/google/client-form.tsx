@@ -1,4 +1,4 @@
-import type { GoogleAppType, GoogleClientConfig, GoogleClientView } from "@shared/types";
+import type { GoogleAppType, GoogleClientConfig, GoogleClientSaveResult, GoogleClientView } from "@shared/types";
 import { CheckCircle2Icon } from "lucide-react";
 import { useState } from "react";
 import { ErrorAlert } from "@/components/common";
@@ -12,6 +12,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
 import { keys } from "@/lib/queries";
+import { rememberClientRedirect } from "./redirect-notice";
+
+/** Last characters of the saved secret (to recognize which one is saved). */
+export const secretHintOf = (v: GoogleClientView | undefined) => v?.secretHint ?? null;
 
 export const CLIENT_ID_RE = /^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/;
 
@@ -44,7 +48,7 @@ export function ClientForm({
   /** When given (from the wizard), these aren't editable here. */
   projectId?: string;
   appType?: GoogleAppType;
-  onSaved?: (v: GoogleClientView) => void;
+  onSaved?: (v: GoogleClientSaveResult) => void;
   submitLabel?: string;
   onCancel?: () => void;
 }) {
@@ -56,12 +60,13 @@ export function ClientForm({
   const hasSecret = !!view?.hasSecret;
 
   const save = useApiMutation({
-    mutationFn: (cfg: GoogleClientConfig) => api<GoogleClientView>("/api/google/client", { method: "PUT", body: cfg }),
+    mutationFn: (cfg: GoogleClientConfig) => api<GoogleClientSaveResult>("/api/google/client", { method: "PUT", body: cfg }),
     invalidate: [keys.googleClient, keys.setupState],
     success: "OAuth client saved",
     errorTitle: false,
     onSuccess: (v) => {
       setSecret("");
+      rememberClientRedirect(v);
       onSaved?.(v);
     },
   });
@@ -119,10 +124,14 @@ export function ClientForm({
             <FieldError>{errors.secret}</FieldError>
           ) : hasSecret ? (
             <FieldDescription className="flex items-center gap-1.5">
-              <CheckCircle2Icon className="size-3.5 text-success" /> A secret is saved (encrypted). It's never shown again.
+              <CheckCircle2Icon className="size-3.5 text-success" /> A secret is saved (encrypted)
+              {secretHintOf(view) ? `, ending in …${secretHintOf(view)}` : ""}. Paste a new one only to replace it.
             </FieldDescription>
           ) : (
-            <FieldDescription>Stored encrypted on this server and never sent back to the browser.</FieldDescription>
+            <FieldDescription>
+              Google shows a secret only once. Lost it? In Google Cloud open <strong>Google Auth Platform → Clients</strong> → your client →{" "}
+              <strong>Add secret</strong>, and paste the new one here. Stored encrypted.
+            </FieldDescription>
           )}
         </Field>
         {!fixedProjectId && (

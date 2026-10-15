@@ -85,7 +85,7 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
   const agent = list.find((a) => a.id === state.agentId) ?? [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 
   const finish = () => {
-    updateDraft({ verified: true } as never);
+    updateDraft({ verified: true });
     onNext();
   };
 

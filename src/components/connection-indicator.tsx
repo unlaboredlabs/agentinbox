@@ -18,7 +18,6 @@ export function ConnectionIndicator() {
       <TooltipTrigger asChild>
         <span
           role="status"
-          tabIndex={0}
           className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <StatusDot tone={s.tone} pulse={state === "reconnecting"} />

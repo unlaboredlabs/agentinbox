@@ -1,5 +1,5 @@
 import { AlertCircleIcon, CheckIcon, CopyIcon, ExternalLinkIcon, RotateCwIcon } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useNow } from "@/hooks/use-now";
 import { describeError } from "@/lib/api";
+import { wrapParts } from "@/lib/wrap";
 import { fmtAgo, fmtExact } from "@/lib/format";
 import type { Tone } from "@/lib/labels";
 import { cn } from "@/lib/utils";
@@ -62,7 +63,7 @@ function useCopy(value: string) {
       toast.error("Couldn't copy", { description: "Select the text and copy it with your keyboard instead." });
       return;
     }
-    // The button itself says "Copied" (no toast: it would cover buttons and outlive the step).
+    // The button itself says "Copied" (and a live region announces it): no toast to cover other controls.
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -77,18 +78,25 @@ export function CopyButton({
   variant = "ghost",
 }: {
   value: string;
+  /** Say what is copied ("Copy redirect URI"): screen readers and the tooltip use it. */
   label?: string;
   className?: string;
-  /** Show the label next to the icon instead of only in a tooltip. */
-  withText?: boolean;
+  /** Show text next to the icon: true shows the label, a string shows that (the label stays the accessible name). */
+  withText?: boolean | string;
   variant?: "ghost" | "outline" | "secondary" | "default";
 }) {
   const { copied, onClick } = useCopy(value);
+  const live = (
+    <span className="sr-only" aria-live="polite">
+      {copied ? "Copied" : ""}
+    </span>
+  );
   if (withText) {
     return (
-      <Button type="button" variant={variant} size="sm" className={className} onClick={onClick}>
+      <Button type="button" variant={variant} size="sm" className={className} onClick={onClick} aria-label={copied ? undefined : label}>
         {copied ? <CheckIcon /> : <CopyIcon />}
-        {copied ? "Copied" : label}
+        {copied ? "Copied" : withText === true ? label : withText}
+        {live}
       </Button>
     );
   }
@@ -104,42 +112,93 @@ export function CopyButton({
           onClick={onClick}
         >
           {copied ? <CheckIcon /> : <CopyIcon />}
+          {live}
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent>{copied ? "Copied" : label}</TooltipContent>
     </Tooltip>
   );
 }
 
+/**
+ * Text that wraps at spaces and after / ? & , only (see wrapParts). Each piece in between is
+ * unbreakable, so long commands and URLs never split mid-flag or mid-word; a piece wider than the box scrolls.
+ */
+export function Wrapped({ text }: { text: string }) {
+  return wrapParts(text).map((part, i) =>
+    "space" in part ? (
+      part.space
+    ) : (
+      <span key={i}>
+        {part.segments.map((seg, j) => (
+          <Fragment key={j}>
+            {j > 0 && <wbr />}
+            <span className="whitespace-nowrap">{seg}</span>
+          </Fragment>
+        ))}
+      </span>
+    ),
+  );
+}
+
 /** A value that must be pasted somewhere else: monospace, selectable, with a prominent copy button. */
-export function CopyField({ value, className, size = "default" }: { value: string; className?: string; size?: "default" | "lg" }) {
+export function CopyField({
+  value,
+  className,
+  size = "default",
+  label = "Copy",
+}: {
+  value: string;
+  className?: string;
+  size?: "default" | "lg";
+  /** What the copy button copies, e.g. "Copy redirect URI". */
+  label?: string;
+}) {
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center gap-1 rounded-lg border bg-muted/40 pl-3",
+        "flex min-w-0 items-center gap-1 rounded-lg border bg-muted/40 pl-3 text-foreground",
         size === "lg" ? "py-1.5 pr-1.5" : "py-0.5 pr-0.5",
         className,
       )}
     >
-      <code className={cn("min-w-0 flex-1 font-mono break-all select-all", size === "lg" ? "text-sm" : "text-[13px]")}>{value}</code>
-      <CopyButton value={value} withText={size === "lg"} variant={size === "lg" ? "outline" : "ghost"} />
+      <code className={cn("min-w-0 flex-1 overflow-x-auto py-1 font-mono whitespace-pre-wrap select-all", size === "lg" ? "text-sm" : "text-[13px]")}>
+        <Wrapped text={value} />
+      </code>
+      <CopyButton value={value} label={label} withText={size === "lg" && "Copy"} variant={size === "lg" ? "outline" : "ghost"} />
     </div>
   );
 }
 
 /** A multi-line snippet with a copy button. Plain text only. */
-export function CodeBlock({ code, className, title, wrap }: { code: string; className?: string; title?: React.ReactNode; /** Wrap long lines (shell commands) instead of scrolling. */ wrap?: boolean }) {
+export function CodeBlock({
+  code,
+  className,
+  title,
+  wrap,
+  copyLabel = "Copy",
+}: {
+  code: string;
+  className?: string;
+  title?: React.ReactNode;
+  /** Wrap long lines (shell commands) at spaces and separators instead of scrolling. */
+  wrap?: boolean;
+  /** What the copy button copies, e.g. "Copy command". */
+  copyLabel?: string;
+}) {
   return (
     <div className={cn("overflow-hidden rounded-lg border bg-muted/40", className)}>
       {title && (
         <div className="flex items-center justify-between gap-2 border-b bg-muted/40 py-1 pr-1 pl-3 text-xs text-muted-foreground">
           <span className="truncate font-mono">{title}</span>
-          <CopyButton value={code} />
+          <CopyButton value={code} label={copyLabel} />
         </div>
       )}
       <div className="relative">
-        <pre className={cn("overflow-x-auto p-3 font-mono text-xs leading-relaxed", !title && "pr-10", wrap && "whitespace-pre-wrap [overflow-wrap:anywhere]")}>{code}</pre>
-        {!title && <CopyButton value={code} className="absolute top-1.5 right-1.5" />}
+        <pre className={cn("overflow-x-auto p-3 font-mono text-xs leading-relaxed text-foreground", !title && "pr-10", wrap && "whitespace-pre-wrap")}>
+          {wrap ? <Wrapped text={code} /> : code}
+        </pre>
+        {!title && <CopyButton value={code} label={copyLabel} className="absolute top-1.5 right-1.5" />}
       </div>
     </div>
   );
@@ -215,7 +274,7 @@ export function TimeAgo({ date, className, fallback = "—" }: { date: string | 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <time dateTime={date} className={cn("whitespace-nowrap underline decoration-dotted decoration-muted-foreground/40 underline-offset-4", className)} tabIndex={0}>
+        <time dateTime={date} className={cn("whitespace-nowrap underline decoration-dotted decoration-muted-foreground/40 underline-offset-4", className)}>
           {fmtAgo(date)}
         </time>
       </TooltipTrigger>
@@ -239,6 +298,22 @@ export function ExternalLink({ href, children, className }: { href: string; chil
   );
 }
 
+/** Turns the https:// URLs in a server hint into links (they're deep links to the fix). */
+export function linkify(text: string): React.ReactNode {
+  const parts = text.split(/(https:\/\/[^\s)]+[^\s).,;:])/);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    i % 2 ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="break-all underline underline-offset-3">
+        {part}
+        <span className="sr-only"> (opens in a new tab)</span>
+      </a>
+    ) : (
+      part
+    ),
+  );
+}
+
 /** Server error, rendered prominently with its remediation hint. */
 export function ErrorAlert({
   error,
@@ -258,7 +333,7 @@ export function ErrorAlert({
       <AlertTitle>{title ?? message}</AlertTitle>
       <AlertDescription>
         {title && <p>{message}</p>}
-        {hint && <p className="text-foreground/80">{hint}</p>}
+        {hint && <p className="text-foreground/80">{linkify(hint)}</p>}
         {children}
       </AlertDescription>
     </Alert>

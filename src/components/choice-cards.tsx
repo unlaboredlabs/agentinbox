@@ -38,13 +38,14 @@ export function ChoiceCards<T extends string>({
           value={c.value}
           className={cn(
             "group flex w-full items-start gap-3 rounded-lg border bg-card p-3 text-left text-sm transition-colors outline-none",
-            "hover:bg-muted/50 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
+            // Focus uses an outline so the checked card's ring can't hide it.
+            "hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-solid focus-visible:outline-ring",
             "data-[state=checked]:border-primary data-[state=checked]:bg-muted/40 data-[state=checked]:ring-1 data-[state=checked]:ring-primary",
           )}
         >
           <span
             aria-hidden
-            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-input group-data-[state=checked]:border-primary"
+            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-muted-foreground/60 group-data-[state=checked]:border-primary"
           >
             <span className="size-2 rounded-full bg-primary opacity-0 transition-opacity group-data-[state=checked]:opacity-100" />
           </span>

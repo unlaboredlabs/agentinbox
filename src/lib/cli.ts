@@ -1,6 +1,7 @@
 // Everything the console tells people to paste into a terminal: the npm package name, the
 // `connect` / `listen` commands and per-tool recipes. Mirrors server/listen/recipes.ts (agent side).
 
+// Relative (not @shared): the setup-logic unit tests type-check this file under the server config.
 import type { AgentTool } from "../../shared/agent-api.ts";
 
 /** The npm package; the command it installs is `agentinbox`. Swap for NPM_PACKAGE from @shared/types once it exists. */

@@ -1,4 +1,5 @@
 import type { Account, ConnectAccountResponse } from "@shared/types";
+import { useQuery } from "@tanstack/react-query";
 import { ExternalLinkIcon } from "lucide-react";
 import { useState } from "react";
 import { ErrorAlert } from "@/components/common";
@@ -7,7 +8,8 @@ import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { UnverifiedTip } from "./unverified-tip";
+import { queries } from "@/lib/queries";
+import { GoogleErrorHelp } from "./google-error-help";
 
 /** Checks a pasted redirect URL before sending it; returns a problem description or null. */
 function checkPasted(value: string, state: string): string | null {
@@ -29,7 +31,18 @@ function checkPasted(value: string, state: string): string | null {
  * Paste mode: the public URL is plain http on a non-localhost host, so Google can't redirect back here.
  * The user signs in in a new tab, lands on an unreachable page, and pastes that address back.
  */
-export function PasteCallback({ res, onConnected }: { res: ConnectAccountResponse; onConnected: (a: Account) => void }) {
+export function PasteCallback({
+  res,
+  onConnected,
+  compact,
+}: {
+  res: ConnectAccountResponse;
+  onConnected: (a: Account) => void;
+  /** Only the paste field (the fallback in pop-up mode, where sign-in was already opened). */
+  compact?: boolean;
+}) {
+  const client = useQuery(queries.googleClient());
+  const placeholder = `${client.data?.redirectUri ?? "http://localhost:8425/oauth/callback"}?state=…&code=…`;
   const [opened, setOpened] = useState(false);
   const [value, setValue] = useState("");
   const [error, setError] = useState<unknown>();
@@ -49,6 +62,39 @@ export function PasteCallback({ res, onConnected }: { res: ConnectAccountRespons
       setPending(false);
     }
   };
+
+  const field = (label: React.ReactNode) => (
+    <Field className="min-w-0 flex-1" data-invalid={!!problem}>
+      <FieldLabel htmlFor={compact ? "pasted-url-fallback" : "pasted-url"}>{label}</FieldLabel>
+      <Textarea
+        id={compact ? "pasted-url-fallback" : "pasted-url"}
+        rows={3}
+        spellCheck={false}
+        placeholder={placeholder}
+        className="font-mono text-xs break-all"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        aria-invalid={!!problem}
+      />
+      {problem ? <FieldError>{problem}</FieldError> : <FieldDescription>It contains a one-time code; it can't be reused.</FieldDescription>}
+    </Field>
+  );
+  const finishButton = (
+    <Button type="submit" disabled={!value.trim() || !!problem || pending} variant={compact ? "outline" : "default"}>
+      {pending && <Spinner />}
+      Finish connecting
+    </Button>
+  );
+
+  if (compact) {
+    return (
+      <form onSubmit={submit} className="space-y-3">
+        {field("Copy the full address from the sign-in window's address bar and paste it here")}
+        {error !== undefined && <ErrorAlert error={error} title="Couldn't finish connecting" />}
+        <div className="flex justify-end">{finishButton}</div>
+      </form>
+    );
+  }
 
   return (
     <form onSubmit={submit} className="space-y-4">
@@ -72,30 +118,12 @@ export function PasteCallback({ res, onConnected }: { res: ConnectAccountRespons
         </li>
         <li className="flex gap-3">
           <StepNum n={3} />
-          <Field className="min-w-0 flex-1" data-invalid={!!problem}>
-            <FieldLabel htmlFor="pasted-url">Copy the full address from that tab's address bar and paste it here</FieldLabel>
-            <Textarea
-              id="pasted-url"
-              rows={3}
-              spellCheck={false}
-              placeholder="http://localhost:8425/oauth/callback?state=…&code=…"
-              className="font-mono text-xs break-all"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              aria-invalid={!!problem}
-            />
-            {problem ? <FieldError>{problem}</FieldError> : <FieldDescription>It contains a one-time code; it can't be reused.</FieldDescription>}
-          </Field>
+          {field("Copy the full address from that tab's address bar and paste it here")}
         </li>
       </ol>
       {error !== undefined && <ErrorAlert error={error} title="Couldn't finish connecting" />}
-      <div className="flex justify-end">
-        <Button type="submit" disabled={!value.trim() || !!problem || pending}>
-          {pending && <Spinner />}
-          Finish connecting
-        </Button>
-      </div>
-      <UnverifiedTip />
+      <div className="flex justify-end">{finishButton}</div>
+      <GoogleErrorHelp />
     </form>
   );
 }
