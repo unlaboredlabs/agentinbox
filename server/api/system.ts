@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Context } from "hono";
-import type { HealthResponse, IngestStatus, SystemInfo, UpdateInfo } from "../../shared/types.ts";
+import { type HealthResponse, type IngestStatus, NPM_PACKAGE, type SystemInfo, type UpdateInfo } from "../../shared/types.ts";
 import { type Config, DEFAULT_PORT } from "../config.ts";
 import type { AppContext } from "../context.ts";
 import { consoleUrls } from "../urls.ts";
@@ -9,7 +9,6 @@ import { errorMessage } from "../util/errors.ts";
 import { setupState } from "./setup.ts";
 import { type AppEnv, router } from "./util.ts";
 
-export const PACKAGE_NAME = "agentinbox";
 const DEFAULT_HOST = "0.0.0.0";
 const LATEST_TTL_MS = 30 * 60_000;
 const LATEST_RETRY_MS = 5 * 60_000;
@@ -25,7 +24,7 @@ export function healthRoutes(ctx: AppContext) {
     return c.json<HealthResponse>(body, body.status === "ok" ? 200 : 503);
   };
   // Also with a trailing slash, which would otherwise fall through to the console and keep a monitor green.
-  return router().get("/health", handler).get("/health/", handler).get("/api/health", handler);
+  return router().get("/health", handler).get("/health/", handler).get("/api/health", handler).get("/api/health/", handler);
 }
 
 export function health(ctx: AppContext): HealthResponse {
@@ -94,7 +93,7 @@ async function latestVersion(ctx: AppContext): Promise<string | null> {
   }
   let version: string | null = null;
   try {
-    const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE}/latest`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     version = ((await res.json()) as { version?: string }).version ?? null;
   } catch (err) {
@@ -104,11 +103,16 @@ async function latestVersion(ctx: AppContext): Promise<string | null> {
   return version;
 }
 
-/** Compares dotted versions numerically; a pre-release sorts before its release. */
+/**
+ * Semver precedence: numeric core, then a pre-release sorts before its release, and pre-release
+ * identifiers compare numerically when both are numbers ("nightly.10" > "nightly.9").
+ */
 export function compareVersions(a: string, b: string): number {
   const parse = (v: string) => {
-    const [core = "", pre] = v.replace(/^v/, "").split("-", 2);
-    return { parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0), pre: pre ?? null };
+    const clean = v.trim().replace(/^v/, "").split("+")[0]!;
+    const dash = clean.indexOf("-");
+    const core = dash === -1 ? clean : clean.slice(0, dash);
+    return { parts: core.split(".").map((n) => Number.parseInt(n, 10) || 0), pre: dash === -1 ? null : clean.slice(dash + 1).split(".") };
   };
   const x = parse(a);
   const y = parse(b);
@@ -116,17 +120,32 @@ export function compareVersions(a: string, b: string): number {
     const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0);
     if (d) return Math.sign(d);
   }
-  if (x.pre === y.pre) return 0;
-  if (x.pre === null) return 1;
-  if (y.pre === null) return -1;
-  return x.pre < y.pre ? -1 : 1;
+  if (!x.pre || !y.pre) return x.pre === y.pre ? 0 : x.pre ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) {
+      const d = Number(p) - Number(q);
+      if (d) return Math.sign(d);
+    } else if (pn !== qn) {
+      return pn ? -1 : 1;
+    } else if (p !== q) {
+      return p < q ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
 const DEFAULT_DATA_DIR = () => resolve(join(homedir(), ".agentinbox"));
 
 /** Runs, or reinstalls as a service, the latest version with this instance's options. */
-export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "port" | "host">): string {
-  const args = ["npx", "-y", PACKAGE_NAME];
+export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "port" | "host" | "trustProxy">): string {
+  // A service keeps TRUST_PROXY from its previous install, but a foreground run needs it again.
+  const args = [...(config.trustProxy ? ["TRUST_PROXY=1"] : []), "npx", "-y", NPM_PACKAGE];
   if (config.service) args.push("service", "install");
   if (config.dataDir !== DEFAULT_DATA_DIR()) args.push("--data", config.dataDir);
   if (config.port !== DEFAULT_PORT) args.push("--port", String(config.port));

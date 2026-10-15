@@ -1,3 +1,4 @@
+import { chmodSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { MIGRATIONS } from "./schema.ts";
 
@@ -13,6 +14,16 @@ export class Db {
     this.raw = new DatabaseSync(path);
     this.raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     this.migrate();
+    // The database holds (encrypted) tokens and the audit log: owner-only, whatever the umask.
+    if (path !== ":memory:") {
+      for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+        try {
+          chmodSync(file, 0o600);
+        } catch {
+          // Not created (yet) or not ours to change.
+        }
+      }
+    }
   }
 
   get<T = Row>(sql: string, ...params: Param[]): T | undefined {

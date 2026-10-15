@@ -1,53 +1,115 @@
+import { isIPv6 } from "node:net";
 import { sha256 } from "../crypto.ts";
 
+/** Distinct wrong secrets per client within the window before a ban. */
 export const MAX_FAILURES = 5;
+/** Raw failed attempts per client within the window (repeats of the same wrong secret included). */
+export const MAX_ATTEMPTS = 30;
+/** Distinct wrong secrets across all clients within the window before sign-in pauses for everyone. */
+export const GLOBAL_MAX_FAILURES = 100;
+export const WINDOW_MS = 15 * 60_000;
 export const BAN_MS = 15 * 60_000;
+/** Tracked clients; the least recently seen is dropped beyond this. */
+export const MAX_ENTRIES = 10_000;
 
 interface Entry {
   tried: Set<string>;
+  attempts: number;
   since: number;
   bannedUntil: number;
 }
 
 /**
- * Failed-login limiter per client IP: 5 distinct wrong secrets within 15 minutes ban the address
- * for 15 minutes. Each distinct secret counts once, so a client retrying the same stale password
- * (or several tabs doing so at once) can't spend every attempt.
+ * Failed sign-in limiter. Per client (IPv4 address or IPv6 /64): 5 distinct wrong secrets or 30
+ * attempts within 15 minutes ban it for 15 minutes. A secret already known to be wrong is
+ * rejected without hashing (`knownBad`) and counts only as an attempt, so a client retrying a stale
+ * password can't spend every attempt, and can't make the server hash it again either. A global
+ * budget of distinct failures caps distributed guessing.
  */
 export class LoginLimiter {
   private readonly entries = new Map<string, Entry>();
+  private global = { failures: 0, since: 0 };
 
   constructor(private readonly clock: () => number = Date.now) {}
 
-  /** Minutes until the ban ends, or 0 when the address may try. */
+  /** Minutes until this client may try again, or 0. */
   bannedMinutes(ip: string): number {
-    const entry = this.entries.get(ip);
-    const left = entry ? entry.bannedUntil - this.clock() : 0;
-    return left > 0 ? Math.ceil(left / 60_000) : 0;
+    const t = this.clock();
+    const entry = this.entries.get(clientKey(ip));
+    let until = entry && entry.bannedUntil > t ? entry.bannedUntil : 0;
+    if (this.global.failures >= GLOBAL_MAX_FAILURES && t - this.global.since < WINDOW_MS) {
+      until = Math.max(until, this.global.since + WINDOW_MS);
+    }
+    return until > t ? Math.ceil((until - t) / 60_000) : 0;
   }
 
-  /** Records a failure; returns true when this failure started a ban. */
+  /** The client already failed with exactly this secret in the current window. */
+  knownBad(ip: string, secret: string): boolean {
+    const entry = this.current(clientKey(ip), this.clock());
+    return !!entry?.tried.has(sha256(secret));
+  }
+
+  /** Records a failure; returns true when it started a ban for this client. */
   fail(ip: string, secret: string): boolean {
     const t = this.clock();
-    const entry = this.entries.get(ip);
-    const fresh = entry && !entry.bannedUntil && t - entry.since < BAN_MS;
-    const tried = fresh ? entry.tried : new Set<string>();
-    tried.add(sha256(secret));
-    const banned = tried.size >= MAX_FAILURES;
-    this.entries.set(ip, { tried, since: fresh ? entry.since : t, bannedUntil: banned ? t + BAN_MS : 0 });
-    this.sweep(t);
+    const key = clientKey(ip);
+    const entry = this.current(key, t) ?? { tried: new Set<string>(), attempts: 0, since: t, bannedUntil: 0 };
+    const hash = sha256(secret);
+    if (!entry.tried.has(hash)) {
+      entry.tried.add(hash);
+      if (t - this.global.since >= WINDOW_MS) this.global = { failures: 0, since: t };
+      this.global.failures++;
+    }
+    entry.attempts++;
+    const banned = entry.tried.size >= MAX_FAILURES || entry.attempts >= MAX_ATTEMPTS;
+    if (banned) entry.bannedUntil = t + BAN_MS;
+    this.touch(key, entry);
     return banned;
   }
 
   clear(ip: string): void {
-    this.entries.delete(ip);
+    this.entries.delete(clientKey(ip));
   }
 
-  /** Bounds memory under a spray of addresses. */
-  private sweep(t: number): void {
-    if (this.entries.size < 1000) return;
-    for (const [ip, e] of this.entries) {
-      if (e.bannedUntil < t && t - e.since >= BAN_MS) this.entries.delete(ip);
-    }
+  /** After the password changes, previously wrong secrets may be right. */
+  reset(): void {
+    this.entries.clear();
+    this.global = { failures: 0, since: 0 };
   }
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  /** The client's entry if its window (or ban) is still running. */
+  private current(key: string, t: number): Entry | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    if (entry.bannedUntil > t || (!entry.bannedUntil && t - entry.since < WINDOW_MS)) return entry;
+    this.entries.delete(key);
+    return undefined;
+  }
+
+  /** Map order doubles as LRU order: re-insert on use, evict from the front. */
+  private touch(key: string, entry: Entry): void {
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    while (this.entries.size > MAX_ENTRIES) this.entries.delete(this.entries.keys().next().value!);
+  }
+}
+
+/** IPv4 addresses as is (also when IPv4-mapped); IPv6 by /64, since one client usually owns the whole prefix. */
+export function clientKey(ip: string): string {
+  const addr = ip.replace(/%.*$/, "").toLowerCase();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
+  if (mapped) return mapped[1]!;
+  if (!isIPv6(addr)) return addr;
+  const [head = "", tail] = addr.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(8 - left.length - right.length).fill("0"), ...right];
+  return `${groups
+    .slice(0, 4)
+    .map((g) => g.replace(/^0+(?=.)/, ""))
+    .join(":")}::/64`;
 }

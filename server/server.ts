@@ -6,7 +6,9 @@ import { createApp } from "./app.ts";
 import { currentSetupToken } from "./auth/index.ts";
 import { type Config, type ConfigInput, loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
+import { acquireInstanceLock, assertMasterKeyUsable, cliCommand } from "./instance.ts";
 import { startMaintenance } from "./maintenance.ts";
+import { setupTokenPath } from "./auth/setup-token.ts";
 import { consoleUrls, loopbackUrl } from "./urls.ts";
 import { errorMessage } from "./util/errors.ts";
 import { createAppContext, type ServiceOverrides, startServices, stopServices } from "./wire.ts";
@@ -28,23 +30,35 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+
 /**
- * Builds the context, binds the port, then starts services (so a second instance that can't bind
- * never runs ingest against the same data). Use `port: 0` in tests; `config.port` is updated to
- * the bound port.
+ * Takes the data directory's instance lock, checks the master key against stored secrets, builds
+ * the context, binds the port, then starts services (so a second instance never runs ingest
+ * against the same data). Use `port: 0` in tests; `config.port` is updated to the bound port.
  */
 export async function startServer(opts: StartOptions): Promise<RunningServer> {
   const { config } = opts;
-  const ctx = createAppContext(config, opts.overrides);
+  const lock = acquireInstanceLock(config);
+  let ctx: AppContext;
   let server: ServerType;
+  try {
+    assertMasterKeyUsable(config);
+    ctx = createAppContext(config, opts.overrides);
+  } catch (err) {
+    lock.release();
+    throw err;
+  }
   try {
     const app = createApp(ctx, { webDir: opts.webDir });
     server = await listen(app.fetch, config.host, config.port);
   } catch (err) {
     ctx.db.close();
+    lock.release();
     throw friendlyListenError(err, config.port);
   }
   config.port = (server.address() as AddressInfo).port;
+  lock.update(config.port);
 
   let stopMaintenance = () => {};
   let closing: Promise<void> | undefined;
@@ -57,6 +71,7 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
         (server as { closeAllConnections?: () => void }).closeAllConnections?.();
       });
       await stopServices(ctx);
+      lock.release();
     })());
 
   try {
@@ -107,6 +122,10 @@ export async function runForeground(opts: RunOptions): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
       console.log(pc.dim(`\n  Stopping agentinbox…`));
+      setTimeout(() => {
+        console.error(`agentinbox did not stop within ${SHUTDOWN_TIMEOUT_MS / 1000} s; exiting anyway.`);
+        process.exit(1);
+      }, SHUTDOWN_TIMEOUT_MS).unref();
       running.close().then(
         () => process.exit(0),
         (err) => {
@@ -123,7 +142,13 @@ function printBanner(ctx: AppContext): void {
   const urls = config.dev ? ["http://localhost:5173"] : consoleUrls(config.host, config.port);
   const token = currentSetupToken(ctx);
   const out: string[] = ["", `  ${pc.bold("agentinbox")} ${pc.dim(`v${config.version} · data in ${config.dataDir}`)}`, ""];
-  if (token) {
+  if (token && config.service) {
+    // Service logs are often readable by others (journal, log files): never print the token there.
+    out.push(
+      `  ${pc.yellow("Not claimed yet.")} The setup link is ${urls[0]}/setup?token=<token>, with the token in ${setupTokenPath(config.dataDir)}.`,
+      `  ${pc.dim(`\`${cliCommand("service install")}\` prints the full link.`)}`,
+    );
+  } else if (token) {
     out.push(`  ${pc.yellow("First run:")} open this link to claim the instance and finish setup:`, "");
     for (const url of urls) out.push(`  ${pc.cyan(`${url}/setup?token=${token}`)}`);
   } else {

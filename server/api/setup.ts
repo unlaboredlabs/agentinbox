@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { GoogleClientView, PubsubState, SetupState, SetupStatus } from "../../shared/types.ts";
 import {
   adminAuth,
+  checkSecret,
   clientIp,
   hasSession,
   isClaimed,
@@ -12,11 +13,15 @@ import {
 } from "../auth/index.ts";
 import { deleteSetupToken, readSetupToken } from "../auth/setup-token.ts";
 import type { AppContext } from "../context.ts";
-import { hashPassword, safeEqual } from "../crypto.ts";
+import { cliCommand } from "../instance.ts";
+import { hashPasswordAsync, safeEqual } from "../crypto.ts";
 import { badRequest, conflict, HttpError } from "../util/errors.ts";
 import { readBody, router } from "./util.ts";
 
-const ClaimBody = z.object({ token: z.string().trim().min(1, "Setup token is required"), password: z.string() });
+const ClaimBody = z.object({
+  token: z.string().trim().min(1, "Setup token is required").max(200),
+  password: z.string().max(MAX_PASSWORD_LENGTH, `Password must be at most ${MAX_PASSWORD_LENGTH} characters`),
+});
 
 /** Unauthenticated: first-run status and the one-time claim. Mounted before the admin guard. */
 export function setupPublicApi(ctx: AppContext) {
@@ -34,17 +39,21 @@ export function setupPublicApi(ctx: AppContext) {
       if (isClaimed(ctx)) throw conflict("This instance is already claimed", "Sign in with the admin password instead.");
       const expected = readSetupToken(ctx.config.dataDir);
       if (!expected) {
-        throw new HttpError(403, "invalid_token", "The setup link has expired", "Restart agentinbox or run `agentinbox reset-password` for a new link.");
+        throw new HttpError(403, "invalid_token", "The setup link has expired", `Restart agentinbox or run \`${cliCommand("reset-password")}\` for a new link.`);
       }
-      if (!safeEqual(body.token, expected)) {
-        auth.limiter.fail(ip, `claim:${body.token}`);
-        ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "denied", reason: "invalid_token", detail: { ip } });
+      const check = await checkSecret(ctx, ip, `claim:${body.token}`, () => safeEqual(body.token, expected));
+      if (!check.ok) {
+        if (check.lockedMinutes) return lockedOut(c, check.lockedMinutes);
+        ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "denied", reason: check.nowBanned ? "lockout" : "invalid_token", detail: { ip } });
         throw new HttpError(403, "invalid_token", "Invalid setup token", "Use the exact setup link printed by agentinbox on startup.");
       }
       checkPassword(body.password);
-      ctx.settings.setState("admin.passwordHash", hashPassword(body.password));
+      const hash = await hashPasswordAsync(body.password);
+      // A concurrent claim may have won while hashing.
+      if (isClaimed(ctx)) throw conflict("This instance is already claimed", "Sign in with the admin password instead.");
+      ctx.settings.setState("admin.passwordHash", hash);
       deleteSetupToken(ctx.config.dataDir);
-      auth.limiter.clear(ip);
+      auth.limiter.reset();
       startSession(c, ctx);
       ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "ok", detail: { ip } });
       return c.body(null, 204);

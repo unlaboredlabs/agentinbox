@@ -1,7 +1,18 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { Command, InvalidArgumentError } from "commander";
 import pc from "picocolors";
+
+// node:sqlite is stable enough for us but still warns on Node 22. This runs before any server
+// module loads: everything that touches node:sqlite is imported dynamically below.
+const emitWarning = process.emitWarning.bind(process);
+process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+  const message = typeof warning === "string" ? warning : warning.message;
+  const type = typeof rest[0] === "string" ? rest[0] : (rest[0] as { type?: string } | undefined)?.type;
+  if ((type === "ExperimentalWarning" || (warning as Error).name === "ExperimentalWarning") && /SQLite/i.test(message)) return;
+  return (emitWarning as (...args: unknown[]) => void)(warning, ...rest);
+}) as typeof process.emitWarning;
 
 /** package.json sits one level above both dist/cli.js and server/cli.ts. */
 function packageVersion(): string {
@@ -20,10 +31,20 @@ interface ServerFlags {
   data?: string;
 }
 
+const validPort = (value: string) => /^\d+$/.test(value) && Number(value) <= 65535;
+
 function parsePort(value: string): number {
-  const n = Number(value);
-  if (!/^\d+$/.test(value) || n < 0 || n > 65535) throw new InvalidArgumentError("Port must be a number from 0 to 65535.");
-  return n;
+  if (!validPort(value)) throw new InvalidArgumentError("Port must be a number from 0 to 65535.");
+  return Number(value);
+}
+
+/** --port, else a validated PORT env (a typo there would otherwise become NaN deep inside). */
+function portOption(flag: number | undefined): number | undefined {
+  if (flag !== undefined) return flag;
+  const env = process.env.PORT?.trim();
+  if (!env) return undefined;
+  if (!validPort(env)) throw new Error(`PORT="${process.env.PORT}" is not a valid port. Use a number from 0 to 65535.`);
+  return Number(env);
 }
 
 const withServerOptions = (cmd: Command) =>
@@ -32,12 +53,13 @@ const withServerOptions = (cmd: Command) =>
     .option("--host <host>", "bind address (default 0.0.0.0, env HOST)")
     .option("-d, --data <dir>", "data directory (default ~/.agentinbox, env AGENTINBOX_DATA)");
 
-const configInput = (o: ServerFlags) => ({ port: o.port, host: o.host, dataDir: o.data });
+const configInput = (o: ServerFlags) => ({ port: portOption(o.port), host: o.host, dataDir: o.data });
 
 const program = new Command("agentinbox")
   .description("Self-hosted Gmail broker for AI agents: MCP tools, webhooks, guardrails and a web console.")
   .version(version, "-v, --version", "print the version")
   .helpOption("-h, --help", "show help")
+  .addHelpText("after", "\nWithout installing: npx agentinbox-cli [command]. To install the command: npm i -g agentinbox-cli")
   .showSuggestionAfterError();
 
 withServerOptions(program.command("start", { isDefault: true }).description("run agentinbox in the foreground (default)"))
@@ -103,20 +125,48 @@ skill
 
 withServerOptions(program.command("reset-password").description("remove the admin password and print a new setup link")).action(
   async (o: ServerFlags) => {
+    // Never create a data directory or master key here: a wrong --data (or a service running as
+    // another user) must not silently produce a fresh instance.
+    const dataDir = resolve(o.data ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
+    const dbPath = join(dataDir, "agentinbox.db");
+    if (!existsSync(dbPath)) {
+      throw new Error(
+        `No agentinbox data in ${dataDir}. If agentinbox runs as a system service, run this with sudo; ` +
+          "otherwise pass the data directory it uses with --data.",
+      );
+    }
     const { loadConfig } = await import("./config.ts");
-    const { createCore } = await import("./context.ts");
-    const { resetAdminPassword } = await import("./auth/index.ts");
+    const { Db } = await import("./db/index.ts");
+    const { createBus } = await import("./bus.ts");
+    const { SettingsStore } = await import("./settings.ts");
+    const { AuditLog } = await import("./audit.ts");
+    const { currentSetupToken, isClaimed, resetAdminPassword } = await import("./auth/index.ts");
+    const { runningInstance } = await import("./instance.ts");
     const { consoleUrls } = await import("./urls.ts");
-    const config = loadConfig(configInput(o), version);
-    const core = createCore(config);
+
+    const running = runningInstance(dataDir);
+    const config = loadConfig(
+      { dataDir, port: portOption(o.port) ?? running?.port, host: o.host ?? (process.env.HOST || running?.host) },
+      version,
+    );
+    const db = new Db(dbPath);
     try {
-      const token = resetAdminPassword(core);
-      console.log("\n  The admin password was removed and all console sessions were signed out.");
-      console.log("  Open this link to set a new password:\n");
-      for (const url of consoleUrls(config.host, config.port)) console.log(`  ${pc.cyan(`${url}/setup?token=${token}`)}`);
-      console.log(pc.dim("\n  A running agentinbox picks this up immediately; no restart needed.\n"));
+      const bus = createBus();
+      const core = { config, db, settings: new SettingsStore(db, bus, config), audit: new AuditLog(db, bus) };
+      const claimed = isClaimed(core);
+      const token = claimed ? resetAdminPassword(core) : currentSetupToken(core)!;
+      console.log(
+        claimed
+          ? "\n  The admin password was removed and all console sessions were signed out.\n  Open this link to set a new password:\n"
+          : "\n  This instance hasn't been claimed yet, so there is no password to reset.\n  Open this link to claim it:\n",
+      );
+      const urls = consoleUrls(config.host, config.port);
+      const publicUrl = core.settings.publicUrl();
+      if (!urls.includes(publicUrl)) urls.push(publicUrl);
+      for (const url of urls) console.log(`  ${pc.cyan(`${url}/setup?token=${token}`)}`);
+      console.log(pc.dim(`\n  ${running ? "The running agentinbox picks this up immediately; no restart needed." : "Start agentinbox to use it."}\n`));
     } finally {
-      core.db.close();
+      db.close();
     }
   },
 );

@@ -3,6 +3,8 @@ import { sha256 } from "../crypto.ts";
 import type { Db } from "../db/index.ts";
 
 export const SESSION_TTL_MS = 30 * 24 * 3600_000;
+/** Sliding refresh never extends a session past this age: sign in again after 90 days. */
+export const SESSION_MAX_AGE_MS = 90 * 24 * 3600_000;
 /** Sliding expiry is pushed forward at most once per this interval, to avoid a write per request. */
 const REFRESH_AFTER_MS = 24 * 3600_000;
 
@@ -36,16 +38,21 @@ export class SessionStore {
   check(token: string | undefined | null): SessionCheck {
     if (!token) return { valid: false, refreshed: false };
     const hash = sha256(token);
-    const row = this.db.get<{ expires_at: string }>("SELECT expires_at FROM admin_sessions WHERE token_hash = ?", hash);
+    const row = this.db.get<{ created_at: string; expires_at: string }>(
+      "SELECT created_at, expires_at FROM admin_sessions WHERE token_hash = ?",
+      hash,
+    );
     if (!row) return { valid: false, refreshed: false };
     const t = this.clock();
     const expires = Date.parse(row.expires_at);
-    if (!(expires > t)) {
+    const hardLimit = Date.parse(row.created_at) + SESSION_MAX_AGE_MS;
+    if (!(expires > t) || !(hardLimit > t)) {
       this.db.run("DELETE FROM admin_sessions WHERE token_hash = ?", hash);
       return { valid: false, refreshed: false };
     }
-    if (t + SESSION_TTL_MS - expires < REFRESH_AFTER_MS) return { valid: true, refreshed: false };
-    this.db.run("UPDATE admin_sessions SET expires_at = ? WHERE token_hash = ?", new Date(t + SESSION_TTL_MS).toISOString(), hash);
+    const next = Math.min(t + SESSION_TTL_MS, hardLimit);
+    if (next - expires < REFRESH_AFTER_MS) return { valid: true, refreshed: false };
+    this.db.run("UPDATE admin_sessions SET expires_at = ? WHERE token_hash = ?", new Date(next).toISOString(), hash);
     return { valid: true, refreshed: true };
   }
 

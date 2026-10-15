@@ -1,131 +1,107 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { NPM_PACKAGE as PACKAGE } from "../shared/types.ts";
 import { readSetupToken } from "./auth/setup-token.ts";
 import type { Config } from "./config.ts";
+import { Crypto } from "./crypto.ts";
+import { assertMasterKeyUsable, cliCommand } from "./instance.ts";
 import { consoleUrls, loopbackUrl } from "./urls.ts";
 
 /** Installs agentinbox as a background service: systemd on Linux, launchd on macOS. */
 
-const NAME = "agentinbox";
-const PACKAGE = "agentinbox";
-const LABEL = "com.unlaboredlabs.agentinbox";
+export const SERVICE_NAME = "agentinbox";
+export const LAUNCHD_LABEL = "com.unlaboredlabs.agentinbox";
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 /** Package root: one level above the running module (dist/cli.js or server/service.ts). */
 const ROOT = resolve(import.meta.dirname, "..");
 
-type ServiceConfig = Pick<Config, "dataDir" | "port" | "host">;
+/**
+ * Settings that come from the environment rather than flags. They are kept in `<data>/service.env`
+ * (mode 0600) so re-running `service install` from a shell without them (the documented update
+ * path) keeps them. Set one to an empty value to drop it.
+ */
+export const SERVICE_ENV_KEYS = ["AGENTINBOX_MASTER_KEY", "TRUST_PROXY", "AGENTINBOX_LOG_LEVEL"] as const;
+
+type ServiceConfig = Pick<Config, "dataDir" | "port" | "host" | "dbPath" | "masterKeyPath">;
 
 const run = (cmd: string, args: string[], quiet = false) => execFileSync(cmd, args, { stdio: quiet ? "ignore" : "inherit" });
 
 const isRoot = () => process.getuid?.() === 0;
 const systemctl = (...args: string[]) => run("systemctl", isRoot() ? args : ["--user", ...args]);
-const unitPath = () => (isRoot() ? `/etc/systemd/system/${NAME}.service` : join(homedir(), ".config/systemd/user", `${NAME}.service`));
-const plistPath = () => join(homedir(), "Library/LaunchAgents", `${LABEL}.plist`);
+const unitPath = () => (isRoot() ? `/etc/systemd/system/${SERVICE_NAME}.service` : join(homedir(), ".config/systemd/user", `${SERVICE_NAME}.service`));
+const plistPath = () => join(homedir(), "Library/LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 const launchdTarget = () => `gui/${process.getuid?.()}`;
-const envFilePath = (config: ServiceConfig) => join(config.dataDir, "service.env");
+export const serviceEnvPath = (dataDir: string) => join(dataDir, "service.env");
 
-/**
- * The service runs from its own install in the data directory, never from the npx cache (which is
- * pruned at will). From an installed package that is the latest release; from a source checkout,
- * the local build.
- */
-function installedEntry(config: ServiceConfig): string {
-  const app = join(config.dataDir, "app");
-  const fromSource = basename(dirname(ROOT)) !== "node_modules";
-  let spec = `${PACKAGE}@latest`;
-  let tmp: string | undefined;
-  if (fromSource) {
-    if (!existsSync(join(ROOT, "dist/cli.js")) || !existsSync(join(ROOT, "dist/web/index.html"))) {
-      throw new Error("Run `pnpm build` before installing the service from a source checkout.");
-    }
-    tmp = mkdtempSync(join(tmpdir(), "agentinbox-pack-"));
-    const out = execFileSync(npm, ["pack", "--ignore-scripts", "--pack-destination", tmp, "--loglevel=error"], { cwd: ROOT, encoding: "utf8" });
-    spec = join(tmp, out.trim().split("\n").pop()!);
-  }
+// ───────────── Pure rendering (unit-tested) ─────────────
 
-  console.log(fromSource ? "  Installing this build into the data directory…" : "  Installing the latest release into the data directory…");
-  rmSync(app, { recursive: true, force: true });
-  mkdirSync(app, { recursive: true });
-  writeFileSync(join(app, "package.json"), '{ "private": true }\n');
-  try {
-    execFileSync(npm, ["install", spec, "--omit=dev", "--prefer-online", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: app, stdio: "inherit" });
-  } finally {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
-  }
-  return join(app, "node_modules", PACKAGE, "dist/cli.js");
+export interface ServiceSpec {
+  /** Node binary. */
+  execPath: string;
+  /** The installed dist/cli.js. */
+  entry: string;
+  dataDir: string;
+  port: number;
+  host: string;
+  /** Extra environment from service.env (SERVICE_ENV_KEYS). */
+  extraEnv: Record<string, string>;
+  /** systemd: system unit (root) rather than a user unit. */
+  system?: boolean;
 }
 
-function environment(config: ServiceConfig): Record<string, string> {
-  const env: Record<string, string> = {
-    AGENTINBOX_DATA: config.dataDir,
-    PORT: String(config.port),
-    HOST: config.host,
-    AGENTINBOX_SERVICE: "1",
-  };
-  for (const key of ["TRUST_PROXY", "AGENTINBOX_LOG_LEVEL"]) {
-    if (process.env[key]) env[key] = process.env[key]!;
-  }
-  return env;
+/** Plain variables written into the unit/plist. Secrets never go into the systemd unit. */
+function plainEnv(spec: ServiceSpec): Record<string, string> {
+  return { AGENTINBOX_DATA: spec.dataDir, PORT: String(spec.port), HOST: spec.host, AGENTINBOX_SERVICE: "1" };
 }
 
-/**
- * AGENTINBOX_MASTER_KEY must reach the service, or it would generate a new master.key and fail to
- * decrypt existing secrets. It goes into a 0600 env file, never into the (world-readable) unit.
- */
-function writeSecretEnv(config: ServiceConfig): boolean {
-  const key = process.env.AGENTINBOX_MASTER_KEY;
-  const file = envFilePath(config);
-  if (!key) {
-    rmSync(file, { force: true });
-    return false;
-  }
-  writeFileSync(file, `AGENTINBOX_MASTER_KEY=${key}\n`, { mode: 0o600 });
-  return true;
-}
-
-/** systemd quoting: wrap in double quotes, escape backslashes, quotes and specifiers. */
+/** systemd word quoting for ExecStart/Environment: double quotes, escaped backslashes, quotes and specifiers. */
 const sdQuote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
 
-function systemdUnit(config: ServiceConfig, entry: string, secretEnv: boolean): string {
-  const vars = Object.entries(environment(config))
+/**
+ * The systemd unit. Everything from service.env (including AGENTINBOX_MASTER_KEY) is loaded with
+ * EnvironmentFile=, so the world-readable unit holds no secrets. EnvironmentFile takes an
+ * unquoted absolute path (systemd ignores quoted ones), which is why data dirs with whitespace are refused.
+ */
+export function renderSystemdUnit(spec: ServiceSpec): string {
+  const vars = Object.entries(plainEnv(spec))
     .map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`)
     .join("\n");
+  const envFile = Object.keys(spec.extraEnv).length ? `\nEnvironmentFile=${serviceEnvPath(spec.dataDir).replace(/%/g, "%%")}` : "";
   return `[Unit]
 Description=agentinbox (Gmail broker for AI agents)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${sdQuote(process.execPath)} ${sdQuote(entry)} start --no-open
-${vars}${secretEnv ? `\nEnvironmentFile=${sdQuote(envFilePath(config))}` : ""}
+ExecStart=${sdQuote(spec.execPath)} ${sdQuote(spec.entry)} start --no-open
+${vars}${envFile}
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
 
 [Install]
-WantedBy=${isRoot() ? "multi-user.target" : "default.target"}
+WantedBy=${spec.system ? "multi-user.target" : "default.target"}
 `;
 }
 
-function launchdPlist(config: ServiceConfig, entry: string): string {
+/** The launchd plist. Written with mode 0600, since it may carry AGENTINBOX_MASTER_KEY. */
+export function renderLaunchdPlist(spec: ServiceSpec): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const env = environment(config);
-  if (process.env.AGENTINBOX_MASTER_KEY) env.AGENTINBOX_MASTER_KEY = process.env.AGENTINBOX_MASTER_KEY;
-  const vars = Object.entries(env)
-    .map(([k, v]) => `    <key>${k}</key><string>${esc(v)}</string>`)
+  const vars = Object.entries({ ...plainEnv(spec), ...spec.extraEnv })
+    .map(([k, v]) => `    <key>${esc(k)}</key><string>${esc(v)}</string>`)
     .join("\n");
-  const log = esc(join(config.dataDir, "agentinbox.log"));
+  const log = esc(join(spec.dataDir, "agentinbox.log"));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LABEL}</string>
+  <key>Label</key><string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${esc(process.execPath)}</string>
-    <string>${esc(entry)}</string>
+    <string>${esc(spec.execPath)}</string>
+    <string>${esc(spec.entry)}</string>
     <string>start</string>
     <string>--no-open</string>
   </array>
@@ -142,24 +118,136 @@ ${vars}
 `;
 }
 
+/** Parses service.env (KEY=value lines). */
+export function parseEnvFile(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const m = /^\s*([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (m) out[m[1]!] = m[2]!.trim();
+  }
+  return out;
+}
+
+/**
+ * The service's env-derived settings: the current shell wins, previous install fills the gaps,
+ * an explicitly empty value removes the setting.
+ */
+export function mergeServiceEnv(previous: Record<string, string>, current: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of SERVICE_ENV_KEYS) {
+    const value = key in current ? current[key] : previous[key];
+    if (value) out[key] = value;
+  }
+  return out;
+}
+
+/** Fails early (before anything is touched) when the master key can't work. */
+export function validateMasterKey(value: string | undefined): void {
+  if (!value) return;
+  try {
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value.trim())) throw new Error("not base64");
+    new Crypto(Buffer.from(value, "base64"));
+  } catch {
+    throw new Error("AGENTINBOX_MASTER_KEY must be 32 random bytes in base64 (e.g. `openssl rand -base64 32`).");
+  }
+}
+
+// ───────────── Install ─────────────
+
+function readPreviousEnv(dataDir: string): Record<string, string> {
+  try {
+    return parseEnvFile(readFileSync(serviceEnvPath(dataDir), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function writeServiceEnv(dataDir: string, env: Record<string, string>): void {
+  const file = serviceEnvPath(dataDir);
+  if (!Object.keys(env).length) {
+    rmSync(file, { force: true });
+    return;
+  }
+  for (const [k, v] of Object.entries(env)) {
+    if (/[\r\n]/.test(v)) throw new Error(`${k} must be a single line.`);
+  }
+  writeFileSync(file, Object.entries(env).map(([k, v]) => `${k}=${v}\n`).join(""), { mode: 0o600 });
+}
+
+/**
+ * Installs the package into `<data>/app.new`, so a failed npm install leaves the current service
+ * untouched. From an installed package that is the latest release; from a source checkout, the
+ * local build. Returns the staging directory.
+ */
+function stageApp(dataDir: string): string {
+  const staging = join(dataDir, "app.new");
+  const fromSource = basename(dirname(ROOT)) !== "node_modules";
+  let spec = `${PACKAGE}@latest`;
+  let tmp: string | undefined;
+  if (fromSource) {
+    if (!existsSync(join(ROOT, "dist/cli.js")) || !existsSync(join(ROOT, "dist/web/index.html"))) {
+      throw new Error("Run `pnpm build` before installing the service from a source checkout.");
+    }
+    tmp = mkdtempSync(join(tmpdir(), "agentinbox-pack-"));
+    const out = execFileSync(npm, ["pack", "--ignore-scripts", "--pack-destination", tmp, "--loglevel=error"], { cwd: ROOT, encoding: "utf8" });
+    spec = join(tmp, out.trim().split("\n").pop()!);
+  }
+
+  console.log(fromSource ? "  Installing this build into the data directory…" : "  Installing the latest release into the data directory…");
+  rmSync(staging, { recursive: true, force: true });
+  mkdirSync(staging, { recursive: true });
+  writeFileSync(join(staging, "package.json"), '{ "private": true }\n');
+  try {
+    execFileSync(npm, ["install", spec, "--omit=dev", "--prefer-online", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: staging, stdio: "inherit" });
+    if (!existsSync(join(staging, "node_modules", PACKAGE, "dist/cli.js"))) throw new Error("the installed package has no dist/cli.js");
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw new Error(`Installing agentinbox failed, so the existing service was left as it was. ${err instanceof Error ? err.message : ""}`.trim());
+  } finally {
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+  }
+  return staging;
+}
+
+/** Replaces `<data>/app` with the staged install (call while the service is stopped). */
+function swapApp(dataDir: string, staging: string): string {
+  const app = join(dataDir, "app");
+  const old = join(dataDir, "app.old");
+  rmSync(old, { recursive: true, force: true });
+  if (existsSync(app)) renameSync(app, old);
+  renameSync(staging, app);
+  rmSync(old, { recursive: true, force: true });
+  return join(app, "node_modules", PACKAGE, "dist/cli.js");
+}
+
 function assertSupported(): void {
   if (process.platform !== "linux" && process.platform !== "darwin") {
-    throw new Error("Service install supports Linux (systemd) and macOS (launchd). Elsewhere, run `agentinbox start` under your own supervisor.");
+    throw new Error(`Service install supports Linux (systemd) and macOS (launchd). Elsewhere, run \`${cliCommand("start")}\` under your own supervisor.`);
   }
 }
 
 export async function installService(config: ServiceConfig): Promise<void> {
   assertSupported();
-  uninstallService(config, true);
+  if (process.platform === "linux" && /\s/.test(config.dataDir)) {
+    throw new Error(`The data directory "${config.dataDir}" contains whitespace, which systemd can't load settings from. Choose another one with --data.`);
+  }
+  const extraEnv = mergeServiceEnv(readPreviousEnv(config.dataDir), process.env);
+  validateMasterKey(extraEnv.AGENTINBOX_MASTER_KEY);
+  // The service must be able to read what's already stored, with exactly the key it will get.
+  assertMasterKeyUsable(config, extraEnv.AGENTINBOX_MASTER_KEY ?? "");
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
-  const entry = installedEntry(config);
+
+  const staging = stageApp(config.dataDir);
+  uninstallService(config, true);
+  const entry = swapApp(config.dataDir, staging);
+  writeServiceEnv(config.dataDir, extraEnv);
+  const spec: ServiceSpec = { execPath: process.execPath, entry, dataDir: config.dataDir, port: config.port, host: config.host, extraEnv, system: isRoot() };
 
   if (process.platform === "linux") {
-    const secretEnv = writeSecretEnv(config);
     mkdirSync(dirname(unitPath()), { recursive: true });
-    writeFileSync(unitPath(), systemdUnit(config, entry, secretEnv));
+    writeFileSync(unitPath(), renderSystemdUnit(spec));
     systemctl("daemon-reload");
-    systemctl("enable", "--now", NAME);
+    systemctl("enable", "--now", SERVICE_NAME);
     if (!isRoot()) {
       // Keep user services running after logout and start them at boot.
       const user = userInfo().username;
@@ -171,12 +259,13 @@ export async function installService(config: ServiceConfig): Promise<void> {
     }
   } else {
     mkdirSync(dirname(plistPath()), { recursive: true });
-    // 0600: the plist may carry AGENTINBOX_MASTER_KEY.
-    writeFileSync(plistPath(), launchdPlist(config, entry), { mode: 0o600 });
+    writeFileSync(plistPath(), renderLaunchdPlist(spec), { mode: 0o600 });
     run("launchctl", ["bootstrap", launchdTarget(), plistPath()]);
   }
 
-  console.log(`\n  Installed ${NAME} as a ${process.platform === "linux" ? "systemd" : "launchd"} service.`);
+  const kept = Object.keys(extraEnv).filter((k) => !(k in process.env));
+  console.log(`\n  Installed ${SERVICE_NAME} as a ${process.platform === "linux" ? "systemd" : "launchd"} service.`);
+  if (kept.length) console.log(`  Kept ${kept.join(", ")} from the previous install.`);
   await printWhenReady(config);
 }
 
@@ -188,7 +277,7 @@ export function uninstallService(config: ServiceConfig, quiet = false): void {
       return;
     }
     try {
-      systemctl("disable", "--now", NAME);
+      systemctl("disable", "--now", SERVICE_NAME);
     } catch {
       // Already stopped.
     }
@@ -200,20 +289,20 @@ export function uninstallService(config: ServiceConfig, quiet = false): void {
       return;
     }
     try {
-      run("launchctl", ["bootout", `${launchdTarget()}/${LABEL}`], true);
+      run("launchctl", ["bootout", `${launchdTarget()}/${LAUNCHD_LABEL}`], true);
     } catch {
       // Not loaded.
     }
     rmSync(plistPath());
   }
-  if (!quiet) console.log(`Removed the ${NAME} service. Your data in ${config.dataDir} was kept.`);
+  if (!quiet) console.log(`Removed the ${SERVICE_NAME} service. Your data in ${config.dataDir} was kept.`);
 }
 
 export function serviceStatus(): void {
   assertSupported();
   try {
-    if (process.platform === "linux") systemctl("status", NAME, "--no-pager");
-    else run("launchctl", ["print", `${launchdTarget()}/${LABEL}`]);
+    if (process.platform === "linux") systemctl("status", SERVICE_NAME, "--no-pager");
+    else run("launchctl", ["print", `${launchdTarget()}/${LAUNCHD_LABEL}`]);
   } catch {
     process.exitCode = 1;
   }
@@ -238,5 +327,5 @@ async function printWhenReady(config: ServiceConfig): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  console.warn(`  The service did not respond on port ${config.port} yet. Check \`agentinbox service status\`.`);
+  console.warn(`  The service did not respond on port ${config.port} yet. Check \`${cliCommand("service status")}\`.`);
 }

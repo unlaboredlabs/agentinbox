@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,11 +16,12 @@ afterEach(async () => {
   h = undefined;
 });
 
+const THEME_SCRIPT = "document.documentElement.classList.add('dark')";
 let webDir: string;
 beforeAll(() => {
   webDir = mkdtempSync(join(tmpdir(), "agentinbox-web-"));
   mkdirSync(join(webDir, "assets"));
-  writeFileSync(join(webDir, "index.html"), "<!doctype html><title>console</title>");
+  writeFileSync(join(webDir, "index.html"), `<!doctype html><title>console</title><script>${THEME_SCRIPT}</script><script type="module" src="/assets/app-abc123.js"></script>`);
   writeFileSync(join(webDir, "assets", "app-abc123.js"), "console.log(1)");
 });
 afterAll(() => rmSync(webDir, { recursive: true, force: true }));
@@ -37,12 +39,13 @@ function addAccount(id: string, status: string) {
 describe("health", () => {
   it("is public, with security headers and no secrets", async () => {
     h = harness();
-    for (const path of ["/health", "/api/health", "/health/"]) {
+    for (const path of ["/health", "/api/health", "/health/", "/api/health/"]) {
       const res = await h.request(path);
       expect(res.status).toBe(200);
       expect(await json(res)).toEqual({ status: "ok", version: "0.0.0-test", setupComplete: false });
       expect(res.headers.get("x-frame-options")).toBe("DENY");
-      expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+      expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     }
@@ -129,15 +132,20 @@ describe("system API", () => {
   });
 
   it("builds the upgrade command and compares versions", () => {
-    const base = { service: false, dataDir: join(process.env.HOME ?? "", ".agentinbox"), port: 8425, host: "0.0.0.0" };
-    expect(upgradeCommand(base)).toBe("npx -y agentinbox");
+    const base = { service: false, dataDir: join(process.env.HOME ?? "", ".agentinbox"), port: 8425, host: "0.0.0.0", trustProxy: false };
+    expect(upgradeCommand(base)).toBe("npx -y agentinbox-cli");
     expect(upgradeCommand({ ...base, service: true, port: 9000, dataDir: "/srv/my data" })).toBe(
-      "npx -y agentinbox service install --data '/srv/my data' --port 9000",
+      "npx -y agentinbox-cli service install --data '/srv/my data' --port 9000",
     );
     expect(compareVersions("0.2.0", "0.1.9")).toBe(1);
     expect(compareVersions("0.1.0", "0.1.0")).toBe(0);
     expect(compareVersions("0.1.0-nightly.1", "0.1.0")).toBe(-1);
     expect(compareVersions("1.10.0", "1.9.0")).toBe(1);
+    expect(compareVersions("0.2.0-nightly.10", "0.2.0-nightly.9")).toBe(1);
+    expect(compareVersions("0.2.0-nightly.2", "0.2.0-nightly.2")).toBe(0);
+    expect(compareVersions("0.2.0-alpha", "0.2.0-alpha.1")).toBe(-1);
+    expect(compareVersions("0.2.0-1", "0.2.0-alpha")).toBe(-1);
+    expect(upgradeCommand({ ...base, trustProxy: true })).toBe("TRUST_PROXY=1 npx -y agentinbox-cli");
   });
 });
 
@@ -170,10 +178,19 @@ describe("console", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("<title>console</title>");
     expect(res.headers.get("cache-control")).toBe("no-cache");
+    // The inline theme script is allowed by hash, nothing else inline.
+    const hash = createHash("sha256").update(THEME_SCRIPT).digest("base64");
+    expect(res.headers.get("content-security-policy")).toContain(`script-src 'self' 'sha256-${hash}';`);
 
     res = await h.request("/agents/agt_123?tab=grants");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    expect(res.headers.get("content-security-policy")).toContain(`'sha256-${hash}'`);
+    // Client routes may contain dots.
+    res = await h.request("/accounts/me@example.com");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    expect((await h.request("/favicon.ico")).status).toBe(404);
 
     res = await h.request("/assets/app-abc123.js");
     expect(res.status).toBe(200);

@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -34,6 +34,7 @@ export const DEFAULT_PORT = 8425;
 export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
   const dataDir = resolve(input.dataDir ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  restrictDir(dataDir);
   return {
     dataDir,
     dbPath: join(dataDir, "agentinbox.db"),
@@ -51,4 +52,16 @@ export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
       pubsubBase: process.env.AGENTINBOX_GOOGLE_PUBSUB_BASE ?? "https://pubsub.googleapis.com",
     },
   };
+}
+
+/** An existing data dir may be group/world accessible (umask, manual mkdir): tighten it to owner-only. */
+function restrictDir(dir: string): void {
+  try {
+    if (process.platform !== "win32" && statSync(dir).mode & 0o077) {
+      chmodSync(dir, 0o700);
+      process.stderr.write(`agentinbox: restricted ${dir} to owner-only access (it was readable by other users).\n`);
+    }
+  } catch {
+    // Not ours to change; the files inside are still created owner-only.
+  }
 }

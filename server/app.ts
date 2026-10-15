@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ApiError } from "../shared/types.ts";
@@ -36,6 +38,45 @@ export interface AppOptions {
  */
 export const DEFAULT_WEB_DIR = resolve(import.meta.dirname, "..", "dist", "web");
 
+const API_BODY_LIMIT = 1024 * 1024;
+const AUTH_BODY_LIMIT = 16 * 1024;
+const AUTH_PATHS = ["/api/setup/claim", "/api/auth/login", "/api/auth/password"];
+
+/** Extensions served as files; any other path (even with a dot, e.g. /accounts/me@example.com) is a console route. */
+const ASSET_EXTENSIONS = new Set([
+  ".js", ".mjs", ".css", ".map", ".json", ".webmanifest", ".txt", ".xml",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico",
+  ".woff", ".woff2", ".ttf", ".otf", ".wasm",
+]);
+
+/**
+ * Content Security Policy for every response. Inline scripts in HTML we serve (the console's
+ * theme bootstrap, the OAuth callback page) are allowed by hash, nothing else inline is.
+ */
+export function contentSecurityPolicy(scriptHashes: string[] = []): string {
+  return [
+    "default-src 'self'",
+    `script-src 'self'${scriptHashes.map((h) => ` '${h}'`).join("")}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join("; ");
+}
+
+/** sha256 sources for the inline (no src) scripts in an HTML document. */
+export function inlineScriptHashes(html: string): string[] {
+  const hashes = new Set<string>();
+  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+    if (/\bsrc\s*=/i.test(m[1]!) || !m[2]) continue;
+    hashes.add(`sha256-${createHash("sha256").update(m[2]).digest("base64")}`);
+  }
+  return [...hashes];
+}
+
 /** Paths the console's index.html fallback must never answer. */
 const SERVER_PREFIXES = ["/api", "/mcp", "/oauth", "/skill.md", "/health"];
 const isServerPath = (path: string) => SERVER_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
@@ -47,9 +88,15 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
 
   app.use("*", async (c, next) => {
     await next();
+    let hashes: string[] = [];
+    if (c.req.method !== "HEAD" && c.res.headers.get("content-type")?.startsWith("text/html") && c.res.body) {
+      const html = await c.res.text();
+      hashes = inlineScriptHashes(html);
+      c.res = new Response(html, c.res);
+    }
     try {
+      c.res.headers.set("Content-Security-Policy", contentSecurityPolicy(hashes));
       c.res.headers.set("X-Frame-Options", "DENY");
-      c.res.headers.set("Content-Security-Policy", "frame-ancestors 'none'");
       c.res.headers.set("X-Content-Type-Options", "nosniff");
       c.res.headers.set("Referrer-Policy", "no-referrer");
     } catch {
@@ -64,6 +111,9 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   });
 
   // ── Public ──
+  const tooLarge = (c: Context) => apiError(c, 413, "payload_too_large", "Request body is too large");
+  for (const path of AUTH_PATHS) app.use(path, bodyLimit({ maxSize: AUTH_BODY_LIMIT, onError: tooLarge }));
+  app.use("/api/*", bodyLimit({ maxSize: API_BODY_LIMIT, onError: tooLarge }));
   app.use("/api/*", csrfGuard());
   app.route("/", healthRoutes(ctx));
   app.route("/api", setupPublicApi(ctx));
@@ -110,7 +160,7 @@ function serveConsole(app: Hono<AppEnv>, webDir: string): void {
   app.get("*", (c) => {
     const path = c.req.path;
     // Client routes get index.html; a missing file (e.g. a stale /assets/x.js) is a real 404.
-    if (isServerPath(path) || extname(path)) return c.notFound();
+    if (isServerPath(path) || path.startsWith("/assets/") || ASSET_EXTENSIONS.has(extname(path).toLowerCase())) return c.notFound();
     c.header("Cache-Control", "no-cache");
     return c.html(readFileSync(index, "utf8"));
   });
@@ -120,7 +170,7 @@ function errorResponse(ctx: AppContext, err: Error, c: Context): Response {
   if (err instanceof HttpError) return c.json(err.toJSON(), err.status as 400);
   if (err instanceof PolicyDenied) return apiError(c, 403, "policy_denied", err.message);
   if (err instanceof z.ZodError) return apiError(c, 400, "bad_request", z.prettifyError(err));
-  if (err instanceof HTTPException) return apiError(c, err.status, "http_error", err.message || "Request failed");
+  if (err instanceof HTTPException) return err.res ? err.getResponse() : apiError(c, err.status, "http_error", err.message || "Request failed");
   if (err instanceof SyntaxError && /JSON/i.test(err.message)) return apiError(c, 400, "bad_request", "Request body must be valid JSON");
   ctx.log.error(`${c.req.method} ${c.req.path} failed`, { error: err.message, stack: err.stack });
   return apiError(c, 500, "internal", "Something went wrong. Check the agentinbox logs for details.");

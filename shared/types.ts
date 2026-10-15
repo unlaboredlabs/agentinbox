@@ -2,6 +2,9 @@
 // Everything crossing the HTTP boundary of the console API (/api/*) is typed here.
 // Timestamps are ISO-8601 strings in UTC. IDs are prefixed opaque strings (e.g. "agt_…").
 
+/** The npm package (`npx agentinbox-cli`); the command it installs is `agentinbox`. */
+export const NPM_PACKAGE = "agentinbox-cli";
+
 // ───────────────────────────── Domain enums ─────────────────────────────
 
 /** What an agent may do with a mailbox. `read` also grants search, labels, attachments and the event feed. */

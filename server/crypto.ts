@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, type ScryptOptions, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 /**
@@ -59,6 +59,25 @@ export function verifyPassword(password: string, stored: string): boolean {
     r: Number(r),
     p: Number(p),
   });
+  return timingSafeEqual(actual, expected);
+}
+
+const scryptAsync = (password: string, salt: Buffer, length: number, opts: ScryptOptions) =>
+  new Promise<Buffer>((resolve, reject) => scrypt(password, salt, length, opts, (err, key) => (err ? reject(err) : resolve(key))));
+
+/** Like hashPassword, but runs scrypt on the thread pool instead of blocking the event loop. */
+export async function hashPasswordAsync(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const hash = await scryptAsync(password, salt, 32, { N: 16384, r: 8, p: 1 });
+  return `scrypt$16384$8$1$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
+
+/** Like verifyPassword, but runs scrypt on the thread pool instead of blocking the event loop. */
+export async function verifyPasswordAsync(password: string, stored: string): Promise<boolean> {
+  const [alg, n, r, p, salt, hash] = stored.split("$");
+  if (alg !== "scrypt" || !salt || !hash) return false;
+  const expected = Buffer.from(hash, "base64");
+  const actual = await scryptAsync(password, Buffer.from(salt, "base64"), expected.length, { N: Number(n), r: Number(r), p: Number(p) });
   return timingSafeEqual(actual, expected);
 }
 

@@ -1,7 +1,7 @@
 # agentinbox
 
 [![CI](https://github.com/unlaboredlabs/agentinbox/actions/workflows/ci.yml/badge.svg)](https://github.com/unlaboredlabs/agentinbox/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/agentinbox)](https://www.npmjs.com/package/agentinbox)
+[![npm](https://img.shields.io/npm/v/agentinbox-cli)](https://www.npmjs.com/package/agentinbox-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A self-hosted Gmail broker for AI agents. One small daemon holds your Gmail credentials; every agent gets its own
@@ -48,8 +48,11 @@ project, with no cloud service in between.
 Requires Node.js 22.13 or newer.
 
 ```sh
-npx agentinbox
+npx agentinbox-cli
 ```
+
+The npm package is `agentinbox-cli`; the command it provides is `agentinbox`. Use `npx agentinbox-cli …` for one-off
+runs, or `npm i -g agentinbox-cli` and then `agentinbox …`.
 
 agentinbox starts on port 8425 and prints a one-time setup link (and opens it if it can):
 
@@ -130,10 +133,10 @@ and that email content is data, never instructions. Install it on the machine wh
 agentinbox needed there):
 
 ```sh
-npx agentinbox skill install --url https://mail.example.com              # ~/.claude/skills/agentinbox/SKILL.md
-npx agentinbox skill install --target codex --url https://mail.example.com
-npx agentinbox skill install --target ./skills --url https://mail.example.com
-npx agentinbox skill print --url https://mail.example.com                 # to stdout
+npx agentinbox-cli skill install --url https://mail.example.com          # ~/.claude/skills/agentinbox/SKILL.md
+npx agentinbox-cli skill install --target codex --url https://mail.example.com
+npx agentinbox-cli skill install --target ./skills --url https://mail.example.com
+npx agentinbox-cli skill print --url https://mail.example.com             # to stdout
 ```
 
 Every instance also serves it at `/skill.md` with its public URL filled in.
@@ -192,9 +195,11 @@ informational; nothing is withheld because of them.
 **Everything is audited.** Every tool call and every console change is recorded with its outcome, and denials name the
 guardrail that blocked them.
 
-**The console** is protected by an admin password (set through the one-time setup link), HttpOnly session cookies, a
-CSRF header on every change, and a 15-minute lockout after five wrong passwords from one address. It never allows
-being framed.
+**The console** is protected by an admin password (set through the one-time setup link), HttpOnly session cookies
+that expire after 30 days of inactivity (90 at most), a CSRF header on every change, request size limits, a strict
+Content Security Policy, and a 15-minute lockout after five wrong passwords from one address (or 30 attempts, with an
+instance-wide cap on top). It never allows being framed. The data directory and database are readable only by their
+owner.
 
 Recommendations: split agents that read untrusted mail from agents that can send; prefer `draft_only` or `approval`;
 use allowlists for anything that sends directly.
@@ -204,14 +209,18 @@ use allowlists for anything that sends directly.
 ### As a service
 
 ```sh
-npx agentinbox service install
+npx agentinbox-cli service install
 ```
 
 Installs a background service that starts at boot: systemd on Linux (a user service with lingering enabled, or a system
 service when run as root) and launchd on macOS. The service runs its own copy of agentinbox from the data directory,
-so it never depends on the npx cache. Re-run `service install` to update; `service status` and `service uninstall` do
-what you'd expect, and uninstalling keeps your data. Options such as `--port`, `--host` and `--data` carry over into
-the service.
+so it never depends on the npx cache; a failed install leaves the running service as it was. Re-run `service install`
+to update; `service status` and `service uninstall` do what you'd expect, and uninstalling keeps your data. Pass the same
+`--port`, `--host` and `--data` options each time. `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY` and `AGENTINBOX_LOG_LEVEL` are
+taken from your shell and remembered in `<data>/service.env`, so later installs keep them (set one to an empty value to
+remove it).
+
+Only one agentinbox runs per data directory; a second one refuses to start.
 
 When a newer version is published, the console shows **Update available** with the exact command to run.
 
@@ -221,7 +230,8 @@ agentinbox serves plain HTTP. To expose it beyond your network, put it behind a 
 Tailscale Funnel) and:
 
 - bind it to localhost: `--host 127.0.0.1`
-- set `TRUST_PROXY=1`, so lockouts apply per client and cookies are marked `Secure`
+- set `TRUST_PROXY=1`, so lockouts apply per client and cookies are marked `Secure`. The client address is taken from
+  the right end of `X-Forwarded-For`; with more than one proxy in front, set `TRUST_PROXY_HOPS` to their number
 - set **Settings → Public URL** to the https address, so MCP snippets, the skill and the OAuth redirect use it
 
 `GET /health` (or `/api/health`) needs no auth and suits uptime monitors: `200` when healthy, `503` when degraded, for
@@ -229,6 +239,8 @@ example when an account needs to be reconnected or ingest is failing. It reports
 whether setup is complete.
 
 ### Options
+
+With a global install (`npm i -g agentinbox-cli`); otherwise prefix `npx agentinbox-cli` instead of `agentinbox`.
 
 ```
 agentinbox [start] [--port 8425] [--host 0.0.0.0] [--data ~/.agentinbox] [--no-open] [--dev]
@@ -245,10 +257,12 @@ agentinbox reset-password [--data …]
 | `--data` | `AGENTINBOX_DATA` | `~/.agentinbox` | Data directory |
 | | `AGENTINBOX_MASTER_KEY` | | Base64 32-byte key for encrypting secrets, instead of `<data>/master.key` |
 | | `TRUST_PROXY` | | `1` behind a reverse proxy: client IPs from `X-Forwarded-For`, https from `X-Forwarded-Proto` |
+| | `TRUST_PROXY_HOPS` | `1` | Number of proxies in front of agentinbox (which `X-Forwarded-For` entry, from the right, is the client) |
 | | `AGENTINBOX_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
-Forgot the admin password? Run `agentinbox reset-password` on the server (with the same `--data`). It signs out all
-sessions and prints a new setup link; a running instance picks it up without a restart.
+Forgot the admin password? Run `npx agentinbox-cli reset-password` on the server, as the user agentinbox runs as (`sudo` for a
+system service) and with the same `--data`. It signs out all sessions and prints a new setup link; a running instance
+picks it up without a restart.
 
 ## Data and backups
 
@@ -259,10 +273,16 @@ Everything lives in the data directory (`~/.agentinbox` by default):
 | `agentinbox.db` | SQLite database: accounts, encrypted tokens, agents, grants, events, deliveries, approvals, audit log |
 | `master.key` | Encrypts refresh tokens, webhook secrets and the OAuth client secret (mode 0600) |
 | `setup-token` | The one-time setup token, until the instance is claimed |
+| `agentinbox.lock` | Marks the running instance (pid and port) |
+| `service.env` | Environment the service was installed with, possibly including `AGENTINBOX_MASTER_KEY` (mode 0600; `service install` only) |
+| `agentinbox.log` | Service output on macOS (launchd); on Linux use `journalctl --user -u agentinbox` (or without `--user` for a system service) |
 | `app/` | The service's own install (`service install` only) |
 
-Back up `agentinbox.db` and `master.key` together: without the key, stored secrets can't be decrypted and accounts must
-be reconnected. Keep the key somewhere safer than the database backup, or supply it via `AGENTINBOX_MASTER_KEY`. Mail
+Back up `agentinbox.db` and `master.key` together: without the key, stored secrets can't be decrypted, and agentinbox
+refuses to start rather than create a new one. Keep the key somewhere safer than the database backup, or supply it via
+`AGENTINBOX_MASTER_KEY`. The database runs in WAL mode, so don't just copy the file while agentinbox is running: stop
+it first (`systemctl --user stop agentinbox`), or take a consistent copy with
+`sqlite3 ~/.agentinbox/agentinbox.db ".backup /path/to/backup.db"`. Mail
 bodies are never stored; agentinbox keeps metadata (ids, headers, labels, snippets) and fetches content from Gmail on
 demand. Events, deliveries and audit entries are pruned after the retention period set in **Settings** (30 days by
 default).
