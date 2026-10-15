@@ -127,6 +127,18 @@ export function ensureConsumerSlot(ctx: AppContext, agentId: string, consumer: s
   db.run("DELETE FROM listener_cursors WHERE agent_id = ? AND consumer = ?", agentId, idle.consumer);
 }
 
+/**
+ * Evidence that some agent works end to end (SetupState.verified): an agent's tool called /mcp, or
+ * a listener acked an event past where its cursor started (a new consumer starts at the head, so
+ * acked_seq alone isn't proof; start_seq is NULL for cursors from before migration 4 or made by an ack).
+ */
+export function anyAgentVerified(db: Db): boolean {
+  return !!db.get(
+    `SELECT 1 AS ok WHERE EXISTS (SELECT 1 FROM agents WHERE last_mcp_at IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM listener_cursors WHERE acked_seq > COALESCE(start_seq, 0))`,
+  );
+}
+
 /** Console pushes for acks: at most one per agent per this interval (the last ack in a burst still goes out). */
 const ACK_PUSH_INTERVAL_MS = 1000;
 

@@ -26,15 +26,14 @@ const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" &
 /**
  * Evidence that the agent's tool talks to agentinbox over MCP.
  * - lastToolCall: an MCP tool call in the audit log (exact).
- * - connectedAt: `lastUsedAt`, but only while no listener exists: lastUsedAt is set by every use of
- *   the key (MCP, including the tools/list a tool runs at startup, and also `listen`), so once a
- *   listener has connected it proves nothing about MCP.
+ * - connectedAt: `lastMcpAt`, set by any request to /mcp (including the tools/list a tool runs at
+ *   startup, which isn't audited), never by `listen`.
  */
 export function useMcpActivity(agent: Agent | undefined, opts: { since?: string } = {}) {
   const audit = useQuery({ ...queries.recentAudit(agent?.id ?? ""), enabled: !!agent });
   const since = opts.since ? Date.parse(opts.since) : 0;
   const calls = agent ? (audit.data?.items ?? []).filter((e) => isToolCall(e, agent.id) && Date.parse(e.ts) >= since) : [];
   const lastToolCall = calls[0] ?? null;
-  const connectedAt = agent?.lastUsedAt && agent.listeners.length === 0 && Date.parse(agent.lastUsedAt) >= since ? agent.lastUsedAt : null;
+  const connectedAt = agent?.lastMcpAt && Date.parse(agent.lastMcpAt) >= since ? agent.lastMcpAt : null;
   return { lastToolCall, calls, connectedAt, seenAt: lastToolCall?.ts ?? connectedAt };
 }

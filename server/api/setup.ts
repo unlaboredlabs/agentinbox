@@ -13,6 +13,7 @@ import {
   startSession,
 } from "../auth/index.ts";
 import { deleteSetupToken, readSetupToken } from "../auth/setup-token.ts";
+import { anyAgentVerified } from "../agentapi/listeners.ts";
 import type { AppContext } from "../context.ts";
 import { cliCommand } from "../instance.ts";
 import { hashPasswordAsync, safeEqual } from "../crypto.ts";
@@ -91,6 +92,7 @@ export function setupState(ctx: AppContext, opts: { warnings?: boolean } = {}): 
     pubsub,
     accountsConnected,
     agentsCreated: count("agents"),
+    verified: anyAgentVerified(ctx.db),
     complete: claimed && googleClientConfigured && accountsConnected > 0,
     warnings: opts.warnings === false ? [] : (attempt(ctx, () => ctx.google.setupWarnings()) ?? []),
   };

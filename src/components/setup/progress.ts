@@ -117,7 +117,7 @@ export function stepStatuses(state: SetupState | undefined, draft: SetupDraft): 
     accounts: accountsDone ? "done" : "todo",
     pubsub: pubsubReady ? "done" : draft.pubsubSkipped ? "skipped" : "todo",
     agent: (s?.agentsCreated ?? 0) > 0 ? "done" : "todo",
-    verify: draft.verified ? "done" : "todo",
+    verify: s?.verified || draft.verified ? "done" : "todo",
   };
 }
 

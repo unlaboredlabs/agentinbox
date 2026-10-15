@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUpCircleIcon, CheckCircle2Icon } from "lucide-react";
+import { Command } from "@/components/agents/command";
 import { CodeBlock, QueryError, StatusDot, TimeAgo } from "@/components/common";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,7 +31,17 @@ export function SystemCard() {
             <dt className="text-muted-foreground">Data directory</dt>
             <dd className="font-mono text-xs break-all">{s.dataDir}</dd>
             <dt className="text-muted-foreground">Runs as</dt>
-            <dd>{s.service ? "System service (starts automatically)" : "Foreground process"}</dd>
+            <dd className="min-w-0 space-y-1.5">
+              <span className="block">{s.service ? "System service (starts automatically)" : "Foreground process"}</span>
+              {!s.service && (
+                <>
+                  <span className="block text-xs text-muted-foreground">
+                    Closing its terminal stops everything. To keep it running and start it at login, run this on the server:
+                  </span>
+                  <Command code={s.serviceCommand} label="service install command" />
+                </>
+              )}
+            </dd>
             <dt className="text-muted-foreground">Mail sync</dt>
             <dd className="space-y-0.5">
               <span className="flex items-center gap-1.5">

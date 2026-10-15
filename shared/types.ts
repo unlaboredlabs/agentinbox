@@ -100,6 +100,8 @@ export interface SetupState {
   pubsub: PubsubState;
   accountsConnected: number;
   agentsCreated: number;
+  /** Some agent is known to work: its tool called /mcp (Agent.lastMcpAt), or a listener acked an event. */
+  verified: boolean;
   /** All required steps done (claimed + client configured + ≥1 account). Pub/Sub is optional (poll fallback). */
   complete: boolean;
   /**

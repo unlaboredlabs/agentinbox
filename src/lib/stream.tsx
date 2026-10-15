@@ -1,5 +1,5 @@
-import type { ConsoleStreamMessage } from "@shared/types";
-import { useQueryClient } from "@tanstack/react-query";
+import type { Agent, ConsoleStreamMessage, SetupState } from "@shared/types";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { keys } from "./queries";
 
@@ -21,8 +21,30 @@ const STALE: Record<ConsoleStreamMessage["kind"], readonly (readonly string[])[]
   audit: [keys.audit, keys.agents, keys.overview],
   account: [keys.accounts, keys.setupState, keys.overview],
   pairing: [keys.pairings, keys.agents],
+  // Written into the cache instead (applyAgent): acks arrive up to once a second.
+  agent: [],
 };
 const ALL_STALE = [...new Set([...Object.values(STALE).flat(), keys.eventHistory, keys.auditLog])];
+
+/** An `agent` message carries the whole Agent: put it in the list and detail caches without a refetch. */
+function applyAgent(qc: QueryClient, agent: Agent) {
+  let known = false;
+  qc.setQueryData<Agent[]>(keys.agents, (old) =>
+    old?.map((a) => {
+      if (a.id !== agent.id) return a;
+      known = true;
+      return agent;
+    }),
+  );
+  if (qc.getQueryData(keys.agent(agent.id))) qc.setQueryData<Agent>(keys.agent(agent.id), agent);
+  // An agent the list hasn't seen yet (created elsewhere): fetch the list.
+  if (!known && qc.getQueryData(keys.agents)) void qc.invalidateQueries({ queryKey: keys.agents, exact: true });
+  // The first sign that an agent works completes setup (SetupState.verified is computed server-side).
+  const setup = qc.getQueryData<SetupState>(keys.setupState);
+  if (setup && !setup.verified && (agent.lastMcpAt || agent.listeners.some((l) => l.ackedSeq > 0))) {
+    void qc.invalidateQueries({ queryKey: keys.setupState });
+  }
+}
 
 function isMessage(v: unknown): v is ConsoleStreamMessage {
   return !!v && typeof v === "object" && typeof (v as { kind?: unknown }).kind === "string" && "data" in v;
@@ -75,6 +97,7 @@ export function StreamProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         if (!isMessage(msg)) return;
+        if (msg.kind === "agent") applyAgent(qc, msg.data);
         invalidate(STALE[msg.kind] ?? []);
         for (const l of listeners.current) l(msg);
       };
