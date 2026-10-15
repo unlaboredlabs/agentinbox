@@ -188,6 +188,11 @@ program
   },
 );
 
+// Agent side: `connect` (device-flow pairing), `setup-mcp`, `mcp-header` and `listen …` (see
+// docs/listen.md). Imported after the Node check, like everything else.
+const { registerListenCommands } = await import("./listen/commands.ts");
+registerListenCommands(program);
+
 /**
  * The URL written into SKILL.md: --url, AGENTINBOX_URL, else the agentinbox running on this
  * machine (its lock file), else http://localhost:8425.
