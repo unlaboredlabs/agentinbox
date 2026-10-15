@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { adminAuth, checkSecret } from "../server/auth/index.ts";
+import { adminAuth, checkSecret, isPrivateAddress, MAX_CONCURRENT_VERIFICATIONS } from "../server/auth/index.ts";
+import { contentSecurityPolicy, inlineScriptHashes, registerInlineScript, scriptHash } from "../server/csp.ts";
 import { BAN_MS, clientKey, GLOBAL_MAX_FAILURES, LoginLimiter, MAX_ATTEMPTS, MAX_ENTRIES } from "../server/auth/lockout.ts";
 import { SESSION_MAX_AGE_MS, SESSION_TTL_MS, SessionStore } from "../server/auth/sessions.ts";
 import { acquireInstanceLock, assertMasterKeyUsable, bootId, lockPath, processStartTime, runningInstance } from "../server/instance.ts";
@@ -61,6 +62,57 @@ describe("M1: lockout and hashing", () => {
   });
 });
 
+describe("N1: concurrent guesses", () => {
+  it("verifies at most 5 of 200 concurrent distinct guesses from one client", async () => {
+    h = harness();
+    await h.claim();
+    const codes: Record<number, number> = {};
+    await Promise.all(
+      Array.from({ length: 200 }, async (_, i) => {
+        const res = await login(`guess-${i}`);
+        codes[res.status] = (codes[res.status] ?? 0) + 1;
+      }),
+    );
+    // 401 = actually verified and wrong; everything else was turned away without hashing.
+    expect(codes[401] ?? 0).toBeLessThanOrEqual(5);
+    expect(codes[429]).toBeGreaterThanOrEqual(195);
+    expect((await login(PASSWORD)).status).toBe(429);
+  });
+
+  it("records the attempt before verifying, and never runs more than 4 verifications at once", async () => {
+    h = harness();
+    let running = 0;
+    let peak = 0;
+    let calls = 0;
+    const slowWrong = async () => {
+      calls++;
+      peak = Math.max(peak, ++running);
+      await new Promise((r) => setTimeout(r, 20));
+      running--;
+      return false;
+    };
+    // One client: everything is serialized and capped at 5 distinct secrets.
+    await Promise.all(Array.from({ length: 50 }, (_, i) => checkSecret(h!.ctx, "203.0.113.1", `s${i}`, slowWrong)));
+    expect(calls).toBeLessThanOrEqual(5);
+    expect(peak).toBe(1);
+    // Many clients: at most MAX_CONCURRENT_VERIFICATIONS at a time.
+    calls = 0;
+    peak = 0;
+    await Promise.all(Array.from({ length: 20 }, (_, i) => checkSecret(h!.ctx, `198.51.100.${i}`, "x", slowWrong)));
+    expect(calls).toBe(20);
+    expect(peak).toBe(MAX_CONCURRENT_VERIFICATIONS);
+  });
+
+  it("refunds the reservation when the secret is right", async () => {
+    h = harness();
+    const { limiter } = adminAuth(h.ctx);
+    for (let i = 0; i < 4; i++) await checkSecret(h.ctx, "203.0.113.2", `bad-${i}`, () => false);
+    // The 5th distinct secret is reserved (which bans) before it's verified; success lifts it.
+    expect((await checkSecret(h.ctx, "203.0.113.2", "good", () => true)).ok).toBe(true);
+    expect(limiter.bannedMinutes("203.0.113.2")).toBe(0);
+  });
+});
+
 describe("M2: client identity", () => {
   it("uses the rightmost X-Forwarded-For entry behind a trusted proxy", async () => {
     h = harness();
@@ -71,6 +123,29 @@ describe("M2: client identity", () => {
     expect((await login(PASSWORD, { "x-forwarded-for": "9.9.9.9, 203.0.113.7" })).status).toBe(429);
     // Other clients are unaffected.
     expect((await login(PASSWORD, { "x-forwarded-for": "198.51.100.1" })).status).toBe(204);
+  });
+
+  it("ignores X-Forwarded-For from a public peer, and entries that aren't IPs", async () => {
+    h = harness();
+    await h.claim();
+    h.ctx.config.trustProxy = true;
+    const peer = "198.51.100.77";
+    for (let i = 0; i < 5; i++) await h.request("/api/auth/login", { method: "POST", headers: { ...CSRF, "x-forwarded-for": `203.0.113.${i}` }, json: { password: `w${i}` }, peer });
+    // All five counted against the public peer itself.
+    expect((await h.request("/api/auth/login", { method: "POST", headers: CSRF, json: { password: PASSWORD }, peer })).status).toBe(429);
+    // Garbage in the chosen entry falls back to the (loopback) socket address.
+    for (let i = 0; i < 5; i++) await login(`x${i}`, { "x-forwarded-for": "not-an-ip" });
+    expect((await login(PASSWORD, { "x-forwarded-for": "198.51.100.8" })).status).toBe(204);
+    expect((await login(PASSWORD)).status).toBe(429);
+    expect(isPrivateAddress("10.1.2.3")).toBe(true);
+    expect(isPrivateAddress("172.20.0.1")).toBe(true);
+    expect(isPrivateAddress("100.100.1.1")).toBe(true);
+    expect(isPrivateAddress("::ffff:192.168.1.1")).toBe(true);
+    expect(isPrivateAddress("fd12::1")).toBe(true);
+    expect(isPrivateAddress("::1")).toBe(true);
+    expect(isPrivateAddress("172.32.0.1")).toBe(false);
+    expect(isPrivateAddress("8.8.8.8")).toBe(false);
+    expect(isPrivateAddress("2001:db8::1")).toBe(false);
   });
 
   it("honors TRUST_PROXY_HOPS", async () => {
@@ -143,6 +218,27 @@ describe("M3: body limits", () => {
     res = await login("x".repeat(2000));
     expect(res.status).toBe(400);
     expect((await json(res)).error.message).toMatch(/at most 1024/);
+  });
+});
+
+describe("N3: CSP hashes only known scripts", () => {
+  it("allows registered and index.html scripts, never ones found in a response", () => {
+    const injected = "fetch('/api/settings')";
+    expect(contentSecurityPolicy()).not.toContain(scriptHash(injected));
+    registerInlineScript("window.__static = 1");
+    expect(contentSecurityPolicy()).toContain(`'${scriptHash("window.__static = 1")}'`);
+    const html = `<script>a()</script><script type="application/json">{"x":1}</script><script src="/x.js"></script><script type="module">b()</script>`;
+    expect(inlineScriptHashes(html)).toEqual([scriptHash("a()"), scriptHash("b()")]);
+  });
+});
+
+describe("N4: MCP and agent body limits", () => {
+  it("rejects oversized bodies on /mcp and /agent", async () => {
+    h = harness();
+    let res = await h.request("/mcp", { method: "POST", json: { x: "x".repeat(5 * 1024 * 1024) } });
+    expect(res.status).toBe(413);
+    res = await h.request("/agent/anything", { method: "POST", json: { x: "x".repeat(100 * 1024) } });
+    expect(res.status).toBe(413);
   });
 });
 

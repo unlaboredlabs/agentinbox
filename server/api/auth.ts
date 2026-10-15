@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { adminAuth, checkSecret, clientIp, endSession, lockedOut, MAX_PASSWORD_LENGTH, sessionToken, startSession } from "../auth/index.ts";
+import { adminAuth, checkSecret, clientIp, endSession, lockedOut, MAX_PASSWORD_LENGTH, rejection, sessionToken, startSession } from "../auth/index.ts";
 import type { AppContext } from "../context.ts";
 import { hashPasswordAsync, verifyPasswordAsync } from "../crypto.ts";
 import { conflict, HttpError } from "../util/errors.ts";
@@ -23,7 +23,8 @@ export function authPublicApi(ctx: AppContext) {
       if (!hash) throw conflict("This instance has not been claimed yet", "Open the setup link printed by agentinbox on startup.");
       const check = await checkSecret(ctx, ip, body.password, () => verifyPasswordAsync(body.password, hash));
       if (!check.ok) {
-        if (check.lockedMinutes) return lockedOut(c, check.lockedMinutes);
+        const rejected = rejection(c, check);
+        if (rejected) return rejected;
         ctx.audit.record({ ...ADMIN_ACTOR, action: "admin.login", outcome: "denied", reason: check.nowBanned ? "lockout" : "bad_password", detail: { ip } });
         throw new HttpError(401, "invalid_password", "Wrong password");
       }
@@ -48,7 +49,8 @@ export function authApi(ctx: AppContext) {
     const hash = ctx.settings.getState("admin.passwordHash");
     const check = await checkSecret(ctx, ip, body.current, async () => !!hash && (await verifyPasswordAsync(body.current, hash)));
     if (!check.ok) {
-      if (check.lockedMinutes) return lockedOut(c, check.lockedMinutes);
+      const rejected = rejection(c, check);
+      if (rejected) return rejected;
       ctx.audit.record({ ...ADMIN_ACTOR, action: "admin.password_change", outcome: "denied", reason: check.nowBanned ? "lockout" : "bad_password", detail: { ip } });
       throw new HttpError(400, "invalid_password", "Current password is wrong");
     }

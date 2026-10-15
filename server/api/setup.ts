@@ -9,6 +9,7 @@ import {
   lockedOut,
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
+  rejection,
   startSession,
 } from "../auth/index.ts";
 import { deleteSetupToken, readSetupToken } from "../auth/setup-token.ts";
@@ -43,7 +44,8 @@ export function setupPublicApi(ctx: AppContext) {
       }
       const check = await checkSecret(ctx, ip, `claim:${body.token}`, () => safeEqual(body.token, expected), { global: false });
       if (!check.ok) {
-        if (check.lockedMinutes) return lockedOut(c, check.lockedMinutes);
+        const rejected = rejection(c, check);
+        if (rejected) return rejected;
         ctx.audit.record({ actorType: "admin", action: "admin.claim", outcome: "denied", reason: check.nowBanned ? "lockout" : "invalid_token", detail: { ip } });
         throw new HttpError(403, "invalid_token", "Invalid setup token", "Use the exact setup link printed by agentinbox on startup.");
       }

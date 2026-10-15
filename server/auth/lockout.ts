@@ -56,22 +56,37 @@ export class LoginLimiter {
 
   /** Records a failure; returns true when it started a ban for this client. `global: false` keeps it out of the global budget. */
   fail(ip: string, secret: string, opts: { global?: boolean } = {}): boolean {
+    return this.record(ip, secret, opts).banned;
+  }
+
+  /**
+   * Counts an attempt with this secret now, before it is verified, so concurrent requests can't
+   * all pass the ban check first. `countedGlobally` says whether it used global budget (refund it
+   * with `refundGlobal` when the secret turns out to be right).
+   */
+  record(ip: string, secret: string, opts: { global?: boolean } = {}): { banned: boolean; countedGlobally: boolean } {
     const t = this.clock();
     const key = clientKey(ip);
     const entry = this.current(key, t) ?? { tried: new Set<string>(), attempts: 0, since: t, bannedUntil: 0 };
     const hash = sha256(secret);
+    let countedGlobally = false;
     if (!entry.tried.has(hash)) {
       entry.tried.add(hash);
       if (opts.global !== false) {
         if (t - this.global.since >= WINDOW_MS) this.global = { failures: 0, since: t };
         this.global.failures++;
+        countedGlobally = true;
       }
     }
     entry.attempts++;
     const banned = entry.tried.size >= MAX_FAILURES || entry.attempts >= MAX_ATTEMPTS;
     if (banned) entry.bannedUntil = t + BAN_MS;
     this.touch(key, entry);
-    return banned;
+    return { banned, countedGlobally };
+  }
+
+  refundGlobal(): void {
+    if (this.global.failures > 0) this.global.failures--;
   }
 
   clear(ip: string): void {

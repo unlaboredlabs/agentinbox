@@ -1,10 +1,11 @@
+import { isIP, isIPv4, isIPv6 } from "node:net";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Context, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { AppEnv } from "../api/util.ts";
 import type { CoreContext } from "../context.ts";
 import { HttpError } from "../util/errors.ts";
-import { GLOBAL_SLOWDOWN_MS, LoginLimiter } from "./lockout.ts";
+import { clientKey, GLOBAL_SLOWDOWN_MS, LoginLimiter } from "./lockout.ts";
 import { SESSION_TTL_MS, SessionStore } from "./sessions.ts";
 import { ensureSetupToken, regenerateSetupToken } from "./setup-token.ts";
 
@@ -13,10 +14,43 @@ export const CSRF_HEADER = "x-agentinbox-csrf";
 export const MIN_PASSWORD_LENGTH = 10;
 export const MAX_PASSWORD_LENGTH = 1024;
 
-/** Per-context admin auth state: the session store and the failed-login limiter. */
+/** Secret checks (scrypt) allowed at once: libuv's default thread pool size. */
+export const MAX_CONCURRENT_VERIFICATIONS = 4;
+/** Requests from one client that may wait behind its in-flight check; more get 429. */
+export const MAX_QUEUED_PER_CLIENT = 4;
+
+/** Hands out at most `max` slots; waiters are served in order. */
+export class Semaphore {
+  private active = 0;
+  private readonly waiters: (() => void)[] = [];
+
+  constructor(private readonly max: number) {}
+
+  get inUse(): number {
+    return this.active;
+  }
+
+  async acquire(): Promise<() => void> {
+    if (this.active < this.max) this.active++;
+    else await new Promise<void>((resolve) => this.waiters.push(resolve));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.waiters.shift();
+      if (next) next();
+      else this.active--;
+    };
+  }
+}
+
+/** Per-context admin auth state: the session store, the failed-login limiter and verification queues. */
 export interface AdminAuth {
   sessions: SessionStore;
   limiter: LoginLimiter;
+  /** One secret check per client at a time: the tail of each client's queue. */
+  lanes: Map<string, { tail: Promise<void>; queued: number }>;
+  verifySlots: Semaphore;
 }
 
 /** What admin auth needs from the context (the CLI builds this without loading the master key). */
@@ -27,7 +61,7 @@ const instances = new WeakMap<AuthCore, AdminAuth>();
 export function adminAuth(ctx: AuthCore): AdminAuth {
   let auth = instances.get(ctx);
   if (!auth) {
-    auth = { sessions: new SessionStore(ctx.db), limiter: new LoginLimiter() };
+    auth = { sessions: new SessionStore(ctx.db), limiter: new LoginLimiter(), lanes: new Map(), verifySlots: new Semaphore(MAX_CONCURRENT_VERIFICATIONS) };
     instances.set(ctx, auth);
   }
   return auth;
@@ -53,32 +87,50 @@ export function resetAdminPassword(ctx: AuthCore): string {
   return regenerateSetupToken(ctx.config.dataDir);
 }
 
+/** Loopback, RFC 1918, CGNAT (100.64/10) and IPv6 ULA (fc00::/7): where a reverse proxy can be. */
+export function isPrivateAddress(ip: string): boolean {
+  const addr = ip.replace(/%.*$/, "").toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, "");
+  if (isIPv4(addr)) {
+    const [a = 0, b = 0] = addr.split(".").map(Number);
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (isIPv6(addr)) return addr === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(addr);
+  return false;
+}
+
+function socketAddress(c: Context): string | null {
+  try {
+    return getConnInfo(c).remote.address ?? null;
+  } catch {
+    // No Node socket (e.g. app.request() without bindings).
+    return null;
+  }
+}
+
 /**
- * The client address. Behind a trusted proxy, X-Forwarded-For is read from the right: proxies
- * append the address they saw, so entries further left are client-controlled. TRUST_PROXY_HOPS
- * (default 1) is the number of proxies in front of agentinbox.
+ * The client address. X-Forwarded-For is honored only with TRUST_PROXY and only when the
+ * connection comes from a loopback or private address (where the proxy runs); it is read from the
+ * right, since proxies append the address they saw and entries further left are client-controlled.
+ * TRUST_PROXY_HOPS (default 1) is the number of proxies in front of agentinbox.
  */
 export function clientIp(c: Context, trustProxy: boolean): string {
-  if (trustProxy) {
+  const peer = socketAddress(c);
+  if (trustProxy && peer && isPrivateAddress(peer)) {
     const hops = Math.max(1, Number.parseInt(process.env.TRUST_PROXY_HOPS ?? "1", 10) || 1);
     const chain = (c.req.header("x-forwarded-for") ?? "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
     const forwarded = chain[chain.length - hops];
-    if (forwarded) return forwarded;
+    if (forwarded && isIP(forwarded)) return forwarded;
   }
-  try {
-    return getConnInfo(c).remote.address ?? "unknown";
-  } catch {
-    // No Node socket (e.g. app.request() in tests).
-    return "unknown";
-  }
+  return peer ?? "unknown";
 }
 
 function isSecure(c: Context, trustProxy: boolean): boolean {
   if (new URL(c.req.url).protocol === "https:") return true;
-  return trustProxy && c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase() === "https";
+  const peer = socketAddress(c);
+  return trustProxy && !!peer && isPrivateAddress(peer) && c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase() === "https";
 }
 
 export function sessionToken(c: Context): string | undefined {
@@ -151,7 +203,9 @@ export function lockedOut(c: Context, minutes: number): Response {
   return c.json({ error: { code: "locked_out", message } }, 429);
 }
 
-export type CheckResult = { ok: true } | { ok: false; lockedMinutes: number; nowBanned: boolean };
+export type CheckResult =
+  | { ok: true }
+  | { ok: false; lockedMinutes: number; nowBanned: boolean; /** Too many concurrent attempts from this client. */ busy?: boolean };
 
 export interface CheckOptions {
   /**
@@ -164,9 +218,13 @@ export interface CheckOptions {
 }
 
 /**
- * Verifies a secret under the failed-login limiter. Locked-out clients and secrets this client
- * already failed with are rejected without running `verify` (scrypt). While the instance-wide
- * budget is exhausted, each attempt waits a little first (asynchronously); it is never refused.
+ * Verifies a secret under the failed-login limiter.
+ * - Each client gets one check at a time (a few more may queue, the rest get `busy`), and at most
+ *   MAX_CONCURRENT_VERIFICATIONS run at once overall.
+ * - The attempt is recorded before `verify` (scrypt) runs and refunded if it succeeds, so
+ *   concurrent requests can't all slip past the ban.
+ * - Locked-out clients and secrets this client already failed with never reach `verify`.
+ * - While the instance-wide budget is exhausted, each attempt waits a little first; it is never refused.
  */
 export async function checkSecret(
   ctx: AuthCore,
@@ -175,15 +233,54 @@ export async function checkSecret(
   verify: () => boolean | Promise<boolean>,
   opts: CheckOptions = {},
 ): Promise<CheckResult> {
-  const { limiter } = adminAuth(ctx);
+  const auth = adminAuth(ctx);
+  const key = clientKey(ip);
+  const lane = auth.lanes.get(key) ?? { tail: Promise.resolve(), queued: 0 };
+  if (lane.queued > MAX_QUEUED_PER_CLIENT) return { ok: false, lockedMinutes: 0, nowBanned: false, busy: true };
+  lane.queued++;
+  auth.lanes.set(key, lane);
+  const previous = lane.tail;
+  let done!: () => void;
+  lane.tail = new Promise<void>((resolve) => (done = resolve));
+  try {
+    await previous;
+    return await checkOnce(auth, ip, secret, verify, opts);
+  } finally {
+    done();
+    if (--lane.queued === 0) auth.lanes.delete(key);
+  }
+}
+
+async function checkOnce(auth: AdminAuth, ip: string, secret: string, verify: () => boolean | Promise<boolean>, opts: CheckOptions): Promise<CheckResult> {
+  const { limiter } = auth;
   const global = opts.global !== false;
+  if (global && limiter.overGlobalBudget() && !limiter.bannedMinutes(ip)) {
+    await new Promise((r) => setTimeout(r, opts.slowdownMs ?? GLOBAL_SLOWDOWN_MS));
+  }
+  // From here to the reservation everything is synchronous.
   const locked = limiter.bannedMinutes(ip);
   if (locked) return { ok: false, lockedMinutes: locked, nowBanned: false };
-  if (global && limiter.overGlobalBudget()) await new Promise((r) => setTimeout(r, opts.slowdownMs ?? GLOBAL_SLOWDOWN_MS));
-  if (!limiter.knownBad(ip, secret) && (await verify())) {
-    limiter.clear(ip);
-    return { ok: true };
+  if (limiter.knownBad(ip, secret)) return { ok: false, lockedMinutes: 0, nowBanned: limiter.fail(ip, secret, { global }) };
+  const reservation = limiter.record(ip, secret, { global });
+  const release = await auth.verifySlots.acquire();
+  let ok = false;
+  try {
+    ok = await verify();
+  } finally {
+    release();
   }
-  const nowBanned = limiter.fail(ip, secret, { global });
-  return { ok: false, lockedMinutes: 0, nowBanned };
+  if (!ok) return { ok: false, lockedMinutes: 0, nowBanned: reservation.banned };
+  limiter.clear(ip);
+  if (reservation.countedGlobally) limiter.refundGlobal();
+  return { ok: true };
+}
+
+/** The 429 for a rejected check (locked out or too many at once), or null to continue. */
+export function rejection(c: Context, check: CheckResult): Response | null {
+  if (check.ok) return null;
+  if (check.busy) {
+    c.header("Retry-After", "2");
+    return c.json({ error: { code: "too_many_requests", message: "Another sign-in attempt from your address is still being checked. Try again in a moment." } }, 429);
+  }
+  return check.lockedMinutes ? lockedOut(c, check.lockedMinutes) : null;
 }

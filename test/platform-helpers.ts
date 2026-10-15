@@ -36,7 +36,8 @@ export interface Harness {
   app: Hono<AppEnv>;
   ctx: ReturnType<typeof testContext>["ctx"];
   dispose: () => Promise<void>;
-  request: (path: string, init?: RequestInit & { cookie?: string; json?: unknown }) => Promise<Response>;
+  /** `peer` is the socket address the request comes from (default loopback, like a local reverse proxy). */
+  request: (path: string, init?: RequestInit & { cookie?: string; json?: unknown; peer?: string }) => Promise<Response>;
   setupToken: () => string | null;
   /** Claims the instance and returns the session cookie ("aib_session=…"). */
   claim: () => Promise<string>;
@@ -46,11 +47,12 @@ export function harness(overrides: ServiceOverrides = {}, opts: AppOptions = {})
   const t = testContext({ google: fakeGoogle(), ingest: fakeIngest(), ...overrides });
   const app = createApp(t.ctx, opts);
   const request: Harness["request"] = (path, init = {}) => {
-    const { cookie, json, ...rest } = init;
+    const { cookie, json, peer = "127.0.0.1", ...rest } = init;
     const headers = new Headers(rest.headers);
     if (cookie) headers.set("cookie", cookie);
     if (json !== undefined) headers.set("content-type", "application/json");
-    return Promise.resolve(app.request(path, { ...rest, headers, body: json !== undefined ? JSON.stringify(json) : rest.body }));
+    const bindings = { incoming: { socket: { remoteAddress: peer } } };
+    return Promise.resolve(app.request(path, { ...rest, headers, body: json !== undefined ? JSON.stringify(json) : rest.body }, bindings));
   };
   const setupToken = () => readSetupToken(t.ctx.config.dataDir);
   return {

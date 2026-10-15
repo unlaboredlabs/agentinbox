@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
@@ -23,6 +22,7 @@ import type { AppEnv } from "./api/util.ts";
 import { webhooksApi } from "./api/webhooks.ts";
 import { csrfGuard, currentSetupToken, requireAdmin } from "./auth/index.ts";
 import type { AppContext } from "./context.ts";
+import { contentSecurityPolicy, inlineScriptHashes } from "./csp.ts";
 import { mcpRoutes } from "./mcp/index.ts";
 import { renderSkill } from "./skill/index.ts";
 import { HttpError, PolicyDenied } from "./util/errors.ts";
@@ -41,6 +41,8 @@ export const DEFAULT_WEB_DIR = resolve(import.meta.dirname, "..", "dist", "web")
 const API_BODY_LIMIT = 1024 * 1024;
 const AUTH_BODY_LIMIT = 16 * 1024;
 const AUTH_PATHS = ["/api/setup/claim", "/api/auth/login", "/api/auth/password"];
+const MCP_BODY_LIMIT = 4 * 1024 * 1024;
+const AGENT_BODY_LIMIT = 64 * 1024;
 
 /** Extensions served as files; any other path (even with a dot, e.g. /accounts/me@example.com) is a console route. */
 const ASSET_EXTENSIONS = new Set([
@@ -48,34 +50,6 @@ const ASSET_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico",
   ".woff", ".woff2", ".ttf", ".otf", ".wasm",
 ]);
-
-/**
- * Content Security Policy for every response. Inline scripts in HTML we serve (the console's
- * theme bootstrap, the OAuth callback page) are allowed by hash, nothing else inline is.
- */
-export function contentSecurityPolicy(scriptHashes: string[] = []): string {
-  return [
-    "default-src 'self'",
-    `script-src 'self'${scriptHashes.map((h) => ` '${h}'`).join("")}`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data:",
-    "connect-src 'self'",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "frame-ancestors 'none'",
-    "form-action 'self'",
-  ].join("; ");
-}
-
-/** sha256 sources for the inline (no src) scripts in an HTML document. */
-export function inlineScriptHashes(html: string): string[] {
-  const hashes = new Set<string>();
-  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
-    if (/\bsrc\s*=/i.test(m[1]!) || !m[2]) continue;
-    hashes.add(`sha256-${createHash("sha256").update(m[2]).digest("base64")}`);
-  }
-  return [...hashes];
-}
 
 /** Paths the console's index.html fallback must never answer. */
 const SERVER_PREFIXES = ["/api", "/mcp", "/oauth", "/skill.md", "/health"];
@@ -86,16 +60,12 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   // Make sure the setup link exists before anyone needs it.
   currentSetupToken(ctx);
 
+  // Hashes of index.html's inline scripts; set once the console is wired up below.
+  let consoleHashes: () => string[] = () => [];
   app.use("*", async (c, next) => {
     await next();
-    let hashes: string[] = [];
-    if (c.req.method !== "HEAD" && c.res.headers.get("content-type")?.startsWith("text/html") && c.res.body) {
-      const html = await c.res.text();
-      hashes = inlineScriptHashes(html);
-      c.res = new Response(html, c.res);
-    }
     try {
-      c.res.headers.set("Content-Security-Policy", contentSecurityPolicy(hashes));
+      c.res.headers.set("Content-Security-Policy", contentSecurityPolicy(consoleHashes()));
       c.res.headers.set("X-Frame-Options", "DENY");
       c.res.headers.set("X-Content-Type-Options", "nosniff");
       c.res.headers.set("Referrer-Policy", "no-referrer");
@@ -112,8 +82,12 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
 
   // ── Public ──
   const tooLarge = (c: Context) => apiError(c, 413, "payload_too_large", "Request body is too large");
-  for (const path of AUTH_PATHS) app.use(path, bodyLimit({ maxSize: AUTH_BODY_LIMIT, onError: tooLarge }));
-  app.use("/api/*", bodyLimit({ maxSize: API_BODY_LIMIT, onError: tooLarge }));
+  const limit = (maxSize: number) => bodyLimit({ maxSize, onError: tooLarge });
+  for (const path of AUTH_PATHS) app.use(path, limit(AUTH_BODY_LIMIT));
+  app.use("/api/*", limit(API_BODY_LIMIT));
+  app.use("/mcp", limit(MCP_BODY_LIMIT));
+  app.use("/mcp/*", limit(MCP_BODY_LIMIT));
+  app.use("/agent/*", limit(AGENT_BODY_LIMIT));
   app.use("/api/*", csrfGuard());
   app.route("/", healthRoutes(ctx));
   app.route("/api", setupPublicApi(ctx));
@@ -134,17 +108,28 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
 
   // ── Console ──
   if (ctx.config.dev) app.get("*", (c) => (isServerPath(c.req.path) ? c.notFound() : devPage(c)));
-  else serveConsole(app, opts.webDir ?? DEFAULT_WEB_DIR);
+  else consoleHashes = serveConsole(app, opts.webDir ?? DEFAULT_WEB_DIR);
 
   return app;
 }
 
-function serveConsole(app: Hono<AppEnv>, webDir: string): void {
+/** Serves the built console; returns the CSP hashes of index.html's inline scripts (re-read when the file changes). */
+function serveConsole(app: Hono<AppEnv>, webDir: string): () => string[] {
   const index = join(webDir, "index.html");
   if (!existsSync(index)) {
     app.get("*", (c) => (isServerPath(c.req.path) ? c.notFound() : missingBuildPage(c, webDir)));
-    return;
+    return () => [];
   }
+  let cached = { mtimeMs: -1, hashes: [] as string[] };
+  const hashes = () => {
+    try {
+      const { mtimeMs } = statSync(index);
+      if (mtimeMs !== cached.mtimeMs) cached = { mtimeMs, hashes: inlineScriptHashes(readFileSync(index, "utf8")) };
+    } catch {
+      // Removed while running: keep the last known hashes.
+    }
+    return cached.hashes;
+  };
   const assets = serveStatic<AppEnv>({ root: webDir });
   const assetsDir = join(webDir, "assets") + sep;
   app.use("*", async (c, next) => {
@@ -164,6 +149,7 @@ function serveConsole(app: Hono<AppEnv>, webDir: string): void {
     c.header("Cache-Control", "no-cache");
     return c.html(readFileSync(index, "utf8"));
   });
+  return hashes;
 }
 
 function errorResponse(ctx: AppContext, err: Error, c: Context): Response {
