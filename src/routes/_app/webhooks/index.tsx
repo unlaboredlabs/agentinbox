@@ -11,6 +11,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SecretDialog } from "@/components/webhooks/secret-dialog";
 import { WebhookRow } from "@/components/webhooks/webhook-row";
 import { WebhookSheet } from "@/components/webhooks/webhook-sheet";
+import { useDeliverySpeed } from "@/hooks/use-delivery-speed";
+import { intervalInWords } from "@/lib/delivery";
 import { queries } from "@/lib/queries";
 
 export const Route = createFileRoute("/_app/webhooks/")({
@@ -29,6 +31,7 @@ function WebhooksPage() {
   const [created, setCreated] = useState<WebhookWithSecret>();
   const setCreating = (v: string | undefined) => void navigate({ search: { new: v }, replace: true });
   const noAgents = agents.data?.length === 0;
+  const { realtime, interval } = useDeliverySpeed();
 
   const newButton = (
     <Button onClick={() => setCreating("1")} disabled={noAgents}>
@@ -40,7 +43,7 @@ function WebhooksPage() {
     <>
       <PageHeader
         title="Webhooks"
-        description="Push mail events to your agents the moment they happen. Payloads are signed, retried on failure and logged for replay."
+        description={`Push mail events to your agents ${realtime ? "within seconds of mail arriving" : `within about ${intervalInWords(interval)} of mail arriving`}. Payloads are signed, retried on failure and logged for replay.`}
         actions={newButton}
       />
       {webhooks.isPending ? (

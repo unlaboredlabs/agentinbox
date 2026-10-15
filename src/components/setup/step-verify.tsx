@@ -10,6 +10,7 @@ import { ProfileHint, toolName, usePublicUrl } from "@/components/agents/connect
 import { grantInWords } from "@/components/agents/grant-words";
 import { CopyButton, ErrorAlert, TimeAgo } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
+import { ArrivalSpeed } from "@/hooks/use-delivery-speed";
 import { useNow } from "@/hooks/use-now";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -637,7 +638,15 @@ function SuccessPanel({
           </h3>
           <p className="text-sm text-muted-foreground">
             New mail reaches <Visible text={agent.name} />
-            {listening ? " the moment it arrives" : " whenever you ask it"}.
+            {listening ? (
+              <>
+                {" "}
+                <ArrivalSpeed />
+              </>
+            ) : (
+              " whenever you ask it"
+            )}
+            .
           </p>
         </div>
       </div>

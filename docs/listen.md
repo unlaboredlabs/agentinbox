@@ -7,6 +7,9 @@ agent that's asleep on a laptop behind NAT: Claude Code, Codex, Cursor or Hermes
 there are no open ports, tunnels or public URLs. For each new email it runs a local command or POSTs to a
 localhost URL. By default only incoming mail (`message.received`) counts: mail the account sends doesn't wake your agent,
 so each run is for mail someone sent you. `--types` adds other events (see below). The command runs on the agent's machine with that agent's own grant. The daemon never executes anything.
+The listener gets each event as soon as agentinbox sees the mail: within seconds with real-time delivery (Pub/Sub), or
+within the poll interval (30 seconds by default) when agentinbox polls Gmail. Turn on real-time delivery in the console
+under Settings → Real-time delivery.
 
 ```
  agentinbox daemon ──(event stream over HTTPS, opened by the laptop)──▶ agentinbox listen ──▶ claude -p … / codex exec … / your script
