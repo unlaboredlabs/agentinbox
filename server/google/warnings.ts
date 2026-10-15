@@ -13,7 +13,7 @@ const formatDate = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UT
 const CONSUMER_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
 
 /**
- * Personal Gmail account? workspace_domain is '' when the id_token said so; accounts connected before
+ * Personal (non-Workspace) Google account? workspace_domain is '' when the id_token said so; accounts connected before
  * it was recorded (NULL) fall back to the address (only @gmail.com/@googlemail.com are certain).
  */
 function isPersonal(row: AccountRow): boolean | null {
@@ -40,7 +40,9 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
         message: `${row.email} is disconnected: Google rejected its saved sign-in, so agentinbox can't read or send its mail.`,
         hint:
           `Accounts → ${row.email} → Reconnect, and sign in as ${row.email}.` +
-          (row.refresh_expires_at ? " Publish the OAuth app first (see the Testing warning), or the new sign-in expires again in 7 days." : ""),
+          (row.refresh_expiry_kind === "testing" && row.refresh_expires_at
+            ? " Publish the OAuth app first (see the Testing warning), or the new sign-in expires again in 7 days."
+            : ""),
         accountId: row.id,
       });
     }
@@ -49,16 +51,30 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
   for (const row of rows) {
     if (!row.refresh_expires_at) continue;
     const expired = Date.parse(row.refresh_expires_at) <= Date.now();
-    out.push({
-      code: "testing_mode",
-      severity: expired || Date.parse(row.refresh_expires_at) - Date.now() < 24 * 3_600_000 ? "error" : "warning",
-      message:
-        `Your OAuth app is in Testing, so Google ${expired ? "expired" : "will expire"} the sign-in for ${row.email} on ` +
-        `${formatDate(row.refresh_expires_at)} (7 days after it connected).`,
-      hint: "Google Cloud → Google Auth Platform → Audience → Publish app → Confirm. Then reconnect the account so it gets a long-lived token.",
-      url: audienceUrl,
-      accountId: row.id,
-    });
+    const severity = expired || Date.parse(row.refresh_expires_at) - Date.now() < 24 * 3_600_000 ? "error" : "warning";
+    const when = `${expired ? "expired" : "will expire"} the sign-in for ${row.email} on ${formatDate(row.refresh_expires_at)}`;
+    // Only a ~7-day initial lifetime means Testing; other lifetimes (e.g. time-based access the user
+    // picked on the consent screen) get a neutral reminder.
+    if (row.refresh_expiry_kind === "testing") {
+      out.push({
+        code: "testing_mode",
+        severity,
+        message: `Your OAuth app is in Testing, so Google ${when} (7 days after it connected).`,
+        hint: "Google Cloud → Google Auth Platform → Audience → Publish app → Confirm. Then reconnect the account so it gets a long-lived token.",
+        url: audienceUrl,
+        accountId: row.id,
+      });
+    } else {
+      out.push({
+        code: "sign_in_expires",
+        severity,
+        message: `Google ${when}.`,
+        hint:
+          `Reconnect ${row.email} before then (Accounts → ${row.email} → Reconnect). If Google offers time-based access on the consent screen, ` +
+          "choose to keep access until you remove it.",
+        accountId: row.id,
+      });
+    }
   }
 
   if (client?.appType === "internal") {
@@ -68,7 +84,7 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
         code: "app_type_mismatch",
         severity: "warning",
         message:
-          `${row.email} is a personal Gmail account, but the app type is set to Internal here. ` +
+          `${row.email} is a personal (non-Workspace) Google account, but the app type is set to Internal here. ` +
           "Internal apps only accept accounts from their own Workspace organization, so your app in Google Cloud is actually External.",
         hint:
           "Set the app type to External in the setup wizard's Google step, and make sure the app is published " +

@@ -127,7 +127,8 @@ describe("client JSON import", () => {
     expect(body.registeredRedirectUris).toEqual(["https://example.com/oauth/callback"]);
     expect(body.warnings).toHaveLength(1);
     const w = body.warnings[0]!;
-    expect(w).toMatchObject({ code: "redirect_uri_missing", severity: "error", url: `https://console.cloud.google.com/auth/clients/${FAKE_CLIENT.clientId}?project=${FAKE_CLIENT.projectId}` });
+    expect(w).toMatchObject({ code: "redirect_uri_missing", severity: "error", url: `https://console.cloud.google.com/auth/clients?project=${FAKE_CLIENT.projectId}` });
+    expect(w.hint).toContain("Google Auth Platform → Clients");
     expect(w.message).toContain(redirectUri());
     expect(w.message).toContain("https://example.com/oauth/callback");
     expect(w.hint).toContain(`add ${redirectUri()}`);
@@ -167,6 +168,7 @@ describe("Testing mode and Workspace detection", () => {
     const acct = await connectFakeAccount(ctx, fake, "tess@gmail.com");
     const at = Date.parse(acct.refreshTokenExpiresAt!);
     expect(Math.abs(at - (Date.now() + 604_800_000))).toBeLessThan(10_000);
+    expect(acct.refreshTokenExpiryKind).toBe("testing");
     expect(acct.workspaceDomain).toBeNull();
 
     const [w] = warnings("testing_mode");
@@ -188,10 +190,28 @@ describe("Testing mode and Workspace detection", () => {
     fake.refreshTokenTtl = null;
     const again = await connectFakeAccount(ctx, fake, "tess@gmail.com", { reauthAccountId: acct.id });
     expect(again.refreshTokenExpiresAt).toBeNull();
+    expect(again.refreshTokenExpiryKind).toBeNull();
     // A refresh without refresh_token_expires_in leaves the column alone.
     await googleRuntime(ctx).tokens.accessToken(acct.id, { force: true });
     expect(ctx.accounts.get(acct.id)!.refreshTokenExpiresAt).toBeNull();
     expect(warnings("testing_mode")).toEqual([]);
+  });
+
+  it("treats other lifetimes (time-based access) as a neutral expiry, not Testing", async () => {
+    ctx.google.setClient({ ...FAKE_CLIENT, appType: "external" });
+    fake.refreshTokenTtl = 30 * 86_400;
+    const acct = await connectFakeAccount(ctx, fake, "tina@gmail.com");
+    expect(acct.refreshTokenExpiryKind).toBe("time_based");
+    expect(warnings("testing_mode")).toEqual([]);
+    const [w] = warnings("sign_in_expires");
+    expect(w).toMatchObject({ severity: "warning", accountId: acct.id });
+    expect(w!.message).toMatch(/^Google will expire the sign-in for tina@gmail.com on \d{4}-\d{2}-\d{2}/);
+    expect(w!.hint).toMatch(/Reconnect tina@gmail.com before then/);
+    expect(w!.url).toBeUndefined();
+    // 7 days ± 1 day still counts as Testing.
+    fake.refreshTokenTtl = 604_800 - 3600;
+    const t = await connectFakeAccount(ctx, fake, "tom@gmail.com");
+    expect(t.refreshTokenExpiryKind).toBe("testing");
   });
 
   it("marks an expired Testing token as an error", async () => {

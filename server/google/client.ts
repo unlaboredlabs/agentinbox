@@ -167,9 +167,9 @@ export function redirectWarning(ctx: Ctx): SetupWarning | null {
     severity: "error",
     message: `Your OAuth client's Authorized redirect URIs don't include ${uri}, so Google will refuse to connect accounts. ${listed}`,
     hint:
-      `In Google Cloud → Clients → your client → Authorized redirect URIs, add ${uri} exactly (no trailing slash) and save. ` +
+      `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, add ${uri} exactly (no trailing slash) and save. ` +
       "You don't need to download the JSON again (it's only used here to read the ID and secret): this warning clears as soon as an account connects, or re-import the new JSON to re-check now.",
-    url: `https://console.cloud.google.com/auth/clients/${encodeURIComponent(c.clientId)}${project}`,
+    url: `https://console.cloud.google.com/auth/clients${project}`,
   };
 }
 

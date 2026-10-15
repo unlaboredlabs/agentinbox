@@ -351,6 +351,7 @@ export function fakeAccounts(ctx: AppContext): AccountsService {
     lastSyncAt: null,
     createdAt: r.created_at,
     refreshTokenExpiresAt: null,
+    refreshTokenExpiryKind: null,
     workspaceDomain: null,
   });
   const get = (id: string) => {

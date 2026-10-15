@@ -9,7 +9,7 @@ import { type AccountRow, accountScopes, getRow, toAccount } from "./accounts.ts
 import { callbackMode, clientCredentials, markRedirectVerified } from "./client.ts";
 import { buildUrl, REQUEST_TIMEOUT_MS } from "./http.ts";
 import { pubsubPrincipal } from "./pubsub.ts";
-import { postToken, refreshExpiry, type TokenResponse } from "./tokens.ts";
+import { postToken, refreshExpiry, refreshExpiryKind, type TokenResponse } from "./tokens.ts";
 import { GoogleApiError } from "./types.ts";
 
 export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
@@ -39,7 +39,7 @@ export function oauthErrorHint(code: string, redirectUri?: string): { message: s
       return {
         message: "This OAuth app is Internal, so only accounts in its own Google Workspace organization can connect.",
         hint:
-          "Sign in with an account from that Workspace organization. To connect personal Gmail or other organizations' accounts, " +
+          "Sign in with an account from that Workspace organization. To connect personal (non-Workspace) Google accounts or other organizations' accounts, " +
           "make the app External instead: Google Cloud → Google Auth Platform → Audience → Make external, then publish it (In production).",
       };
     case "admin_policy_enforced":
@@ -172,7 +172,7 @@ function idTokenClaims(idToken: string | undefined): IdClaims | null {
   }
 }
 
-/** accounts.workspace_domain from the claims: the domain, '' for personal Gmail, null when unknown (no id_token). */
+/** accounts.workspace_domain from the claims: the domain, '' for a personal (non-Workspace) account, null when unknown (no id_token). */
 const workspaceDomain = (claims: IdClaims | null): string | null =>
   claims ? (typeof claims.hd === "string" ? claims.hd.toLowerCase() : "") : null;
 
@@ -227,7 +227,7 @@ function storeTokens(
 ): void {
   ctx.db.run(
     `UPDATE accounts SET display_name = ?, status = ?, last_error = NULL, refresh_token_enc = ?, access_token_enc = ?,
-       access_expires_at = ?, scopes = ?, refresh_expires_at = ?, workspace_domain = ? WHERE id = ?`,
+       access_expires_at = ?, scopes = ?, refresh_expires_at = ?, refresh_expiry_kind = ?, workspace_domain = ? WHERE id = ?`,
     claims?.name ?? row.display_name,
     row.status === "paused" ? "paused" : "active",
     ctx.crypto.encrypt(tokens.refresh_token),
@@ -235,6 +235,7 @@ function storeTokens(
     expiry(tokens),
     JSON.stringify(granted),
     refreshExpiry(tokens),
+    refreshExpiryKind(tokens),
     workspaceDomain(claims) ?? row.workspace_domain,
     row.id,
   );
@@ -321,8 +322,8 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
   } else {
     ctx.db.run(
       `INSERT INTO accounts (id, email, display_name, status, last_error, refresh_token_enc, access_token_enc, access_expires_at, scopes,
-         refresh_expires_at, workspace_domain, created_at)
-       VALUES (?, ?, ?, 'active', NULL, ?, ?, ?, ?, ?, ?, ?)`,
+         refresh_expires_at, refresh_expiry_kind, workspace_domain, created_at)
+       VALUES (?, ?, ?, 'active', NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       email,
       claims?.name ?? null,
@@ -331,6 +332,7 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
       expiry(tokens),
       JSON.stringify(scopes),
       refreshExpiry(tokens),
+      refreshExpiryKind(tokens),
       workspaceDomain(claims),
       now(),
     );
@@ -340,7 +342,13 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     action: existing ? "account.reconnect" : "account.connect",
     accountId: id,
     outcome: "ok",
-    detail: { email, scopes, refreshTokenExpiresAt: refreshExpiry(tokens), workspaceDomain: workspaceDomain(claims) || null },
+    detail: {
+      email,
+      scopes,
+      refreshTokenExpiresAt: refreshExpiry(tokens),
+      refreshTokenExpiryKind: refreshExpiryKind(tokens),
+      workspaceDomain: workspaceDomain(claims) || null,
+    },
   });
   ctx.log.child("google").info(existing ? "Account reconnected" : "Account connected", { email });
   return afterConnect(ctx, id, email);

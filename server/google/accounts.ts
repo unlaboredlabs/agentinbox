@@ -21,7 +21,9 @@ export interface AccountRow {
   last_sync_at: string | null;
   created_at: string;
   refresh_expires_at: string | null;
-  /** '' = personal Gmail (detected), NULL = unknown (connected before migration 3). */
+  /** 'testing' | 'time_based' | NULL (unknown, e.g. only seen on a refresh). */
+  refresh_expiry_kind: "testing" | "time_based" | null;
+  /** '' = personal (non-Workspace) account (detected), NULL = unknown (connected before migration 3). */
   workspace_domain: string | null;
 }
 
@@ -36,6 +38,7 @@ export const toAccount = (r: AccountRow): Account => ({
   lastSyncAt: r.last_sync_at,
   createdAt: r.created_at,
   refreshTokenExpiresAt: r.refresh_expires_at,
+  refreshTokenExpiryKind: r.refresh_expires_at ? r.refresh_expiry_kind : null,
   workspaceDomain: r.workspace_domain || null,
 });
 

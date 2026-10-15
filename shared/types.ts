@@ -108,10 +108,13 @@ export interface SetupState {
 }
 
 /**
- * - testing_mode: an account has a refresh token that expires (External app still in Testing → 7 days).
- *   One per affected account (accountId set); `url` opens the project's Audience page.
+ * - testing_mode: an account's refresh token was issued with a ~7-day lifetime (External app still in
+ *   Testing). One per affected account (accountId set); `url` opens the project's Audience page.
+ * - sign_in_expires: an account's refresh token expires for another reason (any other lifetime, e.g.
+ *   time-based access the user chose on Google's consent screen). Neutral: reconnect before the date.
+ *   One per account (accountId set). Both are "error" within 24 h of the expiry or after it.
  * - app_type_mismatch: the app type saved here contradicts the connected accounts. "warning" when it is
- *   "internal" but a personal Gmail account is connected (so the app is really External); "info" when it is
+ *   "internal" but a personal (non-Workspace) Google account is connected (so the app is really External); "info" when it is
  *   "external" and every account is a Workspace account of one domain (Internal would avoid the 7-day
  *   Testing expiry and verification entirely).
  * - redirect_uri_missing: the imported client JSON doesn't list the exact redirect URI (see
@@ -120,7 +123,13 @@ export interface SetupState {
  * - needs_reauth: an account's sign-in was rejected; one per account (accountId set). Severity "error".
  * - pubsub_failing: ingest mode is pubsub and Pub/Sub has an error (hint carries the remediation). "error".
  */
-export type SetupWarningCode = "testing_mode" | "app_type_mismatch" | "redirect_uri_missing" | "needs_reauth" | "pubsub_failing";
+export type SetupWarningCode =
+  | "testing_mode"
+  | "sign_in_expires"
+  | "app_type_mismatch"
+  | "redirect_uri_missing"
+  | "needs_reauth"
+  | "pubsub_failing";
 
 export interface SetupWarning {
   code: SetupWarningCode;
@@ -130,9 +139,13 @@ export interface SetupWarning {
   message: string;
   /** What to do about it, with Google Cloud console click paths. */
   hint: string;
-  /** Deep link for the fix (e.g. the Google Cloud page, project preselected), when there is one. */
+  /**
+   * Deep link for the fix (a Google Cloud console page, project preselected), when there is one. The
+   * hint always also names the menu path (e.g. "Google Auth Platform → Audience") in case the link
+   * lands elsewhere: show both.
+   */
   url?: string;
-  /** Set for per-account warnings (testing_mode, needs_reauth, and app_type_mismatch for a personal account). */
+  /** Set for per-account warnings (testing_mode, sign_in_expires, needs_reauth, app_type_mismatch for a personal account). */
   accountId?: string;
 }
 
@@ -234,11 +247,16 @@ export interface Account {
   createdAt: string;
   /**
    * When Google said the refresh token expires (token response `refresh_token_expires_in`), or null for a
-   * long-lived token. Set means the OAuth app is External and in Testing (7-day tokens): the account will
-   * need reconnecting after this time unless the app is published and the account reconnected.
+   * long-lived token. The account needs reconnecting before this time.
    */
   refreshTokenExpiresAt: string | null;
-  /** Google Workspace domain (id_token `hd` claim), or null for a personal Gmail account (or not yet known). */
+  /**
+   * Why it expires (null when refreshTokenExpiresAt is null, or unknown): "testing" = issued with the ~7-day
+   * Testing lifetime (External app not published; publish it, then reconnect); "time_based" = any other
+   * lifetime (e.g. time-based access chosen on the consent screen).
+   */
+  refreshTokenExpiryKind: "testing" | "time_based" | null;
+  /** Google Workspace domain (id_token `hd` claim), or null for a personal (non-Workspace) Google account (or not yet known). */
   workspaceDomain: string | null;
 }
 

@@ -203,9 +203,12 @@ export const MIGRATIONS: string[] = [
   );
   `,
   /* 3: onboarding diagnostics on accounts */ `
-  -- When Google said the refresh token expires (External app in Testing: 7 days); NULL = long-lived.
+  -- When Google said the refresh token expires (refresh_token_expires_in); NULL = long-lived.
   ALTER TABLE accounts ADD COLUMN refresh_expires_at TEXT;
-  -- id_token "hd" claim: Workspace domain, '' = personal Gmail account, NULL = not known (connected before this migration).
+  -- Why it expires: 'testing' (initial lifetime ~7 days: External app in Testing) or 'time_based'
+  -- (any other lifetime, e.g. time-based access the user chose on the consent screen). NULL = unknown.
+  ALTER TABLE accounts ADD COLUMN refresh_expiry_kind TEXT;
+  -- id_token "hd" claim: Workspace domain, '' = personal (non-Workspace) Google account, NULL = not known (connected before this migration).
   ALTER TABLE accounts ADD COLUMN workspace_domain TEXT;
   `,
 ];
