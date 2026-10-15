@@ -12,8 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, ApiError, toastError } from "@/lib/api";
-import { shellQuote } from "@/lib/cli";
-import { PROJECT_ID_WITH_DOMAIN_RE } from "@/lib/gcp-project";
+import { iamBindingCommand } from "@/lib/gcp-project";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -53,6 +52,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
   const switching_ = active && !!p?.principalAccountId && principalId !== p.principalAccountId;
   const principal = accountList.data?.find((a) => a.id === principalId);
   const projectId = state.data?.gcpProjectId ?? "";
+  const iamCommand = principal ? iamBindingCommand(projectId, principal.email) : null;
 
   const provision = async (accountId = principalId) => {
     setProvisioning(true);
@@ -224,11 +224,11 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
             <div className="flex flex-wrap items-center gap-3">
               {projectId && <ExternalLink href={cloudUrl.iam(projectId)}>Open IAM in Google Cloud</ExternalLink>}
             </div>
-            {principal && PROJECT_ID_WITH_DOMAIN_RE.test(projectId) && (
+            {iamCommand && (
               <>
                 <p>Or run this in Cloud Shell as the project owner:</p>
                 <CodeBlock
-                  code={`gcloud projects add-iam-policy-binding ${shellQuote(projectId)} --member=${shellQuote(`user:${principal.email}`)} --role=roles/pubsub.admin`}
+                  code={iamCommand}
                   wrap
                   copyLabel="Copy gcloud command"
                 />

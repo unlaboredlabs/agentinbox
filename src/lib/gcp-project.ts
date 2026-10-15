@@ -1,4 +1,6 @@
-// Google Cloud project IDs: validation, suggestions and the Cloud Shell command (pure, unit-tested).
+// Google Cloud project IDs: validation, suggestions and the Cloud Shell commands (pure, unit-tested).
+
+import { shellQuote } from "./cli.ts";
 
 /** A project ID as Google accepts it: 6–30 chars, lowercase letters, digits and hyphens, starting with a letter. */
 export const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -37,4 +39,13 @@ export function projectCommand(id: string, inOrg: boolean): string | null {
     `gcloud services enable gmail.googleapis.com pubsub.googleapis.com --project=${id} && ` +
     `echo "agentinbox: project ${id} is ready"`
   );
+}
+
+/**
+ * Gives `email` the Pub/Sub Admin role on the project (run by the project owner in Cloud Shell).
+ * Both values are shell-quoted; null when the project ID isn't valid.
+ */
+export function iamBindingCommand(projectId: string, email: string): string | null {
+  if (!PROJECT_ID_WITH_DOMAIN_RE.test(projectId) || !email.trim()) return null;
+  return `gcloud projects add-iam-policy-binding ${shellQuote(projectId)} --member=${shellQuote(`user:${email.trim()}`)} --role=roles/pubsub.admin`;
 }

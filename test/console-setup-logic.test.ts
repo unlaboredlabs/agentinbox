@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { callbackMode } from "../server/google/client.ts";
 import { checkTransport } from "../server/listen/transport.ts";
-import { generateProjectId, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
+import { generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
 import { analyzeUrl, urlVerdict } from "../src/lib/public-url.ts";
 import { tunnelCommand } from "../src/lib/tunnel.ts";
 import { wrapParts } from "../src/lib/wrap.ts";
@@ -107,6 +107,25 @@ describe("project IDs", () => {
       `--organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"`,
     );
     for (const bad of ["", "x; rm -rf ~", "agentinbox-1 && curl evil", "$(id)", "My Project"]) expect(projectCommand(bad, false)).toBeNull();
+  });
+});
+
+describe("IAM binding command", () => {
+  it("quotes the member and project for the shell", () => {
+    expect(iamBindingCommand("agentinbox-123456", "ops@acme.dev")).toBe(
+      "gcloud projects add-iam-policy-binding agentinbox-123456 --member=user:ops@acme.dev --role=roles/pubsub.admin",
+    );
+    // A quote in the address (valid in an email local part) can't end the quoting.
+    expect(iamBindingCommand("agentinbox-123456", "o'brien@acme.dev")).toBe(
+      `gcloud projects add-iam-policy-binding agentinbox-123456 --member='user:o'"'"'brien@acme.dev' --role=roles/pubsub.admin`,
+    );
+    expect(iamBindingCommand("agentinbox-123456", "a$(id)@acme.dev")).toContain(`--member='user:a$(id)@acme.dev'`);
+    expect(iamBindingCommand("example.com:my-project", "ops@acme.dev")).toContain(" example.com:my-project ");
+  });
+
+  it("returns null for an invalid project ID or an empty email", () => {
+    for (const bad of ["", "x; rm -rf ~", "$(id)", "My Project"]) expect(iamBindingCommand(bad, "ops@acme.dev")).toBeNull();
+    expect(iamBindingCommand("agentinbox-123456", " ")).toBeNull();
   });
 });
 
