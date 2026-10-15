@@ -149,7 +149,7 @@ describe("connect", () => {
 
   it("completes a paste-mode flow through the API", async () => {
     ctx.settings.update({ publicUrl: "http://nas.local:8425" });
-    const app = accountsApi(ctx);
+    const app = withErrors(accountsApi(ctx));
     fake.addAccount("bob@gmail.com");
     fake.consentAs("bob@gmail.com");
     const start = (await (await app.request("/accounts/connect", { method: "POST" })).json()) as ConnectAccountResponse;
@@ -159,6 +159,12 @@ describe("connect", () => {
     const res = await app.request("/accounts/connect/complete", { method: "POST", body: JSON.stringify({ url: `  ${landed}  ` }) });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ email: "bob@gmail.com", status: "active" });
+    // Pasting it again (the admin-only endpoint): 409 naming the account, so the console shows it connected.
+    const again = await app.request("/accounts/connect/complete", { method: "POST", body: JSON.stringify({ url: landed }) });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({
+      error: { code: "oauth_already_connected", message: "Already connected: bob@gmail.com.", hint: expect.any(String) as string, email: "bob@gmail.com" },
+    });
     expect(((await (await app.request("/accounts")).json()) as Account[]).map((a) => a.email)).toEqual(["bob@gmail.com"]);
   });
 

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { Account, ConnectAccountResponse } from "../../shared/types.ts";
+import type { Account, ApiError as ApiErrorBody, ConnectAccountResponse } from "../../shared/types.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
@@ -163,6 +163,12 @@ export function completedAccount(ctx: AppContext, state: string, code: string): 
 export class AlreadyConnectedError extends HttpError {
   constructor(readonly email: string) {
     super(409, "oauth_already_connected", `Already connected: ${email}.`, "This sign-in was already completed. Nothing else to do: go back to the console.");
+  }
+
+  /** The console's paste endpoint is admin-only: the body names the account so the console can show it as connected. */
+  override toJSON(): ApiErrorBody {
+    const body = super.toJSON();
+    return { error: { ...body.error, email: this.email } };
   }
 }
 

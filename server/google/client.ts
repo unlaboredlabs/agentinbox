@@ -50,17 +50,21 @@ export function clientView(ctx: Ctx): GoogleClientView {
 function redirectConfirmed(ctx: Ctx, uri: string): boolean {
   const c = ctx.settings.getState("google.client");
   if (!c?.clientId) return false;
-  return c.verifiedRedirectUri === uri || (c.check?.redirectUriTested === uri && c.check.redirectUri === "ok") || !!c.importedRedirectUris?.includes(uri);
+  if (c.verifiedRedirectUri === uri) return true;
+  // Google's own answer beats the imported JSON (a snapshot), as in redirectWarning.
+  const checked = c.check?.redirectUriTested === uri ? c.check.redirectUri : "unknown";
+  if (checked !== "unknown") return checked === "ok";
+  return !!c.importedRedirectUris?.includes(uri);
 }
 
 /**
- * Before the public URL changes: a client saved before savedRedirectUri existed gets the redirect URI
- * in effect now, so the change is noticed (redirect_uri_changed).
+ * After a public URL change: a client saved before savedRedirectUri existed gets `previousUri` (the
+ * redirect URI in effect before the change), so the change is noticed (redirect_uri_changed).
  */
-export function recordRedirectBeforeChange(ctx: Ctx): void {
+export function recordPreviousRedirect(ctx: Ctx, previousUri: string): void {
   const c = ctx.settings.getState("google.client");
   if (!c?.clientId || c.savedRedirectUri) return;
-  ctx.settings.setState("google.client", { ...c, savedRedirectUri: callbackMode(ctx).redirectUri });
+  ctx.settings.setState("google.client", { ...c, savedRedirectUri: previousUri });
 }
 
 /** Last 4 characters of a stored secret (for clients saved before secretHint was recorded). */

@@ -114,12 +114,30 @@ describe("OAuth client check", () => {
     ctx.settings.setState("google.client", legacy);
     const patch = (publicUrl: string) =>
       withErrors(settingsApi(ctx)).request("/settings", { method: "PATCH", body: JSON.stringify({ publicUrl }) });
+    // A rejected change records nothing.
+    expect((await patch("ftp://nope")).status).toBe(400);
+    expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBeUndefined();
     expect((await patch("https://mail.example.org")).status).toBe(200);
     expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBe(first);
     expect(setupCodes()).toEqual(["redirect_uri_changed"]);
     // Later changes keep the URI the client was saved with.
     await patch("https://mail2.example.org");
     expect(ctx.settings.getState("google.client")?.savedRedirectUri).toBe(first);
+  });
+
+  it("lets a check that finds the URI missing override the imported JSON's list", async () => {
+    const uri = ctx.google.redirectUri();
+    fake.registeredRedirectUris = ["https://elsewhere.example/oauth/callback"];
+    const json = JSON.stringify({ web: { client_id: FAKE_CLIENT.clientId, client_secret: FAKE_CLIENT.clientSecret, project_id: FAKE_CLIENT.projectId, redirect_uris: [uri] } });
+    const imported = await call<GoogleClientImportResult>("POST", "/google/client/import", { json, appType: "internal" });
+    expect(imported.body.check.redirectUri).toBe("missing");
+    expect(imported.body.redirectUriConfirmed).toBe(false);
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(false);
+    expect(setupCodes()).toEqual(["redirect_uri_missing"]);
+    // Once Google has it, the check says so.
+    fake.registeredRedirectUris = null;
+    await check();
+    expect(ctx.google.clientView().redirectUriConfirmed).toBe(true);
   });
 
   it("needs a saved client", async () => {

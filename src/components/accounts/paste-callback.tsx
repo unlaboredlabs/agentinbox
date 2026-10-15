@@ -62,7 +62,7 @@ export function PasteCallback({
       onConnected((await api<Account>("/api/accounts/connect/complete", { body: { url: value.trim() } })).email);
     } catch (err) {
       // Pasted after the pop-up (or an earlier paste) already finished it: that's the success it looks like.
-      if (err instanceof ApiError && err.code === "oauth_already_connected") onConnected(/^Already connected: (.+?)\.?$/.exec(err.message)?.[1] ?? "Your account");
+      if (err instanceof ApiError && err.code === "oauth_already_connected") onConnected(err.email ?? "The account");
       else setError(err);
     } finally {
       setPending(false);

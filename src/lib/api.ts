@@ -6,12 +6,15 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly hint?: string;
-  constructor(status: number, code: string, message: string, hint?: string) {
+  /** Set on oauth_already_connected: the account that sign-in connected. */
+  readonly email?: string;
+  constructor(status: number, code: string, message: string, hint?: string, email?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.hint = hint;
+    this.email = email;
   }
 }
 
@@ -72,7 +75,7 @@ export async function api<T = void>(path: string, opts: RequestOptions = {}): Pr
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     }
     if (isApiErrorBody(parsed)) {
-      throw new ApiError(res.status, parsed.error.code, parsed.error.message, parsed.error.hint);
+      throw new ApiError(res.status, parsed.error.code, parsed.error.message, parsed.error.hint, parsed.error.email);
     }
     const msg = typeof parsed === "string" && parsed.trim() && parsed.length < 300 ? parsed.trim() : `Request failed (HTTP ${res.status})`;
     throw new ApiError(res.status, "http_" + res.status, msg);

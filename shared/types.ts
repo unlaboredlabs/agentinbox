@@ -678,7 +678,8 @@ export interface Page<T> {
 
 /** All non-2xx console API responses have this body. */
 export interface ApiError {
-  error: { code: string; message: string; hint?: string };
+  /** `email`: only on oauth_already_connected (from the authenticated paste endpoint), the account that sign-in connected. */
+  error: { code: string; message: string; hint?: string; email?: string };
 }
 
 // ───────────────────────────── Console API route map ─────────────────────────────
