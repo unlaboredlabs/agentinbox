@@ -6,7 +6,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GoogleService } from "../server/google/types.ts";
 import { lockPath } from "../server/instance.ts";
 import { nodeVersionError } from "../server/node-check.ts";
-import { installService, serviceHints, type ServiceOps, serviceStatus, systemOps, uninstallService } from "../server/service.ts";
+import {
+  installService,
+  isHealthResponse,
+  renderSystemdUnit,
+  serviceHints,
+  type ServiceOps,
+  serviceStatus,
+  uninstallService,
+  unitDataDir,
+  userManagerConfigHome,
+} from "../server/service.ts";
 import { defaultPublicUrl } from "../server/settings.ts";
 import { testConfig, testContext } from "./helpers.ts";
 import { CSRF, type Harness, harness } from "./platform-helpers.ts";
@@ -54,9 +64,10 @@ describe("1: Node version check", () => {
 
 // ───────────── 3: service install rollback ─────────────
 
-function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean): ServiceOps & { calls: string[] } {
+function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean, ready = true): ServiceOps & { calls: string[] } {
   const calls: string[] = [];
   return {
+    capture: () => "",
     calls,
     platform: "linux",
     root: false,
@@ -73,7 +84,7 @@ function fakeOps(dir: string, failOn?: (cmd: string, args: string[]) => boolean)
       return staging;
     },
     unitDir: () => join(dir, "units"),
-    waitReady: async () => {},
+    waitReady: async () => ready,
   };
 }
 
@@ -127,21 +138,49 @@ describe("3: service install", () => {
     const ops = fakeOps(config.dataDir, (cmd, args) => enableFails(cmd, args) && ++attempts === 1);
     await expect(installService(config, ops)).rejects.toThrow(/Rolled back to the previous install/);
     expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("previous unit\n");
+    expect(existsSync(join(config.dataDir, "app.new"))).toBe(false);
     expect(readFileSync(join(config.dataDir, "app/marker"), "utf8")).toBe("old app");
     expect(readFileSync(join(config.dataDir, "service.env"), "utf8")).toBe("TRUST_PROXY=1\n");
     expect(attempts).toBe(2);
   });
 
-  it("uses $XDG_CONFIG_HOME for the user unit and explains a missing user session", () => {
-    const saved = { xdg: process.env.XDG_CONFIG_HOME };
-    process.env.XDG_CONFIG_HOME = "/tmp/xdg-test";
-    try {
-      const ops = systemOps();
-      if (process.platform === "linux" && !ops.root) expect(ops.unitDir()).toBe("/tmp/xdg-test/systemd/user");
-    } finally {
-      if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = saved.xdg;
-    }
+  it("changes nothing when systemd can't be reached (no user bus)", async () => {
+    const config = setup();
+    mkdirSync(join(config.dataDir, "units"), { recursive: true });
+    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "working unit\n");
+    mkdirSync(join(config.dataDir, "app/node_modules/agentinbox-cli"), { recursive: true });
+    const ops = fakeOps(config.dataDir, (cmd) => cmd === "systemctl");
+    let staged = false;
+    ops.stage = () => {
+      staged = true;
+      return "";
+    };
+    await expect(installService(config, ops)).rejects.toThrow(/Can't talk to systemd \(user session\): Command failed.*Nothing was changed/s);
+    expect(staged).toBe(false);
+    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("working unit\n");
+    expect(existsSync(join(config.dataDir, "app/node_modules/agentinbox-cli"))).toBe(true);
+    expect(ops.calls).toEqual(["systemctl --user daemon-reload"]);
+  });
+
+  it("rolls back when the service starts but never answers health checks", async () => {
+    const config = setup();
+    const ops = fakeOps(config.dataDir, undefined, false);
+    await expect(installService(config, ops)).rejects.toThrow(/did not answer on port .*Rolled back to no service/s);
+    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(existsSync(join(config.dataDir, "app"))).toBe(false);
+    expect(ops.calls).toContain("systemctl --user disable --now agentinbox");
+  });
+
+  it("finds the user unit dir via the user manager's environment and explains a missing user session", () => {
+    expect(userManagerConfigHome({ capture: () => "HOME=/home/me\nXDG_CONFIG_HOME=/srv/cfg\nLANG=C\n" })).toBe("/srv/cfg");
+    expect(userManagerConfigHome({ capture: () => "HOME=/home/me\n" })).toBeNull();
+    expect(
+      userManagerConfigHome({
+        capture: () => {
+          throw new Error("Failed to connect to bus");
+        },
+      }),
+    ).toBeNull();
     const ops = fakeOps("/tmp/x");
     expect(serviceHints(ops, {}).join("\n")).toMatch(/XDG_RUNTIME_DIR is not set.*enable-linger me.*\/run\/user\/1000/s);
     expect(serviceHints(ops, { XDG_RUNTIME_DIR: "/run/user/1000" })).toHaveLength(2);
@@ -153,14 +192,37 @@ describe("3: service install", () => {
     const ops = fakeOps(config.dataDir);
     await installService(config, ops);
     writeFileSync(config.dbPath, "data");
-    uninstallService(config, ops);
+    mkdirSync(join(config.dataDir, "app.old"));
+    writeFileSync(join(config.dataDir, "app.old/mine"), "not the service's");
+    // A wrong --data is ignored in favor of the installed unit's AGENTINBOX_DATA, and never created.
+    const wrong = join(config.dataDir, "..", "agentinbox-wrong-data");
+    uninstallService({ dataDir: wrong }, ops);
+    expect(existsSync(wrong)).toBe(false);
     expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
     expect(existsSync(join(config.dataDir, "app"))).toBe(false);
     expect(readFileSync(config.dbPath, "utf8")).toBe("data");
+    expect(readFileSync(join(config.dataDir, "app.old/mine"), "utf8")).toBe("not the service's");
     const log = vi.spyOn(console, "log");
     serviceStatus(ops);
     expect(log.mock.calls.flat().join(" ")).toMatch(/not installed/);
     process.exitCode = 0;
+  });
+});
+
+describe("3/5: unit parsing and health detection", () => {
+  it("reads AGENTINBOX_DATA back from a unit and a plist", () => {
+    const unit = renderSystemdUnit({ execPath: "/n", entry: "/e", dataDir: '/srv/a%b"c', port: 1, host: "h", extraEnv: {} });
+    expect(unitDataDir(unit)).toBe('/srv/a%b"c');
+    expect(unitDataDir("<key>AGENTINBOX_DATA</key><string>/Users/me/a&amp;b</string>")).toBe("/Users/me/a&b");
+    expect(unitDataDir("[Service]\n")).toBeNull();
+  });
+
+  it("only accepts a real HealthResponse as ready", () => {
+    expect(isHealthResponse({ status: "starting" })).toBe(false);
+    expect(isHealthResponse({ status: "ok", version: "0.1.0", setupComplete: false })).toBe(true);
+    expect(isHealthResponse({ status: "degraded", version: "0.1.0", setupComplete: true })).toBe(true);
+    expect(isHealthResponse({ status: "ok" })).toBe(false);
+    expect(isHealthResponse(null)).toBe(false);
   });
 });
 
@@ -169,6 +231,7 @@ describe("4: default public URL", () => {
     expect(defaultPublicUrl("0.0.0.0", 8425)).toBe("http://localhost:8425");
     expect(defaultPublicUrl("::", 8425)).toBe("http://localhost:8425");
     expect(defaultPublicUrl("127.0.0.1", 8425)).toBe("http://localhost:8425");
+    expect(defaultPublicUrl("127.0.0.2", 8425)).toBe("http://127.0.0.2:8425");
     expect(defaultPublicUrl("::1", 8425)).toBe("http://localhost:8425");
     expect(defaultPublicUrl("192.168.1.5", 9000)).toBe("http://192.168.1.5:9000");
     expect(defaultPublicUrl("100.64.1.2", 8425)).toBe("http://100.64.1.2:8425");

@@ -211,35 +211,52 @@ export interface ServiceOps {
   root: boolean;
   /** Runs a command, throwing on a non-zero exit. */
   exec(cmd: string, args: string[], opts?: { quiet?: boolean }): void;
+  /** Runs a command and returns its stdout, throwing on a non-zero exit. */
+  capture(cmd: string, args: string[]): string;
   /** Installs the package into a staging directory and returns it (see stageApp). */
   stage(dataDir: string): string;
   /** Directory for the systemd unit or the launchd plist. */
   unitDir(): string;
-  /** Waits for /api/health and prints the URLs. */
-  waitReady(config: ServiceConfig): Promise<void>;
+  /** Resolves true once /api/health returns a real HealthResponse, false if it never does. */
+  waitReady(config: ServiceConfig): Promise<boolean>;
   uid: number;
   user: string;
 }
 
 export const systemOps = (): ServiceOps => {
   const root = process.getuid?.() === 0;
-  return {
+  const ops: ServiceOps = {
     platform: process.platform,
     root,
     exec: (cmd, args, opts) => void execFileSync(cmd, args, { stdio: opts?.quiet ? "ignore" : "inherit" }),
+    capture: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     stage: stageApp,
-    unitDir: () =>
-      process.platform === "darwin"
-        ? join(homedir(), "Library/LaunchAgents")
-        : root
-          ? "/etc/systemd/system"
-          : // Where `systemctl --user` actually looks: $XDG_CONFIG_HOME/systemd/user.
-            join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "systemd/user"),
-    waitReady: printWhenReady,
+    unitDir: () => {
+      if (process.platform === "darwin") return join(homedir(), "Library/LaunchAgents");
+      if (root) return "/etc/systemd/system";
+      unitDirCache ??= join(userManagerConfigHome(ops) ?? join(homedir(), ".config"), "systemd/user");
+      return unitDirCache;
+    },
+    waitReady: waitForHealth,
     uid: process.getuid?.() ?? 0,
     user: userInfo().username,
   };
+  let unitDirCache: string | undefined;
+  return ops;
 };
+
+/**
+ * XDG_CONFIG_HOME as the systemd user manager sees it (where `systemctl --user` looks for units),
+ * which can differ from this shell's. Null when unset there or the manager can't be asked.
+ */
+export function userManagerConfigHome(ops: Pick<ServiceOps, "capture">): string | null {
+  try {
+    const env = ops.capture("systemctl", ["--user", "show-environment"]);
+    return /^XDG_CONFIG_HOME=(.+)$/m.exec(env)?.[1]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 const unitFile = (ops: ServiceOps) => join(ops.unitDir(), ops.platform === "darwin" ? `${LAUNCHD_LABEL}.plist` : `${SERVICE_NAME}.service`);
 const systemctl = (ops: ServiceOps, ...args: string[]) => ops.exec("systemctl", ops.root ? args : ["--user", ...args]);
@@ -278,6 +295,19 @@ export function serviceHints(ops: ServiceOps, env: NodeJS.ProcessEnv = process.e
   return hints;
 }
 
+const firstLine = (err: unknown) => (err instanceof Error ? err.message : String(err)).split("\n")[0];
+
+/** Fails before anything is touched when systemd can't be reached (e.g. no user bus over su). */
+function preflight(ops: ServiceOps): void {
+  if (ops.platform !== "linux") return;
+  try {
+    systemctl(ops, "daemon-reload");
+  } catch (err) {
+    const hints = serviceHints(ops).map((h) => `    ${h}`).join("\n");
+    throw new Error(`Can't talk to systemd${ops.root ? "" : " (user session)"}: ${firstLine(err)}. Nothing was changed.\n${hints}`);
+  }
+}
+
 export async function installService(config: ServiceConfig, ops: ServiceOps = systemOps()): Promise<void> {
   assertSupported(ops);
   if (ops.platform === "linux" && /\s/.test(config.dataDir)) {
@@ -287,23 +317,25 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
   validateMasterKey(extraEnv.AGENTINBOX_MASTER_KEY);
   // The service must be able to read what's already stored, with exactly the key it will get.
   assertMasterKeyUsable(config, extraEnv.AGENTINBOX_MASTER_KEY ?? "");
+  preflight(ops);
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 
   const staging = ops.stage(config.dataDir);
   const file = unitFile(ops);
   const previousUnit = readText(file);
   const previousEnv = readText(serviceEnvPath(config.dataDir));
-  uninstallService(config, ops, { quiet: true, keepApp: true });
-
   const app = join(config.dataDir, "app");
   const old = join(config.dataDir, "app.old");
-  rmSync(old, { recursive: true, force: true });
-  if (existsSync(app)) renameSync(app, old);
-  renameSync(staging, app);
   const entry = join(app, "node_modules", PACKAGE, "dist/cli.js");
   const spec: ServiceSpec = { execPath: process.execPath, entry, dataDir: config.dataDir, port: config.port, host: config.host, extraEnv, system: ops.root };
+  let swapped = false;
 
   try {
+    uninstallService(config, ops, { quiet: true, keepApp: true });
+    rmSync(old, { recursive: true, force: true });
+    if (existsSync(app)) renameSync(app, old);
+    renameSync(staging, app);
+    swapped = true;
     writeServiceEnv(config.dataDir, extraEnv);
     mkdirSync(ops.unitDir(), { recursive: true });
     if (ops.platform === "linux") {
@@ -315,12 +347,12 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
       writeFileSync(file, renderLaunchdPlist(spec), { mode: 0o600 });
       ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
     }
+    if (!(await ops.waitReady(config))) throw new Error(`it did not answer on port ${config.port}`);
   } catch (err) {
     rollback();
     const hints = serviceHints(ops).map((h) => `    ${h}`).join("\n");
     throw new Error(
-      `Starting the service failed (${err instanceof Error ? err.message.split("\n")[0] : String(err)}). ` +
-        `Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
+      `Starting the service failed (${firstLine(err)}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
     );
   }
   rmSync(old, { recursive: true, force: true });
@@ -336,10 +368,13 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
     quietly(() => uninstallService(config, ops, { quiet: true, keepApp: true }));
     quietly(() => rmSync(file, { force: true }));
     if (ops.platform === "linux") quietly(() => systemctl(ops, "daemon-reload"));
-    quietly(() => {
-      rmSync(app, { recursive: true, force: true });
-      if (existsSync(old)) renameSync(old, app);
-    });
+    quietly(() => rmSync(staging, { recursive: true, force: true }));
+    if (swapped) {
+      quietly(() => {
+        rmSync(app, { recursive: true, force: true });
+        if (existsSync(old)) renameSync(old, app);
+      });
+    }
     quietly(() => (previousEnv === null ? rmSync(serviceEnvPath(config.dataDir), { force: true }) : writeFileSync(serviceEnvPath(config.dataDir), previousEnv, { mode: 0o600 })));
     if (previousUnit !== null) {
       quietly(() => {
@@ -369,9 +404,23 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
     `  It runs the Node.js at ${process.execPath} (v${process.versions.node}). If you remove or replace that Node, run \`${cliCommand("service install")}\` again.`,
   );
   if (kept.length) console.log(`  Kept ${kept.join(", ")} from the previous install.`);
-  await ops.waitReady(config);
+  printLinks(config);
 }
 
+/** AGENTINBOX_DATA from an installed unit or plist. */
+export function unitDataDir(text: string): string | null {
+  const systemd = /^Environment="AGENTINBOX_DATA=((?:[^"\\]|\\.)*)"/m.exec(text);
+  if (systemd) return systemd[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%");
+  const plist = /<key>AGENTINBOX_DATA<\/key><string>([^<]*)<\/string>/.exec(text);
+  if (plist) return plist[1]!.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  return null;
+}
+
+/**
+ * Stops and removes the service. The data directory is the one the installed unit uses (falling
+ * back to `config.dataDir`), and only directories that really are the service's own install are
+ * deleted; nothing is created.
+ */
 export function uninstallService(
   config: Pick<ServiceConfig, "dataDir">,
   ops: ServiceOps = systemOps(),
@@ -379,7 +428,9 @@ export function uninstallService(
 ): void {
   assertSupported(ops);
   const file = unitFile(ops);
-  if (!existsSync(file)) {
+  const unitText = readText(file);
+  const dataDir = (unitText && unitDataDir(unitText)) || config.dataDir;
+  if (unitText === null) {
     if (!opts.quiet) console.log("The agentinbox service is not installed.");
   } else {
     if (ops.platform === "linux") {
@@ -398,11 +449,14 @@ export function uninstallService(
       }
       rmSync(file);
     }
-    if (!opts.quiet) console.log(`Removed the ${SERVICE_NAME} service. Your data in ${config.dataDir} was kept.`);
+    if (!opts.quiet) console.log(`Removed the ${SERVICE_NAME} service. Your data in ${dataDir} was kept.`);
   }
   if (!opts.keepApp) {
     // The service's own install; the data (database, keys) stays.
-    for (const dir of ["app", "app.new", "app.old"]) rmSync(join(config.dataDir, dir), { recursive: true, force: true });
+    for (const dir of ["app", "app.new", "app.old"]) {
+      const path = join(dataDir, dir);
+      if (existsSync(join(path, "node_modules", PACKAGE))) rmSync(path, { recursive: true, force: true });
+    }
   }
 }
 
@@ -421,24 +475,31 @@ export function serviceStatus(ops: ServiceOps = systemOps()): void {
   }
 }
 
-async function printWhenReady(config: ServiceConfig): Promise<void> {
+/** A real HealthResponse (not the "starting" placeholder or something else on the port). */
+export function isHealthResponse(body: unknown): boolean {
+  const b = body as { status?: unknown; version?: unknown } | null;
+  return !!b && (b.status === "ok" || b.status === "degraded") && typeof b.version === "string";
+}
+
+/** Polls /api/health for up to ~45 s. 503 with a HealthResponse means "up but degraded", which is up. */
+async function waitForHealth(config: ServiceConfig): Promise<boolean> {
   const base = loopbackUrl(config.host, config.port);
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 90; i++) {
     try {
-      // 503 means "up but degraded", which is still up.
       const res = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1000) });
-      if (res.status === 200 || res.status === 503) {
-        const token = readSetupToken(config.dataDir);
-        console.log(`  Running at:\n`);
-        for (const url of consoleUrls(config.host, config.port)) console.log(`    ${url}${token ? `/setup?token=${token}` : ""}`);
-        if (token) console.log(`\n  Open the link above to claim the instance and finish setup.`);
-        console.log();
-        return;
-      }
+      if ((res.status === 200 || res.status === 503) && isHealthResponse(await res.json().catch(() => null))) return true;
     } catch {
       // Not up yet.
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  console.warn(`  The service did not respond on port ${config.port} yet. Check \`${cliCommand("service status")}\`.`);
+  return false;
+}
+
+function printLinks(config: ServiceConfig): void {
+  const token = readSetupToken(config.dataDir);
+  console.log(`  Running at:\n`);
+  for (const url of consoleUrls(config.host, config.port)) console.log(`    ${url}${token ? `/setup?token=${token}` : ""}`);
+  if (token) console.log(`\n  Open the link above to claim the instance and finish setup.`);
+  console.log();
 }

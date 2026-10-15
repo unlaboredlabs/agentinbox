@@ -46,7 +46,8 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 export async function startServer(opts: StartOptions): Promise<RunningServer> {
   const { config } = opts;
   type Fetch = Parameters<typeof serve>[0]["fetch"];
-  let handler: Fetch = () => new Response("agentinbox is starting", { status: 503, headers: { "retry-after": "1" } });
+  // Distinguishable from a real HealthResponse, so `service install` keeps waiting.
+  let handler: Fetch = () => Response.json({ status: "starting" }, { status: 503, headers: { "retry-after": "1" } });
   let server: ServerType;
   try {
     server = await listen((req, env) => handler(req, env), config.host, config.port);

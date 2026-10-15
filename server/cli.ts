@@ -91,11 +91,11 @@ withServerOptions(service.command("install").description("install and start the 
 service
   .command("uninstall")
   .description("stop and remove the service (keeps your data)")
-  .option("-d, --data <dir>", "data directory (default ~/.agentinbox, env AGENTINBOX_DATA)")
+  .option("-d, --data <dir>", "data directory, if the installed service doesn't say (default ~/.agentinbox, env AGENTINBOX_DATA)")
   .action(async (o: ServerFlags) => {
-    const { loadConfig } = await import("./config.ts");
     const { uninstallService } = await import("./service.ts");
-    uninstallService(loadConfig(configInput(o), version));
+    // No loadConfig: uninstalling must not create a data directory.
+    uninstallService({ dataDir: resolve(o.data ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox")) });
   });
 
 service
@@ -227,10 +227,8 @@ function isDir(path: string): boolean {
   }
 }
 
-const COMMANDS = ["start", "service", "skill", "reset-password", "help"];
-
 function unknownCommand(name: string): string {
-  const near = closest(name, COMMANDS);
+  const near = closest(name, [...program.commands.map((c) => c.name()), "help"]);
   return `unknown command '${name}'${near ? `\n(Did you mean ${near}?)` : ""}\nRun agentinbox --help for the list of commands.`;
 }
 
