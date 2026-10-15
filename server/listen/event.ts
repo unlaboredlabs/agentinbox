@@ -32,7 +32,7 @@ export function skipReason(payload: WebhookPayload, f: LocalFilter): string | nu
   if (label) return `--not-label ${label}`;
   const wanted = new Set(f.filter?.labelIds ?? []);
   const category = f.skipCategories?.find((c) => !wanted.has(c) && m.labelIds?.includes(c));
-  if (category) return `Gmail ${category.replace(/^CATEGORY_/, "").toLowerCase()} (--all-categories to include)`;
+  if (category) return `Gmail ${category.replace(/^CATEGORY_/, "").toLowerCase()} tab; --all-categories includes it`;
   return null;
 }
 

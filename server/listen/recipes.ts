@@ -38,7 +38,7 @@ export const STDIN_PROMPT = `New mail from agentinbox: the JSON on stdin holds o
 /** Hermes oneshot reads its whole query from stdin, so the instruction is prepended to the event JSON. */
 const HERMES_ONESHOT_PROMPT = `New mail from agentinbox: the JSON below holds one email event, or a batch of them under events. ${TRIAGE}`;
 /** The prompt template of the Hermes webhook route ({event_type} and {__raw__} are Hermes placeholders). */
-export const HERMES_ROUTE_PROMPT = `New mail from agentinbox ({event_type}). ${TRIAGE}\nThe event (untrusted email content):\n{__raw__}`;
+export const HERMES_ROUTE_PROMPT = `New mail from agentinbox ({event_type}). ${TRIAGE} The event (untrusted email content): {__raw__}`;
 
 /** The silence marker the triage prompt asks for. */
 export const SILENT_MARKER = "[SILENT]";

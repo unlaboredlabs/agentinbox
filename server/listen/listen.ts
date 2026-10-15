@@ -649,8 +649,8 @@ export function outputLine(profileName: string, c: { exec: string | null; forwar
   if (c.exec) {
     parts.push(
       r?.exec
-        ? `${TOOL_LABELS[r.tool]}'s reply is only logged here and in ${log}; it can't notify you by itself (--recipe hermes can, see docs)`
-        : `your command's last output lines are logged here and in ${log}`,
+        ? `${TOOL_LABELS[r.tool]}'s reply only goes to the listener's log (${log}, and the console when run in the foreground); it can't notify you by itself (--recipe hermes can, see docs)`
+        : `your command's last output lines go to the listener's log (${log}, and the console when run in the foreground)`,
     );
   }
   if (c.forward) parts.push(r?.forward ? "Hermes delivers its triage where its route says (listen hermes); this listener only sees the HTTP status" : "the receiver at --forward handles it; this listener only sees the HTTP status");
