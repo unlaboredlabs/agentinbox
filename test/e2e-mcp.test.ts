@@ -382,8 +382,8 @@ describe.runIf(HAS_AGENTS)("MCP agent journey", () => {
   it("organizes mail (labels, archive, read state) within the label scope", async () => {
     const inScope = deliverOrder("Organize me");
     const outside = s.fake.deliver(email, { from: "x@else.test", subject: "Not mine", text: "z" });
-    const { id, mcp } = await agentWith("organizer-scoped", { capabilities: ["read", "organize"], labelScope: [support] });
     const vip = s.fake.addLabel(email, "VIP"); // created in beforeAll
+    const { id, mcp } = await agentWith("organizer-scoped", { capabilities: ["read", "organize"], labelScope: [support, vip] });
 
     expect(await mcp.ok("modify_labels", { thread_id: inScope.threadId, add: ["VIP"] })).toContain("VIP");
     expect(s.fake.message(email, inScope.id)!.labelIds).toContain(vip);
@@ -395,6 +395,11 @@ describe.runIf(HAS_AGENTS)("MCP agent journey", () => {
 
     const protectedLabel = await mcp.call("modify_labels", { thread_id: inScope.threadId, add: ["TRASH"] });
     expect(protectedLabel.isError).toBe(true);
+    // A scoped agent can't name (or pull threads into) labels outside its scope.
+    const narrow = await agentWith("organizer-narrow", { capabilities: ["read", "organize"], labelScope: [support] });
+    const outsideLabel = await narrow.mcp.call("modify_labels", { thread_id: inScope.threadId, add: ["VIP"] });
+    expect(outsideLabel.isError).toBe(true);
+    expect((await audit(narrow.id, "denied")).map((e) => e.reason)).toEqual(["label_scope"]);
     for (const [tool, args] of [
       ["archive", { thread_id: outside.threadId }],
       ["mark_read", { message_id: outside.id }],

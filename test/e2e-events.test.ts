@@ -337,17 +337,24 @@ describe.runIf(HAS_AGENTS)("webhook delivery", () => {
   });
 
   it("summarizes activity on the overview", async () => {
-    const { webhook } = await createHook("/hooks/overview");
+    // Real deliveries only: synthetic test sends don't count.
+    const { webhook } = await createHook("/hooks/overview", { filter: { subject: "^Overview" } });
+    const before = await s.admin.get<OverviewStats>("/api/overview");
     await s.admin.post<Delivery>(`/api/webhooks/${webhook.id}/test`);
-    rx.status = 500;
-    await s.admin.post<Delivery>(`/api/webhooks/${webhook.id}/test`);
+    for (const [status, subject] of [[200, "Overview ok"], [500, "Overview fail"]] as const) {
+      rx.status = status;
+      const m = s.fake.deliver(email, { from: "o@else.test", subject, text: "x" });
+      const ev = await s.waitForEvent((e) => e.message?.id === m.id);
+      await waitFor(async () => (await deliveries(webhook.id)).find((d) => d.eventId === ev.id && d.status === (status === 200 ? "succeeded" : "failed")), { what: subject });
+    }
     const o = await s.admin.get<OverviewStats>("/api/overview");
     const accounts = await s.admin.get<Account[]>("/api/accounts");
     expect(o.accounts.total).toBe(accounts.length);
     expect(o.accounts.needsAttention).toBe(accounts.filter((a) => a.status === "needs_reauth" || a.status === "error").length);
     expect(o.events24h).toBeGreaterThanOrEqual((await s.events()).length);
-    expect(o.deliveries24h.succeeded).toBeGreaterThan(0);
-    expect(o.deliveries24h.failed).toBeGreaterThan(0);
+    // Other unfiltered webhooks in this file receive these emails too.
+    expect(o.deliveries24h.succeeded).toBeGreaterThan(before.deliveries24h.succeeded);
+    expect(o.deliveries24h.failed).toBeGreaterThan(before.deliveries24h.failed);
     expect(o.activity).toHaveLength(24);
     expect(o.activity.reduce((n, h) => n + h.events, 0)).toBe(o.events24h);
   });
