@@ -1,0 +1,209 @@
+// E2E 2 + 8: connecting accounts through the real OAuth flow (direct callback and paste mode), re-auth
+// after the refresh token is revoked, and account removal revoking every agent's access.
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { Account, Agent, GoogleClientView, HealthResponse, MailEvent, Settings } from "../shared/types.ts";
+import { grant, mailbox, type Stack, startStack } from "./e2e/harness.ts";
+import { waitFor } from "./e2e/wait.ts";
+
+let s: Stack;
+beforeAll(async () => {
+  s = await startStack();
+  await s.bootstrap();
+});
+afterAll(() => s.close());
+
+const accountById = async (id: string) => (await s.admin.get<Account[]>("/api/accounts")).find((a) => a.id === id);
+
+describe("connect account", () => {
+  it("runs the direct OAuth flow: PKCE consent → /oauth/callback → active account; the state is single-use", async () => {
+    const email = mailbox("direct");
+    s.fake.addAccount(email, { name: "Direct Desk" });
+
+    const start = await s.admin.post<{ authUrl: string; state: string; callbackMode: string }>("/api/accounts/connect");
+    expect(start.callbackMode).toBe("direct");
+    const auth = new URL(start.authUrl);
+    expect(auth.origin).toBe(s.fake.url);
+    expect(Object.fromEntries(auth.searchParams)).toMatchObject({
+      client_id: "fake-client.apps.googleusercontent.com",
+      redirect_uri: `${s.url}/oauth/callback`,
+      response_type: "code",
+      access_type: "offline",
+      prompt: "consent",
+      code_challenge_method: "S256",
+      state: start.state,
+    });
+    expect(auth.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/gmail.modify");
+
+    s.fake.consentAs(email);
+    const consent = await fetch(start.authUrl, { redirect: "manual" });
+    expect(consent.status).toBe(302);
+    const callback = consent.headers.get("location")!;
+    expect(callback.startsWith(`${s.url}/oauth/callback?`)).toBe(true);
+
+    const page = await fetch(callback);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Account connected");
+    expect(html).toContain(email);
+
+    const account = (await s.admin.get<Account[]>("/api/accounts")).find((a) => a.email === email);
+    expect(account).toMatchObject({ status: "active", displayName: "Direct Desk", lastError: null });
+    expect(account!.historyId).toMatch(/^\d+$/);
+
+    // Replaying the callback (refresh, back button, attacker) fails cleanly.
+    const replay = await fetch(callback);
+    expect(replay.status).toBe(400);
+    expect(await replay.text()).toContain("expired or was already used");
+
+    // Labels come from Gmail through the account's token.
+    const labels = await s.admin.get<{ id: string; name: string }[]>(`/api/accounts/${account!.id}/labels`);
+    expect(labels.map((l) => l.id)).toContain("INBOX");
+  });
+
+  it("shows Google's consent denial on the callback page and creates no account", async () => {
+    const email = mailbox("deny");
+    s.fake.addAccount(email);
+    const start = await s.admin.post<{ authUrl: string }>("/api/accounts/connect");
+    s.fake.consentAs(email, { deny: true });
+    const consent = await fetch(start.authUrl, { redirect: "manual" });
+    const page = await fetch(consent.headers.get("location")!);
+    expect(page.status).toBe(400);
+    expect(await page.text()).toContain("Access was denied");
+    expect((await s.admin.get<Account[]>("/api/accounts")).some((a) => a.email === email)).toBe(false);
+  });
+
+  it("uses paste mode when publicUrl is plain http on a non-localhost host", async () => {
+    const before = await s.admin.get<Settings>("/api/settings");
+    try {
+      await s.admin.patch("/api/settings", { publicUrl: `http://agentinbox.lan:${s.config.port}` });
+      const view = await s.admin.get<GoogleClientView>("/api/google/client");
+      expect(view.callbackMode).toBe("paste");
+      expect(view.redirectUri).toBe(`http://localhost:${s.config.port}/oauth/callback`);
+
+      const email = mailbox("paste");
+      s.fake.addAccount(email);
+      const start = await s.admin.post<{ authUrl: string; callbackMode: string }>("/api/accounts/connect");
+      expect(start.callbackMode).toBe("paste");
+      s.fake.consentAs(email);
+      const consent = await fetch(start.authUrl, { redirect: "manual" });
+      const landed = consent.headers.get("location")!;
+      expect(landed).toMatch(/^http:\/\/localhost:\d+\/oauth\/callback\?code=/);
+
+      // A pasted URL without a code gets an actionable error.
+      const junk = await s.admin.failure(s.admin.post("/api/accounts/connect/complete", { url: "http://localhost/oauth/callback?foo=1" }));
+      expect(junk.status).toBe(400);
+      expect(junk.body?.error.hint).toBeTruthy();
+
+      // The user pastes the URL their browser landed on (which didn't load).
+      const account = await s.admin.post<Account>("/api/accounts/connect/complete", { url: `  ${landed}  ` });
+      expect(account).toMatchObject({ email, status: "active" });
+    } finally {
+      await s.admin.patch("/api/settings", { publicUrl: before.publicUrl });
+    }
+  });
+
+  it("marks the account needs_reauth with an account.auth_failed event when the refresh token is revoked, and reconnecting restores it", async () => {
+    const email = mailbox("reauth");
+    const account = await s.connectAccount(email);
+    const stream = await s.admin.stream();
+    try {
+      s.fake.failRefresh(email);
+      s.kick(account.id); // next Gmail call: 401 → refresh → invalid_grant
+
+      const failed = await waitFor(async () => {
+        const a = await accountById(account.id);
+        return a?.status === "needs_reauth" ? a : null;
+      }, { what: "needs_reauth" });
+      expect(failed.lastError).toMatch(/reconnect/i);
+
+      const ev = await s.waitForEvent((e) => e.type === "account.auth_failed" && e.accountId === account.id, { kick: false });
+      expect(ev).toMatchObject({ accountEmail: email, message: null });
+      expect(ev.detail).toMatchObject({ email });
+      await stream.next("account", (a) => a.id === account.id && a.status === "needs_reauth");
+      await stream.next("event", (e) => e.type === "account.auth_failed" && e.accountId === account.id);
+
+      // Health turns degraded for uptime monitors; manual resync explains what to do.
+      const health = await fetch(`${s.url}/health`);
+      expect(health.status).toBe(503);
+      expect(((await health.json()) as HealthResponse).status).toBe("degraded");
+      const resync = await s.admin.failure(s.admin.post(`/api/accounts/${account.id}/resync`));
+      expect(resync.status).toBe(409);
+
+      // Reconnect (the console passes reauthAccountId): same account id, active again.
+      const back = await s.connectAccount(email, { reauthAccountId: account.id });
+      expect(back).toMatchObject({ id: account.id, status: "active", lastError: null });
+      expect((await fetch(`${s.url}/health`)).status).toBe(200);
+      await stream.next("account", (a) => a.id === account.id && a.status === "active");
+
+      // Mail flows again with the new token.
+      s.fake.deliver(email, { from: "Back <back@elsewhere.test>", subject: "After reauth", text: "hello again" });
+      await s.waitForEvent((e) => e.accountId === account.id && e.message?.subject === "After reauth");
+    } finally {
+      stream.close();
+    }
+  });
+
+  it("refuses a reconnect that signs in as a different Google account", async () => {
+    const email = mailbox("owner");
+    const other = mailbox("intruder");
+    const account = await s.connectAccount(email);
+    s.fake.addAccount(other);
+    const start = await s.admin.post<{ authUrl: string }>("/api/accounts/connect", { reauthAccountId: account.id });
+    s.fake.consentAs(other);
+    const consent = await fetch(start.authUrl, { redirect: "manual" });
+    const page = await fetch(consent.headers.get("location")!);
+    expect(page.status).toBe(400);
+    expect(await page.text()).toContain(`this reconnect is for ${email}`);
+    expect((await s.admin.get<Account[]>("/api/accounts")).some((a) => a.email === other)).toBe(false);
+  });
+});
+
+describe("account removal", () => {
+  it("deletes the account's grants, revokes the token, and the agent loses access over MCP", async () => {
+    const email = mailbox("remove");
+    const keep = mailbox("keep");
+    const account = await s.connectAccount(email);
+    const kept = await s.connectAccount(keep);
+    const msg = s.fake.deliver(email, { from: "Carol <carol@client.test>", subject: "Contract", text: "Please sign" });
+
+    const { agent, apiKey } = await s.createAgent("remover", [
+      grant(account.id, { capabilities: ["read", "draft"] }),
+      grant(kept.id, { capabilities: ["read"] }),
+    ]);
+    const mcp = await s.agent(apiKey);
+    try {
+      expect(await mcp.ok("get_message", { account: email, message_id: msg.id })).toContain("Please sign");
+      expect(await mcp.tools()).toContain("create_draft");
+
+      const revokedBefore = s.fake.revoked.length;
+      await s.admin.del(`/api/accounts/${account.id}`);
+
+      expect((await s.admin.get<Account[]>("/api/accounts")).map((a) => a.id)).not.toContain(account.id);
+      const after = await s.admin.get<Agent>(`/api/agents/${agent.id}`);
+      expect(after.grants.map((g) => g.accountId)).toEqual([kept.id]);
+      expect(s.fake.revoked.length).toBe(revokedBefore + 1);
+
+      // The same MCP client (stateless HTTP) immediately sees the reduced access.
+      const accounts = await mcp.ok("list_accounts");
+      expect(accounts).toContain(keep);
+      expect(accounts).not.toContain(email);
+      expect(await mcp.tools()).not.toContain("create_draft");
+      const denied = await mcp.call("get_message", { account: email, message_id: msg.id });
+      expect(denied.isError).toBe(true);
+      expect(denied.text).not.toContain("Please sign");
+
+      // Mail arriving at the removed mailbox produces no events.
+      s.fake.deliver(email, { from: "carol@client.test", subject: "After removal", text: "x" });
+      s.fake.deliver(keep, { from: "carol@client.test", subject: "Still connected", text: "y" });
+      await s.waitForEvent((e) => e.message?.subject === "Still connected");
+      const events: MailEvent[] = await s.events();
+      expect(events.some((e) => e.message?.subject === "After removal")).toBe(false);
+
+      const missing = await s.admin.failure(s.admin.del(`/api/accounts/${account.id}`));
+      expect(missing.status).toBe(404);
+    } finally {
+      await mcp.close();
+    }
+  });
+});
