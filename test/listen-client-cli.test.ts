@@ -37,7 +37,8 @@ describe("agentinbox CLI (subprocess)", () => {
     const out = run.output();
     expect(out).toContain("K7QM-2XPD");
     expect(out).toContain("hermes chat --oneshot -Q -t mcp-agentinbox --query-file -");
-    expect(out).toContain("npx agentinbox-cli listen --save --exec");
+    expect(out).toContain("npx agentinbox-cli listen --save --recipe hermes");
+    expect(out).not.toContain("$(");
     expect(out).toContain("npx agentinbox-cli listen service install");
     expect(out).not.toContain(FAKE_KEY);
   }, 30_000);
@@ -56,6 +57,17 @@ describe("agentinbox CLI (subprocess)", () => {
     const recipe = cli(["listen", "--print-recipe", "claude-code"], xdg);
     expect(await recipe.exit).toBe(0);
     expect(recipe.output().trim()).toContain(`--mcp-config '${join(xdg.XDG_CONFIG_HOME!, "agentinbox", "mcp", "default.claude.json")}'`);
+  }, 30_000);
+
+  it("listen --recipe rejects unknown tools and --exec alongside it, before connecting", async () => {
+    saveProfile("default", { url: api.url, apiKey: FAKE_KEY, agentId: "agt_1", agentName: "t", consumer: "c" });
+    const bad = cli(["listen", "--recipe", "vim"], xdg);
+    expect(await bad.exit).toBe(1);
+    expect(bad.output()).toContain('Unknown --recipe "vim". Built-in recipes: claude-code, codex, cursor, hermes.');
+    const both = cli(["listen", "service", "install", "--recipe", "claude-code", "--exec", "cat"], xdg);
+    expect(await both.exit).toBe(1);
+    expect(both.output()).toContain("--recipe and --exec can't be combined");
+    expect(api.live.size).toBe(0);
   }, 30_000);
 
   it("--print-recipe validates the profile name before putting it into a command", async () => {

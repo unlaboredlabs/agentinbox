@@ -61,7 +61,7 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
         code: "testing_mode",
         severity,
         message: `Your OAuth app is in Testing, so Google ${when} (7 days after it connected).`,
-        hint: "Google Cloud → Google Auth Platform → Audience → Publish app → Confirm. Then reconnect the account so it gets a long-lived token.",
+        hint: "Google Cloud → Google Auth Platform → Audience → Publish app → Push to production? → Confirm. Then reconnect the account so it gets a long-lived token.",
         url: audienceUrl,
         accountId: row.id,
       });

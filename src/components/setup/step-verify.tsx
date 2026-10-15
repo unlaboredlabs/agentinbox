@@ -671,7 +671,7 @@ function SuccessPanel({
           <li className="space-y-1.5">
             <p>
               <span className="font-medium">Keep agentinbox itself running.</span>{" "}
-              <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On this server, run:</span>
+              <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On the computer running agentinbox, run:</span>
             </p>
             <Command code={system.data.serviceCommand} label="agentinbox service command" />
           </li>

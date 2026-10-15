@@ -6,7 +6,7 @@ import type { AgentTool } from "../shared/agent-api.ts";
 import { type AuditEntry, isMcpToolAction, type ListenerInfo, type MailEvent, type PairingRequest, type SetupState } from "../shared/types.ts";
 import { printNextSteps } from "../server/listen/connect.ts";
 import type { Profile } from "../server/listen/profile.ts";
-import { recipe, shellQuote as cliQuote } from "../server/listen/recipes.ts";
+import { recipe } from "../server/listen/recipes.ts";
 import { grantInWords } from "../src/components/agents/grant-words.ts";
 import { deniedDescription, linkedPairing } from "../src/components/approvals/pairing-link.ts";
 import { listenerHandled } from "../src/components/agents/listener-handled.ts";
@@ -268,18 +268,24 @@ describe("connectCommands matches what `connect` prints", () => {
     const cli = nextSteps(tool, URL_);
     // connect prints the command followed by a dry-run hint on the same line.
     expect(cli.some((l) => l === c.setupMcp || l.startsWith(`${c.setupMcp}  `))).toBe(true);
-    // The console defers to `--print-recipe`; substituted, it is exactly the command connect prints.
-    const recipeExec = cliQuote(recipe(tool).exec);
-    const sub = `"$(${NPX} listen --print-recipe ${tool})"`;
-    expect(c.listenTry).toContain(sub);
-    expect(cli).toContain(c.listenTry.replace(sub, recipeExec));
-    // connect prints the bare service install (after --save); the console repeats --exec so it also works alone.
+    // Both name the CLI's built-in recipe: exactly the command connect prints, and connect shows what it runs.
+    expect(c.listenTry).toBe(`${NPX} listen --save --recipe ${tool}`);
+    expect(cli).toContain(c.listenTry);
+    expect(cli).toContain(`It runs: ${recipe(tool).exec}`);
+    // connect prints the bare service install (after --save); the console repeats --recipe so it also works alone.
     expect(cli).toContain(`${NPX} listen service install`);
-    expect(c.listenService).toBe(`${NPX} listen service install --exec ${sub}`);
+    expect(c.listenService).toBe(`${NPX} listen service install --recipe ${tool}`);
     // Neither passes --types: listen's default (new mail only) applies, and connect says so.
     expect(c.listenTry).not.toContain("--types");
     expect(c.listenService).not.toContain("--types");
     expect(cli.some((l) => l.includes("Only new mail wakes it (message.received), not mail you send"))).toBe(true);
+  });
+
+  it.each([...known, "other" as const])("no %s command runs npx inside $(…), a pipe or a redirect (npx's install prompt would be swallowed)", (tool) => {
+    const c = connectCommands("http://127.0.0.1:8425", tool);
+    const commands = [c.connect, c.setupMcp, c.skillInstall, c.listenTry, c.listenService, ...nextSteps(tool, URL_).filter((l) => l.startsWith(NPX))];
+    // Quoted arguments (e.g. --exec 'cat > /dev/null') are data for the CLI, not shell syntax around npx.
+    for (const cmd of commands) expect(cmd.replace(/'[^']*'/g, "''"), cmd).not.toMatch(/\$\(|\||>/);
   });
 
   it("other: the service runs the same script connect suggests; the try command is a harmless test", () => {

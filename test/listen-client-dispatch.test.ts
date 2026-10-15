@@ -7,7 +7,7 @@ import { matchesLocal } from "../server/listen/event.ts";
 import { runListener } from "../server/listen/listen.ts";
 import { EVENT_TYPES } from "../shared/types.ts";
 import { describeFilter, resolveListen, typesNotes } from "../server/listen/options.ts";
-import { recipesHelp } from "../server/listen/recipes.ts";
+import { recipe, recipesHelp } from "../server/listen/recipes.ts";
 import { deadPath } from "../server/listen/paths.ts";
 import { loadProfile, saveProfile } from "../server/listen/profile.ts";
 import { readDead } from "../server/listen/state.ts";
@@ -86,6 +86,22 @@ describe("local filter", () => {
     expect(() => resolveListen("default", profile, { subject: "(" })).toThrow(/regular expression/);
     expect(() => resolveListen("default", profile, { types: "message.received,nope" })).toThrow(/Unknown event type nope/);
     expect(() => resolveListen("default", profile, { forward: "http://example.com/x" })).toThrow(/this machine/);
+  });
+
+  it("--recipe <tool> is the built-in command as the exec, saved like --exec; it excludes --exec and unknown tools", () => {
+    const profile = { url: "https://x", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c", exec: "old", forward: { url: "http://localhost:9/x", secret: "whsec_x" } };
+    const r = resolveListen("work", profile, { recipe: "claude-code", save: true });
+    expect(r.config.exec).toBe(recipe("claude-code", "work").exec);
+    expect(r.config.exec).toContain("work.claude.json");
+    // A target group: the saved forward is replaced too, as with --exec.
+    expect(r.config.forward).toBeNull();
+    expect(r.next.exec).toBe(r.config.exec);
+    expect(r.next.forward).toBeUndefined();
+    expect(resolveListen("default", profile, { recipe: "Claude" }).config.exec).toBe(recipe("claude-code").exec);
+    expect(resolveListen("default", profile, { recipe: "hermes", forward: "http://localhost:9/y" }).config).toMatchObject({ exec: recipe("hermes").exec, forward: { url: "http://localhost:9/y" } });
+    expect(() => resolveListen("default", profile, { recipe: "codex", exec: "x" })).toThrow(/--recipe and --exec can't be combined/);
+    expect(() => resolveListen("default", profile, { recipe: "vim" })).toThrow(/Unknown --recipe "vim"\. Built-in recipes: claude-code, codex, cursor, hermes\./);
+    expect(() => resolveListen("default", profile, { recipe: "other" })).toThrow(/"other" has no built-in recipe/);
   });
 
   it("wakes only on new mail unless --types or the profile asks for more", () => {

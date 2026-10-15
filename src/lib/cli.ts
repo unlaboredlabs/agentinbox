@@ -19,13 +19,13 @@ export const TOOL_LABEL: Record<AgentTool, string> = {
 };
 
 export interface Recipe {
-  /** What the CLI's own recipe (`listen --print-recipe <tool>`) does and doesn't confine. */
+  /** What the CLI's own recipe (`listen --recipe <tool>`) does and doesn't confine. */
   note: string;
 }
 
 /**
- * The console never spells out `listen --exec` commands itself: for known tools it defers to
- * `listen --print-recipe <tool>`, so the confined command (and this machine's paths) always come
+ * The console never spells out `listen --exec` commands itself: for known tools it uses
+ * `listen --recipe <tool>`, so the confined command (and this machine's paths) always come
  * from the CLI that runs it. The trigger is an email anyone can send, so confinement matters.
  */
 export const RECIPES: Record<AgentTool, Recipe> = {
@@ -107,11 +107,13 @@ export interface ConnectCommands {
 /** A listener command that only acknowledges events: proves delivery without starting anything. */
 export const LISTEN_TEST_EXEC = "cat > /dev/null";
 
-const SKILL_TARGET: Partial<Record<AgentTool, string>> = {
+// "other" installs into ./skills rather than `skill print > SKILL.md`: a redirect would capture npx's install prompt.
+const SKILL_TARGET: Record<AgentTool, string> = {
   "claude-code": "claude",
   codex: "codex",
   cursor: "agents",
   hermes: "~/.hermes/skills/email",
+  other: "./skills",
 };
 
 const MCP_CHECK: Partial<Record<AgentTool, string>> = {
@@ -128,17 +130,18 @@ export function connectCommands(publicUrl: string, tool: AgentTool, acceptInsecu
   const insecure = transportOf(publicUrl) === "insecure";
   const flag = insecure && acceptInsecure ? " --insecure" : "";
   const url = shellQuote(publicUrl);
-  const exec = tool === "other" ? "/path/to/handle-email.sh" : `"$(${NPX} listen --print-recipe ${tool})"`;
-  const target = SKILL_TARGET[tool];
+  // Known tools name the CLI's built-in recipe (never `--exec "$(npx … --print-recipe …)"`: inside `$(…)` npx's
+  // "Ok to proceed?" install prompt is captured, so the terminal looks idle and the prompt text becomes the command).
+  const target = tool === "other" ? "--exec /path/to/handle-email.sh" : `--recipe ${tool}`;
   // Claude Code's web fetch refuses localhost, so point loopback setups at curl.
   const fetchSkill = transportOf(publicUrl) === "loopback" ? `Run curl -s ${publicUrl}/skill.md and follow it` : `Read ${publicUrl}/skill.md and follow it`;
   return {
     connect: `${NPX} connect ${url} --tool ${tool}${tool === "other" ? "" : " --setup-mcp"}${flag}`,
     setupMcp: `${NPX} setup-mcp --tool ${tool}`,
     mcpCheck: MCP_CHECK[tool] ?? null,
-    skillInstall: target ? `${NPX} skill install --target ${target} --url ${url}` : `${NPX} skill print --url ${url} > SKILL.md`,
-    listenTry: tool === "other" ? `${NPX} listen --exec ${shellQuote(LISTEN_TEST_EXEC)}${flag}` : `${NPX} listen --save --exec ${exec}${flag}`,
-    listenService: `${NPX} listen service install --exec ${exec}${flag}`,
+    skillInstall: `${NPX} skill install --target ${SKILL_TARGET[tool]} --url ${url}`,
+    listenTry: tool === "other" ? `${NPX} listen --exec ${shellQuote(LISTEN_TEST_EXEC)}${flag}` : `${NPX} listen --save ${target}${flag}`,
+    listenService: `${NPX} listen service install ${target}${flag}`,
     selfSetup: `${fetchSkill} to set yourself up with agentinbox.`,
     insecure,
   };

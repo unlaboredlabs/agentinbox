@@ -7,11 +7,14 @@ import { newSecret, validateForwardUrl } from "./forward.ts";
 import { assertTrustedDir } from "./fsutil.ts";
 import { workDir } from "./paths.ts";
 import type { Profile } from "./profile.ts";
+import { parseRecipeTool, recipe } from "./recipes.ts";
 
 /** `listen` flags. Each group overrides the profile as a unit: targets (--exec/--forward), --types, and the filter (--from/--to/--label/--subject). */
 export interface ListenFlags {
   profile?: string;
   exec?: string;
+  /** A built-in recipe (claude-code, codex, cursor, hermes): its command becomes the exec, so no `$(…)` is needed. */
+  recipe?: string;
   forward?: string;
   types?: string;
   from?: string[];
@@ -135,10 +138,22 @@ const positiveInt = (v: number | undefined, name: string, max: number) => {
 };
 
 /**
+ * `--recipe <tool>` is shorthand for `--exec "<that tool's recipe>"` (for this profile's paths), and is
+ * saved the same way. It exists so nobody has to write `--exec "$(npx … --print-recipe …)"`: inside
+ * `$(…)` npx's "Ok to proceed?" install prompt is captured and silently becomes part of the command.
+ */
+export function withRecipe(profileName: string, flags: ListenFlags): ListenFlags {
+  if (flags.recipe === undefined) return flags;
+  if (flags.exec !== undefined) throw new Error("--recipe and --exec can't be combined: --recipe <tool> already sets the command (see it with --print-recipe <tool>).");
+  return { ...flags, recipe: undefined, exec: recipe(parseRecipeTool(flags.recipe), profileName).exec };
+}
+
+/**
  * Merges flags over the profile. Returns the effective config and the profile as it would be saved
  * with --save (the forward secret is always persisted, so receivers keep verifying across restarts).
  */
-export function resolveListen(profileName: string, profile: Profile, flags: ListenFlags): { config: EffectiveConfig; next: Profile; changed: boolean } {
+export function resolveListen(profileName: string, profile: Profile, given: ListenFlags): { config: EffectiveConfig; next: Profile; changed: boolean } {
+  const flags = withRecipe(profileName, given);
   const next: Profile = { ...profile };
   let changed = false;
 

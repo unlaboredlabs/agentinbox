@@ -381,6 +381,7 @@ export function printMcpResult(r: McpSetupResult): void {
     for (const l of r.manual) out(`    ${l}`);
   }
   if (r.ok && r.verify?.length) out(`  ${r.dryRun ? "Afterwards, check it with" : "Check it with"}: ${r.verify.map((v) => pc.cyan(v)).join("; ")}`);
+  if (r.ok) for (const n of r.notes ?? []) out(`  ${n}`);
 }
 
 function skillCommand(tool: AgentTool, url: string): string {
@@ -394,7 +395,8 @@ function skillCommand(tool: AgentTool, url: string): string {
     case "cursor":
       return `${NPX} skill install --target agents --url ${url}`;
     default:
-      return `${NPX} skill print --url ${url} > SKILL.md`;
+      // install, not `skill print > SKILL.md`: a redirect would capture npx's "Ok to proceed?" prompt into the file.
+      return `${NPX} skill install --target ./skills --url ${url}`;
   }
 }
 
@@ -402,7 +404,8 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   const label = tool === "other" ? "your agent" : TOOL_LABELS[tool];
   const r = recipe(tool, profileName);
-  const execArg = shellQuote(r.exec);
+  // Known tools use --recipe: no `$(…)` for npx's install prompt to hide in, and the command stays the CLI's own.
+  const target = tool === "other" ? `--exec ${shellQuote(r.exec)}` : `--recipe ${tool}`;
   out();
   out(pc.bold("Next steps"));
   let n = 1;
@@ -418,10 +421,14 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   out(`  ${n++}. Install the agentinbox skill so ${label} knows the rules:`);
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
   out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
-  out(`       ${pc.cyan(`${NPX} listen${p} --save --exec ${execArg}`)}`);
+  out(`       ${pc.cyan(`${NPX} listen${p} --save ${target}`)}`);
   out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. Change it with --types, e.g. --types thread.reply_received (only replies to threads you sent) or --types all.`));
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   for (const note of r.notes) out(pc.gray(`     ${note}`));
+  if (tool !== "other") {
+    out(pc.gray(`     It runs: ${r.exec}`));
+    out(pc.gray(`     To change it: ${NPX} listen${p} --print-recipe ${tool} prints it; pass your edit with --exec '…' instead of --recipe.`));
+  }
   out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
   out(`     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by one ${pc.green("✓")} line once ${label} handled it.`);
   out(`  ${n++}. Then keep it running in the background (systemd / launchd, starts at login; stop the foreground one first):`);

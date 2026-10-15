@@ -43,7 +43,7 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
           External (<Path items={["Audience", "Make external"]} />), publish it, and set the audience to External in step 3.
         </Item>
         <Item title="“Access blocked: agentinbox has not completed the Google verification process” (Error 403: access_denied on Google's page)">
-          The app is still in Testing. Publish it: <Path items={["Audience", "Publish app", "Confirm"]} />
+          The app is still in Testing. Publish it: <Path items={["Audience", "Publish app", "Push to production?", "Confirm"]} />
           {project && (
             <>
               {" "}

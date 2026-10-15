@@ -117,7 +117,7 @@ describe("connect", () => {
     expect(check).toBeGreaterThan(fg);
     expect(svc).toBeGreaterThan(check);
     expect(text).toContain("test email");
-    expect(text).toContain("listen --save --exec");
+    expect(text).toContain("listen --save --recipe claude-code");
   });
 });
 

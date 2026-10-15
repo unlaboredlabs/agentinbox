@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { writePrivateFile } from "./fsutil.ts";
 import { configDir, profilePath, validProfileName } from "./paths.ts";
@@ -31,8 +33,58 @@ process.stdout.write(JSON.stringify({ Authorization: "Bearer " + profile.apiKey 
 `;
 }
 
+/** Node installs whose path names one version, so upgrading or removing that version breaks anything that recorded it. */
+const VERSIONED_NODE = /\/fnm\/node-versions\/|\/\.?nvm\/versions\/node\/|\/\.volta\/tools\/image\/node\/|\/\.asdf\/installs\/nodejs\/|\/mise\/installs\/node\/|\/n\/versions\/node\/|\/Cellar\/node(@\d+)?\//;
+
+export interface NodeChoice {
+  /** The node binary recorded in the header helper command. */
+  path: string;
+  /** `path` is version-specific: replacing or removing that Node breaks the helper. */
+  versioned: boolean;
+}
+
+/** A node binary that runs and is new enough for the helper (ESM with node: imports). */
+function worksAsNode(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const r = spawnSync(path, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+  const major = /^v(\d+)\./.exec(r.stdout ?? "")?.[1];
+  return r.status === 0 && major !== undefined && Number(major) >= 18;
+}
+
+/**
+ * The node to record for Claude Code's header helper. A version manager's node (fnm, nvm, Volta, asdf,
+ * mise, n, a Homebrew Cellar keg) disappears on upgrade, so prefer a path that stays put: the same
+ * Homebrew prefix's bin/node, fnm's default alias, or a system node, but only when it exists and runs.
+ * Version-manager shims that pick a version per directory (asdf, mise, Volta) aren't used: Claude Code
+ * runs the helper in whatever project it's in. Otherwise the current node is kept (and reported).
+ */
+export function helperNode(execPath = process.execPath, works: (path: string) => boolean = worksAsNode): NodeChoice {
+  if (!VERSIONED_NODE.test(execPath)) return { path: execPath, versioned: false };
+  const candidates: string[] = [];
+  const cellar = /^(.*)\/Cellar\/node(@\d+)?\//.exec(execPath);
+  if (cellar) candidates.push(join(cellar[1]!, "bin", "node"));
+  const fnm = /^(.*)\/node-versions\//.exec(execPath);
+  if (fnm && /\/fnm\/node-versions\//.test(execPath)) candidates.push(join(fnm[1]!, "aliases", "default", "bin", "node"));
+  candidates.push("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node");
+  const stable = candidates.find((c) => c !== execPath && !VERSIONED_NODE.test(c) && works(c));
+  return stable ? { path: stable, versioned: false } : { path: execPath, versioned: true };
+}
+
+let chosenNode: NodeChoice | undefined;
+/** helperNode() for this process, computed once (it may run a candidate's --version). */
+export const helperNodeChoice = (): NodeChoice => (chosenNode ??= helperNode());
+
 /** The shell command Claude Code runs as headersHelper (nothing is written). */
-export const headerHelperCommand = (profile: string) => `${sq(process.execPath)} ${sq(helperScriptPath())} ${validProfileName(profile)}`;
+export const headerHelperCommand = (profile: string) => `${sq(helperNodeChoice().path)} ${sq(helperScriptPath())} ${validProfileName(profile)}`;
+
+/** The note setup-mcp prints about the recorded node (like `listen service install`'s Node.js line). */
+export function helperNodeNote(profile: string, rerun: string): string {
+  const { path, versioned } = helperNodeChoice();
+  const v = path === process.execPath ? ` (v${process.versions.node})` : "";
+  return versioned
+    ? `Node.js: Claude Code runs the header helper with ${path}${v}. That path belongs to one Node version: if you upgrade or remove it, run \`${rerun}\` again.`
+    : `Node.js: Claude Code runs the header helper with ${path}${v}; if you remove or replace it, run \`${rerun}\` again.`;
+}
 
 /** Writes (or refreshes) the helper script, 0700. Returns the shell command for headersHelper. */
 export function installHeaderHelper(profile: string): string {

@@ -78,8 +78,8 @@ Examples:
   npx agentinbox-cli reset-password      print a new setup link (forgot the console password)
   npx agentinbox-cli connect https://mail.example.com --tool claude-code --setup-mcp
                                          on an agent's machine: pair it (you approve in the console)
-  npx agentinbox-cli listen --print-recipe claude-code
-                                         the --exec command that wakes Claude Code on new mail
+  npx agentinbox-cli listen --recipe claude-code
+                                         on an agent's machine: wake Claude Code on new mail
 
 Run any command with --help for details. Install it with npm i -g agentinbox-cli to type agentinbox instead.
 Docs: https://github.com/unlaboredlabs/agentinbox/blob/main/docs/reference.md`,
