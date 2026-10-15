@@ -42,8 +42,11 @@ export const ackedSeq = (db: Db, agentId: string, consumer: string): number =>
 const VISIBLE_SCAN_MAX = 2000;
 
 /**
- * The newest event seq this agent may see (0 if none within the scan budget). Cursors are capped
- * at it, so a client can neither skip future events by acking ahead nor learn other mailboxes' activity.
+ * The newest event seq this agent may see, or 0 if it can see none. Cursors are capped at it, so a
+ * client can neither skip future events by acking ahead nor learn other mailboxes' activity. When
+ * the scan budget runs out (narrow label scope on a busy mailbox), the newest seq in its granted
+ * accounts stands in: everything scanned was invisible, so capping there never skips a visible
+ * event and only reveals seqs in accounts the agent already reads.
  */
 export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
   const accounts = ctx.policy
@@ -53,8 +56,11 @@ export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
   if (!accounts.length) return 0;
   const sql = `${EVENT_SELECT} WHERE e.seq > 0 AND e.seq < ? AND e.account_id IN (${accounts.map(() => "?").join(", ")}) ORDER BY e.seq DESC LIMIT 200`;
   let before = Number.MAX_SAFE_INTEGER;
-  for (let scanned = 0; scanned < VISIBLE_SCAN_MAX; ) {
+  let top = 0;
+  for (let scanned = 0; ; ) {
+    if (scanned >= VISIBLE_SCAN_MAX) return top;
     const rows = ctx.db.all<EventRow>(sql, before, ...accounts);
+    top ||= rows[0]?.seq ?? 0;
     for (const r of rows) {
       const ev = toStoredEvent(r);
       if (ctx.policy.canSeeEvent(agentId, ev)) return ev.seq;

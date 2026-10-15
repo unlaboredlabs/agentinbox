@@ -8,7 +8,7 @@ import { badRequest, errorMessage, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { DELIVERY_SELECT, type DeliveryRow, deliveryById, toDelivery } from "./deliveries.ts";
 import { matchesFilter, normalizeFilter, webhookInputSchema, webhookPatchSchema } from "./filter.ts";
-import { buildPayload } from "./payload.ts";
+import { buildPayload, scopeBodyCheck } from "./payload.ts";
 import { newSecret, postPinned, secretPrefix, type SendResult, sign } from "./send.ts";
 import { subjectPatternError } from "./regex.ts";
 import { type LookupFn, resolveTarget, SsrfError } from "./ssrf.ts";
@@ -439,7 +439,7 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
 
     let body: string;
     try {
-      body = JSON.stringify(await untilAborted(buildPayload(ctx, event, bool(d.include_body), { isTest }), signal));
+      body = JSON.stringify(await untilAborted(buildPayload(ctx, event, bool(d.include_body), { isTest, bodyCheck: scopeBodyCheck(ctx, d.agent_id, event) }), signal));
     } catch (err) {
       if (signal.aborted) return interrupted();
       throw err;

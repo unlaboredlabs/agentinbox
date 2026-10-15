@@ -464,3 +464,29 @@ describe("consumer start and reversible refusals", () => {
     expect((await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${rotated}` } })).status).toBe(200);
   });
 });
+
+describe("head on a busy mailbox with a narrow scope", () => {
+  it("caps at the newest granted seq when no visible event is within the scan budget", async () => {
+    const s = await setup();
+    s.ctx.policy.upsertGrant(s.agent.id, "acc_a", readGrant("acc_a", { labelScope: ["Label_work"] }));
+    const visible = [0, 1, 2].map((i) => emitMessage(s.ctx, "acc_a", `w${i}`, ["Label_work"]));
+    let last = 0;
+    for (let i = 0; i < 2100; i++) last = emitMessage(s.ctx, "acc_a", `n${i}`, ["INBOX"]);
+    emitMessage(s.ctx, "acc_b", "other", ["Label_work"]); // ungranted: never the head
+    const me = (await (await fetch(`${s.url}/agent/v1/me`, { headers: { authorization: `Bearer ${s.apiKey}` } })).json()) as { headSeq: number };
+    expect(me.headSeq).toBe(last);
+
+    // start=now: no replay of the old in-scope events.
+    const fresh = await s.open("?consumer=fresh&start=now");
+    const live = emitMessage(s.ctx, "acc_a", "w3", ["Label_work"]);
+    await fresh.until(() => fresh.mail().length >= 1);
+    expect(seqs(fresh)).toEqual([live]);
+    fresh.cancel();
+
+    // Acks and Last-Event-ID below the head are kept as given.
+    expect(await (await s.ack("probe", visible[2]!)).json()).toEqual({ ackedSeq: visible[2] });
+    const r = await s.open("?consumer=probe", { "last-event-id": String(visible[2]) });
+    await r.until(() => r.mail().length >= 1);
+    expect(seqs(r)).toEqual([live]);
+  });
+});

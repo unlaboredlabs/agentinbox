@@ -2,6 +2,7 @@ import type { MessageContent, WebhookPayload } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { toMailEvent } from "../events/repo.ts";
 import type { StoredEvent } from "../events/types.ts";
+import { inScope, threadLabels } from "../policy/enforce.ts";
 import { errorMessage } from "../util/errors.ts";
 
 /** Webhook body data; `contentError` explains a missing `content` when the body was requested. */
@@ -45,6 +46,19 @@ export async function buildPayload(ctx: AppContext, event: StoredEvent, includeB
     }
   }
   return { type: event.type, timestamp: event.createdAt, data };
+}
+
+/**
+ * Body access checked against the thread's labels as they are now (like MCP fetch-by-id), not the
+ * labels stored with the event: a thread relabelled out of the agent's scope since then gets no body.
+ */
+export function scopeBodyCheck(ctx: AppContext, agentId: string, event: StoredEvent): () => Promise<string | null> {
+  return async () => {
+    const scope = ctx.policy.grant(agentId, event.accountId)?.labelScope ?? null;
+    if (scope === null || !event.message) return null;
+    const thread = await ctx.google.gmail(event.accountId).getThread(event.message.threadId, "minimal");
+    return inScope(scope, threadLabels(thread)) ? null : "not accessible";
+  };
 }
 
 export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

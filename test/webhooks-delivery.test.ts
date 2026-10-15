@@ -59,6 +59,8 @@ function setup(opts: WebhooksOptions = {}) {
     policy: () =>
       ({
         canSeeEvent: (agentId: string, ev: { threadLabelIds: string[] }) => agentId !== "agt_scoped" || ev.threadLabelIds.includes("Label_ok"),
+        // No label-scoped grants: bodies skip the current-thread-labels check.
+        grant: () => null,
       }) as unknown as PolicyService,
     mail: () =>
       ({

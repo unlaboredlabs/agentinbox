@@ -5,9 +5,8 @@ import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { json } from "../db/index.ts";
 import type { StoredEvent } from "../events/types.ts";
-import { inScope, threadLabels } from "../policy/enforce.ts";
 import { badRequest, errorMessage, HttpError } from "../util/errors.ts";
-import { buildPayload } from "../webhooks/payload.ts";
+import { buildPayload, scopeBodyCheck } from "../webhooks/payload.ts";
 import type { AgentApiEnv } from "./auth.ts";
 import { cleanText } from "./pairing.ts";
 import { accessProblem, ackedSeq, ensureConsumerSlot, newestVisibleSeq, parseConsumer, type RevokeReason } from "./listeners.ts";
@@ -72,19 +71,6 @@ const OPEN_REFUSALS: Record<RevokeReason, [string, string]> = {
   key_rotated: ["This API key was replaced", "Pair again with `npx agentinbox-cli connect`, or use the new key."],
   no_read_grant: ["This agent has no read access to any account", "Grant it read access to an account in the agentinbox console."],
 };
-
-/**
- * Body access is checked against the thread's labels as they are now (like MCP fetch-by-id), not
- * the labels stored with the event: a thread relabelled out of scope since then gets no body.
- */
-function bodyCheck(ctx: AppContext, agentId: string, event: StoredEvent) {
-  return async (): Promise<string | null> => {
-    const scope = ctx.policy.grant(agentId, event.accountId)?.labelScope ?? null;
-    if (scope === null) return null;
-    const thread = await ctx.google.gmail(event.accountId).getThread(event.message!.threadId, "minimal");
-    return inScope(scope, threadLabels(thread)) ? null : "not accessible";
-  };
-}
 
 /** Destroys the underlying socket (a stalled client never drains, so a graceful end would hang). */
 function destroyConnection(c: Context): void {
@@ -214,7 +200,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
             for (const ev of batch.events) {
               const stored = ctx.events.get(ev.id);
               if (!stored || !visible(stored)) continue;
-              const payload = await buildPayload(ctx, stored, includeBody, { bodyCheck: bodyCheck(ctx, agentId, stored) });
+              const payload = await buildPayload(ctx, stored, includeBody, { bodyCheck: scopeBodyCheck(ctx, agentId, stored) });
               // The body fetch can take seconds: access may have changed meanwhile.
               if (closed || !checkAccess() || !visible(stored)) {
                 if (closed) return;
