@@ -22,7 +22,7 @@ The operator creates keys in the agentinbox console (**Agents** page), which als
 Claude Code:
 
 ```sh
-claude mcp add --transport http agentinbox {{AGENTINBOX_URL}}/mcp --header "Authorization: Bearer $AGENTINBOX_KEY"
+claude mcp add --transport http --scope user agentinbox {{AGENTINBOX_URL}}/mcp --header "Authorization: Bearer $AGENTINBOX_API_KEY"
 ```
 
 You only see tools your grants allow. If a tool you need is missing, the key lacks that capability: ask the user to
@@ -119,8 +119,9 @@ Writing (`draft`, `send`):
 
 - `create_draft`: a draft the user can review and send from Gmail; pass `thread_id` to draft a reply in a thread.
 - `send_message`: a new email.
-- `reply`: a reply to `message_id` inside its thread, addressed to its sender (or Reply-To). Threading headers and the
-  "Re:" subject are handled; `reply_all: true` also copies the original To and Cc (into Cc).
+- `reply`: a reply to `message_id` inside its thread, addressed to its Reply-To, else its sender (for your own sent
+  mail: its recipients). Threading headers and the "Re:" subject are handled; `reply_all: true` also copies the
+  original To and Cc (into Cc).
 - `forward`: forward `message_id` to new recipients, with an optional note in `body`; `include_attachments: true`
   attaches the originals.
 - `get_send_status`: the outcome of a send that was queued for approval, by its `approval_id`.
@@ -181,10 +182,10 @@ blocked and why. The usual ones:
 |---|---|
 | no access, or no permission to do this on an account | The grant lacks the capability. The message lists accounts where you can. |
 | a recipient that isn't allowed | A recipient isn't on the account's allowlist. |
-| replies only | The account only allows replies in threads you can see, to people already in that conversation: use `reply`, or `create_draft` if you may draft. |
+| replies only | The account only allows replies in threads you can see, to people already in that conversation: use `reply`, or `create_draft` if you may draft. The reply goes to the message's Reply-To or From, which the sender chose: check it before replying (only the recipient allowlist limits it). |
 | a send limit | The cap for the last hour or last 24 hours is reached. Say when it's likely to clear; don't loop. |
 | not found or not accessible | Missing, or outside your label scope (the two look the same on purpose). |
-| a label you can't use | With a label scope you can only add your scope labels and a few system ones. |
+| a label you can't use | With a label scope you can add only your scope labels (not `INBOX` or other system labels unless they're in scope). Use `mark_read` for read state. |
 
 ## Reacting to new mail
 
