@@ -199,7 +199,8 @@ describe("connectCommands matches what `connect` prints", () => {
   it.each(known)("setup-mcp, listen try and service for %s", (tool) => {
     const c = connectCommands(URL_, tool);
     const cli = nextSteps(tool, URL_);
-    expect(cli).toContain(c.setupMcp);
+    // connect prints the command followed by a dry-run hint on the same line.
+    expect(cli.some((l) => l === c.setupMcp || l.startsWith(`${c.setupMcp}  `))).toBe(true);
     // The console defers to `--print-recipe`; substituted, it is exactly the command connect prints.
     const recipeExec = cliQuote(recipe(tool).exec);
     const sub = `"$(${NPX} listen --print-recipe ${tool})"`;
