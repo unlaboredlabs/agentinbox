@@ -172,7 +172,7 @@ export function StepVerify({ index, onBack, onNext }: StepProps) {
           {recheck && (
             <p className="flex items-start gap-2 text-sm text-muted-foreground">
               <InfoIcon className="mt-0.5 size-4 shrink-0" />
-              Setup stays complete whatever these checks show.
+              This step stays done whatever these checks show.
             </p>
           )}
           <Checklist key={agent.id} agent={agent} state={state} severalAgents={list.length > 1} />
