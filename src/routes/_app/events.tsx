@@ -5,9 +5,10 @@ import { ActivityIcon, PauseIcon, PlayIcon } from "lucide-react";
 import { useState } from "react";
 import { PageHeader, QueryError, StatusDot } from "@/components/common";
 import { EventRow } from "@/components/events/event-row";
+import { TestEmailButton } from "@/components/events/test-email-button";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -29,6 +30,8 @@ function EventsPage() {
   const { accountId, type } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const accounts = useQuery(queries.accounts());
+  // Listener cursors aren't on the live stream: refresh them so "Delivered to …" appears on rows.
+  useQuery({ ...queries.agents(), refetchInterval: 5000 });
   const history = useInfiniteQuery(queries.eventHistory({ accountId, type }));
   const stream = useStreamState();
   const [live, setLive] = useState<MailEvent[]>([]);
@@ -64,7 +67,7 @@ function EventsPage() {
     <>
       <PageHeader
         title="Live events"
-        description="Mail activity across your accounts as agentinbox sees it: what webhooks and wait_for_events deliver to agents."
+        description="Mail activity across your accounts as agentinbox sees it: what listeners, webhooks and wait_for_events deliver to agents."
         actions={
           <>
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -148,9 +151,14 @@ function EventsPage() {
               <EmptyDescription>
                 {filtered
                   ? "Try another account or event type."
-                  : "Events appear here live as mail arrives, is sent or relabeled. Send yourself an email to see one."}
+                  : "Events appear here live as mail arrives, is sent or relabeled."}
               </EmptyDescription>
             </EmptyHeader>
+            {!filtered && (
+              <EmptyContent>
+                <TestEmailButton accounts={accounts.data ?? []} />
+              </EmptyContent>
+            )}
           </Empty>
         </Card>
       ) : (

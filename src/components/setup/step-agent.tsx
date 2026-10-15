@@ -1,77 +1,95 @@
-import type { AgentWithKey } from "@shared/types";
+import type { Agent, AgentWithKey } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { BotIcon, KeyRoundIcon, PartyPopperIcon, PlugZapIcon } from "lucide-react";
+import { BotIcon, ChevronDownIcon, KeyRoundIcon } from "lucide-react";
 import { useState } from "react";
 import { AgentCreateForm } from "@/components/agents/agent-create-form";
-import { ConnectAgentGuide } from "@/components/agents/connect-agent-guide";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { AgentCreated } from "@/components/agents/agent-created";
-import { TestConnection } from "@/components/agents/test-connection";
+import { ConnectAgentGuide } from "@/components/agents/connect-agent-guide";
 import { Button } from "@/components/ui/button";
 import { queries } from "@/lib/queries";
+import { cn } from "@/lib/utils";
+import { setVerifyAgent } from "./step-verify";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
 
+/**
+ * Step 7: pair the first agent from its terminal and approve it inline by typing its code. Approval
+ * moves straight on to the Verify step, which checks MCP, the listener and a test email live.
+ * Creating an agent here with a copied key stays available as an advanced alternative.
+ */
 export function StepAgent({ index, onBack, onNext }: StepProps) {
   const agents = useQuery(queries.agents());
-  const [created, setCreated] = useState<AgentWithKey>();
   const existing = agents.data ?? [];
-  const [creatingAnother, setCreatingAnother] = useState(false);
-  const [how, setHow] = useState<"pair" | "key">("pair");
-  const showForm = !created && (existing.length === 0 || creatingAnother);
+  const [created, setCreated] = useState<AgentWithKey>();
+  const [another, setAnother] = useState(false);
+  const [withKey, setWithKey] = useState(false);
+  const connecting = !created && (existing.length === 0 || another);
+  const hasAgent = existing.length > 0 || !!created;
+
+  const approved = (a: Agent) => {
+    setVerifyAgent(a.id);
+    onNext();
+  };
 
   return (
     <StepCard
       index={index}
-      title={created ? `${created.agent.name} is ready` : "Create your first agent"}
+      title={created ? `${created.agent.name} is ready` : "Connect your first agent"}
       description={
         created
-          ? "Save its key, add agentinbox to your agent with a snippet, and test the connection."
-          : "An agent is anything that talks MCP: Claude Code, Codex, Cursor, Hermes, your own app. It gets its own key and only the access you grant."
+          ? "Save its key and add agentinbox to your agent with a snippet below. The next step checks that it works."
+          : "Your agent is the AI tool that will read your mail, like Claude Code or Codex. It asks for access from its own terminal and you approve it here. It only gets the access you choose."
       }
       footer={
         <StepFooter
           onBack={onBack}
           onNext={onNext}
-          nextDisabled={showForm && existing.length === 0 && how === "key"}
-          nextLabel={showForm && existing.length === 0 && how === "pair" ? "Finish, I'll approve it later" : "Finish setup"}
-          hint={created ? "Make sure you've saved the key" : undefined}
+          nextLabel="Check that it works"
+          nextDisabled={!hasAgent}
+          hint={created ? "Make sure you've saved the key" : !hasAgent ? "Approve a request to continue" : undefined}
         />
       }
     >
       {created ? (
-        <>
-          <AgentCreated res={created} />
-          <TestConnection agentId={created.agent.id} />
-        </>
-      ) : showForm ? (
-        <div className="space-y-5">
-          <ToggleGroup type="single" variant="outline" className="flex-wrap" value={how} onValueChange={(v) => v && setHow(v as "pair" | "key")} aria-label="How to add the agent">
-            <ToggleGroupItem value="pair">
-              <PlugZapIcon /> From the agent's terminal (recommended)
-            </ToggleGroupItem>
-            <ToggleGroupItem value="key">
-              <KeyRoundIcon /> Here, and copy a key
-            </ToggleGroupItem>
-          </ToggleGroup>
-          {how === "pair" ? (
-            <ConnectAgentGuide />
-          ) : (
-            <AgentCreateForm defaultName={existing.length ? "" : "My first agent"} onCreated={setCreated} onCancel={creatingAnother ? () => setCreatingAnother(false) : undefined} />
+        <AgentCreated res={created} />
+      ) : connecting ? (
+        <div className="space-y-6">
+          <ConnectAgentGuide variant="wizard" onApproved={approved} />
+          <div className="border-t pt-4">
+            <Button variant="ghost" size="sm" className="-ml-2 text-muted-foreground" aria-expanded={withKey} onClick={() => setWithKey(!withKey)}>
+              <KeyRoundIcon /> Advanced: create it here and copy a key instead
+              <ChevronDownIcon className={cn("transition-transform", withKey && "rotate-180")} />
+            </Button>
+            {withKey && (
+              <div className="mt-3 space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  For agents that can't run <code className="font-mono">npx</code>, like a hosted app. You paste the key into its MCP settings yourself, and it
+                  can't use a listener (use a webhook instead).
+                </p>
+                <AgentCreateForm
+                  defaultName={existing.length ? "" : "My first agent"}
+                  onCreated={(res) => {
+                    setVerifyAgent(res.agent.id);
+                    setCreated(res);
+                  }}
+                  onCancel={() => setWithKey(false)}
+                />
+              </div>
+            )}
+          </div>
+          {another && (
+            <Button variant="ghost" size="sm" onClick={() => setAnother(false)}>
+              Cancel
+            </Button>
           )}
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="flex items-start gap-3 rounded-lg border p-4">
-            <PartyPopperIcon className="mt-0.5 size-5 shrink-0 text-chart-1" />
-            <div className="space-y-1 text-sm">
-              <div className="font-medium">
-                You have {existing.length} agent{existing.length === 1 ? "" : "s"} already
-              </div>
-              <p className="text-muted-foreground">Fine-tune permissions, connect snippets and webhooks from each agent's page.</p>
-            </div>
-          </div>
+          <p className="text-sm">
+            You have {existing.length} agent{existing.length === 1 ? "" : "s"} already. Continue to check that{" "}
+            {existing.length === 1 ? "it works" : "one works"}, or connect another.
+          </p>
           <div className="flex flex-wrap gap-2">
             {existing.slice(0, 4).map((a) => (
               <Button key={a.id} variant="outline" size="sm" asChild>
@@ -80,8 +98,8 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
                 </Link>
               </Button>
             ))}
-            <Button variant="ghost" size="sm" onClick={() => setCreatingAnother(true)}>
-              Create another
+            <Button variant="ghost" size="sm" onClick={() => setAnother(true)}>
+              Connect another
             </Button>
           </div>
         </div>

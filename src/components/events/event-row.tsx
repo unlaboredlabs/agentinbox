@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { EventType, MailEvent } from "@shared/types";
 import {
   AlertTriangleIcon,
+  BellRingIcon,
   ChevronRightIcon,
   CornerDownRightIcon,
   KeyRoundIcon,
@@ -54,9 +55,24 @@ function headline(e: MailEvent) {
   return EVENT_TYPE_INFO[e.type]?.description ?? e.type;
 }
 
+/**
+ * `agentinbox listen` instances whose cursor passed this event: their agent can read the account and
+ * the listener acknowledged it (ran its command, or skipped it by its own filter).
+ */
+function useListenerDelivery(e: MailEvent) {
+  const agents = useQuery(queries.agents());
+  const out: { name: string; host: string | null }[] = [];
+  for (const a of agents.data ?? []) {
+    if (!a.grants.some((g) => g.accountId === e.accountId && g.capabilities.includes("read"))) continue;
+    for (const l of a.listeners) if (l.ackedSeq >= e.seq) out.push({ name: a.name, host: l.client.hostname ?? null });
+  }
+  return out;
+}
+
 /** One event, expandable to its full metadata. Message content is never rendered as HTML. */
 export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolean }) {
   const [open, setOpen] = useState(false);
+  const delivered = useListenerDelivery(e);
   const m = e.message;
   const info = EVENT_TYPE_INFO[e.type];
   const isLabel = e.type === "label.added" || e.type === "label.removed";
@@ -88,6 +104,12 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
               </>
             )}
             {m?.hasAttachments && <PaperclipIcon className="size-3.5" aria-label="Has attachments" />}
+            {delivered.length > 0 && (
+              <span className="flex items-center gap-1 text-success">
+                <BellRingIcon className="size-3.5" aria-hidden />
+                {delivered.length === 1 ? `Delivered to ${delivered[0]!.name}` : `Delivered to ${delivered.length} listeners`}
+              </span>
+            )}
           </div>
           <div className={cn("truncate text-sm", m ? "font-medium" : "text-muted-foreground")}>{headline(e)}</div>
           {m?.snippet && <div className="line-clamp-1 text-xs text-muted-foreground">{m.snippet}</div>}
@@ -97,12 +119,12 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
           <ChevronRightIcon className={cn("size-4 transition-transform", open && "rotate-90")} />
         </div>
       </button>
-      {open && <EventDetail event={e} />}
+      {open && <EventDetail event={e} delivered={delivered} />}
     </li>
   );
 }
 
-function EventDetail({ event: e }: { event: MailEvent }) {
+function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { name: string; host: string | null }[] }) {
   const m = e.message;
   const rows: [string, React.ReactNode][] = [
     ["Event", <code key="id" className="font-mono">{e.id} · #{e.seq}</code>],
@@ -121,6 +143,7 @@ function EventDetail({ event: e }: { event: MailEvent }) {
     );
   }
   if (e.labelIds?.length) rows.push([e.type === "label.removed" ? "Removed" : "Added", e.labelIds.join(", ")]);
+  if (delivered.length) rows.push(["Listeners", `Delivered to ${delivered.map((d) => (d.host ? `${d.name} on ${d.host}` : d.name)).join(", ")}`]);
   return (
     <div className="space-y-3 border-t bg-muted/20 px-4 py-3 sm:pl-15">
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">

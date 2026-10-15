@@ -20,6 +20,8 @@ function Overview() {
   const accounts = useQuery(queries.accounts());
   const pending = useQuery(queries.approvals("pending"));
   const pairings = useQuery(queries.pairings("pending"));
+  const agents = useQuery(queries.agents());
+  const listening = agents.data?.filter((a) => a.listeners.some((l) => l.connected)).length ?? 0;
   const s = stats.data;
   const pairingCount = pairings.data?.length ?? 0;
   const waiting = (s?.pendingApprovals ?? 0) + pairingCount;
@@ -44,7 +46,13 @@ function Overview() {
             value={s ? (s.accounts.active === s.accounts.total ? fmtNumber(s.accounts.total) : `${s.accounts.active} of ${s.accounts.total}`) : null}
             hint={s && (s.accounts.needsAttention ? <span className="text-critical">{s.accounts.needsAttention === 1 ? "1 needs attention" : `${s.accounts.needsAttention} need attention`}</span> : "all active")}
           />
-          <StatCard label="Agents" icon={BotIcon} loading={loading} value={fmtNumber(s?.agents.total)} hint={s && `${s.agents.activeLast24h} active today`} />
+          <StatCard
+            label="Agents"
+            icon={BotIcon}
+            loading={loading}
+            value={fmtNumber(s?.agents.total)}
+            hint={s && [`${s.agents.activeLast24h} active today`, listening && `${listening} listening`].filter(Boolean).join(" · ")}
+          />
           <StatCard label="Mail events" icon={ActivityIcon} loading={loading} value={fmtNumber(s?.events24h)} hint="last 24h" />
           <StatCard
             label="Tool calls"
@@ -54,7 +62,7 @@ function Overview() {
             hint={s && (s.denied24h ? <span className="text-warning">{s.denied24h} blocked by guardrails</span> : "none blocked")}
           />
           <StatCard
-            label="Deliveries"
+            label="Webhook deliveries"
             icon={WebhookIcon}
             loading={loading}
             value={fmtNumber(s?.deliveries24h.succeeded)}
