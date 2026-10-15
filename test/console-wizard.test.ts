@@ -445,7 +445,7 @@ describe("stepStatuses: the verify step", () => {
 
 describe("accountsStat (Overview's Accounts tile)", () => {
   it("asks to connect Gmail instead of saying 'all active' about no accounts", () => {
-    expect(accountsStat({ total: 0, active: 0, needsAttention: 0 })).toEqual({ value: "0", hint: "None connected yet", connect: true });
+    expect(accountsStat({ total: 0, active: 0, needsAttention: 0 })).toEqual({ value: "0", hint: "Connect Gmail", connect: true });
     expect(accountsStat({ total: 1, active: 1, needsAttention: 0 })).toEqual({ value: "1", hint: "active" });
     expect(accountsStat({ total: 3, active: 3, needsAttention: 0 })).toEqual({ value: "3", hint: "all active" });
     expect(accountsStat({ total: 3, active: 2, needsAttention: 0 })).toEqual({ value: "2 of 3", hint: "1 paused" });

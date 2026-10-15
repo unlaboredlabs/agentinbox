@@ -60,12 +60,9 @@ function Overview() {
             hint={
               acc &&
               (acc.connect ? (
-                <>
-                  {acc.hint} ·{" "}
-                  <Link to="/accounts" className="font-medium whitespace-nowrap text-foreground underline underline-offset-4">
-                    Connect Gmail
-                  </Link>
-                </>
+                <Link to="/accounts" className="font-medium whitespace-nowrap text-foreground underline underline-offset-4">
+                  {acc.hint}
+                </Link>
               ) : (
                 <span className={acc.tone === "critical" ? "text-critical" : undefined}>{acc.hint}</span>
               ))
