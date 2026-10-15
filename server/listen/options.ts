@@ -202,7 +202,10 @@ export function typesNotes(c: Pick<EffectiveConfig, "types" | "typesDefaulted">)
   const info: string[] = [];
   const warn: string[] = [];
   if (c.typesDefaulted) info.push(`Using default types: ${DEFAULT_LISTEN_TYPES.join(", ")} (add --types all for every event).`);
-  if (c.types.includes("message.received") && c.types.includes("thread.reply_received")) {
+  if (c.types.length === EVENT_TYPES.length) {
+    // Recommended for "every event", so a note rather than a warning.
+    info.push("With all types, each reply also arrives as thread.reply_received: dedupe on the message id.");
+  } else if (c.types.includes("message.received") && c.types.includes("thread.reply_received")) {
     warn.push(
       "thread.reply_received is a subset of message.received: with both, every reply to a thread you sent runs your command twice. Keep one of them (--types thread.reply_received for replies only).",
     );

@@ -5,6 +5,7 @@ import { replayDead } from "../server/listen/admin.ts";
 import { Dispatcher, type Job } from "../server/listen/dispatcher.ts";
 import { matchesLocal } from "../server/listen/event.ts";
 import { runListener } from "../server/listen/listen.ts";
+import { EVENT_TYPES } from "../shared/types.ts";
 import { describeFilter, resolveListen, typesNotes } from "../server/listen/options.ts";
 import { recipesHelp } from "../server/listen/recipes.ts";
 import { deadPath } from "../server/listen/paths.ts";
@@ -117,6 +118,12 @@ describe("local filter", () => {
     const both = resolveListen("default", profile, { types: "message.received,thread.reply_received" }).config;
     expect(typesNotes(both)).toEqual({ info: [], warn: [expect.stringMatching(/subset of message\.received.*twice/)] });
     expect(typesNotes(resolveListen("default", profile, { types: "thread.reply_received" }).config).warn).toEqual([]);
+    // --types all is recommended in several places: a dedupe note, not the "keep one of them" warning.
+    expect(typesNotes(resolveListen("default", profile, { types: "all" }).config)).toEqual({
+      info: ["With all types, each reply also arrives as thread.reply_received: dedupe on the message id."],
+      warn: [],
+    });
+    expect(typesNotes(resolveListen("default", { ...profile, types: [...EVENT_TYPES] }, {}).config).warn).toEqual([]);
   });
 
   it("never suggests combining message.received with thread.reply_received (each reply would run twice)", () => {

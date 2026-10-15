@@ -120,6 +120,9 @@ npx agentinbox-cli listen --save --types message.received,label.added --exec 'â€
 npx agentinbox-cli listen --save --types all --exec 'â€¦'   # also message.sent, label.added/removed, account.auth_failed, sync.gap
 ```
 
+With `--types all`, each reply also arrives as `thread.reply_received` after its `message.received`: dedupe on the
+message id (`event.data.message.id`).
+
 `thread.reply_received` is a subset of `message.received`: a reply produces both events. Don't combine the two, or
 each reply runs your command twice (the listener warns about it). The startup log says when the default is in use.
 
