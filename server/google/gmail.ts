@@ -35,6 +35,9 @@ const COST = {
   stop: 50,
 } as const;
 
+/** Uploads take longer: 30 s + 1 s per 256 KB of raw message, capped at 10 minutes. */
+const uploadTimeout = (raw: string) => Math.min(600_000, 30_000 + Math.ceil(raw.length / 262_144) * 1000);
+
 const listQuery = (p: ListParams) => ({
   q: p.q || undefined,
   labelIds: p.labelIds?.length ? p.labelIds : undefined,
@@ -97,12 +100,14 @@ export function createGmailClient(ctx: AppContext, accountId: string): GmailClie
         method: "POST",
         body: { raw, ...(threadId ? { threadId } : {}) },
         idempotent: false,
+        timeoutMs: uploadTimeout(raw),
       }),
     createDraft: (raw, threadId) =>
       call<GmailDraft>("drafts.create", "/drafts", {
         method: "POST",
         body: { message: { raw, ...(threadId ? { threadId } : {}) } },
         idempotent: false,
+        timeoutMs: uploadTimeout(raw),
       }),
     getDraft: (draftId) => call<GmailDraft>("drafts.get", `/drafts/${id(draftId)}`, { query: { format: "full" } }),
     sendDraft: (draftId) => call<GmailMessage>("drafts.send", "/drafts/send", { method: "POST", body: { id: draftId }, idempotent: false }),

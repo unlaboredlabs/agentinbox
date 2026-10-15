@@ -157,6 +157,25 @@ describe("history sync", () => {
     ]);
   });
 
+  it("doesn't re-announce old mail that is un-archived or restored from trash", async () => {
+    const old = fake.deliver(ME, { from: CLIENT, subject: "Old", text: "x" });
+    const trashed = fake.deliver(ME, { from: CLIENT, subject: "Trashed", text: "y" });
+    await reply(old.threadId, "Re: Old");
+    fake.setLabels(ME, old.id, [], ["INBOX"]);
+    fake.setLabels(ME, trashed.id, ["TRASH"], ["INBOX"]);
+    // These happened before agentinbox saw the mailbox.
+    ctx.db.run("UPDATE accounts SET history_id = ?", (await ctx.google.gmail(accountId).getProfile()).historyId);
+    fake.setLabels(ME, old.id, ["INBOX"], []);
+    fake.setLabels(ME, trashed.id, ["INBOX"], ["TRASH"]);
+    await sync();
+    expect(rec.ofType("message.received")).toHaveLength(0);
+    expect(rec.ofType("thread.reply_received")).toHaveLength(0);
+    expect(rec.ofType("label.added").map((e) => [e.message!.subject, e.labelIds])).toEqual([
+      ["Old", ["INBOX"]],
+      ["Trashed", ["INBOX"]],
+    ]);
+  });
+
   it("advances the cursor to the last fully processed record when a sync fails midway", async () => {
     const first = fake.deliver(ME, { from: CLIENT, subject: "First", text: "1" });
     const second = fake.deliver(ME, { from: CLIENT, subject: "Second", text: "2" });

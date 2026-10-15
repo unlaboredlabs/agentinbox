@@ -239,8 +239,10 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     const target = getRow(ctx, st.reauth_account_id);
     if (!target || target.email.toLowerCase() !== email.toLowerCase()) {
       // Keep the tokens if they belong to another connected account; never revoke them (that would break it).
-      if (existing && tokens.refresh_token) storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims.name);
-      else await discardTokens(ctx, tokens, email);
+      if (existing && tokens.refresh_token) {
+        storeTokens(ctx, existing, { ...tokens, refresh_token: tokens.refresh_token }, scopes, claims.name);
+        await afterConnect(ctx, existing.id, email);
+      } else await discardTokens(ctx, tokens, email);
       if (!target) {
         throw badRequest(
           `The account you were reconnecting was removed from agentinbox meanwhile.${refreshed}`,
@@ -284,13 +286,16 @@ export async function completeConnect(ctx: AppContext, code: string, state: stri
     outcome: "ok",
     detail: { email, scopes },
   });
-  const log = ctx.log.child("google");
-  log.info(existing ? "Account reconnected" : "Account connected", { email });
+  ctx.log.child("google").info(existing ? "Account reconnected" : "Account connected", { email });
+  return afterConnect(ctx, id, email);
+}
 
+/** Baseline/watch/catch-up via ingest (ingest skips paused accounts), then broadcasts the account. */
+async function afterConnect(ctx: AppContext, id: string, email: string): Promise<Account> {
   try {
     await ctx.ingest.onAccountConnected(id);
   } catch (err) {
-    log.warn("Post-connect setup failed", { email, error: errorMessage(err) });
+    ctx.log.child("google").warn("Post-connect setup failed", { email, error: errorMessage(err) });
     ctx.db.run("UPDATE accounts SET last_error = ? WHERE id = ?", `Connected, but initial sync setup failed: ${errorMessage(err)}`, id);
   }
   const account = toAccount(getRow(ctx, id)!);

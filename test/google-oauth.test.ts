@@ -203,11 +203,14 @@ describe("connect", () => {
     ctx.accounts.setStatus(a.id, "needs_reauth", "revoked");
     ctx.accounts.setStatus(b.id, "needs_reauth", "revoked too");
     const before = ctx.db.get<{ refresh_token_enc: string }>("SELECT refresh_token_enc FROM accounts WHERE id = ?", b.id)!;
+    const accountEvents: { email: string; status: string }[] = [];
+    ctx.bus.on("account", (x) => accountEvents.push({ email: x.email, status: x.status }));
     const landed = await consentRedirect("ben@example.com", {}, a.id);
     await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toThrow(
       /signed in as ben@example.com, but this reconnect is for anna@example.com\. Its saved sign-in in agentinbox was refreshed/,
     );
     expect(fake.revoked).toEqual([]);
+    expect(accountEvents).toContainEqual({ email: "ben@example.com", status: "active" });
     // B got the fresh tokens and works; A still needs a reconnect.
     const after = ctx.db.get<{ refresh_token_enc: string }>("SELECT refresh_token_enc FROM accounts WHERE id = ?", b.id)!;
     expect(after.refresh_token_enc).not.toBe(before.refresh_token_enc);
@@ -361,7 +364,9 @@ describe("Gmail client", () => {
     const gmail = ctx.google.gmail(accountId);
     const raw = await ctx.google.mime.compose({ from: { name: null, email: "quinn@example.com" }, to: [{ name: null, email: "x@y.test" }], subject: "Once", text: "x" });
     fake.failNext({ path: "/messages/send", status: 500, afterProcessing: true, retryAfter: 0 });
-    await expect(gmail.send(raw)).rejects.toMatchObject({ status: 500 });
+    const err = (await gmail.send(raw).catch((e: unknown) => e)) as GoogleApiError;
+    expect(err).toMatchObject({ status: 500 });
+    expect(err.message).toMatch(/may have been sent: check Sent in Gmail before retrying/);
     expect(fake.sent("quinn@example.com")).toHaveLength(1);
 
     fake.failNext({ path: "/messages/send", status: 429, retryAfter: 0 });

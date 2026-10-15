@@ -246,7 +246,6 @@ export async function ackPubsub(ctx: AppContext, ackIds: string[]): Promise<void
   await pubsubCall(ctx, acct.id, `${state.subscription}:acknowledge`, { method: "POST", body: { ackIds } });
 }
 
-/** Publishes a test message to the topic and waits until a pull (ours or the ingest loop's) receives it. */
 /** Returns messages to the subscription for immediate redelivery (ackDeadlineSeconds 0). */
 export async function nackPubsub(ctx: AppContext, ackIds: string[]): Promise<void> {
   const state = readPubsub(ctx);
@@ -255,6 +254,7 @@ export async function nackPubsub(ctx: AppContext, ackIds: string[]): Promise<voi
   await pubsubCall(ctx, acct.id, `${state.subscription}:modifyAckDeadline`, { method: "POST", body: { ackIds, ackDeadlineSeconds: 0 } });
 }
 
+/** Publishes a test message to the topic and waits until a pull (ours or the ingest loop's) receives it. */
 export async function testPubsub(ctx: AppContext, timeoutMs = 20_000): Promise<PubsubTestResult> {
   const state = readPubsub(ctx);
   const project = projectId(ctx);

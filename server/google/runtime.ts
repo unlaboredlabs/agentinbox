@@ -92,7 +92,7 @@ export class GoogleRuntime {
         continue;
       }
       const retry = idempotent ? isRetryable(err) : rejectedBeforeProcessing(err);
-      if (!retry || attempt >= MAX_ATTEMPTS - 1) throw err;
+      if (!retry || attempt >= MAX_ATTEMPTS - 1) throw idempotent ? err : ambiguous(err);
       await sleep(backoffMs(attempt, err.details.retryAfterMs), opts.signal);
       if (opts.signal?.aborted) throw opts.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
@@ -103,6 +103,17 @@ export class GoogleRuntime {
     if (!b) this.buckets.set(accountId, (b = new TokenBucket()));
     return b;
   }
+}
+
+/** For non-idempotent calls, a timeout, dropped connection or 5xx may have happened after Google acted. */
+function ambiguous(err: GoogleApiError): GoogleApiError {
+  if (rejectedBeforeProcessing(err) || (err.status !== 0 && err.status < 500)) return err;
+  return new GoogleApiError(
+    err.status,
+    `${err.message}. The message may have been sent: check Sent in Gmail before retrying.`,
+    err.reason,
+    err.details,
+  );
 }
 
 function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {

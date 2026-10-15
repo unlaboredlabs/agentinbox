@@ -30,6 +30,9 @@ export class SyncPass {
   private readonly seen = new Set<string>();
   /** Messages added during this pass: their labels are already in message.received. */
   private readonly added = new Set<string>();
+  /** Spam rescue ("Not spam" = SPAM removed + INBOX added, in either order): new to agents. */
+  private readonly inboxAdded = new Set<string>();
+  private readonly spamRemoved = new Set<string>();
 
   constructor(
     private readonly ctx: AppContext,
@@ -51,18 +54,31 @@ export class SyncPass {
     ] as const) {
       for (const { message, labelIds } of changes ?? []) {
         if (this.added.has(message.id)) continue;
-        // A sent draft gains SENT; a message rescued from spam (or never seen) gains INBOX. Both are new
-        // to agents; the dedupe key drops it when message.sent/received was already emitted.
-        if (type === "label.added" && (labelIds.includes("SENT") || labelIds.includes("INBOX"))) {
+        // A sent draft gains SENT outside a messagesAdded record: still a send (deduped if already seen).
+        if (type === "label.added" && labelIds.includes("SENT")) {
           const meta = await this.fetch(message.id);
           if (meta) await this.newMessage(meta);
         }
+        // Only a spam rescue counts as newly received; un-archive, snooze or restore from trash don't.
+        if (type === "label.added" && labelIds.includes("INBOX")) this.inboxAdded.add(message.id);
+        if (type === "label.removed" && labelIds.includes("SPAM")) this.spamRemoved.add(message.id);
         const changed = labelIds.filter((l) => !skipLabelChange(l));
         if (!changed.length || message.labelIds?.includes("DRAFT")) continue;
         const meta = await this.fetch(message.id);
         if (!meta || meta.labelIds?.includes("DRAFT")) continue;
         this.emit(type, meta, await this.threadLabelIds(meta), `${message.id}:${type}:${r.id}`, changed);
       }
+    }
+  }
+
+  /** Emits message.received for messages rescued from spam so far (call after each page). */
+  async flushRescued(): Promise<void> {
+    for (const id of this.inboxAdded) {
+      if (!this.spamRemoved.has(id)) continue;
+      this.inboxAdded.delete(id);
+      this.spamRemoved.delete(id);
+      const meta = await this.fetch(id);
+      if (meta?.labelIds?.includes("INBOX")) await this.newMessage(meta);
     }
   }
 
@@ -169,6 +185,7 @@ export async function syncHistory(ctx: AppContext, account: AccountRow, signal?:
         await pass.processRecord(r);
         done = r.id;
       }
+      await pass.flushRescued();
       if (done) save(done);
       pageToken = page.nextPageToken ?? undefined;
       if (!pageToken) save(page.historyId);
