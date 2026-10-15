@@ -216,9 +216,9 @@ Installs a background service that starts at boot: systemd on Linux (a user serv
 service when run as root) and launchd on macOS. The service runs its own copy of agentinbox from the data directory,
 so it never depends on the npx cache; a failed install leaves the running service as it was. Re-run `service install`
 to update; `service status` and `service uninstall` do what you'd expect, and uninstalling keeps your data. Pass the same
-`--port`, `--host` and `--data` options each time. `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS` and
-`AGENTINBOX_LOG_LEVEL` are taken from your shell and remembered in `<data>/service.env`, so later installs keep them
-(set one to an empty value to remove it).
+`--port`, `--host` and `--data` options each time. `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS`,
+`TRUST_PROXY_FROM` and `AGENTINBOX_LOG_LEVEL` are taken from your shell and remembered in `<data>/service.env`, so later
+installs keep them (set one to an empty value to remove it).
 
 Only one agentinbox runs per data directory; a second one refuses to start.
 
@@ -231,7 +231,9 @@ Tailscale Funnel) and:
 
 - bind it to localhost: `--host 127.0.0.1`
 - set `TRUST_PROXY=1`, so lockouts apply per client and cookies are marked `Secure`. The client address is taken from
-  the right end of `X-Forwarded-For`; with more than one proxy in front, set `TRUST_PROXY_HOPS` to their number
+  the right end of `X-Forwarded-For`; with more than one proxy in front, set `TRUST_PROXY_HOPS` to their number.
+  Forwarding headers are believed only from a proxy on the same host (loopback); if the proxy runs on another machine,
+  list its address in `TRUST_PROXY_FROM` (for example `TRUST_PROXY_FROM=10.0.0.5` or a CIDR like `10.0.0.0/24`)
 - set **Settings → Public URL** to the https address, so MCP snippets, the skill and the OAuth redirect use it
 
 `GET /health` (or `/api/health`) needs no auth and suits uptime monitors: `200` when healthy, `503` when degraded, for
@@ -258,6 +260,7 @@ agentinbox reset-password [--data …]
 | | `AGENTINBOX_MASTER_KEY` | | Base64 32-byte key for encrypting secrets, instead of `<data>/master.key` |
 | | `TRUST_PROXY` | | `1` behind a reverse proxy: client IPs from `X-Forwarded-For`, https from `X-Forwarded-Proto` |
 | | `TRUST_PROXY_HOPS` | `1` | Number of proxies in front of agentinbox (which `X-Forwarded-For` entry, from the right, is the client) |
+| | `TRUST_PROXY_FROM` | loopback | Other proxy addresses whose forwarding headers are believed: comma-separated IPs or CIDRs (IPv4 or IPv6) |
 | | `AGENTINBOX_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
 Forgot the admin password? Run `npx agentinbox-cli reset-password` on the server, as the user agentinbox runs as (`sudo` for a

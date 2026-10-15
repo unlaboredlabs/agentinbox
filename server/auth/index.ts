@@ -1,4 +1,4 @@
-import { isIP, isIPv4, isIPv6 } from "node:net";
+import { isIP } from "node:net";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Context, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -6,6 +6,7 @@ import type { AppEnv } from "../api/util.ts";
 import type { CoreContext } from "../context.ts";
 import { HttpError } from "../util/errors.ts";
 import { clientKey, GLOBAL_SLOWDOWN_MS, LoginLimiter } from "./lockout.ts";
+import { isTrustedProxy } from "./proxy.ts";
 import { SESSION_TTL_MS, SessionStore } from "./sessions.ts";
 import { ensureSetupToken, regenerateSetupToken } from "./setup-token.ts";
 
@@ -87,17 +88,6 @@ export function resetAdminPassword(ctx: AuthCore): string {
   return regenerateSetupToken(ctx.config.dataDir);
 }
 
-/** Loopback, RFC 1918, CGNAT (100.64/10) and IPv6 ULA (fc00::/7): where a reverse proxy can be. */
-export function isPrivateAddress(ip: string): boolean {
-  const addr = ip.replace(/%.*$/, "").toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, "");
-  if (isIPv4(addr)) {
-    const [a = 0, b = 0] = addr.split(".").map(Number);
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
-  if (isIPv6(addr)) return addr === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(addr);
-  return false;
-}
-
 function socketAddress(c: Context): string | null {
   try {
     return getConnInfo(c).remote.address ?? null;
@@ -109,13 +99,13 @@ function socketAddress(c: Context): string | null {
 
 /**
  * The client address. X-Forwarded-For is honored only with TRUST_PROXY and only when the
- * connection comes from a loopback or private address (where the proxy runs); it is read from the
+ * connection comes from a trusted proxy (loopback, or TRUST_PROXY_FROM); it is read from the
  * right, since proxies append the address they saw and entries further left are client-controlled.
  * TRUST_PROXY_HOPS (default 1) is the number of proxies in front of agentinbox.
  */
 export function clientIp(c: Context, trustProxy: boolean): string {
   const peer = socketAddress(c);
-  if (trustProxy && peer && isPrivateAddress(peer)) {
+  if (trustProxy && peer && isTrustedProxy(peer)) {
     const hops = Math.max(1, Number.parseInt(process.env.TRUST_PROXY_HOPS ?? "1", 10) || 1);
     const chain = (c.req.header("x-forwarded-for") ?? "")
       .split(",")
@@ -130,7 +120,7 @@ export function clientIp(c: Context, trustProxy: boolean): string {
 function isSecure(c: Context, trustProxy: boolean): boolean {
   if (new URL(c.req.url).protocol === "https:") return true;
   const peer = socketAddress(c);
-  return trustProxy && !!peer && isPrivateAddress(peer) && c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase() === "https";
+  return trustProxy && !!peer && isTrustedProxy(peer) && c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase() === "https";
 }
 
 export function sessionToken(c: Context): string | undefined {

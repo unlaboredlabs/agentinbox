@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { adminAuth, checkSecret, isPrivateAddress, MAX_CONCURRENT_VERIFICATIONS } from "../server/auth/index.ts";
+import { adminAuth, checkSecret, MAX_CONCURRENT_VERIFICATIONS } from "../server/auth/index.ts";
+import { isTrustedProxy, parseRange } from "../server/auth/proxy.ts";
 import { contentSecurityPolicy, inlineScriptHashes, registerInlineScript, scriptHash } from "../server/csp.ts";
 import { BAN_MS, clientKey, GLOBAL_MAX_FAILURES, LoginLimiter, MAX_ATTEMPTS, MAX_ENTRIES } from "../server/auth/lockout.ts";
 import { SESSION_MAX_AGE_MS, SESSION_TTL_MS, SessionStore } from "../server/auth/sessions.ts";
@@ -137,15 +138,61 @@ describe("M2: client identity", () => {
     for (let i = 0; i < 5; i++) await login(`x${i}`, { "x-forwarded-for": "not-an-ip" });
     expect((await login(PASSWORD, { "x-forwarded-for": "198.51.100.8" })).status).toBe(204);
     expect((await login(PASSWORD)).status).toBe(429);
-    expect(isPrivateAddress("10.1.2.3")).toBe(true);
-    expect(isPrivateAddress("172.20.0.1")).toBe(true);
-    expect(isPrivateAddress("100.100.1.1")).toBe(true);
-    expect(isPrivateAddress("::ffff:192.168.1.1")).toBe(true);
-    expect(isPrivateAddress("fd12::1")).toBe(true);
-    expect(isPrivateAddress("::1")).toBe(true);
-    expect(isPrivateAddress("172.32.0.1")).toBe(false);
-    expect(isPrivateAddress("8.8.8.8")).toBe(false);
-    expect(isPrivateAddress("2001:db8::1")).toBe(false);
+  });
+
+  it("trusts forwarding headers only from loopback, or peers listed in TRUST_PROXY_FROM", async () => {
+    h = harness();
+    await h.claim();
+    h.ctx.config.trustProxy = true;
+    const from = (peer: string, xff: string, password: string) =>
+      h!.request("/api/auth/login", { method: "POST", headers: { ...CSRF, "x-forwarded-for": xff }, json: { password }, peer });
+
+    // A LAN peer can't pick its address: failures count against the peer itself.
+    for (let i = 0; i < 5; i++) await from("192.168.1.50", `203.0.113.${i}`, `lan-${i}`);
+    expect((await from("192.168.1.50", "203.0.113.99", PASSWORD)).status).toBe(429);
+
+    // A loopback proxy is believed.
+    for (let i = 0; i < 5; i++) await from("127.0.0.1", "198.51.100.1", `lo-${i}`);
+    expect((await from("127.0.0.1", "198.51.100.1", PASSWORD)).status).toBe(429);
+    expect((await from("127.0.0.1", "198.51.100.2", PASSWORD)).status).toBe(204);
+
+    // A proxy in a listed CIDR is believed.
+    process.env.TRUST_PROXY_FROM = "10.0.0.0/8, fd00::/8";
+    try {
+      for (let i = 0; i < 5; i++) await from("10.1.2.3", "198.51.100.3", `cidr-${i}`);
+      expect((await from("10.9.9.9", "198.51.100.3", PASSWORD)).status).toBe(429);
+      expect((await from("10.1.2.3", "198.51.100.4", PASSWORD)).status).toBe(204);
+      expect((await from("::ffff:10.1.2.3", "198.51.100.5", PASSWORD)).status).toBe(204);
+    } finally {
+      delete process.env.TRUST_PROXY_FROM;
+    }
+  });
+
+  it("matches proxy addresses and ranges", () => {
+    expect(isTrustedProxy("127.0.0.1", "")).toBe(true);
+    expect(isTrustedProxy("127.8.9.10", "")).toBe(true);
+    expect(isTrustedProxy("::1", "")).toBe(true);
+    expect(isTrustedProxy("::ffff:127.0.0.1", "")).toBe(true);
+    expect(isTrustedProxy("10.1.2.3", "")).toBe(false);
+    expect(isTrustedProxy("100.100.1.1", "")).toBe(false);
+    expect(isTrustedProxy("fd12::1", "")).toBe(false);
+    const list = "10.0.0.0/8,100.64.0.0/10 192.168.1.7 fd00::/8 2001:db8:1::/48 ::ffff:172.16.0.0/108";
+    expect(isTrustedProxy("10.255.0.1", list)).toBe(true);
+    expect(isTrustedProxy("::ffff:10.0.0.1", list)).toBe(true);
+    expect(isTrustedProxy("100.127.255.255", list)).toBe(true);
+    expect(isTrustedProxy("100.128.0.1", list)).toBe(false);
+    expect(isTrustedProxy("192.168.1.7", list)).toBe(true);
+    expect(isTrustedProxy("192.168.1.8", list)).toBe(false);
+    expect(isTrustedProxy("fd12:3456::1", list)).toBe(true);
+    expect(isTrustedProxy("2001:db8:1:ffff::1", list)).toBe(true);
+    expect(isTrustedProxy("2001:db8:2::1", list)).toBe(false);
+    expect(isTrustedProxy("172.31.255.255", list)).toBe(true);
+    expect(isTrustedProxy("172.32.0.0", list)).toBe(false);
+    expect(isTrustedProxy("8.8.8.8", list)).toBe(false);
+    expect(isTrustedProxy("not-an-ip", list)).toBe(false);
+    expect(parseRange("10.0.0.0/33")).toBeNull();
+    expect(parseRange("nope")).toBeNull();
+    expect(parseRange("0.0.0.0/0")).not.toBeNull();
   });
 
   it("honors TRUST_PROXY_HOPS", async () => {
