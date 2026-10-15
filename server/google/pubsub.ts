@@ -94,7 +94,9 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
     return {
       code: "pubsub_api_disabled",
       message: "The Cloud Pub/Sub API isn't enabled in the Google Cloud project.",
-      hint: `Enable it at https://console.cloud.google.com/apis/library/pubsub.googleapis.com?project=${p}, wait a minute, then retry.`,
+      hint:
+        `Enable it at https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com${project ? `&project=${encodeURIComponent(project)}` : ""}, wait a minute, then retry. ` +
+        "If Google asks for a billing account and you'd rather not add one, use polling: it needs no billing.",
     };
   }
   if (hasReason(err, "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions") || /insufficient authentication scopes/i.test(msg)) {

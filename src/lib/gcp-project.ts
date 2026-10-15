@@ -28,7 +28,9 @@ export function projectIdProblem(raw: string): string | null {
 }
 
 /**
- * The Cloud Shell command: create the project, then enable the Gmail and Pub/Sub APIs in it.
+ * The Cloud Shell command: create the project, then enable the Gmail API in it. Only Gmail: Google
+ * may want a billing account before it enables Pub/Sub, which would fail the whole command on the
+ * required path. Pub/Sub is enabled in the optional real-time delivery step instead.
  * Returns null for an invalid ID (it goes into a shell, so only ever a validated one).
  */
 export function projectCommand(id: string, inOrg: boolean): string | null {
@@ -36,7 +38,7 @@ export function projectCommand(id: string, inOrg: boolean): string | null {
   const org = inOrg ? ` --organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"` : "";
   return (
     `gcloud projects create ${id} --name=agentinbox${org} && ` +
-    `gcloud services enable gmail.googleapis.com pubsub.googleapis.com --project=${id} && ` +
+    `gcloud services enable gmail.googleapis.com --project=${id} && ` +
     `echo "agentinbox: project ${id} is ready"`
   );
 }
@@ -49,3 +51,25 @@ export function iamBindingCommand(projectId: string, email: string): string | nu
   if (!PROJECT_ID_WITH_DOMAIN_RE.test(projectId) || !email.trim()) return null;
   return `gcloud projects add-iam-policy-binding ${shellQuote(projectId)} --member=${shellQuote(`user:${email.trim()}`)} --role=roles/pubsub.admin`;
 }
+
+// ───────────── Google Cloud console links ─────────────
+
+const p = (id: string) => encodeURIComponent(id);
+
+/** Console deep links, preselecting the project. */
+export const cloudUrl = {
+  cloudShell: "https://shell.cloud.google.com/?show=terminal",
+  createProject: "https://console.cloud.google.com/projectcreate",
+  /** The Gmail API only (step 2): enabling Pub/Sub may need billing, so it is enabled in step 6. */
+  enableGmail: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=${p(id)}`,
+  enablePubsub: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=${p(id)}`,
+  dashboard: (id: string) => `https://console.cloud.google.com/home/dashboard?project=${p(id)}`,
+  authOverview: (id: string) => `https://console.cloud.google.com/auth/overview?project=${p(id)}`,
+  authAudience: (id: string) => `https://console.cloud.google.com/auth/audience?project=${p(id)}`,
+  authScopes: (id: string) => `https://console.cloud.google.com/auth/scopes?project=${p(id)}`,
+  clients: (id: string) => `https://console.cloud.google.com/auth/clients?project=${p(id)}`,
+  createClient: (id: string) => `https://console.cloud.google.com/auth/clients/create?project=${p(id)}`,
+  iam: (id: string) => `https://console.cloud.google.com/iam-admin/iam?project=${p(id)}`,
+  orgPolicies: (id: string) => `https://console.cloud.google.com/iam-admin/orgpolicies?project=${p(id)}`,
+  billing: (id: string) => `https://console.cloud.google.com/billing/linkedaccount?project=${p(id)}`,
+};

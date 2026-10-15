@@ -108,7 +108,7 @@ describe("Pub/Sub provisioning", () => {
     fake.disableApi("pubsub", true);
     const err = await provisionError();
     expect(err.message).toMatch(/Cloud Pub\/Sub API isn't enabled/);
-    expect(err.hint).toContain(`https://console.cloud.google.com/apis/library/pubsub.googleapis.com?project=${FAKE_CLIENT.projectId}`);
+    expect(err.hint).toContain(`https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=${FAKE_CLIENT.projectId}`);
   });
 
   it("explains a disabled Gmail API (watch fails)", async () => {

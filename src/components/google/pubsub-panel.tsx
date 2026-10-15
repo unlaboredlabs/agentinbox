@@ -1,6 +1,6 @@
 import type { PubsubState, PubsubTestResult, Settings } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2Icon, KeyRoundIcon, RadioTowerIcon, RefreshCwIcon, SendIcon, TimerIcon, XCircleIcon, ZapIcon } from "lucide-react";
+import { AlertTriangleIcon, CheckCircle2Icon, KeyRoundIcon, PowerIcon, RadioTowerIcon, RefreshCwIcon, SendIcon, TimerIcon, XCircleIcon, ZapIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { connectAccount } from "@/components/accounts/connect-host";
@@ -241,7 +241,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         )}
 
         {code === "pubsub_org_policy" && (
-          <Panel icon={<XCircleIcon className="mt-0.5 size-4 shrink-0 text-critical" />} title="Your organization's policy blocks Gmail notifications">
+          <Panel icon={<AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />} title="Your organization's policy blocks Gmail notifications">
             <p>
               A Google Workspace rule (Domain Restricted Sharing, <span className="font-mono text-xs">iam.allowedPolicyMemberDomains</span>) stops
               Gmail's notification service from publishing into your project. Polling works without it.
@@ -267,7 +267,24 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
           </Panel>
         )}
 
-        {provisionError !== undefined && code !== "pubsub_scope_required" && code !== "pubsub_permission_denied" && code !== "pubsub_org_policy" && (
+        {code === "pubsub_api_disabled" && (
+          <Panel icon={<PowerIcon className="mt-0.5 size-4 shrink-0 text-warning" />} title={`Turn on the Pub/Sub API in ${projectId || "your project"}`}>
+            <p>
+              Real-time delivery uses Google Cloud Pub/Sub, which is off in new projects. Open the link, confirm the project, click{" "}
+              <strong className="text-foreground">Next</strong> and <strong className="text-foreground">Enable</strong>, wait a minute, then try
+              again.
+            </p>
+            <BillingNote interval={settings.data?.pollIntervalSeconds ?? 30} />
+            <div className="flex flex-wrap items-center gap-3">
+              {projectId && <ExternalLink href={cloudUrl.enablePubsub(projectId)}>Enable the Pub/Sub API</ExternalLink>}
+              <Button size="sm" onClick={() => void provision()} disabled={provisioning}>
+                <RefreshCwIcon /> Try again
+              </Button>
+            </div>
+          </Panel>
+        )}
+
+        {provisionError !== undefined && !PANEL_CODES.has(code ?? "") && (
           <ErrorAlert
             error={provisionError}
             title={switching_ ? `Couldn't switch to ${principal?.email ?? "that account"}; real-time keeps working as before` : "Couldn't turn on real-time delivery"}
@@ -277,6 +294,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
                 <ExternalLink href={cloudUrl.billing(projectId)}>Link a billing account</ExternalLink>
               </p>
             )}
+            {code === "pubsub_billing" && <p className="pt-1">Pub/Sub's free tier covers Gmail notifications, but Google wants a billing account on file for it.</p>}
             {(code === "needs_reauth" || code === "account_paused") && principal && (
               <div className="pt-2">
                 <Button size="sm" variant="outline" onClick={() => connectAccount({ reauthAccountId: principal.id, email: principal.email })}>
@@ -303,7 +321,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
             {provisioning ? <Spinner /> : <RadioTowerIcon />} {active ? (switching_ ? `Switch to ${principal?.email ?? "this account"}` : "Set up again") : "Set up real-time automatically"}
           </Button>
         )}
-        {provisionError !== undefined && code !== "pubsub_scope_required" && code !== "pubsub_permission_denied" && code !== "pubsub_org_policy" && (
+        {provisionError !== undefined && !PANEL_CODES.has(code ?? "") && (
           <Button variant="outline" onClick={() => void provision()} disabled={provisioning}>
             <RefreshCwIcon /> Try again
           </Button>
@@ -328,8 +346,24 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
         {provisionError === undefined && accounts.length > 1 && accountPicker}
       </div>
       {accounts.length === 0 && <p className="text-xs text-muted-foreground">Connect a Gmail account first: setting this up uses its Google access.</p>}
+      {!active && provisionError === undefined && projectId && (
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p>
+            Before the first setup, turn on the Pub/Sub API in <span className="font-mono">{projectId}</span>:{" "}
+            <ExternalLink href={cloudUrl.enablePubsub(projectId)}>Enable the Pub/Sub API</ExternalLink> (confirm the project, then Next and Enable).
+          </p>
+          <BillingNote interval={settings.data?.pollIntervalSeconds ?? 30} />
+        </div>
+      )}
     </div>
   );
+}
+
+/** Problems with their own panel above (the generic error alert skips them). */
+const PANEL_CODES = new Set(["pubsub_scope_required", "pubsub_permission_denied", "pubsub_org_policy", "pubsub_api_disabled"]);
+
+function BillingNote({ interval }: { interval: number }) {
+  return <p>Google may ask for a billing account before it turns on Pub/Sub. If it does, you can skip this: polling every {interval} seconds works fine without one.</p>;
 }
 
 function Panel({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {

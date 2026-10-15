@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { callbackMode } from "../server/google/client.ts";
 import { checkTransport } from "../server/listen/transport.ts";
-import { generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
+import { cloudUrl, generateProjectId, iamBindingCommand, PROJECT_ID_RE, projectCommand, projectIdProblem } from "../src/lib/gcp-project.ts";
 import { analyzeUrl, urlVerdict } from "../src/lib/public-url.ts";
 import { tunnelCommand } from "../src/lib/tunnel.ts";
 import { wrapParts } from "../src/lib/wrap.ts";
@@ -100,13 +100,21 @@ describe("project IDs", () => {
   it("builds the Cloud Shell command only for a valid ID", () => {
     expect(projectCommand("agentinbox-123456", false)).toBe(
       "gcloud projects create agentinbox-123456 --name=agentinbox && " +
-        "gcloud services enable gmail.googleapis.com pubsub.googleapis.com --project=agentinbox-123456 && " +
+        "gcloud services enable gmail.googleapis.com --project=agentinbox-123456 && " +
         'echo "agentinbox: project agentinbox-123456 is ready"',
     );
     expect(projectCommand("agentinbox-123456", true)).toContain(
       `--organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"`,
     );
     for (const bad of ["", "x; rm -rf ~", "agentinbox-1 && curl evil", "$(id)", "My Project"]) expect(projectCommand(bad, false)).toBeNull();
+  });
+
+  it("enables only Gmail in step 2 (Pub/Sub may need billing); step 6 links to enabling Pub/Sub", () => {
+    // Google may require billing to enable Pub/Sub: that would fail the required Gmail path.
+    expect(projectCommand("agentinbox-123456", false)).not.toContain("pubsub");
+    expect(projectCommand("agentinbox-123456", true)).not.toContain("pubsub");
+    expect(cloudUrl.enableGmail("agentinbox-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=agentinbox-123456");
+    expect(cloudUrl.enablePubsub("agentinbox-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=agentinbox-123456");
   });
 });
 
