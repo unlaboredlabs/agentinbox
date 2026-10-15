@@ -354,7 +354,27 @@ describe("write modes", () => {
 
     const other = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "different", ...AT }, { eventId: id }));
     expect(other).toMatchObject({ outcome: "error", reason: "event_id_taken" });
+    expect(messageOf(other)).toBe(`event_id ${id} already belongs to a different event. Leave event_id out to create a new event.`);
     expect((await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT }, { eventId: "Not-Base32" }))).reason).toBe("invalid_arguments");
+  });
+
+  it("without calendar.read, a create's result shows only what the agent sent", async () => {
+    const s = setup({ capabilities: ["calendar.write"] });
+    // Someone else's event under a guessed id, matching what the agent asks for and holding more.
+    s.cal.put(ME, {
+      id: "abcde12345",
+      summary: "x",
+      description: "private notes",
+      location: "Room 7",
+      htmlLink: "https://calendar.google.com/event?eid=1",
+      organizer: { email: "boss@acme.com" },
+      attendees: [{ email: "boss@acme.com", displayName: "The Boss" }],
+      start: { dateTime: AT.start },
+      end: { dateTime: AT.end },
+    });
+    const r = await s.run("create_calendar_event", (c) => c.createEvent(ME, undefined, { summary: "x", ...AT }, { eventId: "abcde12345" }));
+    expect(r.value).toMatchObject({ status: "applied", event: { id: "abcde12345", summary: "x", start: AT.start, location: null, htmlLink: null, organizer: null, attendees: [] } });
+    expect(JSON.stringify(r.value)).not.toMatch(/private notes|Room 7|boss|eid=/);
   });
 
   it("a direct update whose answer was lost: applied when in place, uncertain otherwise", async () => {

@@ -4,7 +4,7 @@
 // a failed attempt the same way.
 
 import { randomUUID } from "node:crypto";
-import type { Approval, CalendarApprovalDetail, CalendarEventInput, CalendarResponseStatus } from "../../shared/types.ts";
+import type { Approval, CalendarApprovalDetail, CalendarEventInput, CalendarResponseStatus, Grant } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { CalendarAttendeeRaw, CalendarClient, CalendarDateTimeRaw, CalendarEventRaw } from "../google/calendar.ts";
 import { classifyCalendarError } from "../google/calendar.ts";
@@ -209,6 +209,22 @@ export async function afterFailure(
   }
 }
 
+/**
+ * An RSVP comment is shown to the organizer and every invitee: under the grant's allowlist they must all
+ * still pass when it's applied, and the guest list must still be visible to the account. Throws (for good)
+ * otherwise.
+ */
+function commentStillAllowed(grant: Grant, e: CalendarEventRaw, selfEmail: string): void {
+  if (!grant.allowTo.length || e.organizer?.self) return;
+  if (e.guestsCanSeeOtherGuests === false || e.attendeesOmitted) {
+    throw new Error("The organizer now hides the guest list, so who would see the comment can't be checked against the agent's allowlist.");
+  }
+  const others = (e.attendees ?? []).filter((x) => x.email && !x.self && !x.resource).map((x) => x.email!);
+  const { checked } = attendeeImpact({ kind: "rsvp", selfEmail, before: others, after: [], notify: false, organizer: e.organizer?.email ?? null, comment: true });
+  const bad = disallowedRecipients(grant, checked);
+  if (bad.length) throw new Error(`The comment would now be shown to ${bad.join(", ")}, whom the agent may no longer contact.`);
+}
+
 /** Who the stored change involves (CalendarApprovalDetail.checked; recomputed for approvals stored without it). */
 function checkedOf(kind: CalendarWriteKind, d: CalendarApprovalDetail, selfEmail: string): string[] {
   if (d.checked) return d.checked;
@@ -263,6 +279,7 @@ export function createCalendarApprovals(ctx: AppContext): CalendarApprovals {
       current = await client.getEvent(d.calendarId, d.eventId);
       if (current.status === "cancelled") throw new Error(EVENT_GONE);
       if (attemptedBefore && (kind === "rsvp" ? rsvpMatches(d, current) : changeMatches(d.change, current))) return;
+      if (kind === "rsvp" && d.comment && grant) commentStillAllowed(grant, current, selfEmail(a));
       if (kind === "update" && current.etag !== d.etag) {
         if (changeMatches(d.change, current)) return;
         throw new Error(attemptedBefore ? MAYBE_APPLIED : EVENT_CHANGED);

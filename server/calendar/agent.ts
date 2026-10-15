@@ -543,7 +543,10 @@ export class AgentCalendar {
         // kick never throws; tolerate placeholders.
       }
       if (kind === "delete" || !after) return { status: "deleted", calendarId, eventId, notified: impact.emailed };
-      return { status: "applied", event: summarizeEvent(after, calendarId), notified: impact.emailed };
+      // Without calendar.read the result says only what the agent sent (a retried event_id may have matched
+      // an event with more in it).
+      const shown = kind === "create" && !a.grant.capabilities.includes("calendar.read") ? ownView(eventId, w.change) : after;
+      return { status: "applied", event: summarizeEvent(shown, calendarId), notified: impact.emailed };
     }
 
     detail.calendarName = (await this.listed(a).catch(() => [])).find((c) => normalizeCalendarId(c.id) === calendarId)?.name ?? null;
@@ -620,6 +623,20 @@ export class AgentCalendar {
     const retry = `To retry, call create_calendar_event again with the same details and event_id ${eventId}: it can't create a second event.`;
     return canRead ? `${retry} Or ${check} first.` : retry;
   }
+}
+
+/** The event as the agent described it, with Google's id: nothing read back from Google. */
+function ownView(eventId: string, change: CalendarEventInput): CalendarEventRaw {
+  const at = (v: string | undefined) => (v === undefined ? undefined : change.allDay ? { date: v } : { dateTime: v, ...(change.timeZone ? { timeZone: change.timeZone } : {}) });
+  return {
+    id: eventId,
+    summary: change.summary,
+    location: change.location,
+    start: at(change.start),
+    end: at(change.end),
+    recurrence: change.recurrence,
+    attendees: change.attendees?.map((email) => ({ email })),
+  };
 }
 
 const notGranted = (email: string) =>
