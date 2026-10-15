@@ -916,7 +916,10 @@ export const isCalendarApprovalKind = (k: string): k is CalendarApprovalKind => 
 export interface CalendarApprovalDetail {
   calendarId: string;
   calendarName: string | null;
-  /** Target event (update/delete/rsvp); for create, the created event's id once applied (else null). */
+  /**
+   * Target event (update/delete/rsvp). For create, the id agentinbox chose when queuing (Google accepts
+   * client ids), so a retried apply can't create a second event.
+   */
   eventId: string | null;
   /** create: the new event; update: only the changed fields; delete/rsvp: {}. */
   change: CalendarEventInput;
@@ -926,10 +929,18 @@ export interface CalendarApprovalDetail {
   etag: string | null;
   /** rsvp only. */
   response: CalendarResponseStatus | null;
+  /** rsvp only: the note sent to the organizer with the answer. */
+  comment?: string | null;
   /** Google emails attendees (sendUpdates "all"); false = "none". */
   notifyAttendees: boolean;
-  /** Addresses Google will email when applied (checked against allowTo again at approval). */
+  /** Addresses Google will email when applied. */
   notified: string[];
+  /**
+   * Addresses the grant's allowTo had to cover when queued (attendees after the change, another organizer,
+   * everyone emailed; see attendeeImpact), checked again at approval. Absent on approvals from before it
+   * existed: then recomputed from the change.
+   */
+  checked?: string[];
 }
 
 /**
