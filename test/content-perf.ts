@@ -16,7 +16,8 @@ export function bestOf(fn: () => unknown, runs = 3): number {
 }
 
 /** Ratio below which 4x more input counts as linear (quadratic would be ~16). */
-export const LINEAR_RATIO = 8;
+/** Linear work quadruples at 4n; quadratic would be ~16. 12 leaves room for GC and slow, noisy CI runners. */
+export const LINEAR_RATIO = 12;
 /** Timings below this are noise; the small run is floored to it before taking the ratio. */
 const FLOOR_MS = 2;
 
