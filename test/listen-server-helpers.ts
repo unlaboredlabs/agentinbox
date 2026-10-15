@@ -23,14 +23,14 @@ export function addAccount(ctx: AppContext, id: string, email: string): void {
   );
 }
 
-/** Mail fake: only messageContent. Message ids starting with "fail" throw. */
+/** Mail fake: only messageContent. Message ids starting with "fail" throw, "big" ones get a 1 MB body. */
 export function fakeMail(): () => MailService {
   return () =>
     ({
       async messageContent(_accountId: string, messageId: string): Promise<MessageContent> {
         if (messageId.startsWith("fail")) throw new Error("Gmail is down");
         return {
-          body: `Body of ${messageId}`,
+          body: messageId.startsWith("big") ? "x".repeat(1_000_000) : `Body of ${messageId}`,
           truncated: false,
           attachments: [],
           signals: { hiddenContentRemoved: false, suspiciousInstructions: [], auth: null, external: true },

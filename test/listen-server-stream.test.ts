@@ -1,9 +1,11 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSelf } from "../shared/agent-api.ts";
-import { agentApi } from "../server/agentapi/index.ts";
+import { type AgentApiOptions, agentApi } from "../server/agentapi/index.ts";
 import { createApp } from "../server/app.ts";
 import { type RunningServer, startServer } from "../server/server.ts";
+import type { GoogleService } from "../server/google/types.ts";
+import type { MailService } from "../server/mail/types.ts";
 import { testConfig } from "./helpers.ts";
 import { addAccount, emitMessage, fakeMail, readGrant, SseReader } from "./listen-server-helpers.ts";
 import { fakeGoogle, fakeIngest } from "./platform-helpers.ts";
@@ -17,10 +19,25 @@ afterEach(async () => {
   running = undefined;
 });
 
-async function setup(opts: { heartbeatMs?: number } = {}) {
-  running = await startServer({ config: testConfig(), overrides: { google: fakeGoogle(), ingest: fakeIngest(), mail: fakeMail() } });
+/** Current thread labels for the fake Gmail (include_body scope check); defaults to the event's. */
+let threadLabelsNow: Map<string, string[]>;
+
+function google(): () => GoogleService {
+  const base = fakeGoogle()();
+  return () =>
+    ({
+      ...base,
+      gmail: () => ({
+        getThread: async (id: string) => ({ id, messages: [{ id: "x", threadId: id, labelIds: threadLabelsNow.get(id) ?? ["INBOX", "Label_work"] }] }),
+      }),
+    }) as unknown as GoogleService;
+}
+
+async function setup(opts: AgentApiOptions = {}, mail: () => MailService = fakeMail()) {
+  threadLabelsNow = new Map();
+  running = await startServer({ config: testConfig(), overrides: { google: google(), ingest: fakeIngest(), mail } });
   const { ctx, url } = running;
-  agentApi(ctx, { heartbeatMs: opts.heartbeatMs ?? 60_000 });
+  agentApi(ctx, { heartbeatMs: 60_000, ...opts });
   addAccount(ctx, "acc_a", "me@acme.com");
   addAccount(ctx, "acc_b", "other@acme.com");
   const { agent, apiKey } = ctx.policy.createAgent({ name: "Hermes", grants: [readGrant("acc_a")] });
@@ -151,6 +168,7 @@ describe("GET /agent/v1/events/stream", () => {
   for (const [what, reason, revoke] of revocations) {
     it(`closes a live stream with event: revoked on ${what}`, async () => {
       const s = await setup();
+      const baseline = s.ctx.bus.listenerCount("agent");
       const r = await s.open();
       const started = performance.now();
       revoke(s);
@@ -158,7 +176,7 @@ describe("GET /agent/v1/events/stream", () => {
       expect(performance.now() - started).toBeLessThan(100);
       expect(frames.at(-1)).toEqual({ event: "revoked", data: JSON.stringify({ reason }) });
       // Nothing more is delivered on a revoked stream, and the agent's listener shows disconnected.
-      expect(s.ctx.bus.listenerCount("agent")).toBe(0);
+      expect(s.ctx.bus.listenerCount("agent")).toBe(baseline);
     });
   }
 
@@ -191,6 +209,9 @@ describe("POST /agent/v1/events/ack", () => {
     expect(await (await s.ack("laptop", b)).json()).toEqual({ ackedSeq: b });
     expect(await (await s.ack("laptop", a)).json()).toEqual({ ackedSeq: b });
     expect(await (await s.ack("laptop", b + 1000)).json()).toEqual({ ackedSeq: b });
+    // Capped at the newest event this agent can see, not the global newest.
+    for (let i = 0; i < 5; i++) emitMessage(s.ctx, "acc_b", `other${i}`);
+    expect(await (await s.ack("laptop", 1e12)).json()).toEqual({ ackedSeq: b });
     expect(await (await s.ack("desktop", a)).json()).toEqual({ ackedSeq: a });
     expect((await s.ack("laptop", -1)).status).toBe(400);
     expect(s.ctx.policy.getAgent(s.agent.id)!.listeners.map((l) => [l.consumer, l.ackedSeq])).toEqual([
@@ -226,7 +247,7 @@ describe("agent API auth", () => {
     expect((await s.ack("x", 0)).status).toBe(200);
   });
 
-  it("locks out an address after 5 distinct bad keys without affecting other addresses", async () => {
+  it("locks out an address after 5 distinct bad keys without refusing valid keys or other addresses", async () => {
     const s = await setup();
     s.ctx.config.trustProxy = true;
     const app = createApp(s.ctx);
@@ -236,10 +257,142 @@ describe("agent API auth", () => {
     for (let i = 0; i < 3; i++) expect((await me("10.0.0.1", `aib_bad${i}`)).status).toBe(401);
     expect((await me("10.0.0.1", s.apiKey)).status).toBe(200);
     expect((await me("10.0.0.1", "aib_bad4")).status).toBe(401);
-    const locked = await me("10.0.0.1", s.apiKey);
+    const locked = await me("10.0.0.1", "aib_bad5");
     expect(locked.status).toBe(429);
     expect(locked.headers.get("retry-after")).toBe("900");
-    expect((await me("10.0.0.2", s.apiKey)).status).toBe(200);
+    // A valid key is never refused, even from the locked-out address (shared NAT/proxy).
+    expect((await me("10.0.0.1", s.apiKey)).status).toBe(200);
+    expect((await me("10.0.0.2", "aib_other")).status).toBe(401);
     expect(s.ctx.audit.list({ action: "agent_api.auth" }).items).toMatchObject([{ outcome: "denied", reason: "lockout", detail: { ip: "10.0.0.1" } }]);
+  });
+});
+
+describe("stream hardening", () => {
+  it("does not write an event whose access was revoked while its body was being fetched", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let fetching!: () => void;
+    const started = new Promise<void>((r) => (fetching = r));
+    const slow = fakeMail()();
+    const s = await setup({}, () =>
+      ({
+        async messageContent(accountId: string, id: string) {
+          if (id === "slow") {
+            fetching();
+            await gate;
+          }
+          return slow.messageContent(accountId, id);
+        },
+      }) as unknown as MailService,
+    );
+    s.ctx.policy.upsertGrant(s.agent.id, "acc_b", readGrant("acc_b"));
+    emitMessage(s.ctx, "acc_a", "slow");
+    const r = await s.open("?include_body=1");
+    await started;
+    s.ctx.policy.deleteGrant(s.agent.id, "acc_a"); // acc_b keeps the stream alive
+    release();
+    const next = emitMessage(s.ctx, "acc_b", "m2");
+    await r.until(() => r.mail().length >= 1);
+    expect(r.mail().map((m) => [m.seq, m.payload.data.accountId])).toEqual([[next, "acc_b"]]);
+  });
+
+  it("only attaches a body when the thread is in the label scope now", async () => {
+    const s = await setup();
+    s.ctx.policy.upsertGrant(s.agent.id, "acc_a", readGrant("acc_a", { labelScope: ["Label_work"] }));
+    emitMessage(s.ctx, "acc_a", "moved", ["Label_work"]);
+    emitMessage(s.ctx, "acc_a", "kept", ["Label_work"]);
+    threadLabelsNow.set("t_moved", ["INBOX"]); // relabelled out of scope after the event
+    const r = await s.open("?include_body=1");
+    await r.until(() => r.mail().length >= 2);
+    const [moved, kept] = r.mail();
+    expect(moved!.payload.data).not.toHaveProperty("content");
+    expect(moved!.payload.data.contentError).toBe("Message body unavailable: not accessible");
+    expect(kept!.payload.data.content).toMatchObject({ body: "Body of kept" });
+  });
+
+  it("caps after and Last-Event-ID at the newest visible event", async () => {
+    const s = await setup();
+    emitMessage(s.ctx, "acc_a", "m1");
+    for (let i = 0; i < 3; i++) emitMessage(s.ctx, "acc_b", `b${i}`);
+    let r = await s.open("?after=1000000000");
+    const next = emitMessage(s.ctx, "acc_a", "m2");
+    await r.until(() => r.mail().length >= 1);
+    expect(seqs(r)).toEqual([next]);
+    r.cancel();
+    r = await s.open("", { "last-event-id": "999999999" });
+    const later = emitMessage(s.ctx, "acc_a", "m3");
+    await r.until(() => r.mail().length >= 1);
+    expect(seqs(r)).toEqual([later]);
+  });
+
+  it("ends streams immediately when an account with the agent's only read grant is removed", async () => {
+    const s = await setup();
+    const r = await s.open();
+    const started = performance.now();
+    await s.ctx.accounts.remove("acc_a");
+    const frames = await r.end(1000);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(frames.at(-1)).toEqual({ event: "revoked", data: JSON.stringify({ reason: "no_read_grant" }) });
+  });
+
+  it("limits concurrent streams and consumers per agent", async () => {
+    const s = await setup({ maxStreams: 2, maxConsumers: 3 });
+    const a = await s.open("?consumer=a");
+    await s.open("?consumer=b");
+    const third = await fetch(`${s.url}/agent/v1/events/stream?consumer=c`, { headers: { authorization: `Bearer ${s.apiKey}` } });
+    expect(third.status).toBe(429);
+    expect(((await third.json()) as { error: { code: string } }).error.code).toBe("too_many_streams");
+    a.cancel();
+    const deadline = Date.now() + 2000;
+    while (s.ctx.policy.getAgent(s.agent.id)!.listeners.find((l) => l.consumer === "a")!.connected && Date.now() < deadline) await new Promise((x) => setTimeout(x, 10));
+    expect((await s.ack("c", 0)).status).toBe(200); // 3 consumers: a (idle), b, c
+    // A 4th consumer evicts the longest-idle one (a); with all others connected or fresh, it's 409 once none is idle.
+    expect((await s.ack("d", 0)).status).toBe(200);
+    expect(s.ctx.policy.getAgent(s.agent.id)!.listeners.map((l) => l.consumer)).toEqual(["b", "c", "d"]);
+    await s.open("?consumer=c");
+    s.ctx.db.run("UPDATE listener_cursors SET connected = 1 WHERE consumer = 'd'");
+    const full = await s.ack("e", 0);
+    expect(full.status).toBe(409);
+    expect(((await full.json()) as { error: { code: string } }).error.code).toBe("too_many_consumers");
+  });
+
+  it("refuses browser requests on the stream", async () => {
+    const s = await setup();
+    const res = await fetch(`${s.url}/agent/v1/events/stream`, { headers: { authorization: `Bearer ${s.apiKey}`, origin: "http://evil.example" } });
+    expect(res.status).toBe(403);
+  });
+
+  it("disconnects a client that stops reading", async () => {
+    const s = await setup({ heartbeatMs: 50 });
+    const baseline = s.ctx.bus.listenerCount("event");
+    const res = await fetch(`${s.url}/agent/v1/events/stream?include_body=1&consumer=stalled`, { headers: { authorization: `Bearer ${s.apiKey}` } });
+    expect(res.status).toBe(200);
+    // Never read: ~40 MB of bodies fill the socket buffers and the server's writes stall.
+    for (let i = 0; i < 40; i++) emitMessage(s.ctx, "acc_a", `big${i}`);
+    const waitFor = async (pred: () => boolean, ms: number) => {
+      const deadline = Date.now() + ms;
+      while (!pred() && Date.now() < deadline) await new Promise((x) => setTimeout(x, 20));
+      return pred();
+    };
+    expect(await waitFor(() => s.ctx.bus.listenerCount("event") === baseline, 5000)).toBe(true);
+    expect(s.ctx.policy.getAgent(s.agent.id)!.listeners[0]!.connected).toBe(false);
+    void res.body?.cancel().catch(() => {});
+  });
+
+  it("cuts the connection when a stalled client can't take the revoked frame", async () => {
+    // Heartbeat far away: only the revoked-frame timeout can end this stream.
+    const s = await setup({ heartbeatMs: 60_000, revokeWriteTimeoutMs: 200 });
+    const agentBaseline = s.ctx.bus.listenerCount("agent");
+    const waitFor = async (pred: () => boolean, ms: number) => {
+      const deadline = Date.now() + ms;
+      while (!pred() && Date.now() < deadline) await new Promise((x) => setTimeout(x, 20));
+      return pred();
+    };
+    const res2 = await fetch(`${s.url}/agent/v1/events/stream?include_body=1&consumer=stalled2`, { headers: { authorization: `Bearer ${s.apiKey}` } });
+    for (let i = 40; i < 80; i++) emitMessage(s.ctx, "acc_a", `big${i}`);
+    await new Promise((x) => setTimeout(x, 100));
+    s.ctx.policy.updateAgent(s.agent.id, { disabled: true });
+    expect(await waitFor(() => s.ctx.bus.listenerCount("agent") === agentBaseline, 2000)).toBe(true);
+    void res2.body?.cancel().catch(() => {});
   });
 });
