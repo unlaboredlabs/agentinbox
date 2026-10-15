@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type BannerEnv, bannerLines, startServer } from "../server/server.ts";
+import { type BannerEnv, bannerLines, startServer, tunnelCommand } from "../server/server.ts";
 import { fakeGoogle, fakeIngest, harness, json } from "./platform-helpers.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -84,7 +84,7 @@ describe("startup banner", () => {
       const token = h.setupToken()!;
       expect(out).toContain(`http://localhost:8425/setup?token=${token}`);
       expect(out).toContain(`http://192.168.1.5:8425/setup?token=${token}`);
-      expect(out).toContain("ssh -L 8425:localhost:8425 ada@198.51.100.7");
+      expect(out).toContain("ssh -L 8425:localhost:8425 ada@198.51.100.7 (your usual ssh host or alias works)");
       expect(out).toContain("then open the link above in its browser");
       const warning = out.split("\n").filter((l) => l.includes("Heads up"));
       expect(warning).toHaveLength(1);
@@ -93,12 +93,45 @@ describe("startup banner", () => {
       expect(warning[0]).toContain("--host 127.0.0.1");
     }));
 
-  it("headless without SSH variables falls back to the hostname for the tunnel", () =>
+  it("tunnel: -p for a non-standard SSH port, a placeholder for private server IPs, Tailscale allowed", () =>
+    withHarness((h) => {
+      const tunnel = (conn: string, extra: Partial<BannerEnv> = {}) =>
+        tunnelCommand(h.ctx.config, { ...desktop, env: { SSH_CONNECTION: conn }, ...extra });
+      expect(tunnel("203.0.113.9 50022 198.51.100.7 2222")).toBe("ssh -p 2222 -L 8425:localhost:8425 ada@198.51.100.7");
+      for (const ip of ["10.1.2.3", "172.20.0.5", "192.168.1.5", "169.254.1.1", "127.0.0.1", "fd12::1", "fe80::1", "::1"]) {
+        expect(tunnel(`203.0.113.9 50022 ${ip} 22`)).toBe("ssh -L 8425:localhost:8425 <the host you ssh to>");
+      }
+      expect(tunnel("100.101.102.1 50022 100.91.67.127 22")).toBe("ssh -L 8425:localhost:8425 ada@100.91.67.127");
+      expect(tunnel("203.0.113.9 50022 2001:db8::7 22", { username: "" })).toBe("ssh -L 8425:localhost:8425 2001:db8::7");
+      // SSH_TTY alone (no SSH_CONNECTION): still a tunnel hint, with the placeholder.
+      expect(tunnelCommand(h.ctx.config, { ...desktop, env: { SSH_TTY: "/dev/pts/1" } })).toBe("ssh -L 8425:localhost:8425 <the host you ssh to>");
+    }));
+
+  it("tunnel over sudo names the invoking user, not root", () =>
+    withHarness((h) => {
+      // The default banner env is read from the process.
+      const keys = ["SUDO_USER", "USER", "SSH_CONNECTION"] as const;
+      const saved = keys.map((k) => process.env[k]);
+      Object.assign(process.env, { SUDO_USER: "ada", USER: "root", SSH_CONNECTION: "203.0.113.9 50022 198.51.100.7 22" });
+      try {
+        expect(text(bannerLines(h.ctx, { mcp: true }))).toContain("ssh -L 8425:localhost:8425 ada@198.51.100.7");
+      } finally {
+        keys.forEach((k, i) => (saved[i] === undefined ? delete process.env[k] : (process.env[k] = saved[i])));
+      }
+    }));
+
+  it("headless without SSH (a container, a console): no tunnel, open the link elsewhere", () =>
+    withHarness((h) => {
+      const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: {} }));
+      expect(out).not.toContain("ssh -L");
+      expect(out).toContain("Open the link from a machine with a browser");
+    }));
+
+  it("over SSH with a non-loopback bind address, the laptop-side link is spelled out", () =>
     withHarness((h) => {
       h.ctx.config.host = "10.0.0.4";
-      const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: {} }));
-      expect(out).toContain("ssh -L 8425:10.0.0.4:8425 ada@box");
-      // The bound address isn't loopback, so the laptop-side link is spelled out.
+      const out = text(bannerLines(h.ctx, { mcp: true }, { ...desktop, env: { SSH_CONNECTION: "203.0.113.9 1 198.51.100.7 22" } }));
+      expect(out).toContain("ssh -L 8425:10.0.0.4:8425 ada@198.51.100.7");
       expect(out).toContain(`then open http://localhost:8425/setup?token=${h.setupToken()}`);
     }));
 

@@ -42,7 +42,7 @@ agentinbox [start] [--port 8425] [--host 0.0.0.0] [--data ~/.agentinbox] [--no-o
 agentinbox service install [--port …] [--host …] [--data …]
 agentinbox service uninstall [--data …]
 agentinbox service status
-agentinbox reset-password [--data …]
+agentinbox reset-password [--data …] [--port …] [--host …]
 agentinbox skill install [--target claude|codex|agents|<dir>] [--url <public url>]
 agentinbox skill print [--url <public url>]
 agentinbox connect <url> … / setup-mcp / listen …   # on agent machines, see listen.md
@@ -58,14 +58,15 @@ agentinbox connect <url> … / setup-mcp / listen …   # on agent machines, see
 | | `TRUST_PROXY_HOPS` | `1` | Number of proxies in front of agentinbox (which `X-Forwarded-For` entry, from the right, is the client) |
 | | `TRUST_PROXY_FROM` | loopback | Other proxy addresses whose forwarding headers are believed: comma-separated IPs or CIDRs (IPv4 or IPv6) |
 | | `AGENTINBOX_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
-| `--url` | `AGENTINBOX_URL` | `http://localhost:8425` | `skill` commands only: the server URL written into SKILL.md |
+| `--url` | `AGENTINBOX_URL` | the agentinbox running on this machine, else `http://localhost:8425` | `skill` commands only: the server URL written into SKILL.md |
 
 Everything else (public URL, ingest mode, poll interval, body size limit, retention, approval expiry, webhook allowlist,
 agent pairing) is set in the console under **Settings**.
 
 **Forgot the admin password?** Run `npx agentinbox-cli reset-password` on the server, as the user agentinbox runs as
-(`sudo` for a system service) and with the same `--data`. It signs out all sessions and prints a new setup link; a
-running instance picks it up without a restart. On an instance that hasn't been claimed yet, it prints the first-run
+(`sudo` for a system service) and with the same `--data`. It signs out all sessions and prints a new setup link (for the
+running instance's address; pass `--port`/`--host` if it isn't running); a running instance picks it up without a
+restart. On an instance that hasn't been claimed yet, it prints the first-run
 link instead.
 
 ## Google Cloud setup in brief
@@ -195,8 +196,9 @@ down cleanly.
 
 ### On a remote server
 
-Over SSH (no display), the startup banner prints the tunnel command to run on your laptop, for example
-`ssh -L 8425:localhost:8425 you@server`; then open the printed `localhost` setup link in your laptop's browser. Until
+Over SSH, the startup banner prints the tunnel command to run on your laptop, for example
+`ssh -L 8425:localhost:8425 you@server` (your usual ssh host or alias works too); then open the printed `localhost`
+setup link in your laptop's browser. Until
 the instance is claimed, anyone who can reach its port could claim it first: start it with `--host 127.0.0.1` and use
 the tunnel, or firewall the port. The banner warns when the port is reachable on a public address.
 

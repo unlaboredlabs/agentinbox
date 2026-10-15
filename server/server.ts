@@ -190,7 +190,8 @@ export interface BannerEnv {
 }
 
 function currentBannerEnv(): BannerEnv {
-  let username = process.env.USER || process.env.LOGNAME || "";
+  // Under sudo, USER is root; the person at the keyboard is SUDO_USER.
+  let username = process.env.SUDO_USER || process.env.USER || process.env.LOGNAME || "";
   try {
     username ||= userInfo().username;
   } catch {
@@ -199,23 +200,38 @@ function currentBannerEnv(): BannerEnv {
   return { env: process.env, platform: process.platform, addresses: networkAddresses(), hostname: hostname(), username };
 }
 
+const overSsh = (e: Pick<BannerEnv, "env">) => !!(e.env.SSH_CONNECTION || e.env.SSH_CLIENT || e.env.SSH_TTY);
+
 /** True over SSH, or on Linux without a graphical session: a browser here won't reach the user. */
 export function isHeadless(e: Pick<BannerEnv, "env" | "platform">): boolean {
-  if (e.env.SSH_CONNECTION || e.env.SSH_CLIENT || e.env.SSH_TTY) return true;
-  return e.platform === "linux" && !e.env.DISPLAY && !e.env.WAYLAND_DISPLAY;
+  return overSsh(e) || (e.platform === "linux" && !e.env.DISPLAY && !e.env.WAYLAND_DISPLAY);
+}
+
+/**
+ * True for addresses the user's laptop probably can't dial directly: loopback, RFC 1918, link-local,
+ * IPv6 ULA (behind NAT, a jump host or a cloud load balancer the session's server IP is often one of
+ * these). Tailscale's 100.64.0.0/10 is reachable from the tailnet, so it counts as usable.
+ */
+function isUnroutableIp(ip: string): boolean {
+  const v = ip.toLowerCase().replace(/^::ffff:(?=\d+\.)/, "");
+  if (v.includes(":")) return v === "::1" || /^f[cd]/.test(v) || /^fe[89ab]/.test(v);
+  const [a = -1, b = -1] = v.split(".").map(Number);
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 }
 
 /**
  * The `ssh -L` command that makes this server's port reachable as localhost on the user's own
- * machine. The host is the address this SSH session came in on, else the hostname.
+ * machine, built from SSH_CONNECTION ("client_ip client_port server_ip server_port"). The server IP is
+ * only shown when the laptop can plausibly reach it; otherwise a placeholder stands in.
  */
 export function tunnelCommand(config: Pick<Config, "host" | "port">, e: BannerEnv): string {
-  const serverIp = e.env.SSH_CONNECTION?.trim().split(/\s+/)[2];
-  const remote = serverIp && !/^(127\.|::1$|::ffff:127\.)/.test(serverIp) ? serverIp : e.hostname || "<server>";
+  const [, , serverIp, sshPort] = e.env.SSH_CONNECTION?.trim().split(/\s+/) ?? [];
+  const host = serverIp && !isUnroutableIp(serverIp) ? `${e.username ? `${e.username}@` : ""}${serverIp}` : "<the host you ssh to>";
   const bound = config.host.trim().toLowerCase();
   const target = isWildcardHost(bound) || bound === "localhost" || bound === "::1" || bound.startsWith("127.") ? "localhost" : bound;
   const forward = `${config.port}:${target.includes(":") ? `[${target}]` : target}:${config.port}`;
-  return `ssh -L ${forward} ${e.username ? `${e.username}@` : ""}${remote}`;
+  const port = sshPort && sshPort !== "22" && /^\d+$/.test(sshPort) ? ` -p ${sshPort}` : "";
+  return `ssh${port} -L ${forward} ${host}`;
 }
 
 /** `service install` with the flags this run used, so the service gets the same data and address. */
@@ -257,13 +273,18 @@ export function bannerLines(ctx: AppContext, info: { mcp: boolean }, e: BannerEn
         `  ${pc.yellow("Heads up:")} anyone reaching ${exposed.join(", ")}:${config.port} could claim this first. Open the link now, or restart with --host 127.0.0.1.`,
       );
     }
-    if (!config.dev && isHeadless(e)) {
+    const headless = !config.dev && isHeadless(e);
+    if (headless && overSsh(e)) {
       // The tunnel makes the port local on the laptop, so a loopback link above works there as is.
       const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(new URL(urls[0]!).hostname);
       const where = loopback ? "the link above" : pc.cyan(link(`http://localhost:${config.port}`));
-      out.push(`  ${pc.yellow("No browser here?")} On your laptop run ${pc.bold(tunnelCommand(config, e))}, then open ${where} in its browser.`);
+      out.push(
+        `  ${pc.yellow("No browser here?")} On your laptop run ${pc.bold(tunnelCommand(config, e))} (your usual ssh host or alias works), then open ${where} in its browser.`,
+      );
+    } else if (headless) {
+      out.push(`  ${pc.yellow("No browser here?")} Open the link from a machine with a browser that can reach this one.`);
     }
-    if (exposed.length || (!config.dev && isHeadless(e))) out.push("");
+    if (exposed.length || headless) out.push("");
   } else {
     const publicUrl = ctx.settings.publicUrl();
     out.push(`  ${pc.dim("Console")}  ${pc.cyan(urls[0]!)}`);
