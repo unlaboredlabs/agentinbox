@@ -36,6 +36,7 @@ import {
 } from "./verify-checks";
 import type { StepProps } from "./step-url";
 import { StepCard, StepFooter } from "./wizard-shell";
+import { explainReason } from "@/lib/labels";
 
 // ───────────── State shared with step 7 (per browser and instance) ─────────────
 
@@ -282,7 +283,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
   const Label = label[0]!.toUpperCase() + label.slice(1);
   const c = connectCommands(publicUrl, tool);
   const mcp = useMcpActivity(agent, { since: agent.createdAt });
-  const lastCall = lastCallShown(mcp.calls);
+  const lastCall = lastCallShown(mcp.calls, explainReason);
   const now = useNow(60_000);
   const test = activeTest(state.test, now);
 

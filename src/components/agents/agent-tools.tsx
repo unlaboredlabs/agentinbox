@@ -11,12 +11,13 @@ import { Command } from "./command";
 import { ConnectSnippets } from "./connect-snippets";
 import { ProfileHint, ToolTabs, toolName, usePublicUrl } from "./connect-agent-guide";
 import { TestConnection } from "./test-connection";
+import { explainReason } from "@/lib/labels";
 
 /** "Not called yet" / "Last tool call 2 minutes ago": whether the agent's own tool reaches agentinbox. */
 export function McpStatus({ agent, label }: { agent: Agent; label: string }) {
   const { calls, connectedAt } = useMcpActivity(agent);
   // The last successful call; without one, the last call marked with what went wrong (no tick).
-  const last = lastCallShown(calls);
+  const last = lastCallShown(calls, explainReason);
   return (
     <p role="status" className="flex items-center gap-2 text-sm">
       {last ? (

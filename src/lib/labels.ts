@@ -117,4 +117,10 @@ export const DENIAL_REASONS: Record<string, string> = {
   invalid_request: "The agent sent a malformed tool call",
 };
 
+/** A denial or rejection reason in plain words, to follow "denied: " and the like (the code when unknown). */
+export function explainReason(reason: string): string {
+  const text = DENIAL_REASONS[reason];
+  return text ? text[0]!.toLowerCase() + text.slice(1) : reason;
+}
+
 export const KIND_LABEL = { send: "New message", reply: "Reply", forward: "Forward" } as const;

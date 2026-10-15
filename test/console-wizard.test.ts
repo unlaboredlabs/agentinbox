@@ -429,6 +429,11 @@ describe("stepStatuses: the verify step", () => {
     expect(lastCallShown([rejected])).toEqual({ call: rejected, ok: false, note: "rejected: invalid_arguments" });
     expect(lastCallShown([{ ...call("send_message", "denied", later(1)), reason: "allow_to" }])?.note).toBe("denied: allow_to");
     expect(lastCallShown([{ ...call("get_thread", "error", later(1)), reason: "gmail_error" }])?.note).toBe("failed: gmail_error");
+    // The console passes a plain-words explainer; unknown codes fall back to the code.
+    const words = (r: string) => (r === "allow_to" ? "a recipient isn't on the grant's allowlist" : r);
+    expect(lastCallShown([{ ...call("send_message", "denied", later(1)), reason: "allow_to" }], words)?.note).toBe(
+      "denied: a recipient isn't on the grant's allowlist",
+    );
   });
 
   it("summarizes what was verified from what is still known", () => {
