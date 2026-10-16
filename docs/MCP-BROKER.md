@@ -232,15 +232,24 @@ and payments. Creating and editing goes through without asking. Classification, 
    - WHOOP: none, since everything is read.
 2. **Generic MCP servers with annotations:** `destructiveHint: true` is risky, and `readOnlyHint: true` is a read
    tool.
-3. **Generic MCP servers, either way:** a tool counts as risky if its **name** contains one of these words (split on
-   `_`, `-`, `.` and camelCase), or, when it has no annotations, if its **description** does:
-
-   `delete remove destroy drop purge trash erase wipe send email mail message reply forward publish share post invite
-   pay payment charge transfer refund purchase`
-
-   The name check runs even when annotations are present, so a delete tool can't escape by claiming `readOnlyHint`.
-   The spec says annotations from untrusted servers are hints
-   ([tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)).
+3. **Generic MCP servers, either way** (the code's single source is `CLASSIFICATION_WORDS` in
+   `server/broker/catalog/classify.ts`; this is its summary):
+   - **Name:** risky if a name token (split on `_`, `-`, `.` and camelCase) is a risky **verb**: `delete remove destroy
+     drop purge trash erase wipe send reply forward publish share post invite pay charge transfer refund purchase
+     merge`.
+     - A risky word directly after a leading read verb (`get_post`, `list_shares`) doesn't count. One later in the name
+       (`fetch_and_delete_messages`) does.
+     - `schedule` plus a messaging noun (`message`, `mail`, `email`, `dm`, `sms`) is risky.
+     - A `draft` token cancels send and schedule risk.
+     - A leading server prefix (`notion-get-page`, `slack_list_channels`) is skipped.
+     - The name check runs even when annotations are present, so a delete tool can't escape by claiming
+       `readOnlyHint`. Annotations from untrusted servers are hints
+       ([tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)).
+   - **Description** (only without annotations): risky if a sentence contains a risky verb form: base, `-s`, `-ed` or
+     `-ing` (`delete`, `deletes`, `deleted`, `deleting`, `send`, `sends`, `sent`, `sending`, …). Sentences starting
+     with "Returns", "Lists" or "Gets" are skipped, and the ambiguous nouns `post`, `reply`, `drop` and `pay` aren't
+     matched here.
+   - **Nouns alone** (`message`, `email`, `payment`) never make a tool risky, so `get_message` is a plain read.
 
 **Read only** includes only:
 - tools a preset marks as reads;
