@@ -303,7 +303,7 @@ export function connectAttempt(ctx: AppContext, state: string): ConnectAttempt {
   }
   const bad = failed.get(ctx)?.get(state);
   if (bad && bad.at >= cutoff) return { status: "failed", code: bad.code, error: bad.error, hint: bad.hint };
-  const pending = ctx.db.get<{ created_at: string }>("SELECT created_at FROM oauth_states WHERE state = ?", state);
+  const pending = ctx.db.get<{ created_at: string }>("SELECT created_at FROM oauth_states WHERE state = ? AND connection_id IS NULL", state);
   if (pending && Date.parse(pending.created_at) + STATE_TTL_MS >= Date.now()) return { status: "pending" };
   return { status: "unknown" };
 }
@@ -341,8 +341,9 @@ interface StateRow {
 
 /** Consumes a pending state (single use). */
 function takeState(ctx: AppContext, state: string): StateRow {
-  const row = state ? ctx.db.get<StateRow>("SELECT * FROM oauth_states WHERE state = ?", state) : undefined;
-  if (row) ctx.db.run("DELETE FROM oauth_states WHERE state = ?", state);
+  // connection_id IS NULL here and below: upstream connections' states (MCP broker) are never Google's to read or consume.
+  const row = state ? ctx.db.get<StateRow>("SELECT * FROM oauth_states WHERE state = ? AND connection_id IS NULL", state) : undefined;
+  if (row) ctx.db.run("DELETE FROM oauth_states WHERE state = ? AND connection_id IS NULL", state);
   if (!row || Date.parse(row.created_at) + STATE_TTL_MS < Date.now()) {
     throw new HttpError(
       400,
@@ -621,7 +622,7 @@ export async function completeConnectFromUrl(ctx: AppContext, raw: string): Prom
   const error = q.get("error");
   if (error) {
     const state = q.get("state");
-    const pending = state && ctx.db.run("DELETE FROM oauth_states WHERE state = ?", state).changes ? state : null;
+    const pending = state && ctx.db.run("DELETE FROM oauth_states WHERE state = ? AND connection_id IS NULL", state).changes ? state : null;
     const calendar = pending ? takeCalendarAttempt(ctx, pending) : null;
     const err = consentError(ctx, error, q.get("error_description"), undefined, calendar);
     if (pending) rememberFailed(ctx, pending, err);

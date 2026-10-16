@@ -1,4 +1,5 @@
 import type { Config } from "./config.ts";
+import { upstreams } from "./broker/upstream/runtime.ts";
 import { createCalendarService } from "./calendar/index.ts";
 import { type AppContext, createCore, SERVICE_ORDER, type Services } from "./context.ts";
 import { createEventsService } from "./events/index.ts";
@@ -34,6 +35,8 @@ export function createAppContext(config: Config, overrides: ServiceOverrides = {
 
 export async function startServices(ctx: AppContext): Promise<void> {
   for (const key of SERVICE_ORDER) await ctx[key].start?.();
+  // The MCP broker's upstream sweep (proactive refresh, expiry warnings): a no-op while brokerUpstreams is off.
+  upstreams(ctx).start();
 }
 
 /** Stops services in reverse order, then closes the database. Errors are logged, not thrown. */
@@ -44,6 +47,11 @@ export async function stopServices(ctx: AppContext): Promise<void> {
     } catch (err) {
       ctx.log.error(`Failed to stop ${key}`, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+  try {
+    await upstreams(ctx).stop();
+  } catch (err) {
+    ctx.log.error("Failed to stop the upstream runtime", { error: err instanceof Error ? err.message : String(err) });
   }
   ctx.db.close();
 }

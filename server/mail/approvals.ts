@@ -1,4 +1,13 @@
-import { type Address, type Approval, type ApprovalStatus, type CalendarApprovalDetail, isCalendarApprovalKind } from "../../shared/types.ts";
+import {
+  type Address,
+  type Approval,
+  type ApprovalStatus,
+  type CalendarApprovalDetail,
+  type GoogleApproval,
+  isCalendarApprovalKind,
+  MAIL_APPROVAL_KINDS,
+  type McpCallApprovalDetail,
+} from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { bool, json, now } from "../db/index.ts";
@@ -27,12 +36,17 @@ interface ApprovalRow {
   id: string;
   agent_id: string;
   agent_name: string | null;
-  account_id: string;
+  /** NULL only for mcp.call (migration 8). */
+  account_id: string | null;
   account_email: string | null;
+  connection_id: string | null;
   kind: Approval["kind"];
   status: ApprovalStatus;
-  draft_id: string;
+  /** NULL only for mcp.call; '' for calendar kinds. */
+  draft_id: string | null;
   payload: string;
+  /** JSON McpCallApprovalDetail, mcp.call only. */
+  tool_call: string | null;
   decided_at: string | null;
   decision_note: string | null;
   sent_message_id: string | null;
@@ -49,15 +63,11 @@ const STUCK_AFTER_MS = 10 * 60_000;
 
 function toApproval(r: ApprovalRow): Approval {
   const p = json.parse<Partial<ApprovalPayload>>(r.payload, {});
-  return {
+  const common = {
     id: r.id,
     agentId: r.agent_id,
     agentName: r.agent_name ?? r.agent_id,
-    accountId: r.account_id,
-    accountEmail: r.account_email ?? r.account_id,
-    kind: r.kind,
     status: r.status,
-    draftId: r.draft_id,
     to: p.to ?? [],
     cc: p.cc ?? [],
     bcc: p.bcc ?? [],
@@ -66,13 +76,34 @@ function toApproval(r: ApprovalRow): Approval {
     threadId: p.threadId ?? null,
     attachments: p.attachments ?? [],
     reason: p.reason ?? null,
-    ...(isCalendarApprovalKind(r.kind) && p.calendar ? { calendar: p.calendar } : {}),
     decidedAt: r.decided_at,
     decisionNote: r.decision_note,
     sentMessageId: r.sent_message_id,
     error: r.error,
     createdAt: r.created_at,
     expiresAt: r.expires_at,
+  };
+  // The schema guarantees the columns per kind (approvals CHECK, migration 8). Nothing creates mcp.call yet.
+  if (r.kind === "mcp.call") {
+    return {
+      ...common,
+      kind: r.kind,
+      accountId: null,
+      accountEmail: null,
+      draftId: null,
+      connectionId: r.connection_id ?? "",
+      call: json.parse<McpCallApprovalDetail>(r.tool_call, { tool: "", exposedName: "", args: "", argsSha256: "", pinHash: "" }),
+    };
+  }
+  const accountId = r.account_id ?? "";
+  return {
+    ...common,
+    kind: r.kind,
+    accountId,
+    accountEmail: r.account_email ?? accountId,
+    draftId: r.draft_id ?? "",
+    connectionId: null,
+    ...(isCalendarApprovalKind(r.kind) && p.calendar ? { calendar: p.calendar } : {}),
   };
 }
 
@@ -105,6 +136,8 @@ function isTransient(err: unknown): boolean {
   return err instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
 }
 
+const isMailApprovalKind = (k: string) => (MAIL_APPROVAL_KINDS as readonly string[]).includes(k);
+
 /** Prefix of the decision note on approvals cancelled automatically (status stays "rejected"). */
 export const CANCELLED_PREFIX = "cancelled: ";
 
@@ -125,7 +158,7 @@ export class Approvals {
     return rows.map(toApproval);
   }
 
-  create(input: { agentId: string; accountId: string; kind: Approval["kind"]; draftId: string; payload: ApprovalPayload }): Approval {
+  create(input: { agentId: string; accountId: string; kind: GoogleApproval["kind"]; draftId: string; payload: ApprovalPayload }): Approval {
     const id = newId("apr");
     const created = new Date();
     const expires = new Date(created.getTime() + this.ctx.settings.get().approvalTtlHours * 3_600_000);
@@ -149,6 +182,8 @@ export class Approvals {
     await this.expireOverdue();
     const current = this.require(id);
     if (current.status !== "pending") throw this.notPending(current);
+    // mcp.call approvals are executed by the broker (a later PR); none can be queued before it lands.
+    if (current.kind === "mcp.call") throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
 
     // The human approves a send by this agent under its current grant: both must still allow it.
     const blocked = this.sendBlockedReason(current);
@@ -199,7 +234,7 @@ export class Approvals {
   }
 
   /** Calendar kinds: the stored change goes to Google Calendar (server/calendar/approvals.ts); "sent" = applied. */
-  private async applyCalendar(current: Approval, started: number): Promise<Approval> {
+  private async applyCalendar(current: GoogleApproval, started: number): Promise<Approval> {
     const id = current.id;
     try {
       const { eventId } = await this.ctx.calendar.applyApproval(current);
@@ -241,7 +276,14 @@ export class Approvals {
       count++;
       const a = toApproval(r);
       await this.deleteDraft(a);
-      this.ctx.audit.record({ actorType: "system", action: "approval.expire", accountId: a.accountId, target: a.id, outcome: "ok" });
+      this.ctx.audit.record({
+        actorType: "system",
+        action: "approval.expire",
+        accountId: a.accountId,
+        target: a.id,
+        outcome: "ok",
+        ...(a.connectionId ? { detail: { connectionId: a.connectionId } } : {}),
+      });
       this.emit(r.id);
     }
     return count;
@@ -259,7 +301,9 @@ export class Approvals {
   recoverInterrupted(olderThanMs = STUCK_AFTER_MS): number {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
     const rows = this.ctx.db.all<{ id: string; kind: string }>(
-      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? ORDER BY rowid",
+      // Never mcp.call: an interrupted upstream call may have run, so it ends "failed" with an unknown outcome
+      // (the broker's recoverInterrupted) and must never go back to pending.
+      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? AND kind <> 'mcp.call' ORDER BY rowid",
       cutoff,
     );
     for (const { id, kind } of rows) {
@@ -285,7 +329,8 @@ export class Approvals {
       ? this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ? AND account_id = ?", agentId, accountId)
       : this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
     return this.cancel(
-      rows.filter((r) => !only || (only === "calendar") === isCalendarApprovalKind(r.kind)).map((r) => r.id),
+      // By kind, explicitly: mcp.call is neither mail nor calendar (the broker cancels those on grant changes).
+      rows.filter((r) => !only || (only === "calendar" ? isCalendarApprovalKind(r.kind) : isMailApprovalKind(r.kind))).map((r) => r.id),
       `${CANCELLED_PREFIX}${why}`,
     );
   }
@@ -296,14 +341,21 @@ export class Approvals {
       if (!this.transition(id, "pending", "rejected", note)) continue;
       const a = this.emit(id);
       drafts.push(a);
-      this.ctx.audit.record({ actorType: "system", action: "approval.cancel", accountId: a.accountId, target: id, outcome: "ok", detail: { note } });
+      this.ctx.audit.record({
+        actorType: "system",
+        action: "approval.cancel",
+        accountId: a.accountId,
+        target: id,
+        outcome: "ok",
+        detail: { note, ...(a.connectionId ? { connectionId: a.connectionId } : {}) },
+      });
     }
     if (drafts.length) void Promise.all(drafts.map((a) => this.deleteDraft(a)));
     return drafts.length;
   }
 
   /** Why this send (or calendar change) is no longer allowed under the agent's current grant, or null. */
-  private sendBlockedReason(a: Approval): string | null {
+  private sendBlockedReason(a: GoogleApproval): string | null {
     const agent = this.ctx.db.get<{ disabled: number }>("SELECT disabled FROM agents WHERE id = ?", a.agentId);
     if (!agent) return "the agent was deleted";
     if (bool(agent.disabled)) return "the agent is disabled";
@@ -354,7 +406,7 @@ export class Approvals {
 
   private async deleteDraft(a: Approval): Promise<void> {
     // Calendar approvals have no draft: nothing reached Google before approval.
-    if (isCalendarApprovalKind(a.kind) || !a.draftId) return;
+    if (a.kind === "mcp.call" || isCalendarApprovalKind(a.kind) || !a.draftId) return;
     try {
       await this.ctx.google.gmail(a.accountId).deleteDraft(a.draftId);
     } catch (err) {
@@ -380,7 +432,7 @@ export class Approvals {
       target: a.id,
       outcome,
       durationMs: Date.now() - started,
-      detail: { agentId: a.agentId, kind: a.kind, ...detail },
+      detail: { agentId: a.agentId, kind: a.kind, ...(a.connectionId ? { connectionId: a.connectionId } : {}), ...detail },
     });
   }
 

@@ -44,7 +44,8 @@ const toForm = (s: Settings): FormValues => ({
   pairingEnabled: s.pairingEnabled,
 });
 
-const fromForm = (v: FormValues): Settings => ({
+/** brokerUpstreams isn't on this form (the console's Connections PR owns it); the patch below leaves it alone. */
+const fromForm = (v: FormValues): Omit<Settings, "brokerUpstreams"> => ({
   publicUrl: v.publicUrl.trim().replace(/\/+$/, ""),
   ingestMode: v.ingestMode,
   pollIntervalSeconds: Number(v.pollIntervalSeconds),

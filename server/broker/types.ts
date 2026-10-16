@@ -40,7 +40,11 @@ export interface ToolClass {
   /** Listed at the "read" level. */
   read: boolean;
   source: ClassSource;
-  /** Argument path (dot-separated) naming the target, offered for "always allow … for this target". */
+  /**
+   * JSON Pointer (RFC 6901) into the call's arguments naming the target, offered for "always allow … for this
+   * target" (e.g. `/page_ids`). Not dot paths: `{"a.b": x}` vs `{a: {b: y}}` must never be confused. The value may
+   * be an array of ids; a rule matches only when every element is covered.
+   */
   targetPath?: string;
 }
 
@@ -210,7 +214,11 @@ export interface ToolRegistry {
 }
 
 /** The policy's verdict on one call. FROZEN. */
-export type CallDecision = { kind: "allow" } | { kind: "ask" } | { kind: "deny"; reason: string; message: string };
+export type CallDecision =
+  /** `ruleId`: the "always allow" rule that let a risky call through at the "ask" level (audit). */
+  | { kind: "allow"; ruleId?: string }
+  | { kind: "ask" }
+  | { kind: "deny"; reason: string; message: string };
 
 export interface BrokerPolicy {
   /** Level + risk + "always allow" rules + caps. Never runs the call. */
@@ -233,6 +241,8 @@ export interface StoredTokens {
   expiresAt: number | null;
   scope: string | null;
   issuer: string | null;
+  /** Epoch ms when the access token was issued (for the 10 %-of-lifetime refresh window). Additive. */
+  issuedAt?: number | null;
 }
 
 /** Encrypted per-connection credentials. FROZEN. */
