@@ -57,11 +57,25 @@ anything earlier in that doc.
 - #50: attachments on `create_draft`, `reply` and `send_message` (25 MB per message, at most 10 files, Gmail-blocked
   types refused, filenames cleaned and decoded, shown on approval cards, audited). Published as `nightly.48`.
 
-## Current: MCP broker (building)
+## Current: MCP broker (M1–M3 code merged, 2026-10-16)
 
-Plan: [docs/MCP-BROKER.md](MCP-BROKER.md). All decided on 2026-10-16 (Wynn: GO), including his simpler approval model.
-Building milestone by milestone. The rename (M0) is PR `chore/rename-xaq` (draft until the switch). Milestones: M0 rename, M1
-broker core with the Notion preset, M2 WHOOP, M3 search mode, M4 hardening.
+Plan: [docs/MCP-BROKER.md](MCP-BROKER.md). Everything is decided, including Wynn's approval model. Built in parallel
+(up to 20 agents), with tier-L reviews (2 reviewers plus a security reviewer) per area, and merged in one serial train:
+- #52/#56 contracts (`server/broker/types.ts`);
+- #53 schema (migration 8);
+- #55 SDK ADR plus fake upstreams;
+- #54 Notion preset; #57 WHOOP native;
+- #59 catalog/pinning; #61 policy/approvals; #62 upstream OAuth/credentials; #63 endpoint/events/API wiring;
+- #58 search mode; #65 console; #66 CLI connections/import; #64/#67/#68 docs and tests.
+
+Open:
+- **Rename** to xaq: PR #60, a draft. It needs the GitHub repo rename by Adri first (see its runbook).
+- **New-user E2E walk:** running.
+- **Real-world checks that need Wynn:**
+  - Notion connect (M1 #2);
+  - Hermes migration (M1 #3). Open decision: one entry or two; the rec is two, keeping a mail-only `agentinbox` entry for confined routes;
+  - WHOOP with his own developer app (M2).
+- Nits from every review are in FOLLOWUPS.md under "MCP broker build".
 
 ## Rules (Wynn / Adri)
 
