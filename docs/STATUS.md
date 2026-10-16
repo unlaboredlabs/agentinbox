@@ -32,35 +32,20 @@ anything earlier in that doc.
   - `listen hermes --run` refuses unless `agentinbox` is an enabled MCP server in Hermes. Run `npx agentinbox-cli setup-mcp --tool hermes` first.
   - `--cron-job` requires that job's `enabled_toolsets` to be exactly `["agentinbox"]`.
 
-## In flight (pushed, not merged)
+## Round complete (2026-10-16, forge lead)
 
-- **#42 C** `feat/calendar-c-mcp`: MCP calendar tools and untrusted event content (`<calendar_content … untrusted>`). main is merged in, tests pass. **Needs a review** (security flavour, because invites are an injection vector). The earlier review was stopped before it reported.
-- **#43 E** `feat/calendar-e-console-setup`: the "Add Google Calendar" dialog, wizard Calendar steps, account Calendar badges, and "Connect with mail only". main is merged in. **Needs a review.**
-- **#44 F** `feat/calendar-f-console-agents`: grant editor calendar section, calendar approval cards, event rows, webhook calendar filters. main is merged in. **Needs a review.** It shares `src/lib/queries.ts` with E (an identical cherry-pick).
-- **G** `feat/calendar-g-delivery` (no PR yet), 4 commits:
-  - webhook `calendarIds` and calendar matching;
-  - `calendar.read` listener streams;
-  - listener cleaning and prompts for calendar;
-  - mail `send_message` treats a status-0 timeout as "maybe sent";
-  - `/me` reports calendar grants;
-  - E2E harness prep.
-
-  `scratch/cal-g` has G merged with B, C and D, plus a WIP `test/calendar-delivery.test.ts`.
-  - **Not done:** `test/e2e-calendar.test.ts` (read, write, approval, and an upgrade from a pre-calendar DB with 2 accounts and mail flowing throughout), and the docs (`docs/reference.md`, `docs/listen.md`).
-
-## Next (in order)
-
-1. Finish G: write the E2E test and the docs, then open a PR (tier M).
-2. Review #42, #43 and #44 (one round each, blockers only).
-3. Merge C, E, F, G in that order, rebasing each onto main just before merging.
-4. Do two fresh-persona walks, based on `/tmp/personas/BRIEF.md` (on anvil; recreate it if lost). One walk covers the existing-install "Add Google Calendar" upgrade, the other a new install's Calendar step. Fix blockers, re-check only the affected path, then ship.
-5. Confirm that `npm view agentinbox-cli dist-tags` shows a nightly built from the final main.
-6. Send Adri the done ping with Wynn's exact upgrade steps (nightly, 2 accounts, Pub/Sub, paired Hermes). They must include:
-   - updating to the nightly and restarting (migration 7; the restart is the only mail interruption);
-   - "Add Google Calendar" from Overview: enable the API, add the Data Access scopes, then Add Calendar for each account;
-   - granting `calendar.read`, and optionally `calendar.write`, to Hermes;
-   - Hermes: `setup-mcp --tool hermes`, then `listen hermes --run …`. An existing cron-job route needs `enabled_toolsets: ["agentinbox"]`;
-   - noting that Promotions/Social/Forums mail is now skipped by default (`--all-categories` to override).
+- Merged after one fresh review each (blockers fixed, nits in FOLLOWUPS.md): #42 C (MCP calendar tools; recurring
+  events need `time_zone`, series ids shown), #43 E (Add Google Calendar flow), #46 G (delivery, calendar E2E against
+  the fake Calendar API: read, write, approval, delivery, upgrade from a pre-calendar DB with 2 accounts and mail
+  flowing), #44 F (console grants/approvals; approval times shown in the event's zone).
+- Fresh-persona walks: new install (no blockers) and the existing-install upgrade starting from the real
+  `nightly.34` (no mail lost or duplicated). #47 fixed what they found: a warning when the listener forwards to a
+  Hermes route that puts event content into an unconfined prompt (routes with a `cron_job` or a placeholder-free
+  prompt don't warn), a note that Promotions/Social/Forums are now skipped by default, "No calendar access" on the
+  pairing presets, and upgrade docs (README, calendar.md, listen.md "Upgrading an existing listener").
+- Open decision for Wynn: Forums in the default category skip (see FOLLOWUPS.md, "Open decisions").
+- Persona walk tooling: `/tmp/personas/BRIEF.md`; user-space headless Chromium in `~/.cache/aib-browser` (needs a
+  font via `FONTCONFIG_FILE`); T3's preview browser needs `sudo t3 browser setup` on this host.
 
 ## Rules (Wynn / Adri)
 

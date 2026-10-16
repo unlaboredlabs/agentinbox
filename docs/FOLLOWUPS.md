@@ -169,3 +169,12 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
   `/p/<profile>/webhooks/<name>` routes aren't looked up.
 - `listen … --save` while the profile's service runs saves the profile, then stops on the profile lock; the service
   keeps its old settings until `listen service install`.
+
+### #47 walk fixes (review)
+- `server/listen/hermes.ts:247`: the debug line includes the JSON parse error text; Node 24 can quote a file snippet, so an unquoted `whsec_…` could leak ~10 chars into the 0600 log (same as `verifyRoute` before). Log only the error name and position.
+- `server/listen/options.ts:327`: the "now skipped by default" note fires on every start for any profile on the default (fresh ones too), not only profiles saved before the default.
+- `src/components/approvals/pairing.tsx:319`: presets say "No calendar access" while `presetGrant` keeps calendar caps carried over from Custom ("Plus calendar: …" below).
+- `server/listen/hermes.ts:252`: the placeholder regex misses `{ __raw__ }` with spaces (only matters if Hermes accepts that).
+- `server/listen/admin.ts:81`: `listen status` reads HERMES_HOME from the calling shell, which may differ from the service's.
+- `docs/listen.md` Upgrading: says a placeholder-free route "that runs its own --script or fires a cron job" gets no warning; the code needs only the placeholder-free prompt.
+- `server/skill/SKILL.md:49` still says Read only covers "get events" (same mail-vs-calendar ambiguity as the old pairing copy).
