@@ -1,35 +1,36 @@
-import type { Approval } from "@shared/types";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Approval, McpCallApproval, McpCallApprovalView, McpCallApproveInput } from "@shared/types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { BotIcon, CheckCheckIcon, CheckIcon, LinkIcon, MailIcon, MessageSquareQuoteIcon, PlugIcon, XIcon } from "lucide-react";
+import { AlertTriangleIcon, BotIcon, CheckCheckIcon, CheckIcon, LinkIcon, MailIcon, MessageSquareQuoteIcon, PlugIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { TimeAgo } from "@/components/common";
+import { QueryError, TimeAgo } from "@/components/common";
 import { HiddenCharsWarning, Visible } from "@/components/hidden-chars";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api, toastError } from "@/lib/api";
-import { type BrokerApproval, keys, type McpCallDetail } from "@/lib/queries";
+import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { ExpiryCountdown } from "./approval-parts";
-import { argHighlights, argsHaveInvisible, escapeInvisible, hasInvisible, type McpDecision, prettyJson, targetLabel } from "./mcp-call";
-
-export type McpApproval = BrokerApproval & { kind: "mcp.call"; mcp: McpCallDetail };
+import { argsHaveInvisible, cardWarnings, escapeInvisible, hasInvisible, isCallView, type McpDecision, targetLabel } from "./mcp-call";
 
 /** Approve / Always allow / Reject for an mcp.call, with the optional "only for this target" scope. */
-export function useMcpDecision(a: McpApproval, onDecided?: (res: BrokerApproval, d: McpDecision) => void) {
+export function useMcpDecision(view: McpCallApprovalView, onDecided?: (res: Approval, d: McpDecision) => void) {
   const qc = useQueryClient();
-  const [onlyTarget, setOnlyTarget] = useState(!!a.mcp.target);
+  const a = view.approval;
+  const [onlyTarget, setOnlyTarget] = useState(!!view.target);
   const decide = useMutation({
-    mutationFn: (d: McpDecision) =>
-      api<BrokerApproval>(`/api/approvals/${encodeURIComponent(a.id)}/${d === "reject" ? "reject" : "approve"}`, {
-        body: d === "always" ? { alwaysAllow: { target: !!a.mcp.target && onlyTarget } } : {},
-      }),
+    mutationFn: (d: McpDecision) => {
+      const body: McpCallApproveInput = d === "always" ? { alwaysAllow: { target: !!view.target && onlyTarget } } : {};
+      return api<Approval>(`/api/approvals/${encodeURIComponent(a.id)}/${d === "reject" ? "reject" : "approve"}`, { body });
+    },
     onSuccess: (res, d) => {
-      qc.setQueryData<Approval[]>([...keys.approvals, "pending"], (list) => list?.filter((x) => x.id !== a.id));
+      if (res.status !== "pending") qc.setQueryData<Approval[]>([...keys.approvals, "pending"], (list) => list?.filter((x) => x.id !== a.id));
       for (const k of [keys.approvals, keys.overview, keys.approvalRules]) void qc.invalidateQueries({ queryKey: k });
       onDecided?.(res, d);
     },
@@ -39,22 +40,41 @@ export function useMcpDecision(a: McpApproval, onDecided?: (res: BrokerApproval,
 }
 
 /** The call to decide on: tool and connection, recipients and URLs first, then the exact arguments. */
-export function McpCallBody({ approval: a }: { approval: McpApproval }) {
-  const m = a.mcp;
-  const highlights = argHighlights(m.argsJson);
-  const recipients = highlights.filter((h) => h.kind === "recipient");
-  const urls = highlights.filter((h) => h.kind === "url");
-  const hidden = argsHaveInvisible(m.argsJson) || (!!a.reason && hasInvisible(a.reason));
+export function McpCallBody({ view: v, showReason = true }: { view: McpCallApprovalView; showReason?: boolean }) {
+  const a = v.approval;
+  const warnings = a.status === "pending" ? cardWarnings(v) : [];
+  const hidden = argsHaveInvisible(a.call.args) || (!!a.reason && hasInvisible(a.reason));
   return (
     <div className="space-y-4">
+      {warnings.length > 0 && (
+        <Alert variant="destructive">
+          <AlertTriangleIcon />
+          <AlertTitle>{warnings[0]}</AlertTitle>
+          {warnings.length > 1 && (
+            <AlertDescription>
+              {warnings.slice(1).map((w) => (
+                <p key={w}>{w}</p>
+              ))}
+            </AlertDescription>
+          )}
+        </Alert>
+      )}
       {hidden && <HiddenCharsWarning what="This call" />}
-      <div className="flex flex-wrap items-center gap-2 text-sm">
+      {a.call.outcomeUnknown && (
+        <Alert variant="warning">
+          <AlertTriangleIcon />
+          <AlertTitle>May have run: outcome unknown</AlertTitle>
+          <AlertDescription>The approved call was interrupted, so it may or may not have run. agentinbox won't retry it.</AlertDescription>
+        </Alert>
+      )}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
         <PlugIcon className="size-4 text-muted-foreground" />
-        <span className="font-mono font-medium break-all">{m.tool}</span>
+        <span className="font-mono font-medium break-all">{a.call.tool}</span>
         <span className="text-muted-foreground">on</span>
-        <span className="font-medium">{m.connectionName}</span>
+        <span className="font-medium">{v.connection?.name ?? "a removed connection"}</span>
+        {v.tool?.title && <span className="text-muted-foreground">({escapeInvisible(v.tool.title)})</span>}
       </div>
-      {a.reason && (
+      {showReason && a.reason && (
         <div className="flex gap-2 rounded-lg border-l-2 border-chart-1 bg-chart-1/5 px-3 py-2 text-sm">
           <MessageSquareQuoteIcon className="mt-0.5 size-4 shrink-0 text-chart-1" />
           <div className="min-w-0">
@@ -65,31 +85,31 @@ export function McpCallBody({ approval: a }: { approval: McpApproval }) {
           </div>
         </div>
       )}
-      {(recipients.length > 0 || urls.length > 0) && (
+      {(v.recipients.length > 0 || v.urls.length > 0) && (
         <dl className="space-y-2 text-sm">
-          {recipients.length > 0 && (
+          {v.recipients.length > 0 && (
             <div>
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 <MailIcon className="size-3.5" /> Recipients
               </dt>
               <dd className="mt-1 space-y-0.5">
-                {recipients.map((r) => (
-                  <div key={r.value} className="font-mono text-[13px] break-all">
-                    {escapeInvisible(r.value)} <span className="text-xs text-muted-foreground">({r.path})</span>
+                {v.recipients.map((r) => (
+                  <div key={r} className="font-mono text-[13px] break-all">
+                    {escapeInvisible(r)}
                   </div>
                 ))}
               </dd>
             </div>
           )}
-          {urls.length > 0 && (
+          {v.urls.length > 0 && (
             <div>
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 <LinkIcon className="size-3.5" /> Links
               </dt>
               <dd className="mt-1 space-y-0.5">
-                {urls.map((u) => (
-                  <div key={u.value} className="font-mono text-[13px] break-all">
-                    {escapeInvisible(u.value)} <span className="text-xs text-muted-foreground">({u.path})</span>
+                {v.urls.map((u) => (
+                  <div key={u} className="font-mono text-[13px] break-all">
+                    {escapeInvisible(u)}
                   </div>
                 ))}
               </dd>
@@ -99,25 +119,24 @@ export function McpCallBody({ approval: a }: { approval: McpApproval }) {
       )}
       <div className="space-y-1">
         <div className="text-xs font-medium text-muted-foreground">Exact arguments</div>
-        <ArgsJson raw={m.argsJson} />
-        <div className="truncate font-mono text-[11px] text-muted-foreground" title={m.argsSha256}>
-          sha256 {m.argsSha256}
+        <ArgsJson text={v.pretty} />
+        <div className="truncate font-mono text-[11px] text-muted-foreground" title={a.call.argsSha256}>
+          sha256 {a.call.argsSha256}
         </div>
       </div>
     </div>
   );
 }
 
-/** Pretty JSON, wrapped (never a horizontal scrollbar), with escapes for invisible characters highlighted. */
-function ArgsJson({ raw }: { raw: string }) {
-  const text = prettyJson(raw);
-  // Every \uXXXX escape stands for a character that would otherwise be invisible (or a control): mark them all.
-  const parts = text.split(/(\\u[0-9A-Fa-f]{4})/);
+/** Pretty JSON, wrapped (never a horizontal scrollbar), with the \u escapes the server added for invisible characters highlighted. */
+function ArgsJson({ text }: { text: string }) {
+  // Anything else the server escaped is still a \u sequence; escapeInvisible is a no-op safety net on top.
+  const parts = escapeInvisible(text).split(/(\\u[0-9A-Fa-f]{4})/);
   return (
     <pre className="max-h-[60svh] overflow-y-auto rounded-lg border bg-muted/30 p-3 font-mono text-[13px] leading-relaxed break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
       {parts.map((p, i) =>
         i % 2 ? (
-          <mark key={i} title="Invisible character" className="rounded-sm bg-critical/15 px-0.5 text-critical">
+          <mark key={i} title="Invisible or control character" className="rounded-sm bg-critical/15 px-0.5 text-critical">
             {p}
           </mark>
         ) : (
@@ -129,16 +148,16 @@ function ArgsJson({ raw }: { raw: string }) {
 }
 
 /** Approve / Always allow this (+ "only for <target>") / Reject. `large`: the one-tap page's full-width buttons. */
-export function McpDecisionButtons({ approval: a, d, large }: { approval: McpApproval; d: ReturnType<typeof useMcpDecision>; large?: boolean }) {
+export function McpDecisionButtons({ view: v, d, large }: { view: McpCallApprovalView; d: ReturnType<typeof useMcpDecision>; large?: boolean }) {
   const pending = d.decide.isPending ? d.decide.variables : undefined;
   const size = large ? "lg" : "default";
   return (
-    <div className={cn("w-full space-y-3", !large && "sm:w-auto")}>
-      {a.mcp.target && (
+    <div className={cn("w-full space-y-3")}>
+      {v.target && (
         <label className="flex items-start gap-2 text-sm">
           <Checkbox className="mt-0.5" checked={d.onlyTarget} onCheckedChange={(c) => d.setOnlyTarget(c === true)} />
           <span className="min-w-0 break-words">
-            {targetLabel(a.mcp.target)} <span className="text-muted-foreground">(for “Always allow this”)</span>
+            {targetLabel(v.target)} <span className="text-muted-foreground">(for “Always allow this”)</span>
           </span>
         </label>
       )}
@@ -157,13 +176,9 @@ export function McpDecisionButtons({ approval: a, d, large }: { approval: McpApp
   );
 }
 
-/** A pending mcp.call in the approvals list. */
-export function McpCallCard({ approval: a }: { approval: McpApproval }) {
-  const d = useMcpDecision(a, (res, decision) => {
-    if (decision === "reject") toast.success("Rejected", { description: "Nothing ran. The agent is told you rejected it." });
-    else if (res.status === "failed") toast.error("Approved, but the call failed", { description: res.error ?? undefined });
-    else toast.success(decision === "always" ? "Approved, and always allowed" : "Approved", { description: `${a.mcp.tool} on ${a.mcp.connectionName} ran.` });
-  });
+/** A pending mcp.call in the approvals list: its card comes from GET /api/approvals/:id. */
+export function McpCallCard({ approval: a }: { approval: McpCallApproval }) {
+  const view = useQuery(queries.approval(a.id));
   return (
     <Card>
       <CardHeader className="gap-2">
@@ -174,7 +189,7 @@ export function McpCallCard({ approval: a }: { approval: McpApproval }) {
               {a.agentName}
             </Link>
             <span className="text-muted-foreground">wants to use</span>
-            <span className="font-medium">{a.mcp.connectionName}</span>
+            <span className="font-medium">{(view.data && isCallView(view.data) && view.data.connection?.name) || "a connection"}</span>
             <Badge variant="secondary">Tool call</Badge>
           </div>
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
@@ -183,12 +198,48 @@ export function McpCallCard({ approval: a }: { approval: McpApproval }) {
           </div>
         </div>
       </CardHeader>
+      {view.isPending ? (
+        <CardContent>
+          <Skeleton className="h-40" />
+        </CardContent>
+      ) : view.isError ? (
+        <CardContent>
+          <QueryError error={view.error} onRetry={() => void view.refetch()} />
+        </CardContent>
+      ) : (
+        isCallView(view.data) ? <Decidable view={view.data} /> : <CardContent className="text-sm text-muted-foreground">This request changed kind; reload the page.</CardContent>
+      )}
+    </Card>
+  );
+}
+
+/** A decided mcp.call's details in the history list (fetched when the row opens). */
+export function McpCallHistoryBody({ id }: { id: string }) {
+  const view = useQuery(queries.approval(id));
+  if (view.isPending) return <Skeleton className="h-24" />;
+  if (view.isError) return <QueryError error={view.error} onRetry={() => void view.refetch()} />;
+  return isCallView(view.data) ? <McpCallBody view={view.data} showReason={false} /> : null;
+}
+
+function Decidable({ view }: { view: McpCallApprovalView }) {
+  const name = `${view.approval.call.tool} on ${view.connection?.name ?? "the connection"}`;
+  const d = useMcpDecision(view, (res, decision) => {
+    if (decision === "reject") toast.success("Rejected", { description: "Nothing ran. The agent is told you rejected it." });
+    else if (res.status === "pending") toast.error("It didn't run", { description: res.error ?? undefined });
+    else if (res.status === "failed" && res.kind === "mcp.call" && res.call.outcomeUnknown)
+      toast.error("Outcome unknown", { description: "The call was interrupted: it may or may not have run. It won't be retried." });
+    else if (res.status === "failed") toast.error("Approved, but the call failed", { description: res.error ?? undefined });
+    else if (res.status === "rejected") toast.error("It couldn't run", { description: res.error ?? undefined });
+    else toast.success(decision === "always" ? "Approved, and always allowed" : "Approved", { description: `${name} ran.` });
+  });
+  return (
+    <>
       <CardContent>
-        <McpCallBody approval={a} />
+        <McpCallBody view={view} />
       </CardContent>
       <CardFooter className="border-t">
-        <McpDecisionButtons approval={a} d={d} />
+        <McpDecisionButtons view={view} d={d} />
       </CardFooter>
-    </Card>
+    </>
   );
 }

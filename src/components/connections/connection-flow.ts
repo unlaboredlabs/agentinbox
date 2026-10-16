@@ -2,17 +2,8 @@
 // a connection's status in plain words, the Add connection draft, what a probe found, access levels, held-tool
 // notices and diffs. No React and relative imports only: vitest and the server typecheck load this module too.
 
-import type {
-  AccessLevel,
-  AgentLevel,
-  Connection,
-  ConnectionOAuthMessage,
-  CreateConnectionInput,
-  HeldTool,
-  PresetView,
-  ProbeResult,
-  SetupStep,
-} from "../../lib/broker-dto.ts";
+import type { AccessLevel, UpstreamTool } from "../../../shared/types.ts";
+import type { AgentLevel, ConnectionOAuthMessage, ConnectionView, CreateConnectionInput, PresetView, ProbeResult, SetupStep } from "../../lib/broker-dto.ts";
 
 /** A subset of the console's Tone (src/lib/labels.ts). */
 type Tone = "good" | "warn" | "bad" | "idle";
@@ -53,7 +44,7 @@ export interface ConnectionStatusView {
 }
 
 /** A connection's badge: active / needs reconnect / expiring in N days / disabled. Warns from 7 days before a reconnect date. */
-export function connectionStatusView(c: Pick<Connection, "status" | "statusReason" | "reconnectBy" | "displayName">, now: number): ConnectionStatusView {
+export function connectionStatusView(c: Pick<ConnectionView, "status" | "statusReason" | "expiresAt" | "name">, now: number): ConnectionStatusView {
   switch (c.status) {
     case "disabled":
       return { label: "Disabled", tone: "idle", description: "Agents don't see its tools. Turn it back on to use it again.", action: "enable" };
@@ -61,7 +52,7 @@ export function connectionStatusView(c: Pick<Connection, "status" | "statusReaso
       return {
         label: "Needs reconnect",
         tone: "bad",
-        description: `${c.statusReason ?? "Its sign-in stopped working."} Agents' calls to ${c.displayName} fail until you reconnect.`,
+        description: `${c.statusReason ?? "Its sign-in stopped working."} Agents' calls to ${c.name} fail until you reconnect.`,
         action: "reconnect",
       };
     case "error":
@@ -72,10 +63,10 @@ export function connectionStatusView(c: Pick<Connection, "status" | "statusReaso
         action: "reconnect",
       };
     case "active": {
-      if (!c.reconnectBy) return { label: "Active", tone: "good", description: "Working.", action: null };
-      const days = daysLeft(c.reconnectBy, now);
+      if (!c.expiresAt) return { label: "Active", tone: "good", description: "Working.", action: null };
+      const days = daysLeft(c.expiresAt, now);
       if (days <= 0) {
-        return { label: "Expired", tone: "bad", description: `Its sign-in has expired. Reconnect ${c.displayName} to keep it working.`, action: "reconnect" };
+        return { label: "Expired", tone: "bad", description: `Its sign-in has expired. Reconnect ${c.name} to keep it working.`, action: "reconnect" };
       }
       if (days <= 7) {
         return {
@@ -93,10 +84,10 @@ export function connectionStatusView(c: Pick<Connection, "status" | "statusReaso
 // ───────────── Held tools ─────────────
 
 /** "Notion changed 1 tool", per connection with held tools. */
-export function heldNotices(connections: readonly Pick<Connection, "id" | "displayName" | "heldCount" | "status">[]): { id: string; text: string }[] {
+export function heldNotices(connections: readonly Pick<ConnectionView, "id" | "name" | "heldCount" | "status">[]): { id: string; text: string }[] {
   return connections
     .filter((c) => c.heldCount > 0 && c.status !== "disabled")
-    .map((c) => ({ id: c.id, text: `${c.displayName} changed ${c.heldCount} tool${c.heldCount === 1 ? "" : "s"}` }));
+    .map((c) => ({ id: c.id, text: `${c.name} changed ${c.heldCount} tool${c.heldCount === 1 ? "" : "s"}` }));
 }
 
 export type DiffLine = { kind: "same" | "add" | "del"; text: string };
@@ -130,15 +121,17 @@ export function lineDiff(before: string, after: string): DiffLine[] {
 }
 
 /** What changed in a held tool, as before/after text pairs (description, then the input schema; others when they differ). */
-export function heldDiff(t: Pick<HeldTool, "pinned" | "live">): { label: string; before: string; after: string; changed: boolean }[] {
+export function heldDiff(t: Pick<UpstreamTool, "definition" | "candidate">): { label: string; before: string; after: string; changed: boolean }[] {
   const json = (v: unknown) => (v === undefined ? "" : JSON.stringify(v, null, 2));
-  const p = t.pinned;
+  // Before: what's pinned (null for a new tool). After: what accepting would pin.
+  const p = t.definition;
+  const n = t.candidate;
   const rows = [
-    { label: "Description", before: p?.description ?? "", after: t.live.description },
-    { label: "Arguments (input schema)", before: json(p?.inputSchema), after: json(t.live.inputSchema) },
-    { label: "Title", before: p?.title ?? "", after: t.live.title ?? "" },
-    { label: "Output schema", before: json(p?.outputSchema), after: json(t.live.outputSchema) },
-    { label: "Annotations", before: json(p?.annotations), after: json(t.live.annotations) },
+    { label: "Description", before: p?.description ?? "", after: n?.description ?? "" },
+    { label: "Arguments (input schema)", before: json(p?.inputSchema), after: json(n?.inputSchema) },
+    { label: "Title", before: p?.title ?? "", after: n?.title ?? "" },
+    { label: "Output schema", before: json(p?.outputSchema), after: json(n?.outputSchema) },
+    { label: "Annotations", before: json(p?.annotations), after: json(n?.annotations) },
   ].map((r) => ({ ...r, changed: r.before !== r.after }));
   // Description and arguments always show (so a reviewer sees them); the rest only when they changed.
   return rows.filter((r, i) => i < 2 || r.changed);
@@ -357,7 +350,7 @@ export function createInput(d: ConnectionDraft): CreateConnectionInput {
   const body: CreateConnectionInput = { slug: d.slug, level: d.level, agents: d.agents };
   if (d.preset) body.presetId = d.preset.id;
   else body.url = d.probe?.url ?? d.url.trim();
-  if (d.displayName.trim() && d.displayName.trim() !== d.preset?.displayName) body.displayName = d.displayName.trim();
+  if (d.displayName.trim() && d.displayName.trim() !== d.preset?.displayName) body.name = d.displayName.trim();
   if (control?.kind === "header") {
     const v = d.headerValue.trim();
     body.header = { name: control.headerName, value: control.prefix && !v.toLowerCase().startsWith(control.prefix.trim().toLowerCase()) ? control.prefix + v : v };

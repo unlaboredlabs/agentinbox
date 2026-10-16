@@ -1,18 +1,20 @@
+import type { Approval, McpCallApproval, McpCallApprovalView } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, redirect, useNavigate, useRouterState } from "@tanstack/react-router";
 import { BotIcon, CheckCircle2Icon, CircleSlashIcon, ClockIcon, XCircleIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Logo } from "@/components/auth-shell";
 import { ExpiryCountdown } from "@/components/approvals/approval-parts";
-import { asMcpApproval, doneState, type McpDecision } from "@/components/approvals/mcp-call";
-import { McpCallBody, McpDecisionButtons, type McpApproval, useMcpDecision } from "@/components/approvals/mcp-call-card";
+import { doneState, isCallView, type McpDecision } from "@/components/approvals/mcp-call";
+import { McpCallBody, McpDecisionButtons, useMcpDecision } from "@/components/approvals/mcp-call-card";
 import { QueryError } from "@/components/common";
 import { ThemeToggle } from "@/components/theme";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useNow } from "@/hooks/use-now";
 import { ApiError, UNAUTHORIZED_EVENT } from "@/lib/api";
-import { type BrokerApproval, keys, queries } from "@/lib/queries";
+import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 // The one-tap approve page (docs/MCP-BROKER.md): the link in approval.requested opens it, e.g. texted by Hermes.
@@ -61,16 +63,15 @@ function ApprovePage() {
             <QueryError error={approval.error} onRetry={() => void approval.refetch()} />
           )
         ) : (
-          <Decide approval={approval.data} />
+          <Decide data={approval.data} />
         )}
       </main>
     </div>
   );
 }
 
-function Decide({ approval: a }: { approval: BrokerApproval }) {
-  const mcp = asMcpApproval(a);
-  if (!mcp) {
+function Decide({ data }: { data: McpCallApprovalView | Approval }) {
+  if (!isCallView(data)) {
     // Mail and calendar approvals have their own cards in the console.
     return (
       <Done icon={ClockIcon} title="Open this in the console" description="This request is a message or calendar change. Review it on the Approvals page.">
@@ -80,28 +81,30 @@ function Decide({ approval: a }: { approval: BrokerApproval }) {
       </Done>
     );
   }
-  return <DecideCall key={mcp.id} approval={mcp} />;
+  return <DecideCall key={data.approval.id} view={data} />;
 }
 
-function DecideCall({ approval: a }: { approval: McpApproval }) {
-  const [decided, setDecided] = useState<{ res: BrokerApproval; d: McpDecision } | null>(null);
-  const d = useMcpDecision(a, (res, decision) => setDecided({ res, d: decision }));
-  const status = decided?.res.status ?? a.status;
+function DecideCall({ view }: { view: McpCallApprovalView }) {
+  const [decided, setDecided] = useState<{ res: McpCallApproval; d: McpDecision } | null>(null);
+  const d = useMcpDecision(view, (res, decision) => {
+    if (res.kind === "mcp.call") setDecided({ res, d: decision });
+  });
+  const a = decided?.res ?? view.approval;
   const now = useNow(1000);
-  const expired = status === "pending" && Date.parse(a.expiresAt) <= now;
+  const expired = a.status === "pending" && Date.parse(a.expiresAt) <= now;
+  const connection = view.connection?.name ?? "a removed connection";
 
-  if (status !== "pending" || expired) {
-    const s = doneState(expired ? "expired" : status, decided?.d ?? null);
-    const error = decided?.res.error ?? (decided ? null : a.error);
+  if (a.status !== "pending" || expired) {
+    const s = doneState(expired ? { ...a, status: "expired" } : a, decided?.d ?? null);
     return (
       <Done
         icon={s.tone === "good" ? CheckCircle2Icon : s.tone === "bad" ? XCircleIcon : CircleSlashIcon}
         tone={s.tone}
         title={decided ? s.title : `Already decided: ${s.title.toLowerCase()}`}
-        description={[s.description, error].filter(Boolean).join(" ")}
+        description={s.description}
       >
         <p className="text-center text-sm text-muted-foreground">
-          <span className="font-mono">{a.mcp.tool}</span> on {a.mcp.connectionName}, asked by {a.agentName}.
+          <span className="font-mono">{a.call.tool}</span> on {connection}, asked by {a.agentName}.
         </p>
         <Button variant="outline" size="lg" className="w-full" asChild>
           <Link to="/approvals">Open the console</Link>
@@ -110,21 +113,30 @@ function DecideCall({ approval: a }: { approval: McpApproval }) {
     );
   }
 
+  // Approved, but it provably never ran (re-auth, rate limit): still pending, with the reason.
+  const notRun = decided?.res.status === "pending" ? doneState(decided.res, decided.d) : null;
   return (
     <div className="space-y-4">
       <div className="space-y-1">
         <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold tracking-tight">
-          <BotIcon className="size-5 text-muted-foreground" /> {a.agentName} wants to use {a.mcp.connectionName}
+          <BotIcon className="size-5 text-muted-foreground" /> {a.agentName} wants to use {connection}
         </h1>
         <p className="text-sm text-muted-foreground">
           This action can't be undone, so it waits for you. <ExpiryCountdown expiresAt={a.expiresAt} />.
         </p>
       </div>
+      {notRun && (
+        <Alert variant="destructive">
+          <XCircleIcon />
+          <AlertTitle>{notRun.title}</AlertTitle>
+          <AlertDescription>{notRun.description}</AlertDescription>
+        </Alert>
+      )}
       <div className="rounded-xl border bg-card p-4">
-        <McpCallBody approval={a} />
+        <McpCallBody view={view} />
       </div>
       <div className="sticky bottom-0 -mx-4 border-t bg-muted/90 px-4 py-4 backdrop-blur">
-        <McpDecisionButtons approval={a} d={d} large />
+        <McpDecisionButtons view={view} d={d} large />
       </div>
     </div>
   );

@@ -13,7 +13,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { useNow } from "@/hooks/use-now";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
-import { type HeldTool, keys, queries } from "@/lib/queries";
+import type { UpstreamTool } from "@shared/types";
+import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_app/connections/$connectionId")({
@@ -24,7 +25,8 @@ function ConnectionPage() {
   const { connectionId } = Route.useParams();
   const navigate = useNavigate();
   const conn = useQuery(queries.connection(connectionId));
-  const held = useQuery(queries.heldTools(connectionId));
+  const tools = useQuery(queries.connectionTools(connectionId));
+  const held = (tools.data ?? []).filter((t) => t.state === "held");
   const now = useNow(60_000);
   const { disable, enable, askRemove } = useConnectionActions();
   const { reconnect, dialog } = useReconnect();
@@ -44,7 +46,7 @@ function ConnectionPage() {
       <PageHeader
         title={
           <span className="flex flex-wrap items-center gap-2">
-            {c.displayName} <ToneBadge tone={view.tone}>{view.label}</ToneBadge>
+            {c.name} <ToneBadge tone={view.tone}>{view.label}</ToneBadge>
             {c.privateTarget && (
               <Badge variant="outline">
                 <NetworkIcon /> Private network: {hostPort(c.privateTarget)}
@@ -104,25 +106,25 @@ function ConnectionPage() {
             accept. The other tools keep working.
           </p>
         </div>
-        {held.isPending ? (
+        {tools.isPending ? (
           <Skeleton className="h-32 rounded-xl" />
-        ) : held.isError ? (
-          <QueryError error={held.error} onRetry={() => void held.refetch()} />
-        ) : held.data.length === 0 ? (
+        ) : tools.isError ? (
+          <QueryError error={tools.error} onRetry={() => void tools.refetch()} />
+        ) : held.length === 0 ? (
           <Card>
             <CardContent className="flex items-center gap-2 text-sm text-muted-foreground">
               <CircleCheckIcon className="size-4 text-success" /> No changes. Every tool matches what was pinned.
             </CardContent>
           </Card>
         ) : (
-          held.data.map((t) => <HeldToolCard key={t.name} connectionId={c.id} connectionName={c.displayName} tool={t} />)
+          held.map((t) => <HeldToolCard key={t.name} connectionId={c.id} connectionName={c.name} tool={t} />)
         )}
       </section>
     </>
   );
 }
 
-function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId: string; connectionName: string; tool: HeldTool }) {
+function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId: string; connectionName: string; tool: UpstreamTool }) {
   const accept = useApiMutation({
     mutationFn: () => api(`/api/connections/${encodeURIComponent(connectionId)}/tools/${encodeURIComponent(t.name)}/accept`, { body: {} }),
     invalidate: [keys.connections, keys.overview],
@@ -130,17 +132,17 @@ function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId:
     errorTitle: "Couldn't accept the change",
   });
   const rows = heldDiff(t);
-  const hidden = hasHidden(t.live.description, t.live.title, JSON.stringify(t.live.inputSchema));
+  const hidden = hasHidden(t.candidate?.description, t.candidate?.title, JSON.stringify(t.candidate?.inputSchema ?? {}));
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex flex-wrap items-center gap-2 font-mono text-base">
           {t.name}
-          <Badge variant="secondary">{t.change === "new" ? "New tool" : "Changed"}</Badge>
+          <Badge variant="secondary">{t.heldReason === "new" ? "New tool" : "Changed"}</Badge>
         </CardTitle>
         <CardDescription>
-          {t.change === "new" ? `${connectionName} added this tool after you connected.` : `${connectionName} changed this tool's definition.`} Noticed{" "}
-          <TimeAgo date={t.detectedAt} />. Agents see it as <code className="font-mono">{t.exposedName}</code>.
+          {t.heldReason === "new" ? `${connectionName} added this tool after you connected.` : `${connectionName} changed this tool's definition.`} Noticed{" "}
+          <TimeAgo date={t.updatedAt} />. Agents see it as <code className="font-mono">{t.exposedName}</code>.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

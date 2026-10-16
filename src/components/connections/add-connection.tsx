@@ -1,3 +1,4 @@
+import type { AccessLevel } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftIcon, ArrowRightIcon, GlobeIcon, NetworkIcon, PlugIcon, SearchIcon, ShieldCheckIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -14,8 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import {
-  type AccessLevel,
-  type Connection,
+  type ConnectionView,
   type CreateConnectionResult,
   type PresetView,
   type ProbeInput,
@@ -44,7 +44,7 @@ import {
 interface Request {
   /** Open straight on this preset ("notion", "whoop"), or on the custom URL form with "custom". */
   start?: string;
-  onDone?: (c: Connection) => void;
+  onDone?: (c: ConnectionView) => void;
 }
 
 let opener: ((r: Request) => void) | null = null;

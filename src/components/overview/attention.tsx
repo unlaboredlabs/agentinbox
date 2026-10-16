@@ -62,7 +62,7 @@ export function ApprovalsCallout({ approvals }: { approvals: Approval[] }) {
             {approvals.length === 1 ? `1 ${what[0]} is waiting for your approval` : `${approvals.length} ${what[1]} are waiting for your approval`}
           </div>
           <p className="truncate text-sm text-muted-foreground">
-            {first.agentName}: {firstCall ? `${firstCall.mcp.tool} on ${firstCall.mcp.connectionName}` : `“${first.subject || "(no subject)"}”`}
+            {first.agentName}: {firstCall ? firstCall.call.tool : `“${first.subject || "(no subject)"}”`}
             {approvals.length > 1 && " and more"}
           </p>
         </div>

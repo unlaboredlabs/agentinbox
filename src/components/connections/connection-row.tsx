@@ -13,24 +13,24 @@ import { Spinner } from "@/components/ui/spinner";
 import { useNow } from "@/hooks/use-now";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
-import { type Connection, keys, type ReconnectResult } from "@/lib/queries";
+import { type ConnectionView, keys, type ReconnectResult } from "@/lib/queries";
 import { connectConnection } from "./connection-auth";
 import { connectionStatusView, hostPort } from "./connection-flow";
 
-const path = (c: Pick<Connection, "id">, rest = "") => `/api/connections/${encodeURIComponent(c.id)}${rest}`;
+const path = (c: Pick<ConnectionView, "id">, rest = "") => `/api/connections/${encodeURIComponent(c.id)}${rest}`;
 
 /** Reconnect: OAuth runs a fresh sign-in; a header connection asks for the new key; an open one just retries. */
 export function useReconnect() {
-  const [askingKey, setAskingKey] = useState<Connection | null>(null);
-  const reconnect = (c: Connection) => {
-    if (c.auth === "header") return setAskingKey(c);
-    connectConnection({ name: c.displayName, run: () => api<ReconnectResult>(path(c, "/reconnect"), { body: {} }) });
+  const [askingKey, setAskingKey] = useState<ConnectionView | null>(null);
+  const reconnect = (c: ConnectionView) => {
+    if (c.authType === "header") return setAskingKey(c);
+    connectConnection({ name: c.name, run: () => api<ReconnectResult>(path(c, "/reconnect"), { body: {} }) });
   };
   const dialog = <HeaderReconnectDialog connection={askingKey} onClose={() => setAskingKey(null)} />;
   return { reconnect, dialog };
 }
 
-function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connection | null; onClose: () => void }) {
+function HeaderReconnectDialog({ connection: c, onClose }: { connection: ConnectionView | null; onClose: () => void }) {
   const [value, setValue] = useState("");
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,14 +39,14 @@ function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connect
     onClose();
     setValue("");
     // The header name stays as connected; the server keeps it.
-    connectConnection({ name: c.displayName, run: () => api<ReconnectResult>(path(c, "/reconnect"), { body: { header: { value: v } } }) });
+    connectConnection({ name: c.name, run: () => api<ReconnectResult>(path(c, "/reconnect"), { body: { header: { value: v } } }) });
   };
   return (
     <Dialog open={!!c} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
         <form onSubmit={submit} className="space-y-4">
           <DialogHeader>
-            <DialogTitle>Reconnect {c?.displayName}</DialogTitle>
+            <DialogTitle>Reconnect {c?.name}</DialogTitle>
             <DialogDescription>Paste the new API key or token. The old one is replaced.</DialogDescription>
           </DialogHeader>
           <Field>
@@ -71,26 +71,30 @@ function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connect
 export function useConnectionActions() {
   const invalidate = [keys.connections, ["agent-connections"], keys.approvals, keys.overview] as const;
   const disable = useApiMutation({
-    mutationFn: (c: Connection) => api<Connection>(path(c, "/disable"), { body: {} }),
+    mutationFn: (c: ConnectionView) => api<ConnectionView>(path(c, "/disable"), { body: {} }),
     invalidate,
-    success: (_, c) => `${c.displayName} is disabled`,
+    success: (_, c) => `${c.name} is disabled`,
     errorTitle: "Couldn't disable it",
   });
   const enable = useApiMutation({
-    mutationFn: (c: Connection) => api<Connection>(path(c, "/enable"), { body: {} }),
+    mutationFn: (c: ConnectionView) => api<ConnectionView>(path(c, "/enable"), { body: {} }),
     invalidate,
-    success: (_, c) => `${c.displayName} is back on`,
+    success: (_, c) => `${c.name} is back on`,
     errorTitle: "Couldn't turn it on",
   });
   const remove = useApiMutation({
-    mutationFn: (c: Connection) => api(path(c), { method: "DELETE" }),
+    // The kill switch first (policy: disable, cancel pending calls, delete credentials, close), then the row.
+    mutationFn: async (c: ConnectionView) => {
+      await api(path(c, "/kill"), { body: {} });
+      await api(path(c), { method: "DELETE" });
+    },
     invalidate,
-    success: (_, c) => `${c.displayName} is removed`,
+    success: (_, c) => `${c.name} is removed`,
     errorTitle: "Couldn't remove it",
   });
-  const askRemove = (c: Connection, after?: () => void) =>
+  const askRemove = (c: ConnectionView, after?: () => void) =>
     confirm({
-      title: `Remove ${c.displayName}?`,
+      title: `Remove ${c.name}?`,
       destructive: true,
       confirmLabel: "Remove now",
       description: (
@@ -99,7 +103,7 @@ export function useConnectionActions() {
           <ul className="list-disc space-y-1 pl-5">
             <li>stops every agent from using its tools,</li>
             <li>cancels its calls waiting for approval,</li>
-            <li>signs out of {c.displayName} and deletes the stored credentials.</li>
+            <li>signs out of {c.name} and deletes the stored credentials.</li>
           </ul>
           <p>The audit log keeps what happened. To pause it instead, use Disable.</p>
         </>
@@ -113,7 +117,7 @@ export function useConnectionActions() {
 }
 
 /** One row of the Connections page: status, private-network badge, tool and held counts, and the fixes. */
-export function ConnectionRow({ connection: c }: { connection: Connection }) {
+export function ConnectionRow({ connection: c }: { connection: ConnectionView }) {
   const now = useNow(60_000);
   const view = connectionStatusView(c, now);
   const { disable, enable, askRemove } = useConnectionActions();
@@ -123,7 +127,7 @@ export function ConnectionRow({ connection: c }: { connection: Connection }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <Link to="/connections/$connectionId" params={{ connectionId: c.id }} className="truncate font-medium hover:underline">
-            {c.displayName}
+            {c.name}
           </Link>
           <ToneBadge tone={view.tone}>{view.label}</ToneBadge>
           {c.privateTarget && (
@@ -147,7 +151,7 @@ export function ConnectionRow({ connection: c }: { connection: Connection }) {
           >
             <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-warning" />
             <span>
-              {c.displayName} changed {c.heldCount} tool{c.heldCount === 1 ? "" : "s"}. {c.heldCount === 1 ? "It's" : "They're"} on hold until you review the change.
+              {c.name} changed {c.heldCount} tool{c.heldCount === 1 ? "" : "s"}. {c.heldCount === 1 ? "It's" : "They're"} on hold until you review the change.
             </span>
           </Link>
         )}
@@ -171,7 +175,7 @@ export function ConnectionRow({ connection: c }: { connection: Connection }) {
         )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${c.displayName}`}>
+            <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${c.name}`}>
               <MoreHorizontalIcon />
             </Button>
           </DropdownMenuTrigger>

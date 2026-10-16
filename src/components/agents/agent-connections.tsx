@@ -11,7 +11,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useNow } from "@/hooks/use-now";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
-import { type AgentConnection, type AgentLevel, type ApprovalRule, keys, queries } from "@/lib/queries";
+import type { ApprovalRule } from "@shared/types";
+import { type AgentConnection, type AgentLevel, keys, queries } from "@/lib/queries";
 import { escapeInvisible } from "@/components/approvals/mcp-call";
 
 /** The agent's level on each connection (Full / Ask / Read only / No access) and its "Always allowed" rules. */
@@ -66,7 +67,7 @@ export function AgentConnections({ agentId }: { agentId: string }) {
           <Card className="gap-0 py-0">
             <ul className="divide-y">
               {rules.data.map((r) => (
-                <RuleRow key={r.id} r={r} />
+                <RuleRow key={r.id} r={r} connectionName={list.data?.find((c) => c.connectionId === r.connectionId)?.name ?? "a connection"} />
               ))}
             </ul>
           </Card>
@@ -78,12 +79,12 @@ export function AgentConnections({ agentId }: { agentId: string }) {
 
 function ConnectionLevelRow({ agentId, c }: { agentId: string; c: AgentConnection }) {
   const now = useNow(60_000);
-  const status = connectionStatusView({ ...c, statusReason: null, reconnectBy: null }, now);
+  const status = connectionStatusView({ ...c, statusReason: null, expiresAt: null }, now);
   const set = useApiMutation({
     mutationFn: (level: AgentLevel) =>
       api<AgentConnection>(`/api/agents/${encodeURIComponent(agentId)}/connections/${encodeURIComponent(c.connectionId)}`, { method: "PUT", body: { level } }),
     invalidate: [keys.agentConnections(agentId)],
-    success: (_, level) => `${c.displayName}: ${LEVEL_INFO[level].label.toLowerCase()}`,
+    success: (_, level) => `${c.name}: ${LEVEL_INFO[level].label.toLowerCase()}`,
     errorTitle: "Couldn't change the access",
   });
   return (
@@ -91,14 +92,14 @@ function ConnectionLevelRow({ agentId, c }: { agentId: string; c: AgentConnectio
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <Link to="/connections/$connectionId" params={{ connectionId: c.connectionId }} className="font-medium hover:underline">
-            {c.displayName}
+            {c.name}
           </Link>
           {c.status !== "active" && <ToneBadge tone={status.tone}>{status.label}</ToneBadge>}
         </div>
         <p className="text-xs text-muted-foreground">{LEVEL_INFO[c.level].description}</p>
       </div>
       <Select value={c.level} onValueChange={(v) => set.mutate(v as AgentLevel)} disabled={set.isPending}>
-        <SelectTrigger className="w-full sm:w-60" aria-label={`Access to ${c.displayName}`}>
+        <SelectTrigger className="w-full sm:w-60" aria-label={`Access to ${c.name}`}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -113,7 +114,7 @@ function ConnectionLevelRow({ agentId, c }: { agentId: string; c: AgentConnectio
   );
 }
 
-function RuleRow({ r }: { r: ApprovalRule }) {
+function RuleRow({ r, connectionName }: { r: ApprovalRule; connectionName: string }) {
   const remove = useApiMutation({
     mutationFn: () => api(`/api/approval-rules/${encodeURIComponent(r.id)}`, { method: "DELETE" }),
     invalidate: [keys.approvalRules],
@@ -124,7 +125,7 @@ function RuleRow({ r }: { r: ApprovalRule }) {
     <li className="flex items-center gap-3 px-4 py-3">
       <div className="min-w-0 flex-1 text-sm">
         <div className="break-all">
-          <span className="font-mono font-medium">{r.tool}</span> <span className="text-muted-foreground">on {r.connectionName}</span>
+          <span className="font-mono font-medium">{r.tool}</span> <span className="text-muted-foreground">on {connectionName}</span>
         </div>
         <div className="text-xs break-all text-muted-foreground">
           {r.targetPath ? (

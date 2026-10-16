@@ -8,7 +8,7 @@ import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError } from "@/lib/api";
-import { type Connection, type ConnectionAttempt, type ConnectionAuthorize, keys } from "@/lib/queries";
+import { type ConnectionAttempt, type ConnectionAuthorize, type ConnectionView, keys } from "@/lib/queries";
 import { oauthMessageFor, pastedProblem } from "./connection-flow";
 
 export interface AuthRequest {
@@ -18,14 +18,14 @@ export interface AuthRequest {
    * Creates the connection or starts its reconnect. Returns the sign-in to run, or null when none is needed
    * (header and open servers). Called after the pop-up opens, inside the same click.
    */
-  run: () => Promise<{ connection: Connection; authorize: ConnectionAuthorize | null }>;
-  onDone?: (c: Connection) => void;
+  run: () => Promise<{ connection: ConnectionView; authorize: ConnectionAuthorize | null }>;
+  onDone?: (c: ConnectionView) => void;
 }
 
 type Phase =
   | { kind: "starting" }
-  | { kind: "waiting"; connection: Connection; auth: ConnectionAuthorize; popup: Window | null }
-  | { kind: "done"; connection: Connection }
+  | { kind: "waiting"; connection: ConnectionView; auth: ConnectionAuthorize; popup: Window | null }
+  | { kind: "done"; connection: ConnectionView }
   | { kind: "error"; error: unknown };
 
 // The mounted host registers its starter so any button can begin the flow inside its click handler
@@ -73,7 +73,7 @@ export function ConnectionAuthHost() {
     void qc.invalidateQueries({ queryKey: ["agent-connections"] });
   };
 
-  const finish = (c: Connection) => {
+  const finish = (c: ConnectionView) => {
     setPhase((p) => {
       if (p?.kind === "waiting") p.popup?.close();
       return { kind: "done", connection: c };
@@ -140,7 +140,7 @@ export function ConnectionAuthHost() {
     const now = phaseRef.current;
     if (now?.kind !== "waiting" || now.auth.state !== p.auth.state) return;
     if (r.status === "connected") {
-      const c = await api<Connection>(`/api/connections/${encodeURIComponent(p.connection.id)}`).catch(() => p.connection);
+      const c = await api<ConnectionView>(`/api/connections/${encodeURIComponent(p.connection.id)}`).catch(() => p.connection);
       finishRef.current(c);
     } else if (r.status === "failed") failRef.current(new ApiError(400, r.code, r.error, r.hint ?? undefined));
   };
@@ -194,7 +194,7 @@ export function ConnectionAuthHost() {
     if (phase?.kind === "waiting") phase.popup?.close();
     setPhase(null);
   };
-  const name = phase?.kind === "done" ? phase.connection.displayName : (req?.name ?? "the server");
+  const name = phase?.kind === "done" ? phase.connection.name : (req?.name ?? "the server");
 
   return (
     <Dialog open={!!phase} onOpenChange={(o) => !o && close()}>
@@ -269,7 +269,7 @@ export function ConnectionAuthHost() {
   );
 }
 
-function PasteConnection({ auth, name, onConnected }: { auth: ConnectionAuthorize; name: string; onConnected: (c: Connection) => void }) {
+function PasteConnection({ auth, name, onConnected }: { auth: ConnectionAuthorize; name: string; onConnected: (c: ConnectionView) => void }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<unknown>();
   const [pending, setPending] = useState(false);
@@ -280,7 +280,7 @@ function PasteConnection({ auth, name, onConnected }: { auth: ConnectionAuthoriz
     setPending(true);
     setError(undefined);
     try {
-      onConnected(await api<Connection>("/api/connections/oauth/paste", { body: { url: value.trim() } }));
+      onConnected(await api<ConnectionView>("/api/connections/oauth/paste", { body: { url: value.trim() } }));
     } catch (err) {
       setError(err);
     } finally {

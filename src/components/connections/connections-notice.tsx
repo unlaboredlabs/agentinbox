@@ -47,7 +47,7 @@ export function ConnectionsNotice() {
             <li key={`fix-${c.id}`} className="flex flex-wrap items-center gap-3 py-2">
               <div className="min-w-48 flex-1 text-sm">
                 <div className="flex flex-wrap items-center gap-2 font-medium">
-                  {c.displayName} <ToneBadge tone={view.tone}>{view.label}</ToneBadge>
+                  {c.name} <ToneBadge tone={view.tone}>{view.label}</ToneBadge>
                 </div>
                 <p className="text-xs text-muted-foreground">{view.description}</p>
               </div>

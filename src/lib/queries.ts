@@ -26,7 +26,8 @@ import type {
 } from "@shared/types";
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { apiGet } from "./api";
-import type { AgentConnection, ApprovalRule, BrokerApproval, Connection, HeldTool, PresetView } from "./broker-dto";
+import type { ApprovalRule, McpCallApprovalView, UpstreamTool } from "@shared/types";
+import type { AgentConnection, ConnectionView, PresetView } from "./broker-dto";
 
 export type * from "./broker-dto";
 
@@ -157,12 +158,12 @@ export const queries = {
       refetchOnMount: "always",
     }),
   /** Upstream connections (broker). */
-  connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => apiGet<Connection[]>("/api/connections"), refetchInterval: 60_000 }),
+  connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => apiGet<ConnectionView[]>("/api/connections"), refetchInterval: 60_000 }),
   connection: (id: string) =>
-    queryOptions({ queryKey: keys.connection(id), queryFn: () => apiGet<Connection>(`/api/connections/${encodeURIComponent(id)}`) }),
-  /** Tools on hold on one connection, with their pinned and live definitions. */
-  heldTools: (id: string) =>
-    queryOptions({ queryKey: [...keys.connection(id), "held"], queryFn: () => apiGet<HeldTool[]>(`/api/connections/${encodeURIComponent(id)}/held`) }),
+    queryOptions({ queryKey: keys.connection(id), queryFn: () => apiGet<ConnectionView>(`/api/connections/${encodeURIComponent(id)}`) }),
+  /** A connection's tools; held ones carry the candidate definition next to the pinned one. */
+  connectionTools: (id: string) =>
+    queryOptions({ queryKey: [...keys.connection(id), "tools"], queryFn: () => apiGet<UpstreamTool[]>(`/api/connections/${encodeURIComponent(id)}/tools`) }),
   presets: () => queryOptions({ queryKey: keys.presets, queryFn: () => apiGet<PresetView[]>("/api/connections/presets"), staleTime: 10 * 60_000 }),
   agentConnections: (agentId: string) =>
     queryOptions({
@@ -171,11 +172,11 @@ export const queries = {
     }),
   approvalRules: (agentId: string) =>
     queryOptions({ queryKey: [...keys.approvalRules, agentId], queryFn: () => apiGet<ApprovalRule[]>("/api/approval-rules", { agentId }) }),
-  /** One approval, for the one-tap /approve/$id page. */
+  /** One approval: an mcp.call answers with its card (McpCallApprovalView), mail and calendar kinds with the Approval. */
   approval: (id: string) =>
     queryOptions({
       queryKey: [...keys.approvals, "one", id],
-      queryFn: () => apiGet<BrokerApproval>(`/api/approvals/${encodeURIComponent(id)}`),
+      queryFn: () => apiGet<McpCallApprovalView | Approval>(`/api/approvals/${encodeURIComponent(id)}`),
       retry: false,
     }),
   /** First audit page only, for an agent's detail page. */

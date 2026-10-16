@@ -8,8 +8,8 @@ import { KIND_LABEL } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 import { ApprovalStatusBadge, Attachments, BodyPreview, Recipients } from "./approval-parts";
 import { isCalendarApproval } from "./calendar-approval";
-import { asMcpApproval } from "./mcp-call";
-import { McpCallBody } from "./mcp-call-card";
+import { asMcpApproval, callStatusLabel } from "./mcp-call";
+import { McpCallHistoryBody } from "./mcp-call-card";
 import { CalendarApprovalBody } from "./calendar-approval-body";
 
 export function ApprovalHistory({ items }: { items: Approval[] }) {
@@ -38,14 +38,14 @@ function HistoryRow({ approval: a }: { approval: Approval }) {
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <ApprovalStatusBadge status={a.status} kind={a.kind} />
-            <span>{mcp ? "Tool call" : KIND_LABEL[a.kind]}</span>
+            <span>{mcp ? (callStatusLabel(mcp.status, mcp.call.outcomeUnknown) ?? "Tool call") : KIND_LABEL[a.kind]}</span>
             <span aria-hidden>·</span>
             <span className="truncate">
-              {a.agentName} via {mcp ? mcp.mcp.connectionName : a.accountEmail}
+              {mcp ? a.agentName : `${a.agentName} via ${a.accountEmail}`}
             </span>
           </div>
           <div className="truncate text-sm font-medium">
-            {mcp ? <span className="font-mono">{mcp.mcp.tool}</span> : a.subject ? <Visible text={a.subject} /> : isCalendarApproval(a) ? "(no title)" : "(no subject)"}
+            {mcp ? <span className="font-mono">{mcp.call.tool}</span> : a.subject ? <Visible text={a.subject} /> : isCalendarApproval(a) ? "(no title)" : "(no subject)"}
           </div>
           {(a.decisionNote || a.error) && (
             <div className={cn("truncate text-xs", a.error ? "text-critical" : "text-muted-foreground")}>{a.error ?? `Note: ${a.decisionNote}`}</div>
@@ -72,7 +72,7 @@ function HistoryRow({ approval: a }: { approval: Approval }) {
           )}
           {a.error && <p className="text-sm text-critical">{a.error}</p>}
           {mcp ? (
-            <McpCallBody approval={mcp} />
+            <McpCallHistoryBody id={mcp.id} />
           ) : isCalendarApproval(a) ? (
             <CalendarApprovalBody approval={a} />
           ) : (
