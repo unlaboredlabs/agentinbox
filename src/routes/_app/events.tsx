@@ -1,4 +1,4 @@
-import { EVENT_TYPES, type EventType, type MailEvent } from "@shared/types";
+import { CALENDAR_EVENT_TYPES, EVENT_TYPES, type EventType, isCalendarEventType, type MailEvent } from "@shared/types";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ActivityIcon, PauseIcon, PlayIcon } from "lucide-react";
@@ -9,7 +9,7 @@ import { TestEmailButton } from "@/components/events/test-email-button";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { EVENT_TYPE_INFO } from "@/lib/labels";
@@ -17,6 +17,10 @@ import { queries } from "@/lib/queries";
 import { useStreamListener, useStreamState } from "@/lib/stream";
 
 const MAX_LIVE = 500;
+const TYPE_GROUPS: { label: string; types: readonly EventType[] }[] = [
+  { label: "Mail and account", types: EVENT_TYPES.filter((t) => !isCalendarEventType(t)) },
+  { label: "Calendar", types: CALENDAR_EVENT_TYPES },
+];
 
 export const Route = createFileRoute("/_app/events")({
   validateSearch: (s: Record<string, unknown>): { accountId?: string; type?: EventType } => ({
@@ -67,7 +71,7 @@ function EventsPage() {
     <>
       <PageHeader
         title="Live events"
-        description="Mail activity across your accounts as agentinbox sees it: what listeners, webhooks and wait_for_events deliver to agents."
+        description="Mail and calendar activity across your accounts as agentinbox sees it: what listeners, webhooks and wait_for_events deliver to agents."
         actions={
           <>
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -112,10 +116,15 @@ function EventsPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All event types</SelectItem>
-            {EVENT_TYPES.map((t) => (
-              <SelectItem key={t} value={t}>
-                {EVENT_TYPE_INFO[t].label}
-              </SelectItem>
+            {TYPE_GROUPS.map((g) => (
+              <SelectGroup key={g.label}>
+                <SelectLabel>{g.label}</SelectLabel>
+                {g.types.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {EVENT_TYPE_INFO[t].label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             ))}
           </SelectContent>
         </Select>
@@ -151,7 +160,7 @@ function EventsPage() {
               <EmptyDescription>
                 {filtered
                   ? "Try another account or event type."
-                  : "Events appear here live as mail arrives, is sent or relabeled."}
+                  : "Events appear here live as mail arrives, is sent or relabeled, and as calendar events change."}
               </EmptyDescription>
             </EmptyHeader>
             {!filtered && (

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { EventType, Grant, MailEvent } from "@shared/types";
+import type { CalendarEventSummary, EventType, MailEvent } from "@shared/types";
 import {
   AlertTriangleIcon,
   BellRingIcon,
@@ -16,14 +16,15 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { listenerHandled } from "@/components/agents/listener-handled";
-import { CodeBlock, TimeAgo } from "@/components/common";
+import { CodeBlock, ExternalLink, TimeAgo, ToneBadge } from "@/components/common";
 import { Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
-import { agentOnHost, fmtAddress, fmtAddressShort, fmtExact } from "@/lib/format";
-import { EVENT_TYPE_INFO } from "@/lib/labels";
+import { agentOnHost, fmtAddress, fmtAddressShort, fmtEventWhen, fmtExact } from "@/lib/format";
+import { CALENDAR_RESPONSE_LABEL, EVENT_TYPE_INFO } from "@/lib/labels";
 import { queries } from "@/lib/queries";
 import { prettySystemLabel } from "@/hooks/use-label-names";
 import { cn } from "@/lib/utils";
+import { calendarEventLines, grantSees, httpsUrl, organizedHere } from "./calendar-event";
 
 const ICON: Record<EventType, typeof MailIcon> = {
   "message.received": MailIcon,
@@ -33,7 +34,6 @@ const ICON: Record<EventType, typeof MailIcon> = {
   "label.removed": TagIcon,
   "account.auth_failed": KeyRoundIcon,
   "sync.gap": AlertTriangleIcon,
-  // Calendar rows: workstream E renders calendarEvent (title, time, organizer) instead of the message.
   "calendar.event_created": CalendarPlusIcon,
   "calendar.event_updated": CalendarIcon,
   "calendar.event_cancelled": CalendarXIcon,
@@ -65,18 +65,6 @@ function headline(e: MailEvent) {
   return EVENT_TYPE_INFO[e.type]?.description ?? e.type;
 }
 
-/** Account-level events reach any agent that can read the account, whatever its label scope (server/policy). */
-const SCOPE_FREE: EventType[] = ["account.auth_failed", "sync.gap"];
-
-/** Whether this grant lets its agent see the event (mirrors policy.canSeeEvent). */
-function grantSees(g: Grant, e: MailEvent): boolean {
-  if (g.accountId !== e.accountId || !g.capabilities.includes("read")) return false;
-  if (g.labelScope === null || SCOPE_FREE.includes(e.type)) return true;
-  // threadLabelIds comes with console events; the message's own labels are a (narrower) stand-in.
-  const labels = e.threadLabelIds ?? e.message?.labelIds ?? [];
-  return labels.some((id) => g.labelScope!.includes(id));
-}
-
 /**
  * `agentinbox listen` instances that got this event: their agent may see it (account and label
  * scope), it is of a type the listener asked for, it came after the listener started, and the
@@ -98,6 +86,7 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
   const [open, setOpen] = useState(false);
   const delivered = useListenerDelivery(e);
   const m = e.message;
+  const cal = calendarEventLines(e);
   const info = EVENT_TYPE_INFO[e.type];
   const isLabel = e.type === "label.added" || e.type === "label.removed";
   const labels = useQuery({ ...queries.labels(e.accountId), enabled: isLabel && !!e.labelIds?.length });
@@ -128,6 +117,13 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
               </>
             )}
             {m?.hasAttachments && <PaperclipIcon className="size-3.5" aria-label="Has attachments" />}
+            {cal?.organizer && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="truncate">{cal.organizer}</span>
+              </>
+            )}
+            {cal?.needsAnswer && <ToneBadge tone="warn">Needs your answer</ToneBadge>}
             {delivered.length > 0 && (
               <span className="flex items-center gap-1 text-success">
                 <BellRingIcon className="size-3.5" aria-hidden />
@@ -141,8 +137,21 @@ export function EventRow({ event: e, fresh }: { event: MailEvent; fresh?: boolea
               </span>
             )}
           </div>
-          <div className={cn("truncate text-sm", m ? "font-medium" : "text-muted-foreground")}>{headline(e)}</div>
+          <div className={cn("truncate text-sm", m || cal ? "font-medium" : "text-muted-foreground", e.type === "calendar.event_cancelled" && "line-through decoration-muted-foreground/60")}>
+            {cal ? cal.title : headline(e)}
+          </div>
           {m?.snippet && <div className="line-clamp-1 text-xs text-muted-foreground">{m.snippet}</div>}
+          {cal && (
+            <div className="flex flex-wrap gap-x-1.5 text-xs text-muted-foreground">
+              <span>{cal.when}</span>
+              {cal.note && (
+                <span className="min-w-0 truncate">
+                  <span aria-hidden>· </span>
+                  <Visible text={cal.note} />
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1 pt-0.5 text-xs text-muted-foreground">
           <TimeAgo date={e.createdAt} />
@@ -172,6 +181,7 @@ function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { n
       ["Thread", <code key="thread" className="font-mono break-all">{m.threadId}</code>],
     );
   }
+  if (e.calendarEvent) rows.push(...calendarRows(e.calendarEvent, e.accountEmail));
   if (e.labelIds?.length) rows.push([e.type === "label.removed" ? "Removed" : "Added", e.labelIds.join(", ")]);
   if (delivered.length) rows.push(["Listeners", <Visible key="listeners" text={`Delivered to ${delivered.map((d) => agentOnHost(d.name, d.host)).join(", ")}`} />]);
   return (
@@ -190,4 +200,26 @@ function EventDetail({ event: e, delivered }: { event: MailEvent; delivered: { n
       {e.detail && Object.keys(e.detail).length > 0 && <CodeBlock code={JSON.stringify(e.detail, null, 2)} />}
     </div>
   );
+}
+
+/** The calendar event's metadata. Links are clickable only when https (they can come from the organizer). */
+function calendarRows(c: CalendarEventSummary, accountEmail: string): [string, React.ReactNode][] {
+  const link = httpsUrl(c.htmlLink);
+  const call = httpsUrl(c.conferenceUrl);
+  const shown = c.attendees.map((a) => `${fmtAddress(a)}${a.organizer ? " (organizer)" : ""}: ${CALENDAR_RESPONSE_LABEL[a.responseStatus]}`);
+  if (c.attendeeCount > c.attendees.length) shown.push(`and ${c.attendeeCount - c.attendees.length} more`);
+  const rows: [string, React.ReactNode][] = [
+    ["Title", <Visible key="title" text={c.summary || "(no title)"} />],
+    ["Scheduled", `${fmtEventWhen(c)}${c.timeZone ? ` (${c.timeZone})` : ""}${c.recurring || c.recurringEventId ? ", repeats" : ""}`],
+  ];
+  if (c.location) rows.push(["Where", <Visible key="where" text={c.location} />]);
+  rows.push(["Organizer", organizedHere(c, accountEmail) ? "This account" : <Visible key="org" text={fmtAddress(c.organizer)} />]);
+  if (shown.length) rows.push(["Guests", <Visible key="guests" text={shown.join(", ")} />]);
+  if (c.selfResponse) rows.push(["Your answer", CALENDAR_RESPONSE_LABEL[c.selfResponse]]);
+  if (c.conferenceUrl) rows.push(["Video call", call ? <ExternalLink key="call" href={call} className="break-all">{call}</ExternalLink> : <code key="call" className="font-mono break-all">{c.conferenceUrl}</code>]);
+  rows.push(
+    ["Calendar", <code key="cal" className="font-mono break-all">{c.calendarId}</code>],
+    ["Event id", link ? <ExternalLink key="ev" href={link} className="font-mono break-all">{c.id}</ExternalLink> : <code key="ev" className="font-mono break-all">{c.id}</code>],
+  );
+  return rows;
 }

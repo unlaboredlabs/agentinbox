@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, BotIcon, KeyRoundIcon, MoreHorizontalIcon, PencilIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
+import { useCalendarNames } from "@/components/agents/calendar-scope-picker";
 import { CopyField, QueryError, TimeAgo } from "@/components/common";
 import { confirm } from "@/components/confirm";
 import { Button } from "@/components/ui/button";
@@ -73,6 +74,7 @@ function WebhookDetail({ webhook: w }: { webhook: Webhook }) {
   const agents = useQuery(queries.agents());
   const accounts = useQuery(queries.accounts());
   const labelName = useLabelNames(accounts.data ?? []);
+  const calendarName = useCalendarNames(w.filter.calendarIds?.length ? (w.filter.accountIds ?? (accounts.data ?? []).map((a) => a.id)) : []);
   const [editing, setEditing] = useState(false);
   const [rotated, setRotated] = useState<string>();
   const agent = agents.data?.find((a) => a.id === w.agentId);
@@ -177,7 +179,7 @@ function WebhookDetail({ webhook: w }: { webhook: Webhook }) {
           <CardContent className="space-y-3">
             <CopyField value={w.url} />
             <ul className="list-disc space-y-1 pl-5 text-sm">
-              {describeWebhook(w, accounts.data ?? [], labelName).map((line) => (
+              {describeWebhook(w, accounts.data ?? [], labelName, calendarName).map((line) => (
                 <li key={line}>{line}</li>
               ))}
             </ul>

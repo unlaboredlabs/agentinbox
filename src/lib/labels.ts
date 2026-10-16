@@ -1,14 +1,18 @@
-import type {
-  AccountStatus,
-  ApprovalKind,
-  CalendarWriteMode,
-  ApprovalStatus,
-  AuditOutcome,
-  Capability,
-  DeliveryStatus,
-  EventType,
-  SendMode,
-} from "@shared/types";
+// Relative (not @shared): unit tests load this file under the server config.
+import {
+  type AccountStatus,
+  type ApprovalKind,
+  type ApprovalStatus,
+  type AuditOutcome,
+  type CalendarEventChange,
+  type CalendarResponseStatus,
+  type CalendarWriteMode,
+  type Capability,
+  type DeliveryStatus,
+  type EventType,
+  isCalendarApprovalKind,
+  type SendMode,
+} from "../../shared/types.ts";
 
 export type Tone = "good" | "warn" | "bad" | "idle" | "info";
 
@@ -36,15 +40,41 @@ export const CAPABILITY_INFO: Record<Capability, { label: string; description: s
 
 export const CALENDAR_WRITE_MODE_INFO: Record<CalendarWriteMode, { label: string; short: string; description: string }> = {
   direct: {
-    label: "Write directly",
+    label: "Direct",
     short: "Direct",
     description: "Changes go to Google Calendar immediately. The attendee allowlist and send limits still apply.",
   },
   approval: {
-    label: "Needs approval",
+    label: "Ask me first",
     short: "Approval",
     description: "Changes wait in Approvals here. Approving applies them; rejecting discards them. Nothing reaches Google before.",
   },
+};
+
+/** The grant editor's third calendar write choice: no calendar.write at all. */
+export const CALENDAR_NO_WRITE_INFO = {
+  label: "None",
+  description: "The agent can't create, change or delete events or answer invitations.",
+} as const;
+
+export const CALENDAR_RESPONSE_LABEL: Record<CalendarResponseStatus, string> = {
+  accepted: "Accepted",
+  declined: "Declined",
+  tentative: "Maybe",
+  needsAction: "No answer yet",
+};
+
+/** detail.changes of calendar.event_updated, as words for "Changed: time and place". */
+export const CALENDAR_CHANGE_LABEL: Record<CalendarEventChange, string> = {
+  summary: "title",
+  time: "time",
+  location: "place",
+  description: "description",
+  attendees: "guests",
+  responses: "answers",
+  status: "status",
+  recurrence: "repeat",
+  conference: "video call",
 };
 
 export const SEND_MODE_INFO: Record<SendMode, { label: string; short: string; description: string }> = {
@@ -142,7 +172,7 @@ export const DENIAL_REASONS: Record<string, string> = {
   lockout: "Too many wrong codes or keys from this address",
   not_found: "The item doesn't exist or is outside the agent's access",
   calendar_scope: "The calendar is outside the agent's calendar scope",
-  calendar_not_granted: "The account hasn't granted Google Calendar access yet",
+  calendar_not_granted: "The account hasn't added Google Calendar yet (add it on the Accounts page)",
   calendar_api_disabled: "The Google Calendar API is turned off in the Google Cloud project",
   // Tool calls rejected before the tool ran (outcome "error").
   invalid_arguments: "The agent's arguments don't match the tool's schema",
@@ -165,3 +195,10 @@ export const KIND_LABEL = {
   "calendar.delete": "Calendar event deletion",
   "calendar.rsvp": "Invitation answer",
 } as const satisfies Record<ApprovalKind, string>;
+
+/** Approval status in its kind's words: a calendar approval that went through was applied, not sent. */
+export function approvalStatusInfo(status: ApprovalStatus, kind: ApprovalKind): { label: string; tone: Tone } {
+  if (isCalendarApprovalKind(kind) && status === "sent") return { label: "Applied", tone: "good" };
+  if (isCalendarApprovalKind(kind) && status === "failed") return { label: "Couldn't apply", tone: "bad" };
+  return APPROVAL_STATUS[status];
+}

@@ -1,9 +1,10 @@
-import type { Webhook, WebhookInput, WebhookWithSecret } from "@shared/types";
+import { isCalendarEventType, type Webhook, type WebhookInput, type WebhookWithSecret } from "@shared/types";
 import { useLabelNames } from "@/hooks/use-label-names";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { InfoIcon, SparklesIcon } from "lucide-react";
 import { useState } from "react";
+import { useCalendarNames } from "@/components/agents/calendar-scope-picker";
 import { ErrorAlert, SectionLabel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -119,13 +120,18 @@ function WebhookForm({
     subject: regexError(draft.filter.subject),
   };
   const [filterTyping, setFilterTyping] = useState(false);
+  const calendar = draft.eventTypes.some(isCalendarEventType);
+  const agent = agents.data?.find((a) => a.id === agentId);
+  const calendarNames = useCalendarNames(calendar ? (draft.filter.accountIds?.length ? draft.filter.accountIds : (accounts.data ?? []).map((a) => a.id)) : []);
   const valid = !errors.agent && !errors.name && !errors.url && !errors.events && !errors.subject && !filterTyping;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setTouched(true);
     if (!valid) return;
-    save.mutate({ ...draft, agentId, name: draft.name.trim(), url: draft.url.trim(), filter: cleanFilter(draft.filter) });
+    // Calendar ids only mean something with calendar event types.
+    const filter = cleanFilter(calendar ? draft.filter : { ...draft.filter, calendarIds: undefined });
+    save.mutate({ ...draft, agentId, name: draft.name.trim(), url: draft.url.trim(), filter });
   };
 
   return (
@@ -194,20 +200,38 @@ function WebhookForm({
 
           <Separator />
           <EventTypePicker value={draft.eventTypes} onChange={(eventTypes) => set({ eventTypes })} invalid={touched && errors.events} />
+          {calendar && agent && !agent.grants.some((g) => g.capabilities.includes("calendar.read")) && (
+            <p className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+              <InfoIcon className="mt-px size-3.5 shrink-0 text-warning" />
+              <span>
+                {agent.name} can't read any calendar, so calendar events never reach this webhook. Give it Calendar: read on its{" "}
+                <Link to="/agents/$agentId" params={{ agentId: agent.id }} className="underline underline-offset-4">
+                  agent page
+                </Link>
+                .
+              </span>
+            </p>
+          )}
           <Separator />
           <div className="space-y-1">
-            <SectionLabel>Only when the message matches</SectionLabel>
+            <SectionLabel>{calendar ? "Only when the event matches" : "Only when the message matches"}</SectionLabel>
             <p className="text-xs text-muted-foreground">All conditions you set must match. Leave everything empty to get every event.</p>
           </div>
-          <FilterBuilder value={draft.filter} onChange={(filter) => set({ filter })} accounts={accounts.data ?? []} onPendingChange={setFilterTyping} />
+          <FilterBuilder
+            value={draft.filter}
+            onChange={(filter) => set({ filter })}
+            accounts={accounts.data ?? []}
+            eventTypes={draft.eventTypes}
+            onPendingChange={setFilterTyping}
+          />
           <Separator />
-          <IncludeBodyField value={draft.includeBody} onChange={(includeBody) => set({ includeBody })} />
+          <IncludeBodyField value={draft.includeBody} onChange={(includeBody) => set({ includeBody })} calendar={calendar} />
 
           <div className="rounded-lg border bg-muted/30 p-3 text-sm">
             <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <SparklesIcon className="size-3.5" /> In plain words
             </div>
-            <p>{describeWebhook(draft, accounts.data ?? [], labelName).join(", ")}.</p>
+            <p>{describeWebhook(draft, accounts.data ?? [], labelName, calendarNames).join(", ")}.</p>
           </div>
           {save.isError && <ErrorAlert error={save.error} title="Couldn't save the webhook" />}
         </FieldGroup>

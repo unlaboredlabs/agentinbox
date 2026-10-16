@@ -1,7 +1,13 @@
-import type { Capability, Grant, GrantInput, SendMode } from "@shared/types";
+// Relative (not @shared): unit tests load this file under the server config.
+import { type CalendarWriteMode, type Grant, type GrantInput, isCalendarCapability, type MAIL_CAPABILITIES, type SendMode } from "../../shared/types.ts";
 
-/** A grant's settings without the account it applies to (the account is the URL/context). */
-export type GrantFields = Omit<GrantInput, "accountId">;
+type MailCapability = (typeof MAIL_CAPABILITIES)[number];
+
+/**
+ * A grant's settings without the account it applies to (the account is the URL/context). Unlike GrantInput
+ * the calendar fields are required: the console always sends them, so what is saved is what was shown.
+ */
+export type GrantFields = Omit<GrantInput, "accountId" | "calendarScope" | "calendarWriteMode"> & Pick<Grant, "calendarScope" | "calendarWriteMode">;
 
 export const DEFAULT_GRANT: GrantFields = {
   capabilities: ["read", "draft", "send"],
@@ -11,13 +17,16 @@ export const DEFAULT_GRANT: GrantFields = {
   replyOnly: false,
   maxSendsPerHour: null,
   maxSendsPerDay: null,
+  calendarScope: null,
+  calendarWriteMode: "approval",
 };
 
+/** A mail access preset. Calendar access is set separately and survives switching presets (presetGrant). */
 export interface GrantPreset {
   id: string;
   label: string;
   description: string;
-  capabilities: Capability[];
+  capabilities: MailCapability[];
   sendMode: SendMode;
 }
 
@@ -52,8 +61,18 @@ export const GRANT_PRESETS: GrantPreset[] = [
   },
 ];
 
-export function presetGrant(p: GrantPreset): GrantFields {
-  return { ...DEFAULT_GRANT, capabilities: [...p.capabilities], sendMode: p.sendMode };
+/**
+ * The grant for a preset. Presets only cover mail: the calendar capabilities and fields of `from` (the
+ * grant being edited) are kept, so picking "Full access" never drops calendar access set before.
+ */
+export function presetGrant(p: GrantPreset, from: GrantFields = DEFAULT_GRANT): GrantFields {
+  return {
+    ...DEFAULT_GRANT,
+    capabilities: [...p.capabilities, ...from.capabilities.filter(isCalendarCapability)],
+    sendMode: p.sendMode,
+    calendarScope: from.calendarScope,
+    calendarWriteMode: from.calendarWriteMode,
+  };
 }
 
 export function toGrantFields(g: Grant): GrantFields {
@@ -65,8 +84,31 @@ export function toGrantFields(g: Grant): GrantFields {
     replyOnly: g.replyOnly,
     maxSendsPerHour: g.maxSendsPerHour,
     maxSendsPerDay: g.maxSendsPerDay,
+    calendarScope: g.calendarScope,
+    calendarWriteMode: g.calendarWriteMode,
   };
 }
+
+/** The PUT/POST body for a grant on `accountId`, every field explicit. */
+export const grantInput = (accountId: string, g: GrantFields): GrantInput & GrantFields => ({ ...g, accountId });
+
+/**
+ * The grant editor's calendar write control: "none" is the absence of calendar.write (the write mode is
+ * kept, so turning writes back on restores it).
+ */
+export type CalendarWriteChoice = "none" | CalendarWriteMode;
+
+export const calendarWriteChoice = (g: Pick<GrantFields, "capabilities" | "calendarWriteMode">): CalendarWriteChoice =>
+  g.capabilities.includes("calendar.write") ? g.calendarWriteMode : "none";
+
+export function withCalendarWriteChoice(g: Pick<GrantFields, "capabilities" | "calendarWriteMode">, choice: CalendarWriteChoice) {
+  const others = g.capabilities.filter((c) => c !== "calendar.write");
+  return choice === "none"
+    ? { capabilities: others, calendarWriteMode: g.calendarWriteMode }
+    : { capabilities: [...others, "calendar.write" as const], calendarWriteMode: choice };
+}
+
+export const hasCalendarAccess = (g: Pick<GrantFields, "capabilities">) => g.capabilities.some(isCalendarCapability);
 
 /** Exact address ("bob@example.com") or glob ("*@example.com", "*@*.example.com"). */
 export function validateAddressGlob(v: string): string | null {
@@ -85,6 +127,7 @@ function normalize(g: GrantFields): GrantFields {
     capabilities: [...g.capabilities].sort(),
     labelScope: g.labelScope ? [...g.labelScope].sort() : null,
     allowTo: [...g.allowTo].sort(),
+    calendarScope: g.calendarScope ? [...g.calendarScope].sort() : null,
   };
 }
 
@@ -92,6 +135,7 @@ function normalize(g: GrantFields): GrantFields {
 export function grantProblem(g: GrantFields): string | null {
   if (!g.capabilities.length) return "Choose at least one capability.";
   if (g.labelScope && g.labelScope.length === 0) return "Pick at least one label, or allow the whole mailbox.";
+  if (hasCalendarAccess(g) && g.calendarScope && g.calendarScope.length === 0) return "Pick at least one calendar, or allow every calendar.";
   if (g.maxSendsPerHour === 0 || g.maxSendsPerDay === 0) return "Send limits must be at least 1 (leave empty for no limit).";
   return null;
 }

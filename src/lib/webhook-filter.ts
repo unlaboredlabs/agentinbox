@@ -1,5 +1,6 @@
-import type { Account, EventType, WebhookFilter, WebhookInput } from "@shared/types";
-import { EVENT_TYPE_INFO } from "./labels";
+// Relative (not @shared): unit tests load this file under the server config.
+import { type Account, type EventType, isCalendarEventType, type WebhookFilter, type WebhookInput } from "../../shared/types.ts";
+import { EVENT_TYPE_INFO } from "./labels.ts";
 
 /**
  * Live check for the subject pattern. The server matches with RE2 (linear time), which is stricter
@@ -31,18 +32,25 @@ export function cleanFilter(f: WebhookFilter): WebhookFilter {
   if (f.to?.length) out.to = f.to;
   if (f.subject?.trim()) out.subject = f.subject.trim();
   if (f.hasAttachments !== undefined) out.hasAttachments = f.hasAttachments;
+  if (f.calendarIds?.length) out.calendarIds = f.calendarIds;
   return out;
 }
 
 const list = (xs: string[], max = 3) => (xs.length <= max ? xs.join(", ") : `${xs.slice(0, max).join(", ")} and ${xs.length - max} more`);
 
-/** Plain-language description of what a webhook sends, e.g. for the editor preview and detail page. */
+/**
+ * Plain-language description of what a webhook sends, e.g. for the editor preview and detail page. On
+ * calendar events from/to/subject match the organizer, a guest and the title (server/webhooks/filter.ts).
+ */
 export function describeWebhook(
   w: Pick<WebhookInput, "eventTypes" | "filter" | "includeBody">,
   accounts: Account[],
   labelName: (id: string) => string = (id) => id,
+  calendarName: (id: string) => string = (id) => id,
 ): string[] {
   const f = w.filter;
+  const calendar = w.eventTypes.some(isCalendarEventType);
+  const mail = w.eventTypes.some((t) => !isCalendarEventType(t));
   const types = w.eventTypes.map((t: EventType) => EVENT_TYPE_INFO[t]?.label.toLowerCase() ?? t);
   const lines = [types.length ? `Sends ${list(types)} events` : "Sends nothing yet: pick at least one event type"];
   lines.push(
@@ -50,12 +58,14 @@ export function describeWebhook(
       ? `from ${list(f.accountIds.map((id) => accounts.find((a) => a.id === id)?.email ?? id))}`
       : "from every account the agent can read",
   );
-  if (f.labelIds?.length) lines.push(`only for messages labeled ${list(f.labelIds.map(labelName))}`);
-  if (f.from?.length) lines.push(`where the sender matches ${list(f.from)}`);
-  if (f.to?.length) lines.push(`where a recipient matches ${list(f.to)}`);
-  if (f.subject) lines.push(`where the subject matches /${f.subject}/i`);
-  if (f.hasAttachments === true) lines.push("with attachments only");
-  if (f.hasAttachments === false) lines.push("without attachments only");
-  lines.push(w.includeBody ? "including the cleaned message body" : "with metadata only (no body)");
+  const either = (mailWord: string, calendarWord: string) => (calendar && mail ? `${mailWord} (or ${calendarWord})` : calendar ? calendarWord : mailWord);
+  if (calendar && f.calendarIds?.length) lines.push(`only for calendar events on ${list(f.calendarIds.map(calendarName))}`);
+  if (mail && f.labelIds?.length) lines.push(`only for messages labeled ${list(f.labelIds.map(labelName))}`);
+  if (f.from?.length) lines.push(`where the ${either("sender", "organizer")} matches ${list(f.from)}`);
+  if (f.to?.length) lines.push(`where a ${either("recipient", "guest")} matches ${list(f.to)}`);
+  if (f.subject) lines.push(`where the ${either("subject", "event title")} matches /${f.subject}/i`);
+  if (mail && f.hasAttachments === true) lines.push("with attachments only");
+  if (mail && f.hasAttachments === false) lines.push("without attachments only");
+  lines.push(w.includeBody ? `including the cleaned ${either("message body", "event description")}` : "with metadata only (no body)");
   return lines;
 }
