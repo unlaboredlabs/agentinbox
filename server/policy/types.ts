@@ -26,7 +26,11 @@ export interface PolicyService extends Lifecycle {
   listAgents(): Agent[];
   getAgent(id: string): Agent | null;
   /** `origin` defaults to "key" (console); pairing approval passes "paired". Not settable through the API. */
-  createAgent(input: CreateAgentInput, opts?: { origin?: AgentOrigin }): AgentWithKey;
+  /**
+   * `inheritAllAgents` (default true): the agent also gets every "All agents" connection at its default level.
+   * Pairing passes false: there, only the connections the approver saw and chose (input.connections) are granted.
+   */
+  createAgent(input: CreateAgentInput, opts?: { origin?: AgentOrigin; inheritAllAgents?: boolean }): AgentWithKey;
   updateAgent(id: string, patch: { name?: string; description?: string | null; disabled?: boolean }): Agent;
   rotateKey(id: string): AgentWithKey;
   deleteAgent(id: string): void;

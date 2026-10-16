@@ -8,6 +8,8 @@ import type { PairingStart } from "../shared/agent-api.ts";
 import { agentApi } from "../server/agentapi/index.ts";
 import type { AppContext } from "../server/context.ts";
 import { buildMcpServer } from "../server/mcp/server.ts";
+import { pairingConnectionDefault } from "../src/components/approvals/pairing-grant.ts";
+import { addAccount, readGrant } from "./listen-server-helpers.ts";
 import { CSRF, type Harness, harness, json } from "./platform-helpers.ts";
 
 let h: Harness | undefined;
@@ -105,6 +107,9 @@ describe("pairing without Gmail", () => {
     const names = await toolNames(s.ctx, agent.id);
     expect(names).toContain("notion__notion-search");
     expect(names.some((n) => n.startsWith("wiki__"))).toBe(false);
+    // /me reports its connections: names, slugs and levels only.
+    const me = await json(await s.h.request("/agent/v1/me", { headers: { authorization: `Bearer ${poll.apiKey}` } }));
+    expect(me.connections).toEqual([{ name: "Notion", slug: "notion", level: "read" }]);
     // And the listener: a connection grant counts as read access for the stream.
     const stream = await s.h.request("/agent/v1/events/stream?start=now", { headers: { authorization: `Bearer ${poll.apiKey}` } });
     expect(stream.status).toBe(200);
@@ -115,6 +120,64 @@ describe("pairing without Gmail", () => {
     const b2 = (await again.json()) as PairingStart;
     const p2 = ((await json(await s.api("/pairings?status=pending"))) as { id: string; userCode: string }[]).find((x) => x.userCode === b2.userCode)!;
     expect((await s.api(`/pairings/${p2.id}/approve`, { method: "POST", json: { userCode: b2.userCode, grants: [], connections: [{ connectionId: "con_nope", level: "read" }] } })).status).toBe(400);
+  });
+});
+
+describe("pairing grants only what the card showed", () => {
+  async function pending(s: Awaited<ReturnType<typeof setup>>, name = "Hermes") {
+    const start = await s.h.request("/agent/v1/pairings", { method: "POST", json: { name } });
+    const body = (await start.json()) as PairingStart;
+    const p = ((await json(await s.api("/pairings?status=pending"))) as { id: string; userCode: string }[]).find((x) => x.userCode === body.userCode)!;
+    return { ...body, id: p.id };
+  }
+
+  it("never inherits All agents connections; omitted connections grant none; nothing chosen is refused", async () => {
+    const s = await setup();
+    const notionCon = await notion(s); // All agents, ask
+    // A disabled "All agents" T3 at full: hidden from tools, still never granted behind the card.
+    const t3 = await notion(s, { slug: "t3", levelDefault: "full" });
+    expect((await s.api(`/connections/${t3.id}/kill`, { method: "POST" })).status).toBe(204);
+
+    // Nothing chosen: refused.
+    const p0 = await pending(s, "Nothing");
+    expect((await s.api(`/pairings/${p0.id}/approve`, { method: "POST", json: { userCode: p0.userCode, grants: [] } })).status).toBe(400);
+    expect((await s.api(`/pairings/${p0.id}/approve`, { method: "POST", json: { userCode: p0.userCode, grants: [], connections: [{ connectionId: t3.id, level: "none" }] } })).status).toBe(400);
+
+    // Only Notion chosen: T3 (All agents, full) isn't granted.
+    const p1 = await pending(s, "Picky");
+    const a1 = await json(await s.api(`/pairings/${p1.id}/approve`, { method: "POST", json: { userCode: p1.userCode, grants: [], connections: [{ connectionId: notionCon.id, level: "read" }] } }));
+    expect(s.ctx.db.all("SELECT connection_id, level FROM connection_grants WHERE agent_id = ?", a1.id)).toEqual([{ connection_id: notionCon.id, level: "read" }]);
+    const audit = s.ctx.audit.list({ action: "pairing.approved" }).items.find((e) => e.outcome === "ok")!;
+    expect(audit.detail).toMatchObject({ connections: [{ connectionId: notionCon.id, level: "read" }] });
+
+    // A Gmail grant and connections omitted: no connection at all (not every "All agents" one).
+    addAccount(s.ctx, "acc_a", "me@acme.com");
+    const p2 = await pending(s, "Mail only");
+    const a2 = await json(await s.api(`/pairings/${p2.id}/approve`, { method: "POST", json: { userCode: p2.userCode, grants: [readGrant("acc_a")] } }));
+    expect(s.ctx.db.all("SELECT connection_id FROM connection_grants WHERE agent_id = ?", a2.id)).toEqual([]);
+
+    // Console create still inherits "All agents" (both connections, at their defaults).
+    const { agent } = s.ctx.policy.createAgent({ name: "Console" });
+    expect(s.ctx.db.all("SELECT connection_id, level FROM connection_grants WHERE agent_id = ? ORDER BY level", agent.id)).toEqual([
+      { connection_id: notionCon.id, level: "ask" },
+      { connection_id: t3.id, level: "full" },
+    ]);
+
+    // The card's defaults: All agents at their level, the rest at No access.
+    expect(pairingConnectionDefault({ allAgents: true, levelDefault: "full" })).toBe("full");
+    expect(pairingConnectionDefault({ allAgents: false, levelDefault: "ask" })).toBe("none");
+  });
+
+  it("PATCH allAgents grants others only on the off→on change, never re-granting No access", async () => {
+    const s = await setup();
+    const a = s.ctx.policy.createAgent({ name: "A" }).agent;
+    const con = await notion(s, { agentIds: [a.id] });
+    const b = s.ctx.policy.createAgent({ name: "B" }).agent;
+    expect(await json(await s.api(`/connections/${con.id}`, { method: "PATCH", json: { allAgents: true } }))).toMatchObject({ allAgents: true, agents: 2 });
+    // The admin sets B to No access; repeating allAgents: true doesn't give it back.
+    await s.api(`/connections/${con.id}/grants`, { method: "PUT", json: { grants: [{ agentId: a.id, level: "ask" }] } });
+    expect(await json(await s.api(`/connections/${con.id}`, { method: "PATCH", json: { allAgents: true } }))).toMatchObject({ agents: 1 });
+    expect(s.ctx.db.get("SELECT 1 AS x FROM connection_grants WHERE agent_id = ? AND connection_id = ?", b.id, con.id)).toBeUndefined();
   });
 });
 

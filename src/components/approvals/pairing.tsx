@@ -46,7 +46,7 @@ import { CALENDAR_WRITE_MODE_INFO, CAPABILITY_INFO, SEND_MODE_INFO } from "@/lib
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useSilencePairingToasts } from "@/components/pairing-notifier";
-import { asksForMore, PAIRING_DEFAULT } from "./pairing-grant";
+import { asksForMore, PAIRING_DEFAULT, pairingConnectionDefault } from "./pairing-grant";
 import { deniedDescription } from "./pairing-link";
 
 const toolLabel = (t: string | undefined) => (t && t in TOOL_LABEL ? TOOL_LABEL[t as AgentTool] : t) || null;
@@ -442,12 +442,13 @@ function ApproveForm({
   const [gone, setGone] = useState(false);
   const [busy, setBusy] = useState(false);
   const [typing, setTyping] = useState<Record<string, boolean>>({});
-  // MCP broker connections: each starts at its default level (what "All agents" would give a new agent).
+  // MCP broker connections: every one is listed (the card's choices are all the agent gets). "All agents" ones
+  // start at their default level, the rest at No access.
   const broker = useBrokerEnabled();
   const connectionsQuery = useQuery({ ...queries.connections(), enabled: broker });
-  const connections: ConnectionView[] = broker ? (connectionsQuery.data ?? []).filter((c) => c.status !== "disabled") : [];
+  const connections: ConnectionView[] = broker ? (connectionsQuery.data ?? []) : [];
   const [levels, setLevels] = useState<Record<string, AgentLevel>>({});
-  const levelOf = (c: ConnectionView): AgentLevel => levels[c.id] ?? c.levelDefault;
+  const levelOf = (c: ConnectionView): AgentLevel => levels[c.id] ?? pairingConnectionDefault(c);
   const anyConnection = connections.some((c) => levelOf(c) !== "none");
   const more = asksForMore(p);
   const selected = usable.filter((a) => choices[a.id]?.on);
@@ -616,7 +617,10 @@ function ApproveForm({
           {connections.map((c) => (
             <div key={c.id} className="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center">
               <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium">{c.name}</div>
+                <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                  {c.name}
+                  {c.status === "disabled" && <Badge variant="outline">Turned off</Badge>}
+                </div>
                 <p className="text-xs text-muted-foreground">{LEVEL_INFO[levelOf(c)].description}</p>
               </div>
               <Select value={levelOf(c)} onValueChange={(v) => setLevels((all) => ({ ...all, [c.id]: v as AgentLevel }))}>

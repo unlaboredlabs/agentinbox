@@ -1,10 +1,10 @@
 import { closeSync, constants, fchmodSync, lstatSync, openSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import pc from "picocolors";
-import type { AgentTool, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
+import type { AgentSelf, AgentTool, PairingPoll, PairingStart, PairingStartInput } from "../../shared/agent-api.ts";
 import { CAPABILITIES, type Capability } from "../../shared/types.ts";
 import { ApiError, clientInfo, getSelf, pollPairing, startPairing } from "./api.ts";
-import { describeGrants } from "./grants.ts";
+import { describeGrants, hasAccess } from "./grants.ts";
 import { writeClaudeMcpConfig } from "./mcpheader.ts";
 import { isServiceInstalled } from "./service.ts";
 import { setupMcp, mcpTarget, type McpSetupResult } from "./mcpsetup.ts";
@@ -325,14 +325,15 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
     );
   }
 
-  await printGrants(url, profile.apiKey, profileName);
+  const access = await printGrants(url, profile.apiKey, profileName);
 
   let mcp: McpSetupResult | null = null;
   if (flags.setupMcp) {
     mcp = setupMcp(tool, mcpTarget(profileName, profile), path);
     printMcpResult(mcp);
   }
-  printNextSteps(profileName, profile, tool, mcp);
+  // Mail-only steps (the listener's mail wording, the test email) only when it has a mailbox; unknown = as before.
+  printNextSteps(profileName, profile, tool, mcp, { mail: access ? access.grants.length > 0 : true });
   return CONNECT_EXIT.approved;
 }
 
@@ -356,15 +357,17 @@ export function approveLinks(url: string, start: Pick<PairingStart, "verificatio
   return { primary, publicUrl: start.verificationUrl };
 }
 
-/** What the approver actually granted, in plain words (the console's choice decides, not the request). */
-async function printGrants(url: string, key: string, profileName: string): Promise<void> {
+/** What the approver actually granted, in plain words (the console's choice decides, not the request). Null when unreadable. */
+async function printGrants(url: string, key: string, profileName: string): Promise<AgentSelf | null> {
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   try {
     const self = await getSelf(url, key, 8000);
     out(`  ${pc.bold("Access granted")} ${pc.gray("(chosen by whoever approved it; change it in the console under Agents):")}`);
-    for (const line of describeGrants(self.grants)) out(`    ${self.grants.length ? line : pc.yellow(line)}`);
+    for (const line of describeGrants(self.grants, self.connections)) out(`    ${hasAccess(self) ? line : pc.yellow(line)}`);
+    return self;
   } catch (e) {
     err(pc.yellow(`! Couldn't read this agent's access yet (${e instanceof Error ? e.message.split("\n")[0] : String(e)}). Check it with: ${NPX} listen status${p}`));
+    return null;
   }
 }
 
@@ -403,7 +406,8 @@ function skillCommand(tool: AgentTool, url: string): string {
 /** `listen hermes … --run`: creates the Hermes route (the console shows the same command). */
 export const hermesRouteCommand = (profileName: string) => `${NPX} listen hermes${profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`} --deliver telegram --run`;
 
-export function printNextSteps(profileName: string, profile: Profile, tool: AgentTool, mcp: McpSetupResult | null): void {
+export function printNextSteps(profileName: string, profile: Profile, tool: AgentTool, mcp: McpSetupResult | null, o: { mail?: boolean } = {}): void {
+  const mail = o.mail !== false;
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   const label = tool === "other" ? "your agent" : TOOL_LABELS[tool];
   const r = recipe(tool, profileName);
@@ -428,10 +432,17 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
     out(`       ${pc.cyan(hermesRouteCommand(profileName))}`);
     out(pc.gray(`     Or --deliver discord|slack|…, or --deliver-chat-id <id>. It sets the listener's secret without showing it and limits the route to the agentinbox tools.`));
   }
-  out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
-  out(`       ${pc.cyan(`${NPX} listen${p} --save ${target}`)}`);
-  out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. Change it with --types, e.g. --types thread.reply_received (only replies to threads you sent) or --types all.`));
-  out(pc.gray(`     Gmail's Promotions, Social and Forums tabs are skipped (--all-categories to include them); skip more with --not-from '*@github.com'. --batch 60s runs a burst of mail once.`));
+  if (mail) {
+    out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
+    out(`       ${pc.cyan(`${NPX} listen${p} --save ${target}`)}`);
+    out(pc.gray(`     Only new mail wakes it (message.received), not mail you send. Change it with --types, e.g. --types thread.reply_received (only replies to threads you sent) or --types all.`));
+    out(pc.gray(`     Gmail's Promotions, Social and Forums tabs are skipped (--all-categories to include them); skip more with --not-from '*@github.com'. --batch 60s runs a burst of mail once.`));
+  } else {
+    // No mailbox: its connections' events (an approval waiting, a connection that needs reconnecting).
+    out(`  ${n++}. Wake ${label} when one of its connections needs it. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
+    out(`       ${pc.cyan(`${NPX} listen${p} --save ${target} --types approval.requested,connection.auth_failed,connection.expiring`)}`);
+    out(pc.gray(`     Add an integration's own events too, e.g. whoop.recovery_updated.`));
+  }
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   out(pc.gray(`     Where its output goes: ${r.output}`));
   for (const note of r.notes.filter((x) => tool !== "hermes" || !x.startsWith("Create the Hermes route"))) out(pc.gray(`     ${note}`));
@@ -439,12 +450,14 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
     out(pc.gray(`     It runs: ${r.runs}`));
     if (r.exec) out(pc.gray(`     To change it: ${NPX} listen${p} --print-recipe ${tool} prints it; pass your edit with --exec '…' instead of --recipe.`));
   }
-  out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
-  out(
-    `     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by one ${pc.green("✓")} line once ${
-      tool === "hermes" ? "Hermes accepted it (Hermes then triages it and tells you if it matters)" : `${label} handled it`
-    }.`,
-  );
+  if (mail) {
+    out(`  ${n++}. Check that it works: in the console's setup, the "Check that it works" step sends a test email.`);
+    out(
+      `     Watch it arrive in the foreground listener as ${pc.cyan("→ #… message.received")} followed by one ${pc.green("✓")} line once ${
+        tool === "hermes" ? "Hermes accepted it (Hermes then triages it and tells you if it matters)" : `${label} handled it`
+      }.`,
+    );
+  }
   out(`  ${n++}. Then keep it running in the background (systemd / launchd, starts at login; stop the foreground one first):`);
   out(`       ${pc.cyan(`${NPX} listen service install${p}`)}`);
   out(`       ${pc.cyan(`${NPX} listen status${p}`)}  ${pc.gray("(connection, cursor, recent events and the access granted)")}`);

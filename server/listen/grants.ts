@@ -42,15 +42,33 @@ export function describeGrant(g: Grant): string {
   return `${safeText(g.accountEmail || g.accountId, 120)}: ${parts.join("; ")}`;
 }
 
-/** One line per grant, or a hint when there are none. */
-export function describeGrants(grants: Grant[]): string[] {
-  if (!grants.length) return ["no mailbox or calendar access yet: add a grant for this agent in the console (Agents page)"];
-  return grants.map(describeGrant);
+type ConnectionAccess = NonNullable<AgentSelf["connections"]>[number];
+
+const LEVEL_WORDS: Record<ConnectionAccess["level"], string> = {
+  full: "full access",
+  ask: "ask before risky actions",
+  read: "read only",
+};
+
+/** A connection grant in plain words, e.g. "Notion (notion__… tools): ask before risky actions". */
+export const describeConnection = (c: ConnectionAccess): string =>
+  `${safeText(c.name, 80)} (${safeText(c.slug, 24)}__… tools): ${LEVEL_WORDS[c.level] ?? safeText(String(c.level), 20)}`;
+
+/** One line per mailbox grant and per connection, or a hint when there are none. */
+export function describeGrants(grants: Grant[], connections: ConnectionAccess[] = []): string[] {
+  if (!grants.length && !connections.length) return ["no mailbox or calendar access yet: add a grant for this agent in the console (Agents page)"];
+  return [...grants.map(describeGrant), ...connections.map(describeConnection)];
 }
 
-/** Stable key for "did the grants change?" (order-independent). */
-export const grantsKey = (grants: Grant[]) =>
-  JSON.stringify(
+/** Whether there's anything to describe (else describeGrants' single line is the "nothing yet" hint). */
+export const hasAccess = (self: Pick<AgentSelf, "grants" | "connections">) => self.grants.length > 0 || (self.connections?.length ?? 0) > 0;
+
+/** Stable key for "did the grants change?" (order-independent; connections too). */
+export const grantsKey = (grants: Grant[], connections: ConnectionAccess[] = []) =>
+  JSON.stringify(connections.length ? [grantsList(grants), connections.map((c) => [c.slug, c.level]).sort()] : grantsList(grants));
+
+const grantsList = (grants: Grant[]) =>
+  (
     grants
       .map((g) => [
         g.accountId,
@@ -64,5 +82,5 @@ export const grantsKey = (grants: Grant[]) =>
         g.calendarScope ? [...g.calendarScope].sort() : null,
         g.calendarWriteMode ?? null,
       ])
-      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
   );

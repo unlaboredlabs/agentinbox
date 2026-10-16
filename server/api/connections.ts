@@ -269,8 +269,9 @@ export function connectionsApi(ctx: AppContext) {
         ctx.db.run("UPDATE connections SET all_agents = ?, updated_at = ? WHERE id = ?", body.allAgents ? 1 : null, t, id);
         changed.push("allAgents");
       }
-      if (body.allAgents === true) {
-        // Every agent without access gets it now (at the default level); existing per-agent levels stay.
+      if (body.allAgents === true && !before.allAgents) {
+        // Turning "All agents" on: every agent without access gets it now (at the default level); existing
+        // per-agent levels stay. Only on the off→on change, so a repeat never re-grants agents set to No access.
         const level = body.levelDefault ?? before.levelDefault;
         for (const { id: agentId } of ctx.db.all<{ id: string }>(
           "SELECT id FROM agents WHERE id NOT IN (SELECT agent_id FROM connection_grants WHERE connection_id = ?)",
@@ -439,8 +440,12 @@ export function connectionsApi(ctx: AppContext) {
     const id = c.req.param("id");
     const conn = requireConnection(id);
     if (conn.status === "disabled") throw conflict(`${conn.name} is disabled`, "Reconnect it first.");
-    ctx.broker.attach(id);
-    const r = await ctx.broker.catalog.refresh(id);
+    // Refresh alone when it's attached (attaching again would abort a listing in progress); attach only if not.
+    let r = await ctx.broker.catalog.refresh(id);
+    if (!r.ok && r.error === "not_attached") {
+      ctx.broker.attach(id);
+      r = await ctx.broker.catalog.refresh(id);
+    }
     ctx.broker.invalidate({ connectionId: id });
     audit("connection.refresh", id, { ok: r.ok, held: r.held.length, removed: r.removed.length });
     return c.json({ ok: r.ok, error: r.error ?? null, connection: view(id) });

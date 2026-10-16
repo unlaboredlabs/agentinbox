@@ -17,12 +17,15 @@ import type { AgentPrincipal, PolicyService } from "./types.ts";
 export const API_KEY_PREFIX = "aib_";
 
 /**
- * The connection grants a new agent gets: every "All agents" connection at its level_default, then the explicit
- * choices (pairing approve) on top; "none" leaves one out. Unknown connection ids are refused.
+ * The connection grants a new agent gets: with `inherit`, every "All agents" connection at its level_default; then
+ * the explicit choices on top ("none" leaves one out). Without `inherit` (pairing), only the explicit choices.
+ * Unknown connection ids are refused.
  */
-function connectionGrantsFor(db: Db, explicit: { connectionId: string; level: AccessLevel | "none" }[]): { connectionId: string; level: AccessLevel }[] {
+function connectionGrantsFor(db: Db, explicit: { connectionId: string; level: AccessLevel | "none" }[], inherit: boolean): { connectionId: string; level: AccessLevel }[] {
   const out = new Map<string, AccessLevel>();
-  for (const r of db.all<{ id: string; level_default: AccessLevel }>("SELECT id, level_default FROM connections WHERE all_agents = 1")) out.set(r.id, r.level_default);
+  if (inherit) {
+    for (const r of db.all<{ id: string; level_default: AccessLevel }>("SELECT id, level_default FROM connections WHERE all_agents = 1")) out.set(r.id, r.level_default);
+  }
   for (const c of explicit) {
     if (!db.get("SELECT 1 AS x FROM connections WHERE id = ?", c.connectionId)) throw badRequest(`Unknown connection ${c.connectionId}`);
     if (!["full", "ask", "read", "none"].includes(c.level)) throw badRequest(`Unknown access level ${String(c.level)}`);
@@ -254,7 +257,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
       return r ? toAgent(r) : null;
     },
 
-    createAgent(input: CreateAgentInput, opts: { origin?: AgentOrigin } = {}): AgentWithKey {
+    createAgent(input: CreateAgentInput, opts: { origin?: AgentOrigin; inheritAllAgents?: boolean } = {}): AgentWithKey {
       const fields = parseAgentFields(input);
       if (!fields.name) throw badRequest("Name is required");
       const grants = (input.grants ?? []).map(parseGrantInput);
@@ -263,7 +266,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
         if (seen.has(g.accountId)) throw badRequest(`Only one grant per account (duplicate ${g.accountId})`);
         seen.add(g.accountId);
       }
-      const connections = connectionGrantsFor(db, input.connections ?? []);
+      const connections = connectionGrantsFor(db, input.connections ?? [], opts.inheritAllAgents !== false);
       const apiKey = newApiKey();
       const id = newId("agt");
       db.tx(() => {
