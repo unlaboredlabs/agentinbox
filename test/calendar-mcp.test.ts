@@ -15,6 +15,7 @@ import { Approvals } from "../server/mail/approvals.ts";
 import { formatAccounts, formatWhen } from "../server/mcp/format.ts";
 import { CALENDAR_TOOL_NAMES, INSTRUCTIONS, TOOL_NAMES } from "../server/mcp/server.ts";
 import { PolicyDenied } from "../server/util/errors.ts";
+import { calendarTestContext } from "./calendar-fakes.ts";
 import { connectAgent, grantInput, mailTestContext } from "./mail-fakes.ts";
 
 const ME = "me@acme.com";
@@ -358,16 +359,15 @@ describe("writes", () => {
     const update = stub("updateEvent", async () => applied());
     await t.mcp.call("update_calendar_event", { event_id: "ev1", location: "Room 2", attendees: ["a@x.com"], notify_attendees: false });
     await t.mcp.call("update_calendar_event", { event_id: "ev1", start: "2026-10-21T09:00:00Z", end: "2026-10-21T09:30:00Z" });
-    await t.mcp.call("update_calendar_event", { event_id: "ev1", time_zone: "Europe/Paris" });
+    expect((await t.mcp.call("update_calendar_event", { event_id: "ev1", time_zone: "Europe/Paris" })).text).toMatch(/^time_zone goes with start and end/);
     expect(update.mock.calls.map((c) => [c[2], c[3], c[4]])).toEqual([
       ["ev1", { location: "Room 2", attendees: ["a@x.com"] }, { notifyAttendees: false, reason: undefined }],
       ["ev1", { start: "2026-10-21T09:00:00Z", end: "2026-10-21T09:30:00Z", allDay: false }, { notifyAttendees: undefined, reason: undefined }],
-      ["ev1", { timeZone: "Europe/Paris" }, { notifyAttendees: undefined, reason: undefined }],
     ]);
     expect((await t.mcp.call("update_calendar_event", { event_id: "ev1" })).text).toMatch(/^Nothing to change/);
     expect((await t.mcp.call("update_calendar_event", { event_id: "ev1", start: "2026-10-21T09:00:00Z" })).text).toMatch(/pass both start and end/);
     expect((await t.mcp.call("update_calendar_event", { event_id: "ev1", all_day: true })).text).toMatch(/all_day changes need start and end/);
-    expect(update).toHaveBeenCalledTimes(3);
+    expect(update).toHaveBeenCalledTimes(2);
   });
 
   it("delete_calendar_event and respond_to_invitation", async () => {
@@ -479,5 +479,78 @@ describe("agent docs", () => {
     for (const code of ["write_uncertain", "event_id_taken"]) expect(skill).toContain(`\`${code}\``);
     expect(skill).toContain("Rooms already booked stay unless your list names rooms");
     expect(INSTRUCTIONS).toMatch(/<calendar_content untrusted>/);
+  });
+});
+
+// Through B's real AgentCalendar and the fake Calendar client (test/calendar-fakes.ts), not the stub.
+describe("recurring events end to end", () => {
+  async function real() {
+    const t = calendarTestContext();
+    cleanup.push(t.dispose);
+    const cal = t.addAccount("acc_a", ME);
+    const { agent } = t.ctx.policy.createAgent({
+      name: "hermes",
+      grants: [grantInput("acc_a", { capabilities: ["calendar.read", "calendar.write"], calendarWriteMode: "direct" })],
+    });
+    const mcp = await connectAgent(t.ctx, agent.id);
+    cleanup.push(mcp.close);
+    const audit = () => t.ctx.audit.list({ agentId: agent.id }).items;
+    return { ...t, cal, mcp, audit };
+  }
+
+  it("a repeating timed event needs time_zone, even with offsets (Google requires start.timeZone)", async () => {
+    const t = await real();
+    const args = { summary: "Standup", start: "2026-10-19T09:00:00-07:00", end: "2026-10-19T09:15:00-07:00", recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4"] };
+    const missing = await t.mcp.call("create_calendar_event", args);
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toMatch(/repeating event needs time_zone/);
+    expect(t.audit().at(0)).toMatchObject({ action: "create_calendar_event", reason: "time_zone_required" });
+    expect(t.cal.writes).toEqual([]);
+
+    const ok = await t.mcp.call("create_calendar_event", { ...args, time_zone: "America/Los_Angeles" });
+    expect(JSON.parse(ok.text)).toMatchObject({ status: "applied" });
+    const body = t.cal.writes.at(-1)!.body!;
+    expect(body.start).toMatchObject({ dateTime: "2026-10-19T09:00:00-07:00", timeZone: "America/Los_Angeles" });
+    expect(body.end).toMatchObject({ timeZone: "America/Los_Angeles" });
+
+    // All-day repeating events take dates and need no time zone.
+    const allDay = await t.mcp.call("create_calendar_event", { summary: "Gym", start: "2026-10-20", end: "2026-10-21", recurrence: ["RRULE:FREQ=WEEKLY;COUNT=2"] });
+    expect(JSON.parse(allDay.text)).toMatchObject({ status: "applied", allDay: true });
+
+    // Making a one-off event repeat: recurrence with start, end and time_zone. Missing time_zone is refused before Google.
+    t.cal.put(ME, { id: "once1", summary: "1:1", start: { dateTime: "2026-10-21T10:00:00Z" }, end: { dateTime: "2026-10-21T10:30:00Z" }, organizer: { email: ME, self: true } });
+    const writes = t.cal.writes.length;
+    const at = { event_id: "once1", start: "2026-10-21T10:00:00Z", end: "2026-10-21T10:30:00Z" };
+    expect((await t.mcp.call("update_calendar_event", { ...at, recurrence: ["RRULE:FREQ=WEEKLY"] })).text).toMatch(/repeating event needs time_zone/);
+    expect((await t.mcp.call("update_calendar_event", { event_id: "once1", time_zone: "Europe/Paris" })).text).toMatch(/^time_zone goes with start and end/);
+    expect(t.cal.writes.length).toBe(writes);
+    const made = await t.mcp.call("update_calendar_event", { ...at, time_zone: "Europe/Paris", recurrence: ["RRULE:FREQ=WEEKLY"] });
+    expect(JSON.parse(made.text)).toMatchObject({ status: "applied" });
+    expect(t.cal.writes.at(-1)!.body).toMatchObject({ start: { timeZone: "Europe/Paris" }, recurrence: ["RRULE:FREQ=WEEKLY"] });
+  });
+
+  it("lists show each occurrence's series id, and the docs say to pass it for the whole series", async () => {
+    const t = await real();
+    t.cal.put(ME, {
+      id: "wk1_20261020T160000Z",
+      recurringEventId: "wk1",
+      summary: "Weekly sync",
+      start: { dateTime: "2026-10-20T09:00:00-07:00", timeZone: "America/Los_Angeles" },
+      end: { dateTime: "2026-10-20T09:30:00-07:00", timeZone: "America/Los_Angeles" },
+      organizer: { email: "bob@other.com" },
+      attendees: [{ email: ME, self: true, responseStatus: "needsAction" }],
+    });
+    const list = await t.mcp.call("list_calendar_events", { time_min: "2026-10-20T00:00:00Z", time_max: "2026-10-21T00:00:00Z" });
+    expect(list.text).toContain("event_id: wk1_20261020T160000Z");
+    expect(list.text).toContain("recurring, series: wk1");
+
+    const tools = (await t.mcp.client.listTools()).tools;
+    for (const name of ["update_calendar_event", "delete_calendar_event", "respond_to_invitation"]) {
+      expect(tools.find((x) => x.name === name)!.description).toMatch(/affects only that occurrence.*pass the series id/);
+    }
+    const skill = readFileSync(new URL("../server/skill/SKILL.md", import.meta.url), "utf8");
+    expect(skill).toContain("affects **only that occurrence**");
+    expect(skill).toContain("shown as `series:`");
+    expect(skill).toMatch(/repeating timed event \(`recurrence`\) needs `time_zone`/);
   });
 });

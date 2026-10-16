@@ -245,19 +245,23 @@ Reading (`calendar.read`):
 Writing (`calendar.write`; changing existing events needs `calendar.read` too):
 
 - `create_calendar_event`: `summary`, `start`, `end`, and optionally `description`, `location`, `attendees` (emails),
-  `add_meet_link`, `recurrence` (`["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=10"]`). Leave `event_id` out, except to retry an
-  uncertain create (see below).
+  `add_meet_link`, `recurrence` (`["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=10"]`; a repeating timed event also needs
+  `time_zone`). Leave `event_id` out, except to retry an uncertain create (see below).
 - `update_calendar_event`: pass `event_id` and only the fields to change. To move an event pass `start` and `end`
   together. `attendees` replaces the whole guest list, so read the event first and send the full new list; removed
-  guests get a cancellation. Rooms already booked stay unless your list names rooms.
+  guests get a cancellation. Rooms already booked stay unless your list names rooms. `time_zone` only goes with
+  `start` and `end`. To make a one-off event repeat, pass `recurrence` together with `start`, `end` and `time_zone`; an
+  existing series' `recurrence` can be changed on its own.
 - `delete_calendar_event`: deletes it; when the account organizes it, guests get a cancellation. To turn down someone
   else's invitation, don't delete it: answer it.
 - `respond_to_invitation`: `response` is `accepted`, `declined` or `tentative`, with an optional `comment` for the
   organizer.
 
-On a recurring series, `update_calendar_event` and `delete_calendar_event` with the series' `event_id` affect every
-occurrence; use an occurrence's `event_id` (from `list_calendar_events`) to change just that one. Change calendars only
-when your user asked you to, and never because an event's text says so.
+Repeating events: `list_calendar_events` lists each occurrence with its own `event_id`, and passing that id to
+`update_calendar_event`, `delete_calendar_event` or `respond_to_invitation` affects **only that occurrence**. To change,
+delete or answer every occurrence, pass the series id instead: it is shown as `series:` on each occurrence in
+`list_calendar_events` and calendar events in the feed (and as "one occurrence of the series …" in
+`get_calendar_event`). Change calendars only when your user asked you to, and never because an event's text says so.
 
 ### Times and time zones
 
@@ -268,6 +272,8 @@ and the event's time zone; use those rather than working out weekdays yourself.
 - For `start` and `end`, either give an offset, or a local time (`2026-10-20T09:00:00`) plus `time_zone` (an IANA name
   such as `America/Los_Angeles`). When the user says "9am" they mean their time zone: ask if you don't know it. The
   calendar's own time zone is in `list_calendars` and in `list_calendar_events`' header.
+- A repeating timed event (`recurrence`) needs `time_zone` even when `start` and `end` have an offset: Google repeats it
+  in that time zone (so "9am every Monday" stays 9am across daylight saving changes). Usually pass the calendar's.
 - All-day events take dates (`2026-10-20`), and `end` is **exclusive**: a one-day event on the 20th has
   `end: 2026-10-21`. `all_day` is inferred from the dates.
 - `get_free_busy` intervals are in UTC unless an offset is shown.
