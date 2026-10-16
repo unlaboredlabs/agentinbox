@@ -18,7 +18,7 @@ import { StepCard, StepFooter } from "./wizard-shell";
  * moves straight on to the Verify step, which checks MCP, the listener and a test email live.
  * Creating an agent here with a copied key stays available as an advanced alternative.
  */
-export function StepAgent({ index, onBack, onNext }: StepProps) {
+export function StepAgent({ index, onBack, onNext, total, nextLabel }: StepProps) {
   const agents = useQuery(queries.agents());
   const existing = agents.data ?? [];
   const [created, setCreated] = useState<AgentWithKey>();
@@ -35,6 +35,7 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
   return (
     <StepCard
       index={index}
+      total={total}
       title={created ? `${created.agent.name} is ready` : "Connect your first agent"}
       description={
         created
@@ -45,7 +46,7 @@ export function StepAgent({ index, onBack, onNext }: StepProps) {
         <StepFooter
           onBack={onBack}
           onNext={onNext}
-          nextLabel="Check that it works"
+          nextLabel={nextLabel ?? "Check that it works"}
           nextDisabled={!hasAgent}
           hint={created ? "Make sure you've saved the key" : !hasAgent ? "Approve a request to continue" : undefined}
           extra={

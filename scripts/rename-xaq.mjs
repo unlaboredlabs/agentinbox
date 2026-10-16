@@ -82,6 +82,8 @@ const PROTECTED = [
   "agentinbox-gmail",
   "agentinbox-oauth",
   "agentinbox:oauth",
+  "agentinbox-connection-oauth",
+  "agentinbox:connection-oauth",
   "agentinbox:unauthorized",
   "agentinboxTest",
   "agentinbox.theme",

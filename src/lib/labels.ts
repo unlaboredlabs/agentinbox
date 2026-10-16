@@ -120,6 +120,16 @@ export const EVENT_TYPE_INFO: Record<EventType, { label: string; description: st
     label: "Invitation received",
     description: "Someone invited the account to an event and is waiting for an answer.",
   },
+  "connection.auth_failed": {
+    label: "Connection auth failed",
+    description: "An integration's credential stopped working; it needs to be reconnected.",
+  },
+  "connection.tool_changed": {
+    label: "Tool changed",
+    description: "An integration's tool changed or appeared and is held until you accept it.",
+  },
+  "connection.expiring": { label: "Connection expiring", description: "An integration's sign-in stops working soon; reconnect it before then." },
+  "approval.requested": { label: "Approval requested", description: "An agent's risky tool call waits for your approval." },
 };
 
 export const ACCOUNT_STATUS: Record<AccountStatus, { label: string; tone: Tone; description: string }> = {
@@ -194,10 +204,14 @@ export const KIND_LABEL = {
   "calendar.update": "Calendar event change",
   "calendar.delete": "Calendar event deletion",
   "calendar.rsvp": "Invitation answer",
+  "mcp.call": "Tool call",
 } as const satisfies Record<ApprovalKind, string>;
 
 /** Approval status in its kind's words: a calendar approval that went through was applied, not sent. */
-export function approvalStatusInfo(status: ApprovalStatus, kind: ApprovalKind): { label: string; tone: Tone } {
+export function approvalStatusInfo(status: ApprovalStatus, kind: ApprovalKind | "mcp.call"): { label: string; tone: Tone } {
+  // A broker tool call (mcp.call) that went through ran; it wasn't sent.
+  if (kind === "mcp.call" && status === "sent") return { label: "Ran", tone: "good" };
+  if (kind === "mcp.call" && status === "failed") return { label: "Call failed", tone: "bad" };
   if (isCalendarApprovalKind(kind) && status === "sent") return { label: "Applied", tone: "good" };
   if (isCalendarApprovalKind(kind) && status === "failed") return { label: "Couldn't apply", tone: "bad" };
   return APPROVAL_STATUS[status];

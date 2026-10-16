@@ -54,9 +54,22 @@ export interface InternalState {
       activationUrl?: string | null;
     };
   };
+  /**
+   * MCP broker policy limits (server/broker/policy). Missing fields take the defaults in
+   * server/broker/policy/store.ts (BROKER_POLICY_DEFAULTS). null caps = no cap.
+   */
+  "broker.policy": {
+    /** mcp.call approvals expire after this many hours. */
+    approvalTtlHours?: number;
+    /** Per agent, risky tool calls (run, queued or of unknown outcome) per rolling hour / 24 hours. */
+    riskyPerHour?: number | null;
+    riskyPerDay?: number | null;
+  };
   "admin.passwordHash": string;
   /** When SetupState.verified first had evidence; kept so pruning the audit log doesn't undo it. */
   "setup.verifiedAt": string;
+  /** When brokerUpstreams was turned on for this install by the console release (SettingsStore.brokerOnOnce). */
+  "broker.defaultOnApplied": string;
 }
 
 export type InternalKey = keyof InternalState;
@@ -80,13 +93,33 @@ export class SettingsStore {
       approvalTtlHours: 72,
       webhookAllowlist: ["localhost", "127.0.0.0/8", "::1"],
       pairingEnabled: true,
+      brokerUpstreams: true,
       calendarPollSeconds: 60,
     };
   }
 
   get(): Settings {
+    this.brokerOnOnce();
     const row = this.db.get<{ value: string }>("SELECT value FROM settings WHERE key = ?", USER_KEY);
     return { ...this.defaults(), ...json.parse<Partial<Settings>>(row?.value, {}) };
+  }
+
+  private brokerChecked = false;
+  /**
+   * The broker shipped off (M1 PRs 1-7 wrote brokerUpstreams: false into saved settings on any save). When the
+   * console ships it turns on for everyone, once: a stored false becomes true, and the marker makes a later
+   * deliberate "off" (Settings → MCP broker) stick.
+   */
+  private brokerOnOnce(): void {
+    if (this.brokerChecked) return;
+    this.brokerChecked = true;
+    if (this.getState("broker.defaultOnApplied")) return;
+    const row = this.db.get<{ value: string }>("SELECT value FROM settings WHERE key = ?", USER_KEY);
+    const stored = json.parse<Partial<Settings>>(row?.value, {});
+    this.db.tx(() => {
+      if (row && stored.brokerUpstreams === false) this.write(USER_KEY, { ...stored, brokerUpstreams: true });
+      this.setState("broker.defaultOnApplied", new Date().toISOString());
+    });
   }
 
   /** Validates, persists and broadcasts. Throws HttpError(400) on invalid input. */
@@ -153,6 +186,7 @@ function validate(s: Settings): Settings {
     approvalTtlHours: int(s.approvalTtlHours, "Approval expiry", 1, 24 * 30),
     webhookAllowlist: [...new Set(allowlist)],
     pairingEnabled: s.pairingEnabled !== false,
+    brokerUpstreams: s.brokerUpstreams !== false,
     calendarPollSeconds: int(s.calendarPollSeconds, "Calendar poll interval", 15, 3600),
   };
 }

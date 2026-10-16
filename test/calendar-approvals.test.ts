@@ -3,7 +3,7 @@
 // duplicates the event, and malformed changes fail for good.
 
 import { afterEach, describe, expect, it } from "vitest";
-import type { Approval, CalendarApprovalDetail, GrantInput } from "../shared/types.ts";
+import type { Approval, CalendarApprovalDetail, GoogleApprovalKind, GrantInput } from "../shared/types.ts";
 import type { CalendarWriteOutcome } from "../server/calendar/agent.ts";
 import { GoogleApiError } from "../server/google/types.ts";
 import { Approvals } from "../server/mail/approvals.ts";
@@ -373,7 +373,7 @@ describe("malformed changes", () => {
   it("fail for good instead of going back to pending", async () => {
     const s = setup();
     s.meeting();
-    const cases: [Approval["kind"], CalendarApprovalDetail | undefined][] = [
+    const cases: [GoogleApprovalKind, CalendarApprovalDetail | undefined][] = [
       ["calendar.update", undefined],
       ["calendar.update", detail({ eventId: null })],
       ["calendar.delete", detail({ etag: null })],

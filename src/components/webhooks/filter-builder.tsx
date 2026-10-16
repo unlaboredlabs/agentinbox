@@ -36,10 +36,10 @@ export function EventTypePicker({ value, onChange, invalid }: { value: EventType
                 <Checkbox className="mt-0.5" checked={value.includes(t)} onCheckedChange={(v) => toggle(t, v === true)} />
                 <span className="min-w-0 space-y-0.5">
                   <span className="flex flex-wrap items-baseline gap-x-2 text-sm font-medium">
-                    {EVENT_TYPE_INFO[t].label}
+                    {EVENT_TYPE_INFO[t]?.label ?? t}
                     <code className="font-mono text-xs font-normal text-muted-foreground">{t}</code>
                   </span>
-                  <span className="block text-xs text-muted-foreground">{EVENT_TYPE_INFO[t].description}</span>
+                  <span className="block text-xs text-muted-foreground">{EVENT_TYPE_INFO[t]?.description}</span>
                 </span>
               </label>
             ))}

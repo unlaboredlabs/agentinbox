@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { z } from "zod";
 import type { AgentTool, ListenerConfig } from "../../shared/agent-api.ts";
-import { EVENT_TYPES } from "../../shared/types.ts";
+import { type EventType, isEventType } from "../../shared/types.ts";
 import { webhookFilterSchema } from "../webhooks/filter.ts";
 import { isTooOpen, writePrivateFile } from "./fsutil.ts";
 import { isServerName, mcpServerName } from "./names.ts";
@@ -44,7 +44,10 @@ const profileSchema = z
     agentName: z.string(),
     consumer: z.string().min(1).max(100),
     insecure: z.boolean().optional(),
-    types: z.array(z.enum(EVENT_TYPES)).optional(),
+    types: z
+      .array(z.string().refine(isEventType))
+      .transform((t) => t as EventType[])
+      .optional(),
     filter: webhookFilterSchema.optional(),
     includeBody: z.boolean().optional(),
     exec: z.string().min(1).optional(),

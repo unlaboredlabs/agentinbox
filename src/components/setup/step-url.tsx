@@ -26,6 +26,9 @@ export interface StepProps {
   onNext: () => void;
   /** Set when the user jumped back from a later step: Continue goes back there. */
   returnTo?: StepId;
+  /** The short broker path (first-run.ts): its step count and last button. */
+  total?: number;
+  nextLabel?: string;
 }
 
 const TONE_ICON = { good: CheckCircle2Icon, warn: AlertTriangleIcon, bad: XCircleIcon, info: InfoIcon };

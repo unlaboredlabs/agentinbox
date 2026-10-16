@@ -69,7 +69,41 @@ export const EVENT_TYPES = [
   "calendar.event_cancelled", // the event was cancelled or deleted
   "calendar.invitation_received", // someone else's event now lists the account as an attendee awaiting a response
 ] as const;
-export type EventType = (typeof EVENT_TYPES)[number];
+/** Gmail, Calendar and account events: the closed set that existed before the broker. */
+export type NativeEventType = (typeof EVENT_TYPES)[number];
+
+/**
+ * MCP broker events (docs/MCP-BROKER.md "Events from integrations"). They concern a connection, not an
+ * account: MailEvent.connectionId is set and accountId/accountEmail are "". Visible to agents with a grant
+ * on that connection, while the brokerUpstreams setting is on.
+ */
+export const BROKER_EVENT_TYPES = [
+  "connection.auth_failed", // the upstream's credential stopped working; the owner must reconnect
+  "connection.tool_changed", // an upstream tool changed or appeared and is held until the owner accepts it
+  "connection.expiring", // the credential stops working on a known date (no refresh, or a cap): reconnect before it
+  "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
+] as const;
+export type BrokerEventType = (typeof BROKER_EVENT_TYPES)[number];
+/**
+ * Events a native integration emits: `<preset>.<name>`, e.g. `whoop.recovery_updated` (IntegrationPreset.id and
+ * NativeEvents.types). Open-ended, so EventType as a whole is too: code that needs the known set uses
+ * EVENT_TYPES and BROKER_EVENT_TYPES.
+ */
+export type PresetEventType = `${string}.${string}`;
+export type EventType = NativeEventType | BrokerEventType | PresetEventType;
+
+const PRESET_EVENT_RE = /^([a-z0-9-]{1,24})\.[a-z0-9_]{1,64}$/;
+/** Prefixes of xaq's own events: a preset can't be named like one. */
+const RESERVED_EVENT_PREFIXES = new Set(["message", "thread", "label", "account", "sync", "calendar", "connection", "approval"]);
+export const isPresetEventType = (t: string): t is PresetEventType => {
+  const m = PRESET_EVENT_RE.exec(t);
+  return !!m && !RESERVED_EVENT_PREFIXES.has(m[1]!);
+};
+/** Events about a connection (broker or preset), never an account. */
+export const isConnectionEventType = (t: string): t is BrokerEventType | PresetEventType =>
+  (BROKER_EVENT_TYPES as readonly string[]).includes(t) || isPresetEventType(t);
+/** Any event type the server accepts in filters (webhooks, the listener stream, the console). */
+export const isEventType = (t: string): t is EventType => (EVENT_TYPES as readonly string[]).includes(t) || isConnectionEventType(t);
 
 export const CALENDAR_EVENT_TYPES = [
   "calendar.event_created",
@@ -271,6 +305,11 @@ export interface Settings {
   webhookAllowlist: string[];
   /** Accept device-flow pairing requests from `npx xaq-cli connect` (each still needs approval). */
   pairingEnabled: boolean;
+  /**
+   * The MCP broker's upstream connections (docs/MCP-BROKER.md): the Connections page, connection access on agents,
+   * `mcp.call` approvals and first run with Google optional. On by default since the console shipped (M1 PR 8).
+   */
+  brokerUpstreams: boolean;
 }
 
 export interface GoogleClientConfig {
@@ -782,8 +821,11 @@ export interface MailEvent {
   id: string; // evt_…
   seq: number; // monotonic, used as cursor
   type: EventType;
+  /** "" on connection events (BROKER_EVENT_TYPES and `<preset>.*`), which carry connectionId instead. */
   accountId: string;
   accountEmail: string;
+  /** Connection events only. */
+  connectionId?: string;
   message: MessageSummary | null;
   /** calendar.* events only (absent on mail events, so their payloads are unchanged). */
   calendarEvent?: CalendarEventSummary;
@@ -916,8 +958,14 @@ export const MAIL_APPROVAL_KINDS = ["send", "reply", "forward"] as const;
 export const CALENDAR_APPROVAL_KINDS = ["calendar.create", "calendar.update", "calendar.delete", "calendar.rsvp"] as const;
 export type MailApprovalKind = (typeof MAIL_APPROVAL_KINDS)[number];
 export type CalendarApprovalKind = (typeof CALENDAR_APPROVAL_KINDS)[number];
-export type ApprovalKind = MailApprovalKind | CalendarApprovalKind;
+/** A risky upstream tool call at the "ask" level (docs/MCP-BROKER.md). Goes through a connection, not an account. */
+export const MCP_APPROVAL_KINDS = ["mcp.call"] as const;
+export type McpApprovalKind = (typeof MCP_APPROVAL_KINDS)[number];
+/** The kinds that act on a Google account (an Approval with accountId set). */
+export type GoogleApprovalKind = MailApprovalKind | CalendarApprovalKind;
+export type ApprovalKind = GoogleApprovalKind | McpApprovalKind;
 export const isCalendarApprovalKind = (k: string): k is CalendarApprovalKind => (CALENDAR_APPROVAL_KINDS as readonly string[]).includes(k);
+export const isMcpApprovalKind = (k: string): k is McpApprovalKind => (MCP_APPROVAL_KINDS as readonly string[]).includes(k);
 
 /** The calendar change a calendar.* approval applies. */
 export interface CalendarApprovalDetail {
@@ -955,23 +1003,75 @@ export interface CalendarApprovalDetail {
   attemptedAt?: string | null;
 }
 
+/** The exact call an mcp.call approval forwards once approved (approvals.tool_call). */
+export interface McpCallApprovalDetail {
+  /** The upstream's own tool name (UpstreamTool.name). */
+  tool: string;
+  /** The name the agent called (UpstreamTool.exposedName, `<slug>__<tool>`). */
+  exposedName: string;
+  /** The validated, canonicalised arguments: exactly the bytes shown on the card and forwarded on approve. */
+  args: string;
+  /** sha256 (hex) of `args`, re-checked on approve. */
+  argsSha256: string;
+  /** The tool's pin when the call was queued; a different pin on approve means the tool changed. */
+  pinHash: string;
+  /** The upstream's result once the approved call ran (what get_call_status returns). */
+  result?: McpCallResult | null;
+  /** When the approved call was last forwarded upstream (set right before it is). */
+  attemptedAt?: string | null;
+  /**
+   * The approved call was interrupted (crash, timeout, lost answer): it may or may not have run upstream.
+   * Status is "failed"; it is never retried automatically.
+   */
+  outcomeUnknown?: boolean;
+}
+
 /**
- * A send or calendar change waiting for (or decided by) a human. For calendar kinds the mail fields are
- * filled so generic lists read well: to = `calendar.notified`, cc/bcc empty, subject = event summary,
- * body = description, draftId "" and threadId null; status "sent" means "applied" and sentMessageId holds
- * the Google event id.
+ * GET /api/approvals/:id for an mcp.call: the card. `approval.call.args` holds the exact bytes that run on approve.
+ * `tool` is the tool as the agent can reach it now (null when it no longer can: access removed, on hold).
  */
-export interface Approval {
+export interface McpCallApprovalView {
+  approval: McpCallApproval;
+  connection: { id: string; slug: string; name: string; status: ConnectionStatus } | null;
+  tool: { exposedName: string; name: string; title: string | null; risky: boolean; read: boolean; targetPath: string | null; level: AccessLevel; pinMatches: boolean } | null;
+  /** The exact argument bytes with invisible and control characters shown as \u escapes. */
+  argsDisplay: string;
+  /** The same arguments indented (escaped the same way). */
+  pretty: string;
+  /** Email addresses and URLs found anywhere in the arguments: shown first on the card. */
+  recipients: string[];
+  urls: string[];
+  /** The tool's target argument (ToolClass.targetPath, a JSON Pointer) and its value in this call, if any. */
+  target: { path: string; value: unknown } | null;
+  /** JSON Pointers a generic tool's "always allow for this argument" may pick from. */
+  argumentPaths: string[];
+  /** sha256 of the stored bytes still matches the fingerprint taken when the call was queued. */
+  argsIntact: boolean;
+}
+
+/** POST /api/approvals/:id/approve for an mcp.call. */
+export interface McpCallApproveInput {
+  note?: string | null;
+  /**
+   * "Always allow this": a rule for this agent and tool, created when the call is approved. `target` limits it
+   * to this call's target value (one rule per id when the target is an array); `targetPath` picks the argument
+   * for generic tools (defaults to the tool's own targetPath).
+   */
+  alwaysAllow?: { target?: boolean; targetPath?: string };
+}
+
+/** An upstream CallToolResult as stored for get_call_status. */
+export interface McpCallResult {
+  content: unknown[];
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
+interface ApprovalCommon {
   id: string; // apr_…
   agentId: string;
   agentName: string;
-  accountId: string;
-  accountEmail: string;
-  kind: ApprovalKind;
   status: ApprovalStatus;
-  /** Calendar kinds only. */
-  calendar?: CalendarApprovalDetail;
-  draftId: string;
   to: Address[];
   cc: Address[];
   bcc: Address[];
@@ -989,6 +1089,296 @@ export interface Approval {
   error: string | null;
   createdAt: string;
   expiresAt: string;
+}
+
+/**
+ * A send or calendar change waiting for (or decided by) a human. For calendar kinds the mail fields are
+ * filled so generic lists read well: to = `calendar.notified`, cc/bcc empty, subject = event summary,
+ * body = description, draftId "" and threadId null; status "sent" means "applied" and sentMessageId holds
+ * the Google event id.
+ */
+export interface GoogleApproval extends ApprovalCommon {
+  kind: GoogleApprovalKind;
+  accountId: string;
+  accountEmail: string;
+  draftId: string;
+  /** Calendar kinds only. */
+  calendar?: CalendarApprovalDetail;
+  connectionId?: null;
+  call?: undefined;
+}
+
+/**
+ * A risky upstream tool call waiting for (or decided by) a human. No Google account and no draft; the
+ * mail fields stay empty unless the server fills them for generic lists.
+ */
+export interface McpCallApproval extends ApprovalCommon {
+  kind: McpApprovalKind;
+  accountId: null;
+  accountEmail: null;
+  draftId: null;
+  connectionId: string;
+  call: McpCallApprovalDetail;
+  calendar?: undefined;
+}
+
+export type Approval = GoogleApproval | McpCallApproval;
+
+// ───────────────────────────── MCP broker: connections ─────────────────────────────
+// docs/MCP-BROKER.md. Stored since migration 8; nothing serves these until the broker PRs land (behind the
+// brokerUpstreams setting). Credentials never cross the API boundary: there's no DTO for them.
+// AccessLevel and ToolAnnotations mirror server/broker/types.ts: the console can't import that file (it uses
+// Node's Buffer, and tsconfig.app has no Node types). Keep them in step.
+
+/** native_whoop (M2), stdio (M4) and native_google are reserved; M1 creates remote_http only. */
+export const CONNECTION_KINDS = ["remote_http", "native_whoop", "stdio", "native_google"] as const;
+export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
+
+export const CONNECTION_AUTH_TYPES = ["none", "header", "oauth"] as const;
+export type ConnectionAuthType = (typeof CONNECTION_AUTH_TYPES)[number];
+
+export const CONNECTION_STATUSES = ["active", "needs_reauth", "error", "disabled"] as const;
+export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
+
+/**
+ * What an agent may do with a connection (Wynn's model). No grant row = no access.
+ * - full: every tool listed and called without asking
+ * - ask: every tool listed; risky (irreversible) tools wait for an mcp.call approval. The default.
+ * - read: only read tools are listed or callable
+ */
+export const ACCESS_LEVELS = ["full", "ask", "read"] as const;
+export type AccessLevel = (typeof ACCESS_LEVELS)[number];
+
+/** Connection slugs, chosen by the operator: tools are exposed as `<slug>__<tool>`. Same rule as the schema CHECK. */
+export const CONNECTION_SLUG_RE = /^[a-z0-9-]{1,24}$/;
+/** Exposed tool names: `[A-Za-z0-9_-]`, at most 64 (clients prepend `mcp__<server>__` and cap at 128). */
+export const EXPOSED_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** One upstream (an MCP server, or a native integration) with its credential. */
+export interface Connection {
+  id: string; // con_…
+  /** null = the install's single owner. */
+  ownerId: string | null;
+  kind: ConnectionKind;
+  /** IntegrationPreset.id (server/broker/types.ts), checked against the preset registry in code; null = custom. */
+  preset: string | null;
+  slug: string;
+  name: string;
+  /** The MCP endpoint (remote_http). */
+  url: string | null;
+  authType: ConnectionAuthType;
+  /** The level new grants get. */
+  levelDefault: AccessLevel;
+  /** Admin-only private-target allow: the exact `scheme://host:port`, or null when off. */
+  privateTarget: string | null;
+  status: ConnectionStatus;
+  statusReason: string | null;
+  /** When the credential stops working without a human (no refresh, or a hard cap); null = not known to expire. */
+  expiresAt: string | null;
+  /** Negotiated protocol generation, cached. */
+  protocol: string | null;
+  toolsCachedAt: string | null;
+  instructionsHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** MCP tool annotations as the upstream sent them: hints only, never trusted on their own. */
+export interface ToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/** A tool definition as pinned (upstream_tools.definition). The pin hashes this plus the tool's name. */
+export interface UpstreamToolDefinition {
+  title?: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: ToolAnnotations;
+}
+
+export type ToolClassSource = "preset" | "annotation" | "heuristic";
+export type UpstreamToolState = "active" | "held";
+/** changed: the definition's hash differs from the pin; new: the tool wasn't there at connect. */
+export type ToolHeldReason = "changed" | "new";
+
+export interface UpstreamTool {
+  connectionId: string;
+  /** The upstream's own name. */
+  name: string;
+  /** `<slug>__<name>`, as listed to agents. */
+  exposedName: string;
+  /** What agents see. null only for a held new tool (nothing pinned yet). */
+  definition: UpstreamToolDefinition | null;
+  pinHash: string | null;
+  /** Irreversible: waits for approval at the "ask" level. */
+  risky: boolean;
+  /** Listed at the "read" level. Never both risky and read. */
+  read: boolean;
+  classSource: ToolClassSource;
+  state: UpstreamToolState;
+  heldReason: ToolHeldReason | null;
+  /** While held: what accepting would pin. */
+  candidate: UpstreamToolDefinition | null;
+  candidateHash: string | null;
+  firstSeenAt: string;
+  updatedAt: string;
+}
+
+/** One agent's access to one connection. */
+export interface ConnectionGrant {
+  agentId: string;
+  connectionId: string;
+  level: AccessLevel;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** "Always allow this": matching calls by this agent to this tool never ask again. */
+export interface ApprovalRule {
+  id: string; // rul_…
+  agentId: string;
+  connectionId: string;
+  /** The upstream tool name (UpstreamTool.name). */
+  tool: string;
+  /** Only for one target: a JSON Pointer into the call's arguments, and that argument's canonical JSON. */
+  targetPath: string | null;
+  targetValue: string | null;
+  createdAt: string;
+}
+
+// ───────────────────── MCP broker: connections admin API (/api/connections) ─────────────────────
+
+/** A connection as the Connections list shows it. */
+export interface ConnectionView extends Connection {
+  tools: {
+    /** Every pinned or held tool. */
+    total: number;
+    active: number;
+    /** Waiting for the owner to accept a changed or new definition. */
+    held: number;
+  };
+  /** Whole days until expiresAt (0 = today or past), or null when not known to expire. */
+  expiresInDays: number | null;
+  /** Agents with a grant on this connection. */
+  agents: number;
+}
+
+/** POST /api/connections: a custom MCP URL, or a preset (its URL and auth come from the preset). */
+export interface CreateConnectionInput {
+  /** IntegrationPreset.id (GET /api/connections/presets). */
+  preset?: string;
+  /** Required without a preset. */
+  url?: string;
+  /** Default: the preset's display name, else the URL's host. */
+  name?: string;
+  /** Default: the preset's slug, else derived from the host. */
+  slug?: string;
+  levelDefault?: AccessLevel;
+  /** Agents that get the connection at levelDefault. Default: every agent. */
+  agentIds?: string[];
+}
+
+/**
+ * PATCH /api/connections/:id. Changing the URL (custom connections only) deletes the credentials, clears the
+ * private-target allow, cancels pending calls and sets status needs_reauth: reconnect afterwards.
+ */
+export interface UpdateConnectionInput {
+  name?: string;
+  slug?: string;
+  url?: string;
+  levelDefault?: AccessLevel;
+}
+
+/** PUT /api/connections/:id/grants: the full list; agents not listed lose access. */
+export interface ConnectionGrantsInput {
+  grants: { agentId: string; level: AccessLevel }[];
+}
+
+/** PUT /api/connections/:id/private-target. Admin-only: the allow is pinned to the URL's exact scheme://host:port. */
+export interface PrivateTargetInput {
+  allow: boolean;
+}
+
+/** What probing an MCP URL found (POST /api/connections/probe), so the console shows the right button or field. */
+export interface ConnectionProbe {
+  reachable: boolean;
+  /** none: open; header: needs an API key or bearer; oauth: OAuth discovered; unknown: couldn't tell. */
+  auth: "none" | "header" | "oauth" | "unknown";
+  /** private_target: the host is on loopback or a private network and the connection has no allow for it. */
+  blocked?: "private_target" | "ssrf";
+  /** OAuth: the authorization server's issuer and how the client registers. */
+  issuer?: string;
+  registration?: "preregistered" | "metadata_document" | "dcr" | "manual";
+  /** OAuth: the server issues refresh tokens (false: dated reconnect warnings). */
+  refresh?: boolean;
+  /** blocked: the exact scheme://host:port an admin could allow for this connection, when an allow would help. */
+  privateTarget?: string | null;
+  /** Plain words for the console. */
+  message: string;
+}
+
+/** POST /api/connections/:id/connect. */
+export interface StartConnectInput {
+  /** Static header auth (bearer or API key). Stored encrypted; never returned. */
+  header?: { name: string; value: string };
+  /** Setup inputs (e.g. a pasted client id and secret), keyed by SetupStepView.input.key. */
+  inputs?: Record<string, string>;
+}
+
+export type StartConnectResult =
+  | { status: "connected"; connection: ConnectionView }
+  /**
+   * Open this URL (the OAuth popup). direct: /oauth/connections/callback finishes the connection; paste: the user
+   * copies the landing URL into POST /api/connections/finish.
+   */
+  | { status: "authorize"; authorizeUrl: string; callbackMode?: "direct" | "paste"; redirectUri?: string }
+  | { status: "error"; message: string; probe?: ConnectionProbe };
+
+/** One step of a preset's guided setup (server/broker/types.ts SetupStep), resolved for this install. */
+export interface SetupStepView {
+  id: string;
+  title: string;
+  body: string;
+  link?: { label: string; url: string };
+  copy?: { label: string; value: string };
+  input?: { key: string; label: string; secret?: boolean; pattern?: string; placeholder?: string };
+}
+
+/** GET /api/connections/presets. */
+export interface PresetView {
+  id: string;
+  displayName: string;
+  slug: string;
+  kind: "remote_http" | "native";
+  url: string | null;
+  authType: ConnectionAuthType;
+  setupSteps: SetupStepView[];
+  reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number } | null;
+}
+
+/** One line of a held tool's diff: pinned (-) against the candidate (+), on pretty-printed JSON. */
+export interface ToolDiffLine {
+  op: " " | "-" | "+";
+  text: string;
+}
+
+/** GET /api/connections/:id/held: a tool waiting for the owner to accept its new definition. */
+export interface HeldToolView {
+  name: string;
+  exposedName: string;
+  heldReason: ToolHeldReason;
+  /** null for a new tool. */
+  pinned: UpstreamToolDefinition | null;
+  candidate: UpstreamToolDefinition;
+  /** Pass back to accept: a candidate that changed since is refused (409). */
+  candidateHash: string;
+  diff: ToolDiffLine[];
+  updatedAt: string;
 }
 
 // ───────────────────────────── Audit ─────────────────────────────
@@ -1125,6 +1515,22 @@ export interface ApiError {
 //   GET    /api/pairings?status                       → PairingRequest[]
 //   POST   /api/pairings/:id/approve ApprovePairingInput → Agent   (the key goes to the polling CLI, never to the console)
 //   POST   /api/pairings/:id/deny {note?}             → PairingRequest
+//   (MCP broker, 404 unless Settings.brokerUpstreams)
+//   GET    /api/connections                           → ConnectionView[]
+//   POST   /api/connections CreateConnectionInput     → ConnectionView
+//   GET    /api/connections/presets                   → PresetView[]
+//   POST   /api/connections/probe {url, connectionId?} → ConnectionProbe
+//   GET    /api/connections/:id                       → ConnectionView
+//   PATCH  /api/connections/:id UpdateConnectionInput → ConnectionView
+//   DELETE /api/connections/:id                       → 204 (kill switch, then removal)
+//   POST   /api/connections/:id/kill                  → 204 (disabled; onKill hooks, then credentials deleted and pending calls cancelled)
+//   POST   /api/connections/:id/connect StartConnectInput → StartConnectResult
+//   POST   /api/connections/finish {url}               → StartConnectResult (paste mode: the copied landing URL)
+//   GET    /api/connections/:id/grants                → ConnectionGrant[]
+//   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
+//   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView
+//   GET    /api/connections/:id/held                  → HeldToolView[]
+//   POST   /api/connections/:id/held/:name/accept {candidateHash} → HeldToolView[] (the rest still held; 409 if it changed again)
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval

@@ -11,6 +11,8 @@ import { PROJECT_ID_RE } from "../../lib/gcp-project.ts";
  * saves everything. Also remembers acknowledgements like "public URL confirmed".
  */
 export interface SetupDraft {
+  /** First run's "what do you want to connect?" answer (first-run.ts). Unset: not asked yet. */
+  firstConnect?: "notion" | "whoop" | "custom" | "google";
   urlConfirmed?: boolean;
   /** "new" (default): a dedicated project created for xaq; "existing": reuse one (advanced). */
   projectMode?: "new" | "existing";

@@ -267,23 +267,49 @@ function columns(db: DatabaseSync): Map<string, string[]> {
 /**
  * Rewinds a stopped stack's database to the schema of the last pre-calendar release (migrations 1–6),
  * keeping its data: drops what migration 7 added and any calendar.* state, as if the install had never
- * run a calendar-aware build. Checked against a fresh 1–6 database, so it stays honest when migrations change.
+ * run a calendar-aware (or later) build. Checked against a fresh 1–6 database, so it stays honest when migrations change.
  */
 function rewindToPreCalendar(path: string): void {
   const reference = new DatabaseSync(":memory:");
   reference.exec("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
   for (const sql of MIGRATIONS.slice(0, 6)) reference.exec(sql);
   const want = columns(reference);
+  const ddl = reference.prepare("SELECT type, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL").all() as {
+    type: string;
+    tbl_name: string;
+    sql: string;
+  }[];
   reference.close();
 
   const db = new DatabaseSync(path);
+  // A test rewind, not a migration: no cascades, and renaming a table doesn't rewrite references to it.
+  db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
+  // Later indexes first, so their columns can be dropped (e.g. migration 8's events.connection_id).
+  const refIndexes = new Set(ddl.filter((d) => d.type === "index").map((d) => d.sql));
+  const indexes = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL").all() as { name: string; sql: string }[];
+  for (const { name, sql } of indexes) if (!refIndexes.has(sql)) db.exec(`DROP INDEX "${name}"`);
   for (const [table, cols] of columns(db)) {
     const keep = want.get(table);
     if (!keep) {
       db.exec(`DROP TABLE "${table}"`);
       continue;
     }
-    for (const col of cols) if (!keep.includes(col)) db.exec(`ALTER TABLE "${table}" DROP COLUMN "${col}"`);
+    const extra = cols.filter((col) => !keep.includes(col));
+    if (!extra.length) continue;
+    try {
+      db.exec("SAVEPOINT rewind");
+      for (const col of extra) db.exec(`ALTER TABLE "${table}" DROP COLUMN "${col}"`);
+      db.exec("RELEASE rewind");
+    } catch {
+      // DROP COLUMN can't remove an indexed or foreign-key column (migration 8's approvals.connection_id):
+      // rebuild the table from its 1–6 definition, keeping its rows and rowids.
+      db.exec("ROLLBACK TO rewind; RELEASE rewind");
+      const list = keep.map((c) => `"${c}"`).join(", ");
+      db.exec(`ALTER TABLE "${table}" RENAME TO "_rewind"`);
+      for (const d of ddl) if (d.type === "table" && d.tbl_name === table) db.exec(d.sql);
+      db.exec(`INSERT INTO "${table}" (rowid, ${list}) SELECT rowid, ${list} FROM "_rewind"; DROP TABLE "_rewind";`);
+      for (const d of ddl) if (d.type === "index" && d.tbl_name === table) db.exec(d.sql);
+    }
   }
   db.exec("DELETE FROM settings WHERE key LIKE 'calendar.%'; DELETE FROM _migrations WHERE version > 6;");
   expect(columns(db)).toEqual(want);

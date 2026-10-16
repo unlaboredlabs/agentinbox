@@ -4,6 +4,7 @@ import { EyeOffIcon } from "lucide-react";
 import { useState } from "react";
 import { ConnectAccountButton } from "@/components/accounts/accounts-list";
 import { AgentActivity } from "@/components/agents/agent-activity";
+import { AgentConnections } from "@/components/agents/agent-connections";
 import { AgentHeader } from "@/components/agents/agent-header";
 import { AgentListeners } from "@/components/agents/agent-listeners";
 import { AgentTools } from "@/components/agents/agent-tools";
@@ -16,6 +17,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { queries } from "@/lib/queries";
 import { useRevealedKey } from "@/lib/revealed-keys";
+import { useBrokerEnabled } from "@/hooks/use-broker";
 
 export const Route = createFileRoute("/_app/agents/$agentId")({
   component: AgentPage,
@@ -27,6 +29,7 @@ function AgentPage() {
   const accounts = useQuery(queries.accounts());
   const apiKey = useRevealedKey(agentId);
   const [keyHidden, setKeyHidden] = useState(false);
+  const broker = useBrokerEnabled();
 
   if (agent.isPending) {
     return (
@@ -95,6 +98,8 @@ function AgentPage() {
           </div>
         )}
       </section>
+
+      {broker && <AgentConnections agentId={a.id} />}
 
       <AgentTools agent={a} apiKey={apiKey} />
 

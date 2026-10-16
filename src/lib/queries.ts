@@ -26,6 +26,10 @@ import type {
 } from "@shared/types";
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { apiGet } from "./api";
+import type { ApprovalRule, ConnectionGrant, ConnectionView, HeldToolView, McpCallApprovalView, PresetView } from "@shared/types";
+import { agentConnections } from "../components/connections/connection-flow";
+
+export type * from "./broker-dto";
 
 /** Query key roots. The live stream invalidates by root. */
 export const keys = {
@@ -51,6 +55,12 @@ export const keys = {
   /** Paged history on /events and /audit: kept out of per-message invalidation (the pages merge live rows themselves and can be paused), refetched on mount and after a reconnect. */
   eventHistory: ["event-history"] as const,
   auditLog: ["audit-log"] as const,
+  // MCP broker (docs/MCP-BROKER.md).
+  connections: ["connections"] as const,
+  connection: (id: string) => ["connections", id] as const,
+  presets: ["connection-presets"] as const,
+  agentConnections: (agentId: string) => ["agent-connections", agentId] as const,
+  approvalRules: ["approval-rules"] as const,
 };
 
 export interface EventFilters {
@@ -146,6 +156,38 @@ export const queries = {
       getNextPageParam: (last) => last.nextCursor,
       staleTime: Infinity,
       refetchOnMount: "always",
+    }),
+  /** Upstream connections (broker). */
+  connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => apiGet<ConnectionView[]>("/api/connections"), refetchInterval: 60_000 }),
+  connection: (id: string) =>
+    queryOptions({ queryKey: keys.connection(id), queryFn: () => apiGet<ConnectionView>(`/api/connections/${encodeURIComponent(id)}`) }),
+  /** Tools on hold on one connection, each with its pinned and candidate definition and their diff. */
+  heldTools: (id: string) =>
+    queryOptions({ queryKey: [...keys.connection(id), "held"], queryFn: () => apiGet<HeldToolView[]>(`/api/connections/${encodeURIComponent(id)}/held`) }),
+  presets: () => queryOptions({ queryKey: keys.presets, queryFn: () => apiGet<PresetView[]>("/api/connections/presets"), staleTime: 10 * 60_000 }),
+  connectionGrants: (connectionId: string) =>
+    queryOptions({
+      queryKey: [...keys.connection(connectionId), "grants"],
+      queryFn: () => apiGet<ConnectionGrant[]>(`/api/connections/${encodeURIComponent(connectionId)}/grants`),
+    }),
+  /** One agent's level on every connection (adapter: the API keeps grants per connection). */
+  agentConnections: (agentId: string) =>
+    queryOptions({
+      queryKey: keys.agentConnections(agentId),
+      queryFn: async () => {
+        const list = await apiGet<ConnectionView[]>("/api/connections");
+        const grants = await Promise.all(list.map((c) => apiGet<ConnectionGrant[]>(`/api/connections/${encodeURIComponent(c.id)}/grants`)));
+        return agentConnections(agentId, list, Object.fromEntries(list.map((c, i) => [c.id, grants[i]!])));
+      },
+    }),
+  approvalRules: (agentId: string) =>
+    queryOptions({ queryKey: [...keys.approvalRules, agentId], queryFn: () => apiGet<ApprovalRule[]>("/api/approval-rules", { agentId }) }),
+  /** One approval: an mcp.call answers with its card (McpCallApprovalView), mail and calendar kinds with the Approval. */
+  approval: (id: string) =>
+    queryOptions({
+      queryKey: [...keys.approvals, "one", id],
+      queryFn: () => apiGet<McpCallApprovalView | Approval>(`/api/approvals/${encodeURIComponent(id)}`),
+      retry: false,
     }),
   /** First audit page only, for an agent's detail page. */
   recentAudit: (agentId: string) =>

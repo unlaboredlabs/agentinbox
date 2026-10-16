@@ -103,12 +103,15 @@ export function StepCard({
   description,
   children,
   footer,
+  total,
 }: {
   index: number;
   title: string;
   description: React.ReactNode;
   children: React.ReactNode;
   footer: React.ReactNode;
+  /** Steps on this path (the short broker path has 2); default the Google wizard's. */
+  total?: number;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -119,7 +122,7 @@ export function StepCard({
     <Card className="gap-0 py-0" aria-labelledby="wizard-step-title">
       <div className="space-y-1.5 border-b p-5 sm:p-6">
         <div className="text-xs font-medium text-muted-foreground">
-          Step {index + 1} of {STEP_IDS.length}
+          Step {index + 1} of {total ?? STEP_IDS.length}
         </div>
         <h2 id="wizard-step-title" ref={heading} tabIndex={-1} className="rounded-sm text-xl font-semibold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring">
           {title}

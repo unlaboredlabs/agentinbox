@@ -7,6 +7,7 @@ import {
   LayoutDashboardIcon,
   LogOutIcon,
   MailIcon,
+  PlugIcon,
   RocketIcon,
   ScrollTextIcon,
   SettingsIcon,
@@ -30,10 +31,17 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useBrokerEnabled } from "@/hooks/use-broker";
 import { useSignOut } from "@/hooks/use-sign-out";
 import { queries } from "@/lib/queries";
 
-type NavItem = { to: "/" | "/approvals" | "/events" | "/audit" | "/accounts" | "/agents" | "/webhooks" | "/settings"; label: string; icon: typeof InboxIcon };
+type NavItem = {
+  to: "/" | "/approvals" | "/events" | "/audit" | "/accounts" | "/connections" | "/agents" | "/webhooks" | "/settings";
+  label: string;
+  icon: typeof InboxIcon;
+  /** Only with Settings.brokerUpstreams. */
+  broker?: boolean;
+};
 
 const NAV: { label: string; items: NavItem[] }[] = [
   {
@@ -49,6 +57,7 @@ const NAV: { label: string; items: NavItem[] }[] = [
     label: "Manage",
     items: [
       { to: "/accounts", label: "Gmail accounts", icon: MailIcon },
+      { to: "/connections", label: "Connections", icon: PlugIcon, broker: true },
       { to: "/agents", label: "Agents", icon: BotIcon },
       { to: "/webhooks", label: "Webhooks", icon: WebhookIcon },
       { to: "/settings", label: "Settings", icon: SettingsIcon },
@@ -67,6 +76,7 @@ export function AppSidebar() {
   const pendingCount = (pending?.length ?? 0) + (pairings?.length ?? 0);
 
   const signOut = useSignOut();
+  const broker = useBrokerEnabled();
 
   return (
     <Sidebar variant="inset" collapsible="icon">
@@ -111,7 +121,7 @@ export function AppSidebar() {
             <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {group.items.map((item) => (
+                {group.items.filter((item) => !item.broker || broker).map((item) => (
                   <SidebarMenuItem key={item.to}>
                     <SidebarMenuButton
                       asChild

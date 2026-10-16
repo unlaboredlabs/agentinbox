@@ -121,7 +121,7 @@ function EventsPage() {
                 <SelectLabel>{g.label}</SelectLabel>
                 {g.types.map((t) => (
                   <SelectItem key={t} value={t}>
-                    {EVENT_TYPE_INFO[t].label}
+                    {EVENT_TYPE_INFO[t]?.label ?? t}
                   </SelectItem>
                 ))}
               </SelectGroup>

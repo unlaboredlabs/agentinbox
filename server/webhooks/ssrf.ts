@@ -152,6 +152,25 @@ function ipAllowed(ip: string, list: Allowlist): boolean {
   return list.ips.has(ip) || list.nets.check(ip, family(ip));
 }
 
+/** Wording of resolveTarget's errors, so other callers (the MCP broker's upstream fetch) name their own setting. */
+export interface TargetMessages {
+  /** What the URL is, e.g. "Webhook URL". */
+  subject: string;
+  /** How to allow a private host, e.g. "add it to the webhook allowlist in Settings". */
+  allowHint: (host: string) => string;
+  /** Where plain http is allowed. */
+  httpHint: string;
+  /** Where the hostname is configured. */
+  hostHint: string;
+}
+
+const WEBHOOK_MESSAGES: TargetMessages = {
+  subject: "Webhook URL",
+  allowHint: (host) => `To allow it, add "${host}" or a matching CIDR to the webhook allowlist in Settings.`,
+  httpHint: "Plain http is only allowed for loopback addresses and hosts on the webhook allowlist in Settings.",
+  hostHint: "Check the hostname in the webhook URL.",
+};
+
 /** Hostname from a URL without IPv6 brackets. */
 export const urlHost = (url: URL): string => url.hostname.replace(/^\[|\]$/g, "");
 
@@ -159,8 +178,13 @@ export const urlHost = (url: URL): string => url.hostname.replace(/^\[|\]$/g, ""
  * Resolves the URL's host and returns the address to connect to. Throws SsrfError when the target
  * is not allowed. Every resolved address must pass, so a mixed answer cannot slip a private one in.
  */
-export async function resolveTarget(url: URL, allowlist: readonly string[], lookup: LookupFn = defaultLookup): Promise<ResolvedTarget> {
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new SsrfError("blocked", "Webhook URL must use http or https");
+export async function resolveTarget(
+  url: URL,
+  allowlist: readonly string[],
+  lookup: LookupFn = defaultLookup,
+  messages: TargetMessages = WEBHOOK_MESSAGES,
+): Promise<ResolvedTarget> {
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new SsrfError("blocked", `${messages.subject} must use http or https`);
   const host = urlHost(url);
   const list = compileAllowlist(allowlist);
   const hostListed = hostAllowed(host, list);
@@ -170,10 +194,10 @@ export async function resolveTarget(url: URL, allowlist: readonly string[], look
     answers = literal ?? (await lookup(host));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOTFOUND" || code === "ENODATA") throw new SsrfError("unresolved", `Could not resolve ${host}`, "Check the hostname in the webhook URL.");
+    if (code === "ENOTFOUND" || code === "ENODATA") throw new SsrfError("unresolved", `Could not resolve ${host}`, messages.hostHint);
     throw new SsrfError("dns", `DNS lookup for ${host} failed: ${(err as Error).message}`);
   }
-  if (answers.length === 0) throw new SsrfError("unresolved", `Could not resolve ${host}`, "Check the hostname in the webhook URL.");
+  if (answers.length === 0) throw new SsrfError("unresolved", `Could not resolve ${host}`, messages.hostHint);
   for (const a of answers) {
     const ip = normalizeIp(a.address);
     if (METADATA.has(ip)) {
@@ -184,7 +208,7 @@ export async function resolveTarget(url: URL, allowlist: readonly string[], look
     throw new SsrfError(
       "blocked",
       `${host === ip ? ip : `${host} resolves to ${ip}, which`} is a private, loopback or reserved address`,
-      `To allow it, add "${host}" or a matching CIDR to the webhook allowlist in Settings.`,
+      messages.allowHint(host),
     );
   }
   // Plain http only where cleartext stays local or was explicitly allowed: mail content travels in it.
@@ -194,7 +218,7 @@ export async function resolveTarget(url: URL, allowlist: readonly string[], look
       return LOOPBACK.check(ip, family(ip)) || ipAllowed(ip, list);
     });
     if (!local) {
-      throw new SsrfError("blocked", "Webhook URLs must use https", "Plain http is only allowed for loopback addresses and hosts on the webhook allowlist in Settings.");
+      throw new SsrfError("blocked", `${messages.subject}s must use https`, messages.httpHint);
     }
   }
   const first = answers[0]!;

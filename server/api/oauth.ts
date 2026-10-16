@@ -58,6 +58,16 @@ export const OAUTH_CALLBACK_SCRIPT_HASH = `sha256-${createHash("sha256").update(
 // Allow exactly this static script under the console CSP (server/csp.ts).
 registerInlineScript(OAUTH_CALLBACK_SCRIPT);
 
+/**
+ * The same page script for an upstream connection's sign-in (/oauth/connections/callback): its own message
+ * type, so the Google connect host never mistakes it for an account, and the connection instead of an email.
+ */
+export const CONNECTION_CALLBACK_SCRIPT = OAUTH_CALLBACK_SCRIPT.replace(
+  'var msg = { type: "agentinbox:oauth", ok: r.ok, email: r.email,',
+  'var msg = { type: "agentinbox:connection-oauth", ok: r.ok, connectionId: r.connectionId, name: r.name,',
+);
+registerInlineScript(CONNECTION_CALLBACK_SCRIPT);
+
 interface PageInput {
   ok: boolean;
   /** A reload of a callback that already connected `email`: nothing is posted to the console. */
@@ -70,6 +80,8 @@ interface PageInput {
   code?: string | null;
   /** postMessage target origin for the opener (the console). */
   targetOrigin: string;
+  /** An upstream connection's sign-in (docs/MCP-BROKER.md) instead of a Google account's. */
+  connection?: { id: string | null; name: string | null };
 }
 
 export function callbackPage(p: PageInput): string {
@@ -85,6 +97,7 @@ export function callbackPage(p: PageInput): string {
     hint: p.ok ? null : (p.hint ?? null),
     targetOrigin: p.targetOrigin,
     ...(p.already ? { already: true } : {}),
+    ...(p.connection ? { connectionId: p.connection.id, name: p.connection.name } : {}),
   };
   return `<!doctype html>
 <html lang="en">
@@ -120,11 +133,15 @@ export function callbackPage(p: PageInput): string {
   <h1>${escapeHtml(p.title)}</h1>
   <p>${escapeHtml(p.message)}</p>
   ${p.hint ? `<p class="hint">${escapeHtml(p.hint)}</p>` : ""}
-  <a class="button" href="${escapeHtml(p.ok && p.email ? `/accounts?connected=${encodeURIComponent(p.email)}` : "/accounts")}">${p.already ? "Back to the console" : "Go to accounts"}</a>
+  ${
+    p.connection
+      ? `<a class="button" href="/connections">${p.already ? "Back to the console" : "Go to connections"}</a>`
+      : `<a class="button" href="${escapeHtml(p.ok && p.email ? `/accounts?connected=${encodeURIComponent(p.email)}` : "/accounts")}">${p.already ? "Back to the console" : "Go to accounts"}</a>`
+  }
   <div class="brand">xaq</div>
 </main>
 <script type="application/json" id="oauth-result">${scriptJson(result)}</script>
-<script>${OAUTH_CALLBACK_SCRIPT}</script>
+<script>${p.connection ? CONNECTION_CALLBACK_SCRIPT : OAUTH_CALLBACK_SCRIPT}</script>
 </body>
 </html>`;
 }

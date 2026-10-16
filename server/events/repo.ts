@@ -14,7 +14,10 @@ export interface EventRow {
   seq: number;
   id: string;
   type: EventType;
+  /** '' on connection events. */
   account_id: string;
+  /** Connection events only (migration 8). */
+  connection_id: string | null;
   account_email: string | null;
   label_ids: string;
   message: string | null;
@@ -27,7 +30,7 @@ export interface EventRow {
 
 /** Joins the account email live; deleted accounts fall back to detail.email. */
 export const EVENT_SELECT = `SELECT e.seq, e.id, e.type, e.account_id, a.email AS account_email, e.label_ids, e.message,
-  e.changed_label_ids, e.detail, e.calendar_event, e.created_at FROM events e LEFT JOIN accounts a ON a.id = e.account_id`;
+  e.changed_label_ids, e.detail, e.calendar_event, e.connection_id, e.created_at FROM events e LEFT JOIN accounts a ON a.id = e.account_id`;
 
 export function toStoredEvent(r: EventRow): StoredEvent {
   const detail = json.parse<Record<string, unknown> | null>(r.detail, null);
@@ -39,7 +42,8 @@ export function toStoredEvent(r: EventRow): StoredEvent {
     seq: r.seq,
     type: r.type,
     accountId: r.account_id,
-    accountEmail: r.account_email ?? fallbackEmail,
+    accountEmail: r.connection_id ? "" : (r.account_email ?? fallbackEmail),
+    ...(r.connection_id ? { connectionId: r.connection_id } : {}),
     message: json.parse<MessageSummary | null>(r.message, null),
     ...(calendarEvent ? { calendarEvent } : {}),
     ...(changed ? { labelIds: changed } : {}),
