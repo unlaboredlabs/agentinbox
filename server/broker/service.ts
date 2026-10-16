@@ -249,7 +249,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       if (!preset?.events?.handleWebhook || preset.auth.type !== "user_app") return null;
       const secret = clientRecord(connectionId)?.[preset.auth.clientSecretInput];
       if (typeof secret !== "string" || !secret) return null;
-      return { preset, deps: parts.nativeDeps?.(c) ?? defaultNativeDeps(c), clientSecret: secret };
+      return { preset, deps: parts.nativeDeps?.(c) ?? defaultNativeDeps(c), clientSecret: secret, client: clientRecord(connectionId) };
     },
     emit(events) {
       const byConnection = new Map<string, IntegrationEvent[]>();
