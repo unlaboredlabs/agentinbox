@@ -79,7 +79,6 @@ export type NativeEventType = (typeof EVENT_TYPES)[number];
  */
 export const BROKER_EVENT_TYPES = [
   "connection.auth_failed", // the upstream's credential stopped working; the owner must reconnect
-  "connection.tool_changed", // an upstream tool changed or appeared and is held until the owner accepts it
   "connection.expiring", // the credential stops working on a known date (no refresh, or a cap): reconnect before it
   "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
 ] as const;
@@ -1030,7 +1029,7 @@ export interface McpCallApprovalDetail {
   args: string;
   /** sha256 (hex) of `args`, re-checked on approve. */
   argsSha256: string;
-  /** The tool's pin when the call was queued; a different pin on approve means the tool changed. */
+  /** The tool's definition hash when the call was queued; a different one on approve means the tool changed since. */
   pinHash: string;
   /** The upstream's result once the approved call ran (what get_call_status returns). */
   result?: McpCallResult | null;
@@ -1045,7 +1044,7 @@ export interface McpCallApprovalDetail {
 
 /**
  * GET /api/approvals/:id for an mcp.call: the card. `approval.call.args` holds the exact bytes that run on approve.
- * `tool` is the tool as the agent can reach it now (null when it no longer can: access removed, on hold).
+ * `tool` is the tool as the agent can reach it now (null when it no longer can: access removed, or the tool was removed).
  */
 export interface McpCallApprovalView {
   approval: McpCallApproval;
@@ -1221,9 +1220,6 @@ export interface UpstreamToolDefinition {
 }
 
 export type ToolClassSource = "preset" | "annotation" | "heuristic";
-export type UpstreamToolState = "active" | "held";
-/** changed: the definition's hash differs from the pin; new: the tool wasn't there at connect. */
-export type ToolHeldReason = "changed" | "new";
 
 export interface UpstreamTool {
   connectionId: string;
@@ -1231,19 +1227,15 @@ export interface UpstreamTool {
   name: string;
   /** `<slug>__<name>`, as listed to agents. */
   exposedName: string;
-  /** What agents see. null only for a held new tool (nothing pinned yet). */
-  definition: UpstreamToolDefinition | null;
-  pinHash: string | null;
+  /** What agents see: the upstream's latest definition (a change is used at once and audited). */
+  definition: UpstreamToolDefinition;
+  /** The definition's hash; a different one on a later listing is audited as connection.tool_changed. */
+  pinHash: string;
   /** Irreversible: waits for approval at the "ask" level. */
   risky: boolean;
   /** Listed at the "read" level. Never both risky and read. */
   read: boolean;
   classSource: ToolClassSource;
-  state: UpstreamToolState;
-  heldReason: ToolHeldReason | null;
-  /** While held: what accepting would pin. */
-  candidate: UpstreamToolDefinition | null;
-  candidateHash: string | null;
   firstSeenAt: string;
   updatedAt: string;
 }
@@ -1275,11 +1267,8 @@ export interface ApprovalRule {
 /** A connection as the Connections list shows it. */
 export interface ConnectionView extends Connection {
   tools: {
-    /** Every pinned or held tool. */
+    /** Every tool the upstream lists (all usable: a changed tool is never held). */
     total: number;
-    active: number;
-    /** Waiting for the owner to accept a changed or new definition. */
-    held: number;
   };
   /** Whole days until expiresAt (0 = today or past), or null when not known to expire. */
   expiresInDays: number | null;
@@ -1380,26 +1369,6 @@ export interface PresetView {
   authType: ConnectionAuthType;
   setupSteps: SetupStepView[];
   reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number } | null;
-}
-
-/** One line of a held tool's diff: pinned (-) against the candidate (+), on pretty-printed JSON. */
-export interface ToolDiffLine {
-  op: " " | "-" | "+";
-  text: string;
-}
-
-/** GET /api/connections/:id/held: a tool waiting for the owner to accept its new definition. */
-export interface HeldToolView {
-  name: string;
-  exposedName: string;
-  heldReason: ToolHeldReason;
-  /** null for a new tool. */
-  pinned: UpstreamToolDefinition | null;
-  candidate: UpstreamToolDefinition;
-  /** Pass back to accept: a candidate that changed since is refused (409). */
-  candidateHash: string;
-  diff: ToolDiffLine[];
-  updatedAt: string;
 }
 
 // ───────────────────────────── Audit ─────────────────────────────
@@ -1551,8 +1520,6 @@ export interface ApiError {
 //   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
 //   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView
 //   POST   /api/connections/:id/refresh               → { ok, error, connection: ConnectionView } (list the tools again now)
-//   GET    /api/connections/:id/held                  → HeldToolView[]
-//   POST   /api/connections/:id/held/:name/accept {candidateHash} → HeldToolView[] (the rest still held; 409 if it changed again)
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval

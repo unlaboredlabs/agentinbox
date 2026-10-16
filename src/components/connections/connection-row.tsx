@@ -147,13 +147,12 @@ export function useConnectionActions() {
   return { askDisable, askRemove };
 }
 
-/** One row of the Connections page: status, private-network badge, tool and held counts, and the fixes. */
+/** One row of the Connections page: status, private-network badge, tool count, and the fixes. */
 export function ConnectionRow({ connection: c }: { connection: ConnectionView }) {
   const now = useNow(60_000);
   const view = connectionStatusView(c, now);
   const { askDisable, askRemove } = useConnectionActions();
   const { reconnect, dialog } = useReconnect();
-  const held = c.tools.held;
   return (
     <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
       <div className="min-w-0 flex-1">
@@ -171,25 +170,13 @@ export function ConnectionRow({ connection: c }: { connection: ConnectionView })
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
           <span className="font-mono">{c.slug}</span>
           <span className="flex items-center gap-1">
-            <WrenchIcon className="size-3" /> {c.tools.active} tool{c.tools.active === 1 ? "" : "s"}
+            <WrenchIcon className="size-3" /> {c.tools.total} tool{c.tools.total === 1 ? "" : "s"}
           </span>
           <span>
             {c.agents} agent{c.agents === 1 ? "" : "s"}
           </span>
           {c.url && <span className="max-w-64 truncate">{c.url}</span>}
         </div>
-        {held > 0 && (
-          <Link
-            to="/connections/$connectionId"
-            params={{ connectionId: c.id }}
-            className="mt-2 flex max-w-3xl items-start gap-1.5 rounded-md bg-warning/[0.08] px-2.5 py-1.5 text-xs text-foreground/90 hover:bg-warning/15"
-          >
-            <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-warning" />
-            <span>
-              {c.name} changed {held} tool{held === 1 ? "" : "s"}. {held === 1 ? "It's" : "They're"} on hold until you review the change.
-            </span>
-          </Link>
-        )}
         {view.tone === "bad" && (
           <p className="mt-2 flex max-w-3xl items-start gap-1.5 rounded-md bg-critical/[0.06] px-2.5 py-1.5 text-xs text-foreground/90">
             <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-critical" />

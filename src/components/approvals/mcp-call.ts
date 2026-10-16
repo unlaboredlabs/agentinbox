@@ -135,8 +135,8 @@ export function cardWarnings(v: Pick<McpCallApprovalView, "argsIntact" | "tool" 
   if (!v.argsIntact) out.push("The stored arguments no longer match their fingerprint. Reject this request.");
   if (!v.connection) out.push("Its connection was removed. Approving can't run it.");
   else if (v.connection.status !== "active") out.push(`${v.connection.name} isn't working right now (${v.connection.status.replace("_", " ")}). Approving fails until it's fixed.`);
-  if (!v.tool) out.push("The agent can't reach this tool anymore (access removed, or the tool is on hold). Approving can't run it.");
-  else if (!v.tool.pinMatches) out.push("The tool's definition changed since the agent asked. Approving can't run it until you accept the change.");
+  if (!v.tool) out.push("The agent can't reach this tool anymore (access removed, or the tool was removed). Approving can't run it.");
+  else if (!v.tool.pinMatches) out.push("The tool's definition changed since the agent asked. Approving can't run it: reject it, and the agent can ask again.");
   return out;
 }
 
