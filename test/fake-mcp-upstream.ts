@@ -59,7 +59,11 @@
  *   ["authorization_code"], no refresh tokens, refresh → unsupported_grant_type), accessTokenTtlSec,
  *   forceInvalidGrant (every refresh → invalid_grant), rotateRefreshTokens, issMode, deny (→ error=access_denied),
  *   requireResource, requiredScope, metadataIssuer (publish a wrong `issuer`), pkce (false: S256 not advertised),
- *   dcr (false: no registration_endpoint; use `preRegistered` clients), scopesSupported. Fixed at start: authServer,
+ *   dcr (false: no registration_endpoint; use `preRegistered` clients), scopesSupported, pkce "absent" (no
+ *   code_challenge_methods_supported at all), advertiseIss (false: no authorization_response_iss_parameter_supported),
+ *   cimd (client ID metadata documents: an https client_id is fetched with `cimdFetch`). The token endpoint checks
+ *   the RFC 7636 verifier format (43–128 unreserved characters). `issuerPath` puts the issuer under a path (RFC 8414
+ *   path insertion; the root documents 404). Fixed at start: authServer,
  *   prm, advertiseResourceMetadata (false: a bare `WWW-Authenticate: Bearer`), metadataAt, preRegistered.
  *
  * Private hosts: `advertisedOrigin: "http://100.104.249.49:3773"` makes the fake call itself by that origin (url,
@@ -144,9 +148,17 @@ export interface FakeOAuthSettings {
   requireResource: boolean;
   requiredScope: string | null;
   metadataIssuer: string | null;
-  pkce: boolean;
+  /** true: advertises S256; false: only "plain"; "absent": no code_challenge_methods_supported at all. */
+  pkce: boolean | "absent";
   dcr: boolean;
   scopesSupported: string[];
+  /** Advertise `authorization_response_iss_parameter_supported` (default true). */
+  advertiseIss: boolean;
+  /**
+   * Client ID Metadata Documents: advertise `client_id_metadata_document_supported` and accept an https URL as
+   * client_id, fetching the document with `cimdFetch` (offline tests point it at the broker's own route).
+   */
+  cimd: boolean;
 }
 
 export interface FakeOAuthOptions extends Partial<FakeOAuthSettings> {
@@ -159,6 +171,13 @@ export interface FakeOAuthOptions extends Partial<FakeOAuthSettings> {
   metadataAt?: "oauth" | "oidc";
   /** Clients that exist without DCR (pre-registered). */
   preRegistered?: FakeOAuthClient[];
+  /**
+   * A path on the issuer (e.g. "/tenant1"): issuer = origin + path, metadata at the RFC 8414 path-inserted URL
+   * (/.well-known/oauth-authorization-server/tenant1), endpoints under the path.
+   */
+  issuerPath?: string;
+  /** Fetches a client ID metadata document (settings.cimd). Default: the global fetch. */
+  cimdFetch?: (url: string) => Promise<Response>;
 }
 
 export type FakeAuth =
@@ -474,7 +493,10 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     pkce: oauthCfg?.pkce ?? true,
     dcr: oauthCfg?.dcr ?? true,
     scopesSupported: oauthCfg?.scopesSupported ?? ["notes:read", "notes:write"],
+    advertiseIss: oauthCfg?.advertiseIss ?? true,
+    cimd: oauthCfg?.cimd ?? false,
   };
+  const issuerPath = (oauthCfg?.issuerPath ?? "").replace(/\/$/, "");
 
   // ---- the fake object (filled in after the servers listen) -------------------------------------------------------
   const up: FakeMcpUpstream = {
@@ -483,7 +505,9 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     listenOrigin: "",
     fetch: (input, init) => {
       const u = input instanceof Request ? input.url : String(input);
-      if (up.origin === up.listenOrigin || !u.startsWith(up.origin)) return fetch(input, init);
+      // Origin boundary: ":3773" must not also match ":37731".
+      const sameOrigin = u.startsWith(up.origin) && (u.length === up.origin.length || "/?#".includes(u[up.origin.length]!));
+      if (up.origin === up.listenOrigin || !sameOrigin) return fetch(input, init);
       const mapped = up.listenOrigin + u.slice(up.origin.length);
       return input instanceof Request ? fetch(new Request(mapped, input), init) : fetch(mapped, init);
     },
@@ -906,10 +930,11 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
       revocation_endpoint: `${issuer}/revoke`,
       response_types_supported: ["code"],
       grant_types_supported: settings.refreshGrant ? ["authorization_code", "refresh_token"] : ["authorization_code"],
-      code_challenge_methods_supported: settings.pkce ? ["S256"] : ["plain"],
+      ...(settings.pkce === "absent" ? {} : { code_challenge_methods_supported: settings.pkce ? ["S256"] : ["plain"] }),
       token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
       scopes_supported: settings.scopesSupported,
-      authorization_response_iss_parameter_supported: true,
+      ...(settings.advertiseIss ? { authorization_response_iss_parameter_supported: true } : {}),
+      ...(settings.cimd ? { client_id_metadata_document_supported: true } : {}),
     };
   }
 
@@ -937,8 +962,31 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     sendHtml(res, 400, `<!doctype html><title>Authorization error</title><p>${msg}</p>`);
   }
 
+  /** A registered client, or (settings.cimd) one described by the client ID metadata document at its https URL. */
+  async function resolveClient(id: string): Promise<FakeOAuthClient | undefined> {
+    const known = registrations.get(id);
+    if (known || !settings.cimd || !id.startsWith("https://")) return known;
+    try {
+      const r = await (oauthCfg?.cimdFetch ?? fetch)(id);
+      const doc = (await r.json()) as Json;
+      if (!r.ok || doc.client_id !== id || !Array.isArray(doc.redirect_uris)) return undefined;
+      const client: FakeOAuthClient = { client_id: id, redirect_uris: doc.redirect_uris as string[], token_endpoint_auth_method: "none" };
+      registrations.set(id, client);
+      return client;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function authServer(req: IncomingMessage, res: ServerResponse, entry: LoggedRequest, url: URL): Promise<boolean> {
-    const p = url.pathname;
+    let p = url.pathname;
+    if (issuerPath) {
+      // RFC 8414 path insertion (and the OIDC forms); the root documents and unprefixed endpoints don't exist.
+      if (p === `/.well-known/oauth-authorization-server${issuerPath}`) p = "/.well-known/oauth-authorization-server";
+      else if (p === `/.well-known/openid-configuration${issuerPath}` || p === `${issuerPath}/.well-known/openid-configuration`) p = "/.well-known/openid-configuration";
+      else if (p.startsWith(`${issuerPath}/`)) p = p.slice(issuerPath.length);
+      else return false;
+    }
     if (req.method === "GET" && p === "/.well-known/oauth-authorization-server" && oauthCfg?.metadataAt !== "oidc") {
       sendJson(res, 200, asMetadata());
       return true;
@@ -977,7 +1025,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     }
     if (req.method === "GET" && p === "/authorize") {
       const q = url.searchParams;
-      const client = registrations.get(q.get("client_id") ?? "");
+      const client = await resolveClient(q.get("client_id") ?? "");
       const redirectUri = q.get("redirect_uri") ?? "";
       if (!client) return errorPage(res, "Error 401: invalid_client"), true;
       if (!client.redirect_uris.includes(redirectUri)) return errorPage(res, "Error 400: redirect_uri_mismatch"), true;
@@ -1043,6 +1091,8 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
           return oauthError(400, "invalid_grant", "Code already used"), true;
         }
         if (form.get("redirect_uri") !== c.redirectUri) return oauthError(400, "invalid_grant", "redirect_uri mismatch"), true;
+        // RFC 7636 §4.1: 43–128 unreserved characters.
+        if (!/^[A-Za-z0-9\-._~]{43,128}$/.test(form.get("code_verifier") ?? "")) return oauthError(400, "invalid_grant", "code_verifier format"), true;
         if (s256(form.get("code_verifier") ?? "") !== c.challenge) return oauthError(400, "invalid_grant", "PKCE verification failed"), true;
         if (resource !== c.resource || (settings.requireResource && resource !== up.url)) return oauthError(400, "invalid_target", "resource mismatch"), true;
         c.used = true;
@@ -1142,6 +1192,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
           if (!(await authServer(req, res, entry, url))) fallback(req, res);
         })
       : up.origin;
+    issuer += issuerPath;
     up.oauth = {
       issuer,
       settings,

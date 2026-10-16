@@ -558,3 +558,71 @@ describe("credential store and refresher", () => {
     expect(scrubText("echo mysecret123", ["mysecret123"])).toBe("echo [redacted]");
   });
 });
+
+// ───────────────────────────── OAuth edge cases (fake modes added for these) ─────────────────────────────
+
+describe("MCP OAuth: registration order and authorization server variants", () => {
+  it("refuses an authorization server that doesn't advertise PKCE methods at all", async () => {
+    const up = await fake({ auth: { kind: "oauth", pkce: "absent" } });
+    const e = env();
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    await expect(e.rt.startConnect(id)).rejects.toThrow(/S256/);
+    expect(up.oauth!.registrations.size).toBe(0);
+  });
+
+  it("an issuer with a path: RFC 8414 path insertion and an exact issuer match", async () => {
+    const up = await fake({ auth: { kind: "oauth", issuerPath: "/tenant1" } });
+    expect(up.oauth!.issuer).toBe(`${up.origin}/tenant1`);
+    const e = env();
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    await connectOAuth(e, id, up);
+    expect(up.requests.some((r) => r.path === "/.well-known/oauth-authorization-server/tenant1" && r.status === 200)).toBe(true);
+    expect(firstText(await e.rt.source(id).callTool("echo", { t: 1 }, callCtx(id)))).toBe('{"t":1}');
+  });
+
+  it("iss: accepted when absent from a server that doesn't advertise it; required from one that does", async () => {
+    const quiet = await fake({ auth: { kind: "oauth", advertiseIss: false, issMode: "omit" } });
+    const e = env();
+    const a = addConnection(e.ctx, { url: quiet.url, auth: "oauth" });
+    await connectOAuth(e, a, quiet);
+    expect(status(e.ctx, a).status).toBe("active");
+
+    const loud = await fake({ auth: { kind: "oauth", issMode: "omit" } });
+    const b = addConnection(e.ctx, { url: loud.url, auth: "oauth" });
+    const start = await e.rt.startConnect(b);
+    const cb = await loud.oauth!.followAuthorize(start.authUrl);
+    await expect(e.rt.finishConnectFromUrl(cb.toString())).rejects.toMatchObject({ code: "oauth_issuer" });
+  });
+
+  it("a pre-registered client comes first; without DCR or one, the user is asked for a client ID", async () => {
+    const up = await fake({
+      auth: { kind: "oauth", dcr: false, preRegistered: [{ client_id: "shipped-client", redirect_uris: [], token_endpoint_auth_method: "none" }] },
+    });
+    const e = env();
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    await expect(e.rt.startConnect(id)).rejects.toThrow(/paste its client ID/);
+    up.oauth!.registrations.get("shipped-client")!.redirect_uris = [e.rt.callback().redirectUri];
+    await connectOAuth(e, id, up, { preRegistered: { client_id: "shipped-client" } });
+    expect(e.rt.store.client(id)).toMatchObject({ client_id: "shipped-client", source: "pre_registered", issuer: up.oauth!.issuer });
+  });
+
+  it("a client ID metadata document on a public https install, before DCR", async () => {
+    const e = env({ lookup: dns({ "broker.example": ["93.184.216.34"] }) });
+    e.ctx.settings.update({ publicUrl: "https://broker.example" });
+    const app = createApp(e.ctx);
+    const up = await fake({ auth: { kind: "oauth", cimd: true, cimdFetch: async (url) => app.request(new URL(url).pathname) } });
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    expect(await e.rt.probe(up.url, { privateTarget: up.origin })).toMatchObject({ auth: "oauth", registration: "metadata_document" });
+    await connectOAuth(e, id, up);
+    expect(e.rt.store.client(id)).toMatchObject({ client_id: "https://broker.example/oauth/connections/client.json", source: "metadata_document" });
+    expect(up.requests.some((r) => r.path === "/register")).toBe(false);
+    const doc = (await (await app.request("/oauth/connections/client.json")).json()) as { redirect_uris: string[] };
+    expect(doc.redirect_uris).toEqual(["https://broker.example/oauth/connections/callback"]);
+  });
+
+  it("the fake's up.fetch maps only its own origin (port boundary)", async () => {
+    const up = await fake({ advertisedOrigin: "http://forge.test:3773" });
+    // Not mapped to the fake (forge.test doesn't resolve), where a prefix match would have mapped it.
+    await expect(up.fetch("http://forge.test:37731/mcp")).rejects.toBeInstanceOf(Error);
+  });
+});

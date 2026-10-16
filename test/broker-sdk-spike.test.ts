@@ -272,8 +272,11 @@ describe("calls: cancellation, timeouts, latency, outputs", () => {
       const ac = new AbortController();
       const started = Date.now();
       const call = c.callTool({ name: "slow", arguments: {} }, { signal: ac.signal });
-      setTimeout(() => ac.abort(new Error("downstream went away")), 20);
-      await expect(call).rejects.toBeInstanceOf(SdkError);
+      const rejected = expect(call).rejects.toBeInstanceOf(SdkError);
+      // Abort only once the upstream has the call: an earlier abort never reaches it (flaky under load).
+      await until(() => up.requests.some((r) => r.rpcMethod === "tools/call"), 5000);
+      ac.abort(new Error("downstream went away"));
+      await rejected;
       expect(Date.now() - started).toBeLessThan(1000);
       await until(() => up.cancellations.length === 1);
       expect(up.cancellations[0]).toMatchObject({ method: "tools/call", via });
