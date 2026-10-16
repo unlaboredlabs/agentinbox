@@ -513,11 +513,22 @@ describe("worker fairness, retention and shutdown", () => {
     });
     const healthy = await receiver();
     await ctx.webhooks.create(input(`http://127.0.0.1:${(stuck.address() as AddressInfo).port}/`, { name: "stuck" }));
-    await ctx.webhooks.create(input(healthy.url, { name: "healthy" }));
+    const { webhook: healthyHook } = await ctx.webhooks.create(input(healthy.url, { name: "healthy" }));
     for (let i = 0; i < 6; i++) ctx.events.emit(received(`m${i}`));
     ctx.webhooks.start!();
-    await until(() => healthy.requests.length === 6);
+    // The stuck webhook's second slot may only be filled once a healthy attempt frees a worker
+    // slot, and that request can reach the stuck receiver after the healthy backlog has drained,
+    // so wait for both conditions instead of sampling `hanging` at one moment.
+    await until(() => healthy.requests.length === 6 && hanging >= 2, 8_000);
+    // Give the worker further chances to over-dispatch the stuck backlog: one more healthy
+    // delivery can only go out on a later tick, and the stuck receiver must still hold exactly
+    // the per-webhook cap, with the rest of its backlog untouched.
+    ctx.events.emit(received("m6"));
+    await until(() => healthy.requests.length === 7, 8_000);
     expect(hanging).toBe(2);
+    const stuckRows = deliveries(ctx).filter((d) => d.webhookId !== healthyHook.id);
+    expect(stuckRows).toHaveLength(7);
+    expect(stuckRows.every((d) => d.status === "pending" && d.attempts === 0)).toBe(true);
     await ctx.webhooks.stop!();
   });
 
