@@ -636,6 +636,22 @@ four of Hermes's six upstreams are on loopback or Tailscale.
    until M2. t3code-worldstream is retired and isn't migrated.
 4. One fresh-persona walk passes: a new user with Notion only, no Google.
 
+**M1 merge train**, in order. Each PR is off the latest main and runs behind a `brokerUpstreams` setting, off by default,
+until PR 8, so existing users see nothing half-built:
+
+| # | PR | Tier |
+|---|---|---|
+| 1 | SDK spike, written up as a short ADR: stay on v1.32 or move to the v2 client, decided by a 2025 session server and a 2026 stateless server in the fake | M |
+| 2 | Schema (migration 8): `connections`, `connection_credentials`, `upstream_tools` (pins), `tool_grants`; rebuild `approvals` with nullable `account_id`/`draft_id` and a generic payload; `owner_id` columns. Existing data is untouched, and there's an upgrade test from main's DB | L |
+| 3 | Upstream runtime: the pinned, guarded fetch with the private-target allow, the client pool (both protocol generations plus SSE), timeouts and cancellation, strict discovery, static-header auth | L |
+| 4 | OAuth to upstreams: an SQLite `OAuthClientProvider` (pre-registered, DCR, client ID metadata document), PKCE, `state` and `iss` checks, `resource`, proactive and reactive refresh, `needs_reauth` and expiry warnings, `connection.auth_failed`, the `/oauth/connections/callback` route | L, plus a security review |
+| 5 | Catalog and pinning: list with TTL, hashing, `pending_review`, cleaned descriptions, review signals, namespacing and collision checks | L |
+| 6 | Policy and approvals: `decideTool`, the defaults, caps and egress budget, `mcp.call` approvals with exact bytes, `get_call_status`, output wrapping, token scrubbing, the audit fields, the kill switch | L, plus a security review |
+| 7 | MCP endpoint aggregation: upstream tools on `/mcp` next to the unchanged native ones, the instructions, a listener stream without Gmail, the events | L |
+| 8 | Console: Connections, Add connection (custom URL plus the Notion preset), tool review, the tool grant editor, the approval card, the private-target allow UX, first run with Google optional. The feature flag is removed here | M |
+| 9 | CLI: `connections add/list/reconnect/disable` and `import --from hermes/claude-code/cursor/codex`, with a dry run | M |
+| 10 | E2E (done-when #1), docs, SKILL.md; then the Notion check and the Hermes migration on Wynn's install; then the persona walk | M |
+
 ### M2: WHOOP native
 
 **Scope:** the guided per-user app setup, the WHOOP tools, the refresh worker, webhooks or polling, and the
