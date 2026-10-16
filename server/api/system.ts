@@ -151,7 +151,7 @@ export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "por
   // Assignments are quoted per value above: quoting the whole `KEY=value` word would turn it into a command.
   const args = ["npx", "-y", NPM_PACKAGE];
   if (config.service) args.push("service", "install");
-  // An install from before the rename on ~/.xaq needs no --data: it stays the default while ~/.xaq doesn't exist.
+  // An install from before the rename on ~/.agentinbox needs no --data: it stays the default unless ~/.xaq holds our files (rename-xaq: keep).
   if (resolve(config.dataDir) !== defaultDataDir()) args.push("--data", config.dataDir);
   if (config.port !== DEFAULT_PORT) args.push("--port", String(config.port));
   if (config.host !== DEFAULT_HOST) args.push("--host", config.host);

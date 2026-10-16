@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MIN_NODE, nodeVersionError } from "../node-check.ts";
-import { writePrivateFile } from "./fsutil.ts";
+import { assertOurs, writePrivateFile } from "./fsutil.ts";
 import { profileBrand } from "./names.ts";
 import { configDir, profilePath, validProfileName } from "./paths.ts";
 import { loadProfile } from "./profile.ts";
@@ -162,7 +162,10 @@ export function helperNodeNote(profile: string, rerun: string): string {
 /** Writes (or refreshes) the helper script, 0700. Returns the shell command for headersHelper. */
 export function installHeaderHelper(profile: string): string {
   const command = headerHelperCommand(profile);
-  writePrivateFile(helperScriptPath(), helperScript(join(configDir(), "profiles")));
+  // Ours: written by connect / setup-mcp (named agentinbox in helpers from before the rename). bin/ may sit in a
+  // directory another program called xaq owns, so an existing bin/ keeps its mode.
+  assertOurs(helperScriptPath(), (p) => /^#!\/usr\/bin\/env node\n\/\/ (?:xaq|agentinbox) MCP header helper/.test(readFileSync(p, "utf8")), "MCP header helper");
+  writePrivateFile(helperScriptPath(), helperScript(join(configDir(), "profiles")), { privateDir: "new" });
   // writePrivateFile leaves 0600; the script itself is run through node, so it needn't be executable.
   return command;
 }
@@ -172,12 +175,20 @@ export function claudeServerEntry(url: string, profile: string, opts: { install?
   return { type: "http", url, headersHelper: opts.install === false ? headerHelperCommand(profile) : installHeaderHelper(profile) };
 }
 
+/** One of our keyless MCP configs: a single server whose headers come from our header helper. */
+function isOurClaudeMcpConfig(path: string): boolean {
+  const servers = (JSON.parse(readFileSync(path, "utf8")) as { mcpServers?: Record<string, { headersHelper?: unknown }> }).mcpServers ?? {};
+  const entries = Object.values(servers);
+  return entries.length === 1 && typeof entries[0]?.headersHelper === "string" && entries[0].headersHelper.includes("mcp-header.mjs");
+}
+
 /** Writes the per-profile MCP config the Claude Code listener recipe uses. Returns its path. */
 export function writeClaudeMcpConfig(profile: string, url: string): string {
   const path = claudeMcpConfigPath(profile);
   // The recipe allows exactly `mcp__<brand>`, so the server is always named that in this file: xaq, or
   // agentinbox for a profile from before the rename, whose saved recipe allows `mcp__agentinbox`.
-  writePrivateFile(path, JSON.stringify({ mcpServers: { [profileBrand(profile)]: claudeServerEntry(url, profile) } }, null, 2) + "\n");
+  assertOurs(path, isOurClaudeMcpConfig, "Claude Code MCP config");
+  writePrivateFile(path, JSON.stringify({ mcpServers: { [profileBrand(profile)]: claudeServerEntry(url, profile) } }, null, 2) + "\n", { privateDir: "new" });
   return path;
 }
 

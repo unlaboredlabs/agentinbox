@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_NAME, NPM_PACKAGE as PACKAGE } from "../shared/types.ts";
 import { readSetupToken } from "./auth/setup-token.ts";
+import { assertOurs } from "./listen/fsutil.ts";
 import { envVar, LEGACY_PRODUCT } from "./brand.ts";
-import { type Config, type ConfigInput, dataFiles, legacyDataDir } from "./config.ts";
+import { type Config, type ConfigInput, dataFiles, hasForeignFiles } from "./config.ts";
 import { Crypto } from "./crypto.ts";
 import { assertMasterKeyUsable, cliCommand, type InstanceInfo, runningInstance, serviceInstallCommand } from "./instance.ts";
 import { consoleUrls, loopbackUrl } from "./urls.ts";
@@ -181,8 +182,19 @@ function readPreviousEnv(dataDir: string): Record<string, string> {
   }
 }
 
+/** A service.env we wrote: only KEY=value lines for our own settings. */
+function isOurServiceEnv(file: string): boolean {
+  const known = new Set<string>([...SERVICE_ENV_KEYS, ...Object.values(LEGACY_ENV_KEYS)]);
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .every((l) => known.has(/^([A-Z_][A-Z0-9_]*)=/.exec(l)?.[1] ?? ""));
+}
+
 function writeServiceEnv(dataDir: string, env: Record<string, string>): void {
   const file = serviceEnvPath(dataDir);
+  // The data directory may be a ~/.xaq another program called xaq owns: never replace its files.
+  assertOurs(file, isOurServiceEnv, "service settings (service.env)");
   if (!Object.keys(env).length) {
     rmSync(file, { force: true });
     return;
@@ -226,7 +238,7 @@ export function stagePackage(staging: string, opts: { where: string; requireWeb:
   }
 
   console.log(fromSource ? `  Installing this build into ${opts.where}…` : `  Installing the latest release into ${opts.where}…`);
-  rmSync(staging, { recursive: true, force: true });
+  clearOwnInstall(staging);
   mkdirSync(staging, { recursive: true });
   writeFileSync(join(staging, "package.json"), '{ "private": true }\n');
   try {
@@ -253,7 +265,11 @@ export const stageApp = (dir: string): string => stagePackage(join(dir, "app.new
  */
 export function swapIn(staging: string, app: string): { restore(): void; commit(): void } {
   const old = `${app}.old`;
-  rmSync(old, { recursive: true, force: true });
+  clearOwnInstall(old);
+  // In a directory that also holds another program's files (it is called xaq too), only our own install is moved aside.
+  if (existsSync(app) && hasForeignFiles(dirname(app)) && !isOwnInstall(app)) {
+    throw new Error(`${app} already exists and isn't a xaq install, so it was left alone. Move it away, then run this again.`);
+  }
   if (existsSync(app)) renameSync(app, old);
   try {
     renameSync(staging, app);
@@ -272,12 +288,39 @@ export function swapIn(staging: string, app: string): { restore(): void; commit(
   };
 }
 
+/** Whether `path` is one of our installs (xaq-cli, or agentinbox-cli from before the rename). */
+export const isOwnInstall = (path: string) => [PACKAGE, LEGACY_PACKAGE].some((p) => existsSync(join(path, "node_modules", p)));
+
 /** Deletes `<dir>/app`, `app.new` and `app.old`, but only where they really are our own installs (xaq-cli, or agentinbox-cli from before the rename). */
 export function removeOwnInstall(dir: string): void {
   for (const name of ["app", "app.new", "app.old"]) {
     const path = join(dir, name);
-    if ([PACKAGE, LEGACY_PACKAGE].some((p) => existsSync(join(path, "node_modules", p)))) rmSync(path, { recursive: true, force: true });
+    if (isOwnInstall(path)) rmSync(path, { recursive: true, force: true });
   }
+}
+
+/**
+ * Makes room for a staging or backup install. In a directory that also holds another program's files (it is
+ * called xaq too), only our own install (or an empty leftover) is removed; anything else there is refused.
+ */
+function clearOwnInstall(path: string): void {
+  let there = true;
+  try {
+    lstatSync(path);
+  } catch {
+    there = false;
+  }
+  if (!there) return;
+  // An empty leftover (an install that failed before npm wrote anything) is ours too.
+  const empty = (() => {
+    try {
+      return readdirSync(path).filter((n) => n !== "package.json" && n !== "package-lock.json").length === 0;
+    } catch {
+      return false;
+    }
+  })();
+  if (hasForeignFiles(dirname(path)) && !isOwnInstall(path) && !empty) throw new Error(`${path} already exists and isn't a xaq install, so it was left alone. Move it away, then run this again.`);
+  rmSync(path, { recursive: true, force: true });
 }
 
 // ───────────── System integration (injectable for tests) ─────────────
@@ -604,8 +647,9 @@ export function legacyDaemonUnit(
 /**
  * Where `service install` puts the service when the command line and environment don't say: replacing a
  * service from before the rename keeps its data directory, port and host (a bind to 127.0.0.1 must not
- * widen to 0.0.0.0 on upgrade). A service already moved keeps ~/.agentinbox too, even if a ~/.xaq has
- * appeared since. `given` is what the flags (and PORT / HOST / XAQ_DATA) said.
+ * widen to 0.0.0.0 on upgrade). An installed xaq service keeps the data directory its unit names (say
+ * ~/.agentinbox, or the ~/.xaq nightly.71/72 used), even if the default has changed since. `given` is what
+ * the flags (and PORT / HOST / XAQ_DATA) said.
  */
 export function serviceInstallInput(
   given: { dataDir?: string; port?: number; host?: string },
@@ -615,7 +659,7 @@ export function serviceInstallInput(
   const legacy = legacyDaemonUnit(ops);
   const installed = installedDaemonDataDir(ops);
   return {
-    dataDir: given.dataDir ?? (envVar("DATA", env) || undefined) ?? legacy?.dataDir ?? (installed && installed === legacyDataDir() ? installed : undefined) ?? undefined,
+    dataDir: given.dataDir ?? (envVar("DATA", env) || undefined) ?? legacy?.dataDir ?? installed ?? undefined,
     port: given.port ?? (env.PORT?.trim() ? undefined : (legacy?.port ?? undefined)),
     host: given.host ?? (env.HOST ? undefined : (legacy?.host ?? undefined)),
   };

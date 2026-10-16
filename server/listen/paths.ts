@@ -1,15 +1,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { LEGACY_PRODUCT, pickDir, PRODUCT } from "../brand.ts";
+import { pickDir } from "../brand.ts";
 
 /**
  * Agent-side locations (the machine running `connect` / `listen`, not the daemon). XDG on Linux and
  * macOS alike, so one set of paths works everywhere:
- *   config  $XDG_CONFIG_HOME/xaq  (~/.config/xaq)       profiles/<name>.json (0600)
- *   state   $XDG_STATE_HOME/xaq   (~/.local/state/xaq)  listen/<name>/{listen.log,dead.jsonl,status.json}
- *   data    $XDG_DATA_HOME/xaq    (~/.local/share/xaq)  app/ (stable install the services run)
- * Each one is still the pre-rename `…/agentinbox` while that exists and the `…/xaq` one doesn't: existing
- * profiles, keys, logs and the listener services' install stay where they are. Nothing is moved.
+ *   config  $XDG_CONFIG_HOME/xaq-cli  (~/.config/xaq-cli)       profiles/<name>.json (0600)
+ *   state   $XDG_STATE_HOME/xaq-cli   (~/.local/state/xaq-cli)  listen/<name>/{listen.log,dead.jsonl,status.json}
+ *   data    $XDG_DATA_HOME/xaq-cli    (~/.local/share/xaq-cli)  app/ (stable install the services run)
+ * Each directory is chosen on its own (brand.ts pickDir). Another, unrelated program is also called xaq and
+ * may own `~/.config/xaq`, so `…/xaq` counts as ours only when it holds our marker (config: profiles/,
+ * state: listen/, data: app/; a stat, nothing is read):
+ *   `…/xaq` with our marker; else the pre-rename `…/agentinbox` if it exists, so existing profiles, keys,
+ *   logs and the listener services' install stay where they are; else `…/xaq`.
+ * In a `…/xaq` the other program owns, we only add our own subpaths (profiles/, bin/, mcp/, listen/, app*,
+ * install.lock) and never change, rename or delete anything we didn't create. Nothing is ever moved.
  */
 
 const xdg = (envVar: string, fallback: string) => {
@@ -18,11 +23,9 @@ const xdg = (envVar: string, fallback: string) => {
   return v && v.startsWith("/") ? v : join(homedir(), fallback);
 };
 
-const named = (base: string) => pickDir(join(base, PRODUCT), join(base, LEGACY_PRODUCT)).dir;
-
-export const configDir = () => named(xdg("XDG_CONFIG_HOME", ".config"));
-export const stateDir = () => named(xdg("XDG_STATE_HOME", ".local/state"));
-export const dataDir = () => named(xdg("XDG_DATA_HOME", ".local/share"));
+export const configDir = () => pickDir(xdg("XDG_CONFIG_HOME", ".config"), ["profiles"]).dir;
+export const stateDir = () => pickDir(xdg("XDG_STATE_HOME", ".local/state"), ["listen"]).dir;
+export const dataDir = () => pickDir(xdg("XDG_DATA_HOME", ".local/share"), ["app"]).dir;
 
 export const profilesDir = () => join(configDir(), "profiles");
 export const profilePath = (name: string) => join(profilesDir(), `${name}.json`);
