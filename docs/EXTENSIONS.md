@@ -192,9 +192,15 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   Its sign-in waits for the extension's own rules (T3 Code's same-origin issuer) instead of running generic ones.
   Its tools keep working on the stored credential.
 - **The registry:** `presets()` (`server/integrations/index.ts`) stays synchronous. It lists the installed extensions'
-  presets, then what is still in core; an installed extension replaces a core preset of the same name. The store
-  calls `reloadPresets()` after an install, update or remove. After a background install, the bound connections are
-  re-listed, which re-classifies their pinned tools under the manifest.
+  presets, then what is still in core; an installed extension replaces a core preset of the same name.
+- **Startup wiring** (the broker's `start()`): `useExtensionStore(extensionStore(ctx))`, then `setHooks` with:
+  - `usedBy`, as above;
+  - `onRemove`: a forced removal disables the bound connections. Their credentials stay until the connections are
+    removed.
+  - `onChange`: `reloadPresets()`, then the bound connections are re-listed, which re-classifies their pinned tools
+    under the new manifest, or under the generic rules once it's gone.
+  A background install from a bootstrap pin re-lists the same way. The broker's `stop()` unregisters the store.
+- **Validation:** the store's `checkManifest` is `validateManifest`; an invalid manifest is an `invalid` error.
 - **Placeholder pins:** an all-zero commit in `bootstrap.json` installs nothing. The release fills in the real pins.
 - **Test:** a DB fixture shaped like Wynn's install: `notion-personal` and `notion-work` (Notion preset), `whoop` (a
   generic MCP connection to the dashboard URL with a bearer key) and `brightspace` (generic, bearer, `127.0.0.1`). After

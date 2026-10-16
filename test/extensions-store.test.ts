@@ -180,7 +180,7 @@ describe("the extension store", () => {
   });
 
   it("third-party: a GitHub URL needs confirmation and gets the warning (kind, network hosts, runs on your machine)", async () => {
-    const files = { "xaq-extension.json": manifest("whoopish", { kind: "code", remote: undefined, code: { entry: "dist/server.mjs", network: ["api.example.com", "auth.example.com"] } }), "!dist/server.mjs": "export {}" };
+    const files = { "xaq-extension.json": manifest("whoopish", { kind: "code", remote: undefined, code: { entry: "dist/server.mjs", auth: { type: "none" }, network: ["api.example.com", "auth.example.com"] } }), "!dist/server.mjs": "export {}" };
     const dir = writeTree(join(work, "whoopish"), files);
     const sha = fakeSha("tp");
     gh.commit("someone", "exts", "feat/x", sha, entriesFromDir(dir, "pkg/whoopish"));

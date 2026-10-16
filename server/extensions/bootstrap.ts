@@ -14,7 +14,7 @@ import type { Db } from "../db/index.ts";
 import { reloadPresets } from "../integrations/index.ts";
 import { errorMessage } from "../util/errors.ts";
 import pinsJson from "./bootstrap.json" with { type: "json" };
-import type { ExtensionPin, ExtensionStore, InstalledExtension } from "./contract.ts";
+import type { ExtensionPin, ExtensionStore, InstalledExtension } from "./store.ts";
 
 /** The official extensions' pins at release time. */
 export const BOOTSTRAP_PINS: readonly ExtensionPin[] = pinsJson;
@@ -29,9 +29,12 @@ export function usedBy(db: Pick<Db, "all">, name: string): string[] {
   return db.all<{ id: string }>("SELECT id FROM connections WHERE preset = ? ORDER BY created_at, rowid", name).map((r) => r.id);
 }
 
+/** What the upgrade needs from the extension store. */
+export type UpgradeStore = Pick<ExtensionStore, "get" | "installPinned">;
+
 export interface UpgradeDeps {
   db: Pick<Db, "all">;
-  store: ExtensionStore;
+  store: UpgradeStore;
   log: { info(msg: string, meta?: Record<string, unknown>): void; warn(msg: string, meta?: Record<string, unknown>): void };
   /** Default: BOOTSTRAP_PINS. */
   pins?: readonly ExtensionPin[];
@@ -49,7 +52,7 @@ export interface UpgradeResult {
 }
 
 /** Installs in flight, per store: a second upgrade (or a restart of the service) doesn't install twice. */
-const inFlight = new WeakMap<ExtensionStore, Map<string, Promise<void>>>();
+const inFlight = new WeakMap<UpgradeStore, Map<string, Promise<void>>>();
 
 /** The startup upgrade: binds legacy preset connections and installs missing extensions in the background. */
 export function upgradeToExtensions(deps: UpgradeDeps): UpgradeResult {

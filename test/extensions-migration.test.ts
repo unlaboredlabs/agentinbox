@@ -16,9 +16,13 @@ import { createBrokerService } from "../server/broker/service.ts";
 import type { IntegrationPreset, ToolClass, ToolDef } from "../server/broker/types.ts";
 import { upstreams } from "../server/broker/upstream/runtime.ts";
 import type { AppContext } from "../server/context.ts";
-import type { ExtensionPin } from "../server/extensions/contract.ts";
-import { presets, useExtensionStore } from "../server/integrations/index.ts";
-import { type StubStore, stubExtensionStore } from "./extension-fixtures.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type ExtensionPin, extensionStore } from "../server/extensions/store.ts";
+import { presetById, presetSource, presets, useExtensionStore } from "../server/integrations/index.ts";
+import { fixtureManifest, type StubStore, stubExtensionStore } from "./extension-fixtures.ts";
+import { writeTree } from "./extension-fakes.ts";
 import { type FakeMcpUpstream, type FakeTool, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
 import { CSRF, harness, json } from "./platform-helpers.ts";
 
@@ -351,6 +355,40 @@ describe("upgrade to extensions: Wynn's install, no re-auth", () => {
     expect(placeholder.installs).toEqual([]);
     noReauth(e, w);
     expect(snapshot(e.ctx)).toEqual(before);
+  }, 30_000);
+});
+
+describe("the extension store's hooks (startup wiring)", () => {
+  it("presets() reads B1's store; usedBy is the bound connections; install, forced remove and stop are reflected", async () => {
+    const e = await env();
+    const work = mkdtempSync(join(tmpdir(), "xaq-b2-hooks-"));
+    cleanup.push(async () => rmSync(work, { recursive: true, force: true }));
+    // Startup: the broker registers this context's store with presets() and fills its hooks.
+    void e.ctx.broker.start?.();
+    const store = extensionStore(e.ctx);
+    expect(presetSource()).toBe(store);
+    expect(presetById("bs-dev")).toBeNull();
+
+    // An install (a local copy of the Brightspace manifest: third-party, so under another name) reloads presets()
+    // through onChange.
+    const dir = writeTree(join(work, "bs-dev"), { "xaq-extension.json": JSON.stringify({ ...fixtureManifest("brightspace"), name: "bs-dev", slug: "bs-dev" }) });
+    await store.install(dir, { confirmThirdParty: true });
+    expect(presetById("bs-dev")).toMatchObject({ id: "bs-dev", auth: { type: "header" } });
+
+    // A connection bound to it: usedBy names it, and a plain remove is refused.
+    const id = insertConnection(e.ctx, { slug: "bs", name: "Brightspace", preset: "bs-dev", url: "http://127.0.0.1:8787/mcp", authType: "header", privateTarget: "http://127.0.0.1:8787" });
+    upstreams(e.ctx).store.setHeader(id, "Authorization", "Bearer kept");
+    expect(store.usedBy("bs-dev")).toEqual([id]);
+    await expect(store.remove("bs-dev", { force: false })).rejects.toMatchObject({ code: "in_use" });
+    // Forced: the connection is disabled, its credential stays (until the connection is removed), the preset goes.
+    await store.remove("bs-dev", { force: true });
+    expect(e.ctx.db.get("SELECT status, status_reason FROM connections WHERE id = ?", id)).toEqual({ status: "disabled", status_reason: "its extension bs-dev was removed" });
+    expect(upstreams(e.ctx).store.header(id)).toEqual({ name: "Authorization", value: "Bearer kept" });
+    expect(presetById("bs-dev")).toBeNull();
+
+    // Stopping the broker unregisters its store.
+    await e.ctx.broker.stop?.();
+    expect(presetSource()).toBeNull();
   }, 30_000);
 });
 

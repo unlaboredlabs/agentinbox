@@ -341,7 +341,7 @@ describe("presets(): installed extensions plus what's left in core", () => {
   it("an installed extension replaces a core preset of the same name; a broken manifest offers nothing", () => {
     const whoop = { ...fixtureExtension("notion"), name: "whoop", kind: "code" as const, manifest: { ...code(), name: "whoop", slug: "whoop", code: { ...(code().code as object), events: ["whoop.recovery_updated"] } } };
     const broken = { ...fixtureExtension("notion"), name: "broken", manifest: { schema: 1, name: "broken" } };
-    useExtensionStore({ list: () => [whoop, broken], get: () => null, installPinned: () => Promise.reject(new Error("no")) });
+    useExtensionStore({ list: () => [whoop, broken] });
     const ids = presets().map((p) => p.id);
     expect(ids).toEqual(["whoop"]);
     expect(presetById("whoop")!.kind).toBe("native");

@@ -10,18 +10,22 @@
 // - Remote presets give `url` and `auth`, or `userServer` when the user names the server (T3 Code, Brightspace);
 //   native ones give `createSource` (and `events`).
 //
-// presets() is synchronous for its callers and cached: the extension store calls reloadPresets() after an install,
-// update or remove (and the startup upgrade after its background installs).
+// presets() is synchronous for its callers and cached. The broker's start() registers the store
+// (useExtensionStore) and its onChange hook calls reloadPresets() after an install, update or remove; the startup
+// upgrade does too after its background installs.
 
 import type { IntegrationPreset } from "../broker/types.ts";
-import type { ExtensionStore, InstalledExtension } from "../extensions/contract.ts";
+import type { ExtensionStore, InstalledExtension } from "../extensions/store.ts";
 import { presetFromManifest } from "../extensions/manifest.ts";
 import { whoopPreset } from "./whoop/index.ts";
 
 /** Display order for the official extensions; anything else follows by name. */
 const ORDER = ["notion", "whoop", "t3code", "brightspace"];
 
-let store: ExtensionStore | null = null;
+/** What presets() needs from the extension store. */
+export type PresetSource = Pick<ExtensionStore, "list">;
+
+let store: PresetSource | null = null;
 let core: IntegrationPreset[] | null = null;
 let cached: IntegrationPreset[] | null = null;
 /** Presets of installed extensions, by name and integrity: the same install keeps the same object across reloads. */
@@ -70,14 +74,15 @@ export function reloadPresets(): void {
 }
 
 /** The extension store presets() reads (set once at startup; tests set a stub and reset it with null). */
-export function useExtensionStore(s: ExtensionStore | null): void {
+export function useExtensionStore(s: PresetSource | null): void {
   store = s;
   built.clear();
   broken.clear();
   reloadPresets();
 }
 
-export const extensionStore = (): ExtensionStore | null => store;
+/** The store presets() reads (null: core presets only). */
+export const presetSource = (): PresetSource | null => store;
 
 /** Installed extensions whose manifest didn't load, with the reason (they offer no preset). */
 export const brokenExtensions = (): ReadonlyMap<string, string> => {

@@ -26,9 +26,9 @@ import {
 import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
-import { type UpgradeResult, upgradeToExtensions } from "../extensions/bootstrap.ts";
-import type { ExtensionPin, ExtensionStore } from "../extensions/contract.ts";
-import { extensionStore, presetById, presets } from "../integrations/index.ts";
+import { type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
+import { type ExtensionPin, extensionStore, type SqliteExtensionStore } from "../extensions/store.ts";
+import { presetById, presetSource, presets, reloadPresets, useExtensionStore } from "../integrations/index.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -174,7 +174,7 @@ export interface BrokerService extends Lifecycle {
    * presets are bound to those extensions, and missing ones install in the background; once one is installed its
    * connections are re-listed under its risk map. start() runs it with the registered extension store.
    */
-  upgradeExtensions(store: ExtensionStore, pins?: readonly ExtensionPin[]): UpgradeResult;
+  upgradeExtensions(store: UpgradeStore, pins?: readonly ExtensionPin[]): UpgradeResult;
 }
 
 const UNAVAILABLE = "Integrations aren't available in this build of xaq yet.";
@@ -439,6 +439,31 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return emitted;
   }
   let pollTimer: NodeJS.Timeout | null = null;
+  let extensions: SqliteExtensionStore | null = null;
+
+  /** Re-lists connections after their extension changed: cached views drop, native sources are rebuilt, and listing
+   * re-classifies the pinned tools under the extension's risk map (or the generic rules, once it's gone). */
+  function relist(connectionIds: string[]): void {
+    invalidate("all");
+    for (const id of connectionIds) {
+      const c = getConnection(ctx, id);
+      if (!c || c.status === "disabled") continue;
+      void (c.kind === "remote_http" ? Promise.resolve() : closeSource(id)).then(() => catalog.refresh(id)).catch(() => {});
+    }
+  }
+
+  /** A forced extension removal: its connections are disabled. Credentials stay until the connections are removed. */
+  function disableBound(connectionIds: string[], reason: string): void {
+    for (const id of connectionIds) {
+      const c = getConnection(ctx, id);
+      if (!c || c.status === "disabled") continue;
+      ctx.db.run("UPDATE connections SET status = 'disabled', status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), id);
+      catalog.detach(id);
+      void closeSource(id);
+      ctx.audit.record({ actorType: "system", action: "connection.disable", target: id, outcome: "ok", reason, detail: { slug: c.slug } });
+    }
+    if (connectionIds.length) invalidate("all");
+  }
 
   const service: BrokerService = {
     enabled,
@@ -535,16 +560,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         store,
         ...(pins ? { pins } : {}),
         log,
-        onInstalled: (_ext, connectionIds) => {
-          // presets() is reloaded: cached views drop, native sources are rebuilt, and each connection is re-listed,
-          // which re-classifies its pinned tools under the extension's risk map.
-          invalidate("all");
-          for (const id of connectionIds) {
-            const c = getConnection(ctx, id);
-            if (!c) continue;
-            void (c.kind === "remote_http" ? Promise.resolve() : closeSource(id)).then(() => catalog.refresh(id)).catch(() => {});
-          }
-        },
+        onInstalled: (_ext, connectionIds) => relist(connectionIds),
       });
     },
 
@@ -563,14 +579,26 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       } catch (err) {
         log.error("Couldn't release tools held by an older version", { error: errorMessage(err) });
       }
-      // Connections of the former core presets are bound to their extensions; missing ones install in the background.
-      const extensions = extensionStore();
-      if (extensions) {
-        try {
-          service.upgradeExtensions(extensions);
-        } catch (err) {
-          log.error("Couldn't bind connections to their extensions", { error: errorMessage(err) });
-        }
+      // Extensions (docs/EXTENSIONS.md): presets() reads the installed ones; the store asks us which connections use
+      // one, disables them on a forced removal, and reloads presets() after every change. Then the startup upgrade:
+      // connections of the former core presets are bound, and missing extensions install in the background.
+      try {
+        extensions = extensionStore(ctx);
+        useExtensionStore(extensions);
+        extensions.setHooks({
+          usedBy: (name) => usedBy(ctx.db, name),
+          onRemove: (ext, o) => {
+            if (o.force) disableBound(o.usedBy, `its extension ${ext.name} was removed`);
+          },
+          onChange: (change) => {
+            reloadPresets();
+            const name = change.to?.name ?? change.from?.name;
+            relist(name ? usedBy(ctx.db, name) : []);
+          },
+        });
+        service.upgradeExtensions(extensions);
+      } catch (err) {
+        log.error("Couldn't load extensions", { error: errorMessage(err) });
       }
       policy.start();
       ctx.bus.on("settings", onSettings);
@@ -581,6 +609,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
 
     async stop() {
+      // This context's store goes with it (tests run several contexts in one process).
+      if (extensions && presetSource() === extensions) useExtensionStore(null);
       catalog.close();
       ctx.bus.off("settings", onSettings);
       if (pollTimer) clearInterval(pollTimer);

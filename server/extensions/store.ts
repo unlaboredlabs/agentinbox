@@ -15,6 +15,7 @@ import type { Logger } from "../util/log.ts";
 import { computeIntegrity, integrityDirName, IntegrityError } from "./integrity.ts";
 import { defaultExtensionUrls, EXTENSION_NAME_RE, type ExtensionUrls, fetchIndex, OFFICIAL_NAMES, OFFICIAL_OWNER, OFFICIAL_REPO, type RegistryEntry, type RegistryIndex } from "./registry.ts";
 import { type FetchDeps, fetchGit, fetchGithubTarball, fetchLocal, fetchOfficial, parseSource, resolveGithubTree, SourceError, type SourceSpec } from "./sources.ts";
+import { type Manifest, ManifestError, validateManifest } from "./manifest.ts";
 import { type ExtractLimits, UnsafeArchiveError } from "./tar.ts";
 
 export interface InstalledExtension {
@@ -102,25 +103,22 @@ export interface ManifestFacts {
   remoteUrl: string | null;
 }
 
-// B2: replace the body with `validateManifest(raw)` from server/extensions/manifest.ts (schema 1, unknown keys
-// rejected) and derive the facts from its result. Until then, this minimal check is the only one.
+/** The manifest, checked by validateManifest (server/extensions/manifest.ts: schema 1, unknown keys rejected). */
 export function checkManifest(raw: unknown): ManifestFacts {
-  const m = raw as Record<string, unknown> | null;
-  if (!m || typeof m !== "object" || Array.isArray(m)) throw new ExtensionError("invalid", `${MANIFEST_FILE} isn't a JSON object.`);
-  if (m.schema !== 1) throw new ExtensionError("invalid", `${MANIFEST_FILE} must have "schema": 1.`);
-  if (typeof m.name !== "string" || !EXTENSION_NAME_RE.test(m.name)) throw new ExtensionError("invalid", `${MANIFEST_FILE}'s name must be 1-32 lowercase letters, digits or dashes.`);
-  if (m.kind !== "remote" && m.kind !== "code") throw new ExtensionError("invalid", `${MANIFEST_FILE}'s kind must be "remote" or "code".`);
-  if (typeof m.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(m.version)) throw new ExtensionError("invalid", `${MANIFEST_FILE}'s version must be semver.`);
-  const code = (m.code ?? {}) as { network?: unknown };
-  const network = Array.isArray(code.network) ? code.network.filter((h): h is string => typeof h === "string").slice(0, 50) : [];
-  const remote = (m.remote ?? {}) as { url?: unknown };
+  let m: Manifest;
+  try {
+    m = validateManifest(raw);
+  } catch (err) {
+    if (err instanceof ManifestError) throw new ExtensionError("invalid", err.message);
+    throw err;
+  }
   return {
     name: m.name,
     kind: m.kind,
     version: m.version,
-    displayName: typeof m.displayName === "string" && m.displayName ? m.displayName : m.name,
-    network: m.kind === "code" ? network : [],
-    remoteUrl: m.kind === "remote" && typeof remote.url === "string" ? remote.url : null,
+    displayName: m.displayName,
+    network: m.code?.network ?? [],
+    remoteUrl: m.remote?.url ?? null,
   };
 }
 

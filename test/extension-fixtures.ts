@@ -2,7 +2,7 @@
 // xaq-extension.json; refresh them when the repo's change) and a stub of B1's extension store.
 
 import { readFileSync } from "node:fs";
-import type { ExtensionPin, ExtensionStore, InstalledExtension } from "../server/extensions/contract.ts";
+import type { ExtensionPin, ExtensionStore, InstalledExtension } from "../server/extensions/store.ts";
 import type { Manifest } from "../server/extensions/manifest.ts";
 import { useExtensionStore } from "../server/integrations/index.ts";
 
@@ -31,7 +31,7 @@ export function fixtureExtension(name: FixtureExtension, over: Partial<Installed
   };
 }
 
-export interface StubStore extends ExtensionStore {
+export interface StubStore extends Pick<ExtensionStore, "list" | "get" | "installPinned"> {
   /** Pins installPinned was called with, in order. */
   installs: ExtensionPin[];
   /** Resolves the pending installPinned calls (with `installable`, they wait for this). */

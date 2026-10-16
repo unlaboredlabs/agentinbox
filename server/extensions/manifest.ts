@@ -7,7 +7,8 @@
 // that uses {{webhookUrl}} must say `"when": "webhookUrl"`, so it only shows when the internet can reach this install.
 
 import type { IntegrationPreset, PresetAuth, SetupContext, SetupStep, ToolClass, ToolDef } from "../broker/types.ts";
-import { createCodeSource, type InstalledExtension } from "./contract.ts";
+import { createCodeSource } from "./code-host-stub.ts";
+import type { InstalledExtension } from "./store.ts";
 
 export const MANIFEST_FILE = "xaq-extension.json";
 export const MANIFEST_SCHEMA_VERSION = 1;
