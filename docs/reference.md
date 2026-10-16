@@ -20,7 +20,8 @@ running agentinbox in production, scripting it, and understanding what it does.
 - **One place for credentials.** Connect Gmail and Google Workspace accounts once. Refresh tokens are encrypted at rest.
   Agents only ever see an `aib_…` key.
 - **MCP for every agent.** Streamable HTTP at `/mcp`: `search_threads`, `get_thread`, `reply`, `send_message`,
-  `modify_labels`, `wait_for_events` and more. Each agent sees only the tools its grants allow.
+  `modify_labels`, `wait_for_events` and more. Each agent sees only the tools its grants allow. Drafts, replies and new
+  messages can carry files the agent attaches (see [Attachments](#attachments)).
 - **Real-time delivery.** New mail, replies to threads you sent into, and label changes arrive within seconds through
   Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or within the poll interval (30 seconds by
   default) by polling with zero extra setup.
@@ -281,6 +282,31 @@ It never allows being framed. The data directory and database are readable only 
 
 Recommendations: split agents that read untrusted mail from agents that can send; prefer `draft_only` or `approval`;
 use allowlists for anything that sends directly.
+
+### Attachments
+
+`create_draft`, `reply` and `send_message` take an optional `attachments` array of
+`{filename, mime_type, content_base64}`; the file travels base64-encoded inside the MCP tool call. Attachments are
+checked before anything reaches Google, and the agent gets a plain-words error otherwise:
+
+| Check | |
+|---|---|
+| Count | At most 10 files per message |
+| Size | 25 MB per message, body and files together, before encoding: Gmail's sending limit ([Gmail help](https://support.google.com/mail/answer/6584)). As a backstop the encoded message must fit the 35 MB (`36700160` bytes) Gmail's upload endpoint accepts |
+| Content | Standard or url-safe base64; empty files are refused |
+| Type | `mime_type` must be `type/subtype` (default: from the extension, else `application/octet-stream`); [file types Gmail blocks](https://support.google.com/mail/answer/6590) (`.exe`, `.js`, `.bat`, `.msi`, `.iso`, …, also gzipped) are refused. Gmail may still refuse archives that contain them |
+| Filename | Path removed; control, zero-width, bidi and tag characters stripped; delimiter tags defused; at most 120 characters with the extension kept; `attachment` (plus the type's extension) when nothing is left |
+
+The grant applies unchanged: a draft needs `draft`, a send needs `send` and goes through its send mode, recipient
+allowlist, reply-only rule and caps. An approval card lists each file's name, type and size, and approving sends the
+draft that carries them. The audit log records each file's name, type, size and SHA-256, never its content.
+
+Messages whose raw form is over 512 KB are sent to Gmail through its `/upload/` endpoint (`uploadType=media`, or
+`multipart` with the `threadId` for replies), since Google documents no size limit for the JSON `raw` field and has
+refused such bodies at 1 MB. This also applies to forwards with their original attachments.
+
+`/mcp` reads at most 4 MB of request body, except for requests whose `Authorization` header carries a valid agent key
+(checked before the body is read), which may send up to 36 MB, enough for 25 MB of files in base64.
 
 ## Data and backups
 

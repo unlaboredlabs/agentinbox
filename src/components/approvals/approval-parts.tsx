@@ -82,6 +82,11 @@ export function Attachments({ items }: { items: Approval["attachments"] }) {
           <span className="max-w-48 truncate">
             <Visible text={f.filename} />
           </span>
+          {f.mimeType && (
+            <span className="max-w-40 truncate text-muted-foreground">
+              <Visible text={f.mimeType} />
+            </span>
+          )}
           <span className="text-muted-foreground">{fmtBytes(f.size)}</span>
         </li>
       ))}

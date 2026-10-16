@@ -977,7 +977,8 @@ export interface Approval {
   /** Full body as the agent wrote it (markdown/plain). */
   body: string;
   threadId: string | null;
-  attachments: { filename: string; size: number }[];
+  /** Files on the message: name, MIME type and decoded size (never the content). */
+  attachments: { filename: string; size: number; mimeType?: string }[];
   /** Why the agent says it is sending (optional `reason` tool arg). */
   reason: string | null;
   decidedAt: string | null;

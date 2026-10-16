@@ -5,6 +5,7 @@
 import type { Account, Address, Approval, Capability, GmailLabel, Grant, MessageSummary } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { GmailClient, GmailMessage, GmailPart, GmailThread, ParsedMessage } from "../google/types.ts";
+import { UPLOAD_MAX_BYTES } from "../google/gmail.ts";
 import { isOutcomeUnknown, rejectedBeforeProcessing } from "../google/http.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import {
@@ -21,6 +22,7 @@ import type { AgentPrincipal } from "../policy/types.ts";
 import { PolicyDenied } from "../util/errors.ts";
 import { matchesGlob } from "../util/glob.ts";
 import { Approvals, type ApprovalPayload, draftFingerprint } from "./approvals.ts";
+import { AttachmentError, type AttachmentInput, attachmentMeta, type OutgoingAttachment, prepareAttachments } from "./attachments.ts";
 import { type BuiltContent, formatAddresses } from "./content.ts";
 import { contentPool } from "./pool.ts";
 
@@ -76,6 +78,8 @@ export interface ComposeArgs {
   bcc?: string | string[];
   subject: string;
   body: string;
+  /** Files to attach (validated by prepareAttachments). */
+  attachments?: AttachmentInput[];
 }
 
 type Target = { threadId?: string; messageId?: string };
@@ -482,12 +486,34 @@ export class AgentMail {
     const to = this.recipients(args.to, "to");
     const cc = this.recipients(args.cc, "cc");
     const bcc = this.recipients(args.bcc, "bcc");
+    const files = this.attachments(args.attachments, args.body);
     const threading = args.threadId ? await this.threadingHeaders(a, args.threadId) : { inReplyTo: null, references: [] };
-    const raw = await this.ctx.google.mime.compose({ from: this.from(a), to, cc, bcc, subject: args.subject, text: args.body, ...threading });
+    const raw = this.checkEncodedSize(
+      await this.ctx.google.mime.compose({ from: this.from(a), to, cc, bcc, subject: args.subject, text: args.body, ...threading, attachments: files }),
+    );
     const draft = await a.gmail.createDraft(raw, args.threadId ?? null);
     this.trace.target = draft.id;
-    this.trace.detail = { recipients: to.length + cc.length + bcc.length, threaded: !!args.threadId };
+    this.trace.detail = { recipients: to.length + cc.length + bcc.length, threaded: !!args.threadId, ...(files.length ? { attachments: attachmentMeta(files) } : {}) };
     return { draftId: draft.id, threadId: draft.message?.threadId ?? args.threadId ?? null };
+  }
+
+  /** The agent's files, checked and decoded (nothing reaches Google when one is refused). */
+  private attachments(input: AttachmentInput[] | undefined, body: string): OutgoingAttachment[] {
+    try {
+      return prepareAttachments(input, Buffer.byteLength(body));
+    } catch (err) {
+      if (err instanceof AttachmentError) throw new ToolError(err.code, err.message);
+      throw err;
+    }
+  }
+
+  /** Backstop for the encoded message: Gmail's upload endpoint takes at most 35 MB (the 25 MB check comes first). */
+  private checkEncodedSize(raw: string): string {
+    const bytes = Math.floor((raw.length * 3) / 4);
+    if (bytes > UPLOAD_MAX_BYTES) {
+      throw new ToolError("too_large", `The message is ${(bytes / 1048576).toFixed(1)} MB once encoded; Gmail accepts at most 35 MB. Send fewer or smaller files.`);
+    }
+    return raw;
   }
 
   private denyReplyOnly(a: Access): never {
@@ -501,20 +527,30 @@ export class AgentMail {
   async sendMessage(account: string | undefined, args: ComposeArgs & { reason?: string }): Promise<SendOutcome> {
     const a = this.resolve(account, "send");
     if (a.grant.replyOnly) this.denyReplyOnly(a);
+    const to = this.recipients(args.to, "to");
+    const cc = this.recipients(args.cc, "cc");
+    const bcc = this.recipients(args.bcc, "bcc");
+    const files = this.attachments(args.attachments, args.body);
     return this.deliver(a, "send", {
-      to: this.recipients(args.to, "to"),
-      cc: this.recipients(args.cc, "cc"),
-      bcc: this.recipients(args.bcc, "bcc"),
+      to,
+      cc,
+      bcc,
       subject: args.subject,
       body: args.body,
       threadId: null,
       reason: args.reason ?? null,
+      attachments: files.length ? async () => files : undefined,
     });
   }
 
-  async reply(account: string | undefined, args: { messageId: string; body: string; replyAll?: boolean; reason?: string }): Promise<SendOutcome> {
+  async reply(
+    account: string | undefined,
+    args: { messageId: string; body: string; replyAll?: boolean; reason?: string; attachments?: AttachmentInput[] },
+  ): Promise<SendOutcome> {
     const a = this.resolve(account, "send");
     this.trace.target = args.messageId;
+    // Cheap checks before loading the original.
+    const files = this.attachments(args.attachments, args.body);
     const src = await this.loadMessage(a, args.messageId, "full");
     // A draft isn't a message anyone sent: replying to one would let an agent pick arbitrary recipients.
     if (src.labelIds?.includes("DRAFT")) throw new ToolError("draft_source", "That message is a draft; reply to a message that was actually sent or received.");
@@ -557,6 +593,7 @@ export class AgentMail {
       inReplyTo: p.messageId,
       references: p.messageId ? [...p.references.filter((r) => r !== p.messageId), p.messageId] : p.references,
       reason: args.reason ?? null,
+      attachments: files.length ? async () => files : undefined,
     });
   }
 
@@ -639,8 +676,9 @@ export class AgentMail {
     // Synchronous check-and-reserve: no await between the cap check and taking the slot.
     this.trace.release = reserveSend(this.ctx.db, a.grant);
     const attachments = m.attachments ? await m.attachments() : [];
-    if (attachments.length) this.trace.detail.attachments = attachments.length;
-    const raw = await this.ctx.google.mime.compose({
+    // Names, types, sizes and sha256 only: never the content.
+    if (attachments.length) this.trace.detail.attachments = attachmentMeta(attachments);
+    const raw = this.checkEncodedSize(await this.ctx.google.mime.compose({
       from: this.from(a),
       to: m.to,
       cc: m.cc,
@@ -650,7 +688,7 @@ export class AgentMail {
       inReplyTo: m.inReplyTo ?? null,
       references: m.references ?? [],
       attachments,
-    });
+    }));
 
     if (a.grant.sendMode === "direct") {
       const sent = await this.uncertain(() => a.gmail.send(raw, m.threadId), "sent");
@@ -683,7 +721,7 @@ export class AgentMail {
       subject: m.subject,
       body: m.body,
       threadId: m.threadId,
-      attachments: attachments.map((x) => ({ filename: x.filename, size: x.content.length })),
+      attachments: attachmentMeta(attachments, false),
       reason: m.reason,
       fingerprint,
     };

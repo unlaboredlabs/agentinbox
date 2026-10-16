@@ -152,6 +152,7 @@ Reading (`read`):
 Writing (`draft`, `send`):
 
 - `create_draft`: a draft the user can review and send from Gmail; pass `thread_id` to draft a reply in a thread.
+  `create_draft`, `send_message` and `reply` can attach files: see [Attaching files](#attaching-files).
 - `send_message`: a new email.
 - `reply`: a reply to `message_id` inside its thread, addressed to its Reply-To, else its sender (for your own sent
   mail: its recipients). Threading headers and the "Re:" subject are handled; `reply_all: true` also copies the
@@ -162,6 +163,25 @@ Writing (`draft`, `send`):
 
 Recipients (`to`, `cc`, `bcc`) are an array or a comma-separated string; `Name <a@example.com>` works. Pass `reason`
 on `send_message`, `reply` and `forward`: a human reviewing an approval sees it.
+
+### Attaching files
+
+`create_draft`, `reply` and `send_message` take `attachments`: an array of
+`{ "filename": "tenant-form.pdf", "mime_type": "application/pdf", "content_base64": "JVBERi0xLjcK…" }`.
+
+- The file itself goes **in the tool call**, base64-encoded (standard or url-safe; no `data:` prefix). There is no
+  separate upload: read or generate the file, encode its bytes and pass them.
+- `mime_type` is `type/subtype` without parameters; leave it out to have it guessed from the extension
+  (`application/octet-stream` when unknown).
+- Limits: at most 10 files, and 25 MB per message (Gmail's limit, measured before encoding, body included). Gmail
+  refuses executables and similar types (`.exe`, `.js`, `.bat`, `.msi`, `.jar`, `.iso`, `.ps1`, …, also when gzipped);
+  those are refused before anything is sent. For bigger or blocked files, share a link instead.
+- Filenames are cleaned: folders are dropped, invisible characters removed, long names shortened (the extension is
+  kept). An empty name becomes `attachment`.
+- Attachments change nothing about the rules: a draft needs the draft permission, a send goes through the send mode,
+  allowlist, reply-only and send limits like any other. In approval mode the human sees each file's name, type and size.
+- To answer inside a thread with a file, use `reply` (or `create_draft` with `thread_id`). `forward` doesn't take new
+  files; it can carry the original's with `include_attachments`.
 
 Organizing (`organize`, `trash`):
 
@@ -220,6 +240,7 @@ blocked and why. The usual ones:
 | a recipient that isn't allowed | A recipient isn't on the account's allowlist. |
 | replies only | The account only allows replies in threads you can see, to people already in that conversation: use `reply`, or `create_draft` if you may draft. The reply goes to the message's Reply-To or From, which the sender chose: check it before replying (only the recipient allowlist limits it). |
 | a send limit | The cap for the last hour or last 24 hours is reached. Say when it's likely to clear; don't loop. |
+| an attachment (blocked type, too large, not valid base64) | Nothing was sent or saved. Fix the file or the call; for a blocked type or a file over 25 MB, offer a link instead. |
 | not found or not accessible | Missing, or outside your label scope (the two look the same on purpose). |
 | a label you can't use | With a label scope you can add only your scope labels (not `INBOX` or other system labels unless they're in scope). Use `mark_read` for read state. |
 
