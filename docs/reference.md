@@ -90,7 +90,10 @@ key; the broker holds every upstream credential and lists only the tools the age
   name: nothing is held and nothing asks you. Access levels, approvals and "always allow" rules apply as usual (a
   change that makes a tool risky makes it ask). The audit log records each change (`connection.tool_changed`, with
   the old and new definition hash).
-- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`.
+- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`. To change a connection's short name: the
+  connection's page → Change short name, or `npx xaq-cli connections rename <name> --slug <new> [--name <display
+  name>]`. The exposed tool names follow at once and approval rules carry over, but anything that calls the old
+  `<old>__<tool>` names stops working until it uses the new ones.
 - **Search mode**: the tool list shows only `search_tools`, `call_read_tool`, `call_write_tool` and `get_call_status`;
   the agent finds the rest by searching. Calling a tool by its name still works, with the same access, approvals and
   audit. A new agent gets search mode if it has more than about 30 tools the first time it connects. After that its
@@ -100,6 +103,55 @@ key; the broker holds every upstream credential and lists only the tools the age
   MCP servers into connections and replaces them with the single xaq entry, after a backup. Entries that don't
   work yet (an OAuth sign-in to finish, a rejected key) stay in the client until they do.
 - **Turn it off**: Settings → Connections (MCP broker).
+
+## Extensions
+
+Integrations come as extensions ([EXTENSIONS.md](EXTENSIONS.md)): a manifest-only `remote` one (Notion, T3 Code) or
+a `code` one with a bundled MCP server that xaq runs out of process (WHOOP). Official extensions come from
+[wynn-dev/xaq-extensions](https://github.com/wynn-dev/xaq-extensions); its `index.json` pins each to a commit and an
+integrity hash, and xaq installs exactly that.
+
+```
+xaq ext add <name | github-url | git-url[#ref[:path]] | ./dir> [--yes] [--data …]
+xaq ext list [--data …]
+xaq ext update <name> [--yes] [--data …]
+xaq ext remove <name> [--force] [--yes] [--data …]
+```
+
+- **Sources**: a registry name (`notion`); a GitHub URL (`https://github.com/<owner>/<repo>[/tree/<ref>/<path>]`,
+  fetched as the tarball of the resolved commit); any other `https://` or ssh git URL, through the `git` CLI (`#<ref>`,
+  `#<ref>:<path>`; `http://`, `git://` and URLs with credentials in them are refused); or a directory on xaq's
+  machine, for development (the CLI resolves `./dir` and `~/dir` where you run it; the console and the API take an
+  absolute path). git runs without your git config or environment, and without hooks. GitHub refs are resolved through its
+  API without signing in (60 requests an hour per address; xaq says when that's used up).
+- **Third-party**: anything that isn't the official registry at the indexed commit. Before it's installed you see
+  its source, its kind, its declared network hosts and, for a `code` one, that it runs on your machine with network
+  access; the CLI needs a yes (or `--yes`), the console a click on "I trust it: install". A third-party extension
+  can't use an official extension's name (`notion`, `t3code`, `whoop`, `brightspace`, or any in the registry).
+- **Pinned and read-only**: files go to `<data>/extensions/<name>/<first 16 hex of the integrity>/` (fetched into a
+  temp directory, checked, then renamed into place) and are made read-only. Integrity is sha256 over the sorted
+  listing of `<path>\0<644|755>\0<sha256>\n` lines; symlinks, `..` paths and anything over 20 MB or 5,000 files are
+  refused.
+- **Updates**: never automatic. `ext update` shows the old and new version, commit and integrity and installs only
+  on confirmation; an update that changed after you saw it is refused.
+- **Removal**: refused while connections use the extension; `--force` disables them first (their credentials stay
+  until you remove the connections).
+- **Console**: Extensions lists what's installed (version, commit, source, official or third-party, used by),
+  browses the registry, updates with the diff shown, and adds from a URL with the same warning.
+
+Admin API (console session and the CSRF header, like every `/api` route; the CLI uses it through its local admin
+session):
+
+| Route | |
+|---|---|
+| `GET /api/extensions` | Installed extensions, with `usedBy` |
+| `GET /api/extensions/registry` | The registry index, with what's installed |
+| `POST /api/extensions/resolve` `{source}` | What `source` would install and the third-party warning; installs nothing |
+| `POST /api/extensions` `{source, confirmThirdParty?, expectIntegrity?}` | Install. 409 `third_party_unconfirmed` (with `warnings`) until confirmed; 409 `changed` when `expectIntegrity` no longer matches |
+| `GET /api/extensions/:name` | One extension |
+| `POST /api/extensions/:name/update` `{confirm?, expectIntegrity?}` | Without `confirm`, the would-be update (`from`, `to`, `warnings`); with it, installed. `update: null` when up to date |
+| `POST /api/extensions/:name/verify` | Re-checks the installed files' integrity: `{ok}` |
+| `DELETE /api/extensions/:name[?force=true]` | Remove. 409 `in_use` (with `usedBy`) unless forced |
 
 ## Commands and configuration
 
@@ -114,6 +166,8 @@ xaq service status
 xaq reset-password [--data …] [--port …] [--host …]
 xaq skill install [--target claude|codex|agents|<dir>] [--url <public url>]
 xaq skill print [--url <public url>]
+xaq connections add|list|reconnect|rename|disable|remove …   # see Connections
+xaq ext add|list|update|remove …                             # see Extensions
 xaq connect <url> … / setup-mcp / listen …   # on agent machines, see listen.md
 ```
 

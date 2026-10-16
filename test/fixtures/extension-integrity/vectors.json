@@ -1,0 +1,34 @@
+{
+  "about": "Extension integrity test vectors (docs/EXTENSIONS.md). xaq's server/extensions/integrity.ts and xaq-extensions' scripts/integrity.mjs must both produce these. Each dir is next to this file; listing is the canonical listing's entries in order.",
+  "vectors": [
+    {
+      "dir": "basic",
+      "integrity": "sha256-IKFq4wGiNR8B9cEKhs15oy9O/Cs9TJKLMz/PWa4vPJ8=",
+      "listing": [
+        ["README.md", "644", "03c68d4096d0a99121abfa84cd68a6b0a163f4d3e923825e30456b1400edb8bf"],
+        ["dist/server.mjs", "755", "0c4698384a52d132f0c0c1d84bdd3440bd9f448ef250937dd29c5b3f90869491"],
+        ["xaq-extension.json", "644", "6821df6be940fe135855f0035debc0e1fef852ed7609b3b5675d9b0ab7f4d2e8"]
+      ]
+    },
+    {
+      "dir": "ordering",
+      "integrity": "sha256-fGRLvhg6/XgoPcdcWu28anb1ZmCbT5S+psT38Uq1QFg=",
+      "listing": [
+        ["B.txt", "644", "7e29e1bb2114b3d7f1c1fa1792810826d2bd2f591ba39356b5224b3c58739f2a"],
+        ["a-b.txt", "644", "dc7e5db4969d8296392f4f12a0eab650b07fb6c473f7ce956414091c2797a914"],
+        ["a.txt", "644", "10fbdce5d5e2ba7e0249a4a8921faede362fda69bae3c5bb8a59bb1b9407ad5e"],
+        ["a/b.txt", "644", "241714c62f70695b332fd13a5feeb58b25bf8f3899a0e41d80d2dd6892d8f87a"],
+        ["z/a.txt", "644", "a489310d5b0b546c7bd8118118d7aa8ef8c5d7525cb73c27ec3cb89ab5e2675b"],
+        ["é.txt", "644", "6b08fa469115f21e9d5d3a98e93e2938d35a601784c6a8ffdfd3026fecfd4a9c"]
+      ]
+    },
+    {
+      "dir": "empty-file",
+      "integrity": "sha256-Vc4v0C2JCHS0QMH6OgMWAmahP/fGum8p0pRN8zqOvkc=",
+      "listing": [
+        ["empty", "644", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+        ["x", "644", "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"]
+      ]
+    }
+  ]
+}

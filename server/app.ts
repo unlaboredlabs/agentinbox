@@ -18,6 +18,7 @@ import { auditApi } from "./api/audit.ts";
 import { authApi, authPublicApi } from "./api/auth.ts";
 import { brokerApprovalsApi } from "./api/broker-approvals.ts";
 import { eventsApi } from "./api/events.ts";
+import { extensionsApi } from "./api/extensions.ts";
 import { googleApi } from "./api/google.ts";
 import { oauthRoutes } from "./api/oauth.ts";
 import { connectionOAuthRoutes } from "./broker/upstream/callback.ts";
@@ -164,7 +165,7 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   app.use("/api/*", requireAdmin(ctx));
   // brokerApprovalsApi before approvalsApi: it answers /approvals/:id for mcp.call and passes the rest on.
   // connectionsApi before brokerApprovalsApi: its /connections/:id/kill runs the service's kill (hooks first).
-  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, connectionsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, connectionsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi, extensionsApi]) {
     app.route("/api", api(ctx));
   }
 

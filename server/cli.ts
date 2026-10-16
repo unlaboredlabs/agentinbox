@@ -245,6 +245,9 @@ registerListenCommands(program);
 // Daemon side, behind the brokerUpstreams setting: `connections …` and `import --from …` (server/connections-cli).
 const { registerConnectionsCommands } = await import("./connections-cli/commands.ts");
 registerConnectionsCommands(program);
+// `ext add | list | update | remove` (docs/EXTENSIONS.md), through the daemon's /api/extensions.
+const { registerExtensionCommands } = await import("./extensions/cli.ts");
+registerExtensionCommands(program);
 // Short one-liners for the command list; each command's own --help keeps its full description.
 const AGENT_SUMMARIES: Record<string, string> = {
   connect: "pair an agent; you approve it in the console",
