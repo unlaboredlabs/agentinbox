@@ -1,3 +1,4 @@
+import { createBrokerService } from "./broker/service.ts";
 import type { Config } from "./config.ts";
 import { createCalendarService } from "./calendar/index.ts";
 import { type AppContext, createCore, SERVICE_ORDER, type Services } from "./context.ts";
@@ -20,6 +21,7 @@ const FACTORIES: { [K in keyof Services]: (ctx: AppContext) => Services[K] } = {
   mail: createMailService,
   webhooks: createWebhooksService,
   calendar: createCalendarService,
+  broker: (ctx) => createBrokerService(ctx),
 };
 
 /** Builds the full context. Nothing runs until `startServices`. */

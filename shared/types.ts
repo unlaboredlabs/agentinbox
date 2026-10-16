@@ -67,7 +67,40 @@ export const EVENT_TYPES = [
   "calendar.event_cancelled", // the event was cancelled or deleted
   "calendar.invitation_received", // someone else's event now lists the account as an attendee awaiting a response
 ] as const;
-export type EventType = (typeof EVENT_TYPES)[number];
+/** Gmail, Calendar and account events: the closed set that existed before the broker. */
+export type NativeEventType = (typeof EVENT_TYPES)[number];
+
+/**
+ * MCP broker events (docs/MCP-BROKER.md "Events from integrations"). They concern a connection, not an
+ * account: MailEvent.connectionId is set and accountId/accountEmail are "". Visible to agents with a grant
+ * on that connection, while the brokerUpstreams setting is on.
+ */
+export const BROKER_EVENT_TYPES = [
+  "connection.auth_failed", // the upstream's credential stopped working; the owner must reconnect
+  "connection.tool_changed", // an upstream tool changed or appeared and is held until the owner accepts it
+  "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
+] as const;
+export type BrokerEventType = (typeof BROKER_EVENT_TYPES)[number];
+/**
+ * Events a native integration emits: `<preset>.<name>`, e.g. `whoop.recovery_updated` (IntegrationPreset.id and
+ * NativeEvents.types). Open-ended, so EventType as a whole is too: code that needs the known set uses
+ * EVENT_TYPES and BROKER_EVENT_TYPES.
+ */
+export type PresetEventType = `${string}.${string}`;
+export type EventType = NativeEventType | BrokerEventType | PresetEventType;
+
+const PRESET_EVENT_RE = /^([a-z0-9-]{1,24})\.[a-z0-9_]{1,64}$/;
+/** Prefixes of agentinbox's own events: a preset can't be named like one. */
+const RESERVED_EVENT_PREFIXES = new Set(["message", "thread", "label", "account", "sync", "calendar", "connection", "approval"]);
+export const isPresetEventType = (t: string): t is PresetEventType => {
+  const m = PRESET_EVENT_RE.exec(t);
+  return !!m && !RESERVED_EVENT_PREFIXES.has(m[1]!);
+};
+/** Events about a connection (broker or preset), never an account. */
+export const isConnectionEventType = (t: string): t is BrokerEventType | PresetEventType =>
+  (BROKER_EVENT_TYPES as readonly string[]).includes(t) || isPresetEventType(t);
+/** Any event type the server accepts in filters (webhooks, the listener stream, the console). */
+export const isEventType = (t: string): t is EventType => (EVENT_TYPES as readonly string[]).includes(t) || isConnectionEventType(t);
 
 export const CALENDAR_EVENT_TYPES = [
   "calendar.event_created",
@@ -785,8 +818,11 @@ export interface MailEvent {
   id: string; // evt_…
   seq: number; // monotonic, used as cursor
   type: EventType;
+  /** "" on connection events (BROKER_EVENT_TYPES and `<preset>.*`), which carry connectionId instead. */
   accountId: string;
   accountEmail: string;
+  /** Connection events only. */
+  connectionId?: string;
   message: MessageSummary | null;
   /** calendar.* events only (absent on mail events, so their payloads are unchanged). */
   calendarEvent?: CalendarEventSummary;
@@ -1212,6 +1248,124 @@ export interface ApprovalRule {
   createdAt: string;
 }
 
+// ───────────────────── MCP broker: connections admin API (/api/connections) ─────────────────────
+
+/** A connection as the Connections list shows it. */
+export interface ConnectionView extends Connection {
+  tools: {
+    /** Every pinned or held tool. */
+    total: number;
+    active: number;
+    /** Waiting for the owner to accept a changed or new definition. */
+    held: number;
+  };
+  /** Whole days until expiresAt (0 = today or past), or null when not known to expire. */
+  expiresInDays: number | null;
+  /** Agents with a grant on this connection. */
+  agents: number;
+}
+
+/** POST /api/connections: a custom MCP URL, or a preset (its URL and auth come from the preset). */
+export interface CreateConnectionInput {
+  /** IntegrationPreset.id (GET /api/connections/presets). */
+  preset?: string;
+  /** Required without a preset. */
+  url?: string;
+  /** Default: the preset's display name, else the URL's host. */
+  name?: string;
+  /** Default: the preset's slug, else derived from the host. */
+  slug?: string;
+  levelDefault?: AccessLevel;
+  /** Agents that get the connection at levelDefault. Default: every agent. */
+  agentIds?: string[];
+}
+
+/** PATCH /api/connections/:id. Changing the URL clears the private-target allow. */
+export interface UpdateConnectionInput {
+  name?: string;
+  slug?: string;
+  url?: string;
+  levelDefault?: AccessLevel;
+}
+
+/** PUT /api/connections/:id/grants: the full list; agents not listed lose access. */
+export interface ConnectionGrantsInput {
+  grants: { agentId: string; level: AccessLevel }[];
+}
+
+/** PUT /api/connections/:id/private-target. Admin-only: the allow is pinned to the URL's exact scheme://host:port. */
+export interface PrivateTargetInput {
+  allow: boolean;
+}
+
+/** What probing an MCP URL found (POST /api/connections/probe), so the console shows the right button or field. */
+export interface ConnectionProbe {
+  reachable: boolean;
+  /** none: open; header: needs an API key or bearer; oauth: OAuth discovered; unknown: couldn't tell. */
+  auth: "none" | "header" | "oauth" | "unknown";
+  /** private_target: the host is on loopback or a private network and the connection has no allow for it. */
+  blocked?: "private_target" | "ssrf";
+  /** OAuth: the authorization server's issuer and how the client registers. */
+  issuer?: string;
+  registration?: "preregistered" | "metadata_document" | "dcr" | "manual";
+  /** Plain words for the console. */
+  message: string;
+}
+
+/** POST /api/connections/:id/connect. */
+export interface StartConnectInput {
+  /** Static header auth (bearer or API key). Stored encrypted; never returned. */
+  header?: { name: string; value: string };
+  /** Setup inputs (e.g. a pasted client id and secret), keyed by SetupStepView.input.key. */
+  inputs?: Record<string, string>;
+}
+
+export type StartConnectResult =
+  | { status: "connected"; connection: ConnectionView }
+  /** Open this URL (the OAuth popup); the callback finishes the connection. */
+  | { status: "authorize"; authorizeUrl: string }
+  | { status: "error"; message: string; probe?: ConnectionProbe };
+
+/** One step of a preset's guided setup (server/broker/types.ts SetupStep), resolved for this install. */
+export interface SetupStepView {
+  id: string;
+  title: string;
+  body: string;
+  link?: { label: string; url: string };
+  copy?: { label: string; value: string };
+  input?: { key: string; label: string; secret?: boolean; pattern?: string; placeholder?: string };
+}
+
+/** GET /api/connections/presets. */
+export interface PresetView {
+  id: string;
+  displayName: string;
+  slug: string;
+  kind: "remote_http" | "native";
+  url: string | null;
+  authType: ConnectionAuthType;
+  setupSteps: SetupStepView[];
+  reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number } | null;
+}
+
+/** One line of a held tool's diff: pinned (-) against the candidate (+), on pretty-printed JSON. */
+export interface ToolDiffLine {
+  op: " " | "-" | "+";
+  text: string;
+}
+
+/** GET /api/connections/:id/held: a tool waiting for the owner to accept its new definition. */
+export interface HeldToolView {
+  name: string;
+  exposedName: string;
+  heldReason: ToolHeldReason;
+  /** null for a new tool. */
+  pinned: UpstreamToolDefinition | null;
+  candidate: UpstreamToolDefinition;
+  diff: ToolDiffLine[];
+  updatedAt: string;
+}
+
 // ───────────────────────────── Audit ─────────────────────────────
 
 export interface AuditEntry {
@@ -1346,6 +1500,21 @@ export interface ApiError {
 //   GET    /api/pairings?status                       → PairingRequest[]
 //   POST   /api/pairings/:id/approve ApprovePairingInput → Agent   (the key goes to the polling CLI, never to the console)
 //   POST   /api/pairings/:id/deny {note?}             → PairingRequest
+//   (MCP broker, 404 unless Settings.brokerUpstreams)
+//   GET    /api/connections                           → ConnectionView[]
+//   POST   /api/connections CreateConnectionInput     → ConnectionView
+//   GET    /api/connections/presets                   → PresetView[]
+//   POST   /api/connections/probe {url, connectionId?} → ConnectionProbe
+//   GET    /api/connections/:id                       → ConnectionView
+//   PATCH  /api/connections/:id UpdateConnectionInput → ConnectionView
+//   DELETE /api/connections/:id                       → 204 (kill switch, then removal)
+//   POST   /api/connections/:id/kill                  → 204 (disabled; credentials deleted, pending calls cancelled; server/api/broker-approvals.ts)
+//   POST   /api/connections/:id/connect StartConnectInput → StartConnectResult
+//   GET    /api/connections/:id/grants                → ConnectionGrant[]
+//   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
+//   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView
+//   GET    /api/connections/:id/held                  → HeldToolView[]
+//   POST   /api/connections/:id/held/:name/accept     → HeldToolView[] (the rest still held)
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval

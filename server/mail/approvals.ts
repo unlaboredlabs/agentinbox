@@ -5,6 +5,7 @@ import {
   type CalendarApprovalDetail,
   type GoogleApproval,
   isCalendarApprovalKind,
+  type McpCallApproval,
   MAIL_APPROVAL_KINDS,
   type McpCallApprovalDetail,
 } from "../../shared/types.ts";
@@ -182,8 +183,7 @@ export class Approvals {
     await this.expireOverdue();
     const current = this.require(id);
     if (current.status !== "pending") throw this.notPending(current);
-    // mcp.call approvals are executed by the broker (a later PR); none can be queued before it lands.
-    if (current.kind === "mcp.call") throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
+    if (current.kind === "mcp.call") return this.approveCall(current, note, started);
 
     // The human approves a send by this agent under its current grant: both must still allow it.
     const blocked = this.sendBlockedReason(current);
@@ -229,6 +229,28 @@ export class Approvals {
         this.fail(id, message);
       }
       this.audit("approval.approve", current, "error", started, { error: message, transient: isTransient(err) });
+    }
+    return this.emit(id);
+  }
+
+  /**
+   * mcp.call: claim it, then the broker runs the stored call (ctx.broker.runApprovedCall re-checks the agent,
+   * grant, pin and args hash, forwards the exact bytes, and records the outcome and result on the approval for
+   * get_call_status). The console's /api/approvals route for mcp.call (server/api/broker-approvals.ts) claims the
+   * same way. A call that may have reached the upstream is never retried.
+   */
+  private async approveCall(current: McpCallApproval, note: string | null | undefined, started: number): Promise<Approval> {
+    const id = current.id;
+    if (!this.ctx.broker.canRunApprovedCalls()) throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
+    if (!this.transition(id, "pending", "approved", note)) throw this.notPending(current);
+    this.emit(id);
+    try {
+      await this.ctx.broker.runApprovedCall(current);
+    } catch (err) {
+      // The runner records every outcome itself; this is a bug path, so the outcome is unknown.
+      const message = errorMessage(err);
+      this.ctx.db.run("UPDATE approvals SET status = 'failed', error = ? WHERE id = ? AND status = 'approved'", `${message} (outcome unknown; not retried)`, id);
+      this.audit("approval.approve", current, "error", started, { connectionId: current.connectionId, tool: current.call.exposedName, error: message });
     }
     return this.emit(id);
   }
@@ -305,6 +327,16 @@ export class Approvals {
       cutoff,
     );
     for (const { id, kind } of rows) {
+      if (kind === "mcp.call") {
+        // The call may have reached the upstream: its outcome is unknown, and it's never retried automatically.
+        this.fail(
+          id,
+          "The tool call was interrupted before its result came back, so its outcome is unknown. It is not retried; check the integration, then ask the agent to call again if needed.",
+        );
+        this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: id, outcome: "error", reason: "outcome_unknown" });
+        this.emit(id);
+        continue;
+      }
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
         isCalendarApprovalKind(kind)
@@ -329,6 +361,17 @@ export class Approvals {
     return this.cancel(
       // By kind, explicitly: mcp.call is neither mail nor calendar (the broker cancels those on grant changes).
       rows.filter((r) => !only || (only === "calendar" ? isCalendarApprovalKind(r.kind) : isMailApprovalKind(r.kind))).map((r) => r.id),
+      `${CANCELLED_PREFIX}${why}`,
+    );
+  }
+
+  /** Rejects pending mcp.call approvals on a connection (optionally one agent's) after it was disabled or access changed. */
+  cancelForConnection(connectionId: string, agentId: string | null, why: string): number {
+    const rows = agentId
+      ? this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND connection_id = ? AND agent_id = ?", connectionId, agentId)
+      : this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND connection_id = ?", connectionId);
+    return this.cancel(
+      rows.map((r) => r.id),
       `${CANCELLED_PREFIX}${why}`,
     );
   }

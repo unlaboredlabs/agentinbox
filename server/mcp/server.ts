@@ -12,6 +12,7 @@ import { cleanLine, formatSize, labelNames, MAX_HTML_CHARS, truncateText, wrapUn
 import { contentPool } from "../mail/pool.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
 import { errorMessage, HttpError, PolicyDenied } from "../util/errors.ts";
+import { brokerInstructions, registerBrokerTools } from "./broker.ts";
 import { registerCalendarTools } from "./calendar.ts";
 import {
   formatAccounts,
@@ -200,7 +201,12 @@ export const TOOL_NAMES = [
 ] as const;
 export const CALENDAR_TOOL_NAMES: readonly ToolName[] = TOOL_NAMES.slice(TOOL_NAMES.indexOf("list_calendars"));
 export type ToolName = (typeof TOOL_NAMES)[number];
-const CATALOG: ReadonlySet<string> = new Set(TOOL_NAMES);
+/**
+ * Fixed tools the MCP broker adds (server/mcp/broker.ts), only with Settings.brokerUpstreams on and a
+ * connection grant. Upstream tools are dynamic (`<slug>__<tool>`) and audited under their exposed name.
+ */
+export const BROKER_TOOL_NAMES = ["get_call_status"] as const;
+const CATALOG: ReadonlySet<string> = new Set<string>([...TOOL_NAMES, ...BROKER_TOOL_NAMES]);
 
 /** The argument fields that fail a tool's schema: names (paths) only, never the values. */
 export function invalidFields(shape: z.ZodRawShape, args: unknown): string[] {
@@ -218,15 +224,18 @@ export function rejectedCall(
   params: unknown,
   response: { result?: unknown; error?: { code: number } },
   shapes: ReadonlyMap<string, z.ZodRawShape>,
+  /** Upstream tools listed to this agent (exposed names, which never contain "."): audited under their own name. */
+  dynamic: ReadonlySet<string> = new Set(),
 ): { action: string; reason: string; detail: Record<string, unknown> | null } | null {
   if (!response.error && !(response.result as { isError?: unknown } | undefined)?.isError) return null;
   const p = (params && typeof params === "object" ? params : {}) as { name?: unknown; arguments?: unknown };
   const name = typeof p.name === "string" ? p.name : null;
   const shape = name === null ? undefined : shapes.get(name);
   // Only catalog names are the action (TOOL_NAMES); keep a short, cleaned copy of any other.
-  const action = name !== null && CATALOG.has(name) ? name : name === null ? "invalid_request" : "unknown_tool";
+  const action = name !== null && (CATALOG.has(name) || dynamic.has(name)) ? name : name === null ? "invalid_request" : "unknown_tool";
   const named = name !== null && action !== name ? { tool: cleanLine(name).slice(0, 64) } : {};
   if (response.error) return { action, reason: "invalid_request", detail: { ...named, code: response.error.code } };
+  if (!shape && name !== null && dynamic.has(name)) return { action, reason: "invalid_arguments", detail: null };
   if (!shape) return { action, reason: "unknown_tool", detail: Object.keys(named).length ? named : null };
   const fields = invalidFields(shape, p.arguments);
   return { action, reason: "invalid_arguments", detail: fields.length ? { fields } : null };
@@ -261,16 +270,20 @@ function auditRejections(
 
 /** One McpServer per request (stateless), with only the tools this agent's grants allow. */
 export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts: BuildOptions = {}): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: ctx.config.version }, { instructions: INSTRUCTIONS });
+  // The broker's part for this agent (null while Settings.brokerUpstreams is off): adds a line per connection.
+  const broker = ctx.broker.view(principal.agentId);
+  const server = new McpServer({ name: SERVER_NAME, version: ctx.config.version }, { instructions: INSTRUCTIONS + brokerInstructions(broker) });
   const can = abilities(ctx, principal.agentId);
+  const hasConnections = !!broker?.connections.length;
   const log = ctx.log.child("mcp");
   // Calls a tool handler ran for (and audited), and each registered tool's schema, for auditRejections.
   const handled = new Set<RequestId>();
   const shapes = new Map<string, z.ZodRawShape>();
+  const dynamic = new Set<string>();
   const connect = server.connect.bind(server);
   server.connect = async (transport) => {
     auditRejections(transport, handled, (params, response) => {
-      const r = rejectedCall(params, response, shapes);
+      const r = rejectedCall(params, response, shapes, dynamic);
       if (r) ctx.audit.record({ actorType: "agent", actorId: principal.agentId, action: r.action, outcome: "error", reason: r.reason, detail: r.detail });
     });
     await connect(transport);
@@ -470,8 +483,9 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
   // ───────────── events (read or calendar.read) ─────────────
 
   // The feed carries mail events to `read` grants and calendar.* events to `calendar.read` grants
-  // (ctx.policy.canSeeEvent filters each event), so a calendar-only agent gets these tools too.
-  if (can.has("read") || can.has("calendar.read")) {
+  // (ctx.policy.canSeeEvent filters each event), so a calendar-only agent gets these tools too, and so
+  // does an agent with only connections (their connection.* and <preset>.* events), with the broker on.
+  if (can.has("read") || can.has("calendar.read") || hasConnections) {
     register(
       "list_events",
       {
@@ -742,6 +756,10 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
   // ───────────── calendar.read / calendar.write ─────────────
 
   registerCalendarTools(ctx, register, can);
+
+  // ───────────── MCP broker: upstream tools and get_call_status ─────────────
+
+  if (broker) registerBrokerTools(ctx, server, principal, broker, { handled, shapes, dynamic, signal: opts.signal });
 
   return server;
 }

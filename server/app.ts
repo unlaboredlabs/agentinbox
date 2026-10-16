@@ -12,6 +12,7 @@ import { CALENDAR_PUSH_PATH } from "./calendar/push.ts";
 import { CONNECTION_HOOK_BODY_LIMIT, CONNECTION_HOOKS_PREFIX, type ConnectionHookHost, brokerUpstreamsOn, connectionHookRoutes } from "./integrations/hooks.ts";
 import { accountsApi } from "./api/accounts.ts";
 import { agentsApi } from "./api/agents.ts";
+import { connectionsApi } from "./api/connections.ts";
 import { approvalsApi } from "./api/approvals.ts";
 import { auditApi } from "./api/audit.ts";
 import { authApi, authPublicApi } from "./api/auth.ts";
@@ -130,7 +131,7 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   // Google-facing: verified by channel id + X-Goog-Channel-Token, outside the admin session and CSRF guard.
   app.post(CALENDAR_PUSH_PATH, (c) => c.body(null, ctx.calendar.handlePush(c.req.raw.headers) as 204));
   // Provider-facing (WHOOP): verified by the preset's signature check, outside the admin session and CSRF guard.
-  app.route("/", connectionHookRoutes({ enabled: () => brokerUpstreamsOn(ctx.settings), host: () => opts.connectionHooks ?? null, log: ctx.log }));
+  app.route("/", connectionHookRoutes({ enabled: () => brokerUpstreamsOn(ctx.settings), host: () => opts.connectionHooks ?? ctx.broker.hooks, log: ctx.log }));
   const mcp = mcpRoutes(ctx);
   if (mcp.routes.length) withMcp.add(app);
   app.route("/", mcp);
@@ -140,7 +141,7 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   // ── Admin console API ──
   app.use("/api/*", requireAdmin(ctx));
   // brokerApprovalsApi before approvalsApi: it answers /approvals/:id for mcp.call and passes the rest on.
-  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi, connectionsApi]) {
     app.route("/api", api(ctx));
   }
 

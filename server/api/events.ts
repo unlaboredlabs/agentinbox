@@ -1,5 +1,5 @@
 import { streamSSE } from "hono/streaming";
-import { type ConsoleStreamMessage, EVENT_TYPES, type EventType, type MailEvent } from "../../shared/types.ts";
+import { type ConsoleStreamMessage, EVENT_TYPES, type EventType, isEventType, type MailEvent } from "../../shared/types.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { badRequest } from "../util/errors.ts";
@@ -38,7 +38,7 @@ export function eventsApi(ctx: AppContext, opts: { heartbeatMs?: number; maxPend
   return router()
     .get("/events", (c) => {
       const type = c.req.query("type");
-      if (type && !EVENT_TYPES.includes(type as EventType)) throw badRequest(`type must be one of ${EVENT_TYPES.join(", ")}`);
+      if (type && !isEventType(type)) throw badRequest(`type must be one of ${EVENT_TYPES.join(", ")}`);
       const limit = Number(c.req.query("limit"));
       return c.json(
         ctx.events.list({
