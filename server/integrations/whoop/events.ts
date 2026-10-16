@@ -1,5 +1,6 @@
-// WHOOP events (https://developer.whoop.com/docs/developing/webhooks): signed v2 webhooks when the install has a
-// public https URL, and a 15-minute poll otherwise. Events carry ids only; agents fetch the data with the tools.
+// WHOOP events (https://developer.whoop.com/docs/developing/webhooks): a 15-minute poll, which needs nothing but the
+// OAuth connection, and optional signed v2 webhooks when the internet can reach this install (the broker pauses the
+// poll while verified deliveries arrive). Events carry ids only; agents fetch the data with the tools.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IntegrationEvent, NativeEvents, NativeSourceDeps } from "../../broker/types.ts";
@@ -23,6 +24,11 @@ export const TIMESTAMP_HEADER = "x-whoop-signature-timestamp";
  * memory, then the outbox's dedupeKey); outside it they're refused (401).
  */
 export const SIGNATURE_TOLERANCE_MS = 2 * 3_600_000;
+/**
+ * A poll is 3 requests (recoveries, sleeps, workouts; up to 4 pages each), so about 290 a day: under 3% of WHOOP's
+ * 10,000 a day and never near 100 a minute, leaving the rest for agents' tool calls on the same app. WHOOP scores a
+ * sleep or workout minutes after it ends and new data lands a few times a day, so 15 minutes is timely enough.
+ */
 export const POLL_INTERVAL_MS = 15 * 60_000;
 /** How far back a poll looks for changed records (a sleep scored this morning started last night). */
 const POLL_LOOKBACK_MS = 48 * 3_600_000;

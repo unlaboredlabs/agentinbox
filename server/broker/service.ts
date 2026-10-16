@@ -27,6 +27,7 @@ import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
+import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { randomToken } from "../util/ids.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -34,6 +35,7 @@ import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGr
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
+import { type ReachabilityDeps, type WebhookReachability, reachabilityCache } from "./reachability.ts";
 import {
   type BrokerCalls,
   type CredentialStore,
@@ -97,10 +99,18 @@ export interface BrokerParts {
   presets?: () => IntegrationPreset[];
   /** The credential store. Default: the upstream runtime's (server/broker/credentials). */
   credentials?: CredentialStore;
+  /** DNS and the Tailscale CLI for the webhook reachability check (tests: fakes, no network). */
+  reachability?: Partial<ReachabilityDeps>;
 }
 
 /** What changed: one agent's grants, one connection (slug, URL, pins, kill), or everything. */
 export type InvalidateScope = { agentId: string } | { connectionId: string } | "all";
+
+/**
+ * How long a verified webhook delivery pauses a connection's poll. WHOOP sends sleep and recovery updates daily for a
+ * worn strap, so a day without any means the strap is off or the webhooks stopped: the poll resumes either way.
+ */
+export const WEBHOOK_TRUST_MS = 24 * 3_600_000;
 
 export interface BrokerOptions {
   /** How often the native-preset event poll checks which connections are due (each polls every pollIntervalMs). Default 60 s. */
@@ -153,9 +163,17 @@ export interface BrokerService extends Lifecycle {
   emitConnectionEvent(e: { type: EventType; connectionId: string; dedupeKey: string; detail?: Record<string, unknown> }): MailEvent | null;
   /** Inbound webhooks of native presets (POST /hooks/connections/:id, server/integrations/hooks.ts). */
   hooks: ConnectionHookHost;
-  /** The connection's inbound webhook URL, or null without a public https URL (then its events are polled). */
+  /**
+   * The connection's inbound webhook URL, or null when nothing public reaches this install (server/broker/reachability.ts).
+   * From the last check: null until one has finished.
+   */
   webhookUrl(connectionId: string): string | null;
-  /** Polls every due native connection without a webhook URL once; returns the number of events emitted. */
+  /** Whether providers can reach the webhook URL, and the optional Tailscale Funnel step (cached, bounded). */
+  webhookReachability(): Promise<WebhookReachability>;
+  /**
+   * Polls every due native connection once, unless its webhooks are proven to arrive (a verified delivery within
+   * WEBHOOK_TRUST_MS, while the webhook URL is still public); returns the number of events emitted.
+   */
   pollEvents(at?: number): Promise<number>;
 }
 
@@ -345,6 +363,18 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return n;
   }
 
+  const reach = reachabilityCache({
+    publicUrl: () => ctx.settings.publicUrl(),
+    localOrigin: () => loopbackUrl(ctx.config.host, ctx.config.port),
+    deps: parts.reachability,
+  });
+  /** Last verified webhook delivery per connection (memory only: after a restart the poll runs until the next one). */
+  const lastDelivery = new Map<string, number>();
+  const webhooksProven = (connectionId: string): boolean => {
+    const at = lastDelivery.get(connectionId);
+    return at !== undefined && Date.now() - at < WEBHOOK_TRUST_MS && webhookUrl(connectionId) !== null;
+  };
+
   const hooks: ConnectionHookHost = {
     webhookTarget(connectionId) {
       const c = getConnection(ctx, connectionId);
@@ -354,6 +384,19 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       const secret = clientRecord(connectionId)?.[preset.auth.clientSecretInput];
       if (typeof secret !== "string" || !secret) return null;
       return { preset, deps: parts.nativeDeps?.(c) ?? defaultNativeDeps(c), clientSecret: secret, client: clientRecord(connectionId) };
+    },
+    presetWebhookTargets(presetId) {
+      if (!presetFor(presetId)) return [];
+      return listConnections(ctx)
+        .filter((c) => c.preset === presetId)
+        .flatMap((c) => hooks.webhookTarget(c.id) ?? []);
+    },
+    delivered(connectionId) {
+      // Strictly increasing, so a poll can tell a delivery happened while it ran.
+      lastDelivery.set(connectionId, Math.max(Date.now(), (lastDelivery.get(connectionId) ?? 0) + 1));
+      // The poll pauses now; when it resumes it starts from a fresh baseline, so nothing webhooks already
+      // delivered is announced a second time.
+      ctx.db.run("UPDATE connections SET events_cursor = NULL WHERE id = ?", connectionId);
     },
     emit(events) {
       const byConnection = new Map<string, IntegrationEvent[]>();
@@ -366,10 +409,10 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
   };
 
-  const webhookUrl = (connectionId: string): string | null => {
-    const publicUrl = ctx.settings.publicUrl();
-    return publicUrl.startsWith("https://") ? connectionHookUrl(publicUrl, connectionId) : null;
-  };
+  function webhookUrl(connectionId: string): string | null {
+    const base = reach.current().webhookBase;
+    return base ? connectionHookUrl(base, connectionId) : null;
+  }
 
   const lastPoll = new Map<string, number>();
   let polling = false;
@@ -378,19 +421,28 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     polling = true;
     let emitted = 0;
     try {
+      let checked = false;
       for (const c of listConnections(ctx)) {
-        if (c.kind === "remote_http" || c.status === "disabled" || c.status === "needs_reauth" || webhookUrl(c.id)) continue;
+        if (c.kind === "remote_http" || c.status === "disabled" || c.status === "needs_reauth") continue;
         const preset = presetOf(c);
         const poll = preset?.events?.poll;
         if (!preset || !poll) continue;
+        // Only once there's something to poll (no DNS or CLI call otherwise); bounded and cached.
+        if (!checked) {
+          checked = true;
+          await reach.check();
+        }
+        if (webhooksProven(c.id)) continue;
         const interval = preset.events?.pollIntervalMs ?? 15 * 60_000;
         if (at - (lastPoll.get(c.id) ?? 0) < interval) continue;
         lastPoll.set(c.id, at);
         try {
+          const before = lastDelivery.get(c.id);
           const cursor = ctx.db.get<{ events_cursor: string | null }>("SELECT events_cursor FROM connections WHERE id = ?", c.id)?.events_cursor ?? null;
           const r = await poll(cursor, parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
           emitted += emitIntegrationEvents(c, preset, r.events);
-          ctx.db.run("UPDATE connections SET events_cursor = ? WHERE id = ?", r.cursor, c.id);
+          // A webhook verified meanwhile reset the cursor (delivered above): keep it reset.
+          if (lastDelivery.get(c.id) === before) ctx.db.run("UPDATE connections SET events_cursor = ? WHERE id = ?", r.cursor, c.id);
         } catch (err) {
           log.warn("Integration event poll failed", { connection: c.id, error: errorMessage(err) });
         }
@@ -502,6 +554,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
     hooks,
     webhookUrl,
+    webhookReachability: () => reach.check(),
     pollEvents,
 
     start() {
