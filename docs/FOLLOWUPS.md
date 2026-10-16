@@ -401,3 +401,16 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `/mcp` instructions still list a disabled connection (from grants).
 - Upstream `notifications/tools/list_changed` → `requestRefresh` isn't wired (the remote source has no notification hook); tool changes surface on the 10-minute timer or the Refresh tools button.
 - `/me` lists grants on turned-off connections with no status (`listen status` shows them as usable).
+
+### Directory ownership (#74 review)
+- `server/listen/paths.ts` header comment says `$XDG_*/xaq-cli`; the code uses `xaq`.
+- `server/config.ts` `DATA_MARKERS`: `master.key` is a generic name; a foreign `~/.xaq/master.key` would count as ours and be read as the master key. The db and lock markers suffice.
+- `server/config.ts` `OWN_ENTRY`: a macOS `.DS_Store` counts as foreign, so the daemon skips tightening the dir and `clearOwnInstall` refuses a partial `app.new`/`app.old` (safe rollback, clear error). Ignore `.DS_Store`.
+- `server/auth/setup-token.ts`: a foreign `~/.xaq/setup-token` of 8–128 alphanumerics would be adopted and printed in our setup link.
+- `server/service.ts` `isOurServiceEnv`: a foreign `service.env` holding only keys we know is parsed and then overwritten.
+- `server/listen/lock.ts`: a non-empty unreadable lock now throws instead of being taken over; a lock truncated by a crash must be deleted by hand.
+
+### WHOOP without webhooks (blocker round)
+- The "last webhook delivery" mark is in memory: after a restart, polling runs until the next webhook (the first poll can repeat an event a webhook already sent).
+- If webhooks stop silently while the URL still looks public, polling resumes after 24 h from a fresh baseline, so those events are missed.
+- The Funnel command was checked against Tailscale's docs and source, not on a real tailnet.
