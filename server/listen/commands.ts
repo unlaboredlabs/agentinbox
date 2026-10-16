@@ -1,4 +1,5 @@
 import { type Command, InvalidArgumentError } from "commander";
+import { LEGACY_PRODUCT } from "../brand.ts";
 import { EVENT_TYPES } from "../../shared/types.ts";
 import type { ConnectFlags } from "./connect.ts";
 import type { HermesFlags } from "./hermes.ts";
@@ -7,7 +8,7 @@ import { DEFAULT_PROFILE } from "./paths.ts";
 import { RECIPE_NAMES, recipesHelp, TOOLS } from "./recipes.ts";
 import { NPX } from "./version.ts";
 
-/** `agentinbox connect`, `agentinbox setup-mcp` and `agentinbox listen …`, all lazily loaded. */
+/** `xaq connect`, `xaq setup-mcp` and `xaq listen …`, all lazily loaded. */
 
 /**
  * Options of a `listen` subcommand plus any its ancestors parsed: `listen` declares the same flags
@@ -54,15 +55,16 @@ function listenFlags(cmd: Command): Command {
 /** `listen hermes --help`. */
 function hermesHelp(): string {
   return `
---recipe hermes forwards each event to your running Hermes gateway (http://127.0.0.1:8644/webhooks/agentinbox; for
-another profile the route is agentinbox-<profile>). Hermes verifies the Standard Webhooks signature with the
+--recipe hermes forwards each event to your running Hermes gateway (http://127.0.0.1:8644/webhooks/xaq; for
+another profile the route is xaq-<profile>; a profile set up before the rename keeps its ${LEGACY_PRODUCT}[-<profile>] route,
+toolset and server name). Hermes verifies the Standard Webhooks signature with the
 listener's secret, runs the triage, and delivers the result where this route says. Mail that isn't important gets
 a [SILENT] reply, which Hermes doesn't deliver.
 
 A Hermes webhook run normally gets web tools (web_search, web_extract, vision_analyze, clarify) and every MCP
 server enabled in Hermes: with email as the trigger, an attacker could make it read your mail and send it out.
---run therefore also limits the route to the agentinbox MCP server ("toolsets": ["mcp-agentinbox"] in
-webhook_subscriptions.json, which \`hermes webhook subscribe\` can't set). That limit only holds when agentinbox is an
+--run therefore also limits the route to the xaq MCP server ("toolsets": ["mcp-xaq"] in
+webhook_subscriptions.json, which \`hermes webhook subscribe\` can't set). That limit only holds when xaq is an
 enabled MCP server in Hermes' config.yaml (else Hermes adds every MCP server), so this refuses until
 \`${NPX} setup-mcp --tool hermes\` has added it. --run creates the route disabled with the real secret under Hermes'
 lock (python3), runs \`hermes webhook subscribe\` without --secret (hermes keeps the secret and the disabled state),
@@ -73,35 +75,36 @@ toolsets). The Hermes home follows HERMES_HOME or Hermes' sticky active_profile.
 Without --run it prints both steps for you to do by hand; the toolsets edit is required.
 
 --cron-job hands the email to that job's own tools, so it is accepted only when the job's enabled_toolsets is
-exactly ["agentinbox"] (the bare server name; "mcp-agentinbox" doesn't narrow MCP servers for cron jobs).
+exactly ["xaq"] (the bare server name; "mcp-xaq" doesn't narrow MCP servers for cron jobs).
 
 Needs python3, the gateway's webhook platform (hermes gateway setup, or WEBHOOK_ENABLED=true in ~/.hermes/.env) and
 a running gateway. Check it: curl http://127.0.0.1:8644/health
 
 Examples:
   ${NPX} listen hermes --deliver telegram --run
-  ${NPX} listen hermes --cron-job email-watch --run    # only for a job limited to ["agentinbox"]
+  ${NPX} listen hermes --cron-job email-watch --run    # only for a job limited to ["xaq"]
   ${NPX} listen service install --recipe hermes`;
 }
 
 /** `setup-mcp --help`: exactly what it changes, per tool. */
 function mcpSetupHelp(): string {
   return `
-What it changes (the server is named "agentinbox", or "agentinbox-<profile>" for --profile):
-  claude-code  runs \`claude mcp remove agentinbox --scope user\` then
-               \`claude mcp add-json --scope user agentinbox '{"type":"http","url":"<daemon>/mcp","headersHelper":"…"}'\`.
-               The header helper (~/.config/agentinbox/bin/mcp-header.mjs) reads the key from your profile, so
+What it changes (the server is named "xaq", or "xaq-<profile>" for --profile; a profile set up before the
+rename keeps the "${LEGACY_PRODUCT}[-<profile>]" name it already has in your tools):
+  claude-code  runs \`claude mcp remove xaq --scope user\` then
+               \`claude mcp add-json --scope user xaq '{"type":"http","url":"<daemon>/mcp","headersHelper":"…"}'\`.
+               The header helper (~/.config/xaq/bin/mcp-header.mjs) reads the key from your profile, so
                the key is in neither the command line nor ~/.claude.json. Backs up ~/.claude.json first
                ($CLAUDE_CONFIG_DIR/.claude.json if set).
-  codex        adds or replaces [mcp_servers.agentinbox] in ~/.codex/config.toml ($CODEX_HOME), with the key in
+  codex        adds or replaces [mcp_servers.xaq] in ~/.codex/config.toml ($CODEX_HOME), with the key in
                http_headers; the file becomes 0600.
-  cursor       adds or replaces mcpServers.agentinbox in ~/.cursor/mcp.json, with the key in headers; 0600.
-  hermes       adds or replaces mcp_servers.agentinbox in ~/.hermes/config.yaml ($HERMES_HOME) and puts the key in
-               ~/.hermes/.env as AGENTINBOX_API_KEY; both 0600.
-Every file is backed up first as <file>.agentinbox-backup-<timestamp> (0600; backups of files holding the key hold it
-too). It also refreshes ~/.config/agentinbox/mcp/<profile>.claude.json (no key), which the listen recipe uses.
+  cursor       adds or replaces mcpServers.xaq in ~/.cursor/mcp.json, with the key in headers; 0600.
+  hermes       adds or replaces mcp_servers.xaq in ~/.hermes/config.yaml ($HERMES_HOME) and puts the key in
+               ~/.hermes/.env as XAQ_API_KEY; both 0600.
+Every file is backed up first as <file>.xaq-backup-<timestamp> (0600; backups of files holding the key hold it
+too). It also refreshes ~/.config/xaq/mcp/<profile>.claude.json (no key), which the listen recipe uses.
 
-Check it afterwards: claude mcp list · codex mcp list · agent mcp list (Cursor) · hermes mcp test agentinbox
+Check it afterwards: claude mcp list · codex mcp list · agent mcp list (Cursor) · hermes mcp test xaq
 
 Example:
   ${NPX} setup-mcp --tool claude-code --dry-run`;
@@ -110,8 +113,8 @@ Example:
 export function registerListenCommands(program: Command): void {
   program
     .command("connect")
-    .description("pair this machine's agent with an agentinbox daemon (approve the code in the console)")
-    .argument("<daemon-url>", "the agentinbox daemon, e.g. https://mail.example.com or http://100.101.102.103:8425")
+    .description("pair this machine's agent with a xaq daemon (approve the code in the console)")
+    .argument("<daemon-url>", "the xaq daemon, e.g. https://mail.example.com or http://100.101.102.103:8425")
     .option("--name <name>", 'how the agent appears in the console (default "<Tool> on <hostname>")')
     .option("--tool <tool>", `the agent's tool: ${TOOLS.join(", ")}; tailors the next steps`)
     .option("--account <email>", "mailbox to request access to (repeatable; the approver decides)", collect)
@@ -136,7 +139,7 @@ Example:
       process.exit(await runConnect(url, flags, { handleSignals: true }));
     });
 
-  profileOption(program.command("setup-mcp").description("register the agentinbox MCP server in your agent's tool, without showing the key"))
+  profileOption(program.command("setup-mcp").description("register the xaq MCP server in your agent's tool, without showing the key"))
     .option("--tool <tool>", `${TOOLS.filter((t) => t !== "other").join(", ")} (default: the tool given to connect)`)
     .option("--dry-run", "print the exact commands and file changes, and change nothing")
     .addHelpText("after", mcpSetupHelp())
@@ -205,13 +208,13 @@ Example:
   profileOption(
     listen
       .command("hermes")
-      .description("create the Hermes gateway webhook route that --recipe hermes forwards to, limited to the agentinbox tools"),
+      .description("create the Hermes gateway webhook route that --recipe hermes forwards to, limited to the xaq tools"),
   )
     .option("--deliver <target>", "where Hermes sends its triage: telegram, discord, slack… (a platform connected to your gateway), or log")
     .option("--deliver-chat-id <id>", "with --deliver: a specific chat instead of the platform's home channel")
-    .option("--cron-job <job>", "instead of --deliver: fire this existing Hermes cron job (id or name; `hermes cron list`); its prompt, tools and delivery apply, so its enabled_toolsets must be exactly [\"agentinbox\"]")
+    .option("--cron-job <job>", "instead of --deliver: fire this existing Hermes cron job (id or name; `hermes cron list`); its prompt, tools and delivery apply, so its enabled_toolsets must be exactly [\"xaq\"]")
     .option("--script <file>", "a Hermes filter script under ~/.hermes/scripts (runs before the agent; can drop events at no LLM cost)")
-    .option("--run", "set the route up now: run hermes, then set the real secret and limit the route to the agentinbox tools (recommended)")
+    .option("--run", "set the route up now: run hermes, then set the real secret and limit the route to the xaq tools (recommended)")
     .addHelpText("after", hermesHelp())
     .action(async (_o: unknown, cmd: Command) => {
       const flags = all<HermesFlags>(cmd);

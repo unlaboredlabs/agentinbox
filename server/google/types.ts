@@ -130,7 +130,7 @@ export class AccountNeedsReauthError extends Error {
     readonly accountId: string,
     readonly email: string,
   ) {
-    super(`The Gmail account ${email} needs to be reconnected in the agentinbox console.`);
+    super(`The Gmail account ${email} needs to be reconnected in the xaq console.`);
   }
 }
 

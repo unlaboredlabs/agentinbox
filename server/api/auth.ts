@@ -20,7 +20,7 @@ export function authPublicApi(ctx: AppContext) {
       if (banned) return lockedOut(c, banned);
       const body = await readBody(c, LoginBody);
       const hash = ctx.settings.getState("admin.passwordHash");
-      if (!hash) throw conflict("This instance has not been claimed yet", "Open the setup link printed by agentinbox on startup.");
+      if (!hash) throw conflict("This instance has not been claimed yet", "Open the setup link printed by xaq on startup.");
       const check = await checkSecret(ctx, ip, body.password, () => verifyPasswordAsync(body.password, hash));
       if (!check.ok) {
         const rejected = rejection(c, check);

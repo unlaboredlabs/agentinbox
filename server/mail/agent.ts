@@ -226,7 +226,7 @@ export class AgentMail {
     if (match.account.status === "needs_reauth") {
       throw new ToolError(
         "needs_reauth",
-        `The Gmail account ${match.account.email} needs to be reconnected. Ask the operator to reconnect it in the agentinbox console.`,
+        `The Gmail account ${match.account.email} needs to be reconnected. Ask the operator to reconnect it in the xaq console.`,
       );
     }
     return { ...match, gmail: this.ctx.google.gmail(match.account.id) };

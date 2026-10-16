@@ -99,12 +99,12 @@ const apiError = (code: string, message: string, hint?: string) => ({ error: { c
 export function agentRequestGuard(ctx: AppContext, deps?: HostDeps): MiddlewareHandler<AgentApiEnv> {
   return async (c, next) => {
     if (c.req.header("origin") !== undefined || c.req.header("sec-fetch-site") !== undefined) {
-      return c.json(apiError("browser_request", "The agent API does not accept browser requests", "Use `npx agentinbox-cli connect` / `listen`."), 403);
+      return c.json(apiError("browser_request", "The agent API does not accept browser requests", "Use `npx xaq-cli connect` / `listen`."), 403);
     }
     const host = hostOf(c.req.header("host") ?? new URL(c.req.url).host);
     if (!host || !(await hostAllowed(ctx, host, deps))) {
       return c.json(
-        apiError("unknown_host", "This agentinbox does not answer to that host name", "Use the public URL configured in Settings (behind a proxy, forward the original Host header)."),
+        apiError("unknown_host", "This xaq does not answer to that host name", "Use the public URL configured in Settings (behind a proxy, forward the original Host header)."),
         421,
       );
     }

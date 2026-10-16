@@ -29,7 +29,7 @@ afterEach(async () => {
   env.restore();
 });
 
-describe("agentinbox CLI (subprocess)", () => {
+describe("xaq CLI (subprocess)", () => {
   it("connect pairs, prints the code and next steps, never the key", async () => {
     api.pollScript = [{ status: "approved", apiKey: FAKE_KEY, agent: { id: "agt_9", name: "Hermes on box" }, mcpUrl: `${api.url}/mcp`, skillUrl: `${api.url}/skill.md` }];
     const run = cli(["connect", api.url, "--tool", "hermes"], xdg);
@@ -37,11 +37,11 @@ describe("agentinbox CLI (subprocess)", () => {
     const out = run.output();
     expect(out).toContain("K7QM-2XPD");
     // Hermes forwards to its gateway: connect says to create the route first, and where the result goes.
-    expect(out).toContain("npx agentinbox-cli listen hermes --deliver telegram --run");
-    expect(out).toContain("http://127.0.0.1:8644/webhooks/agentinbox");
-    expect(out).toContain("npx agentinbox-cli listen --save --recipe hermes");
+    expect(out).toContain("npx xaq-cli listen hermes --deliver telegram --run");
+    expect(out).toContain("http://127.0.0.1:8644/webhooks/xaq");
+    expect(out).toContain("npx xaq-cli listen --save --recipe hermes");
     expect(out).not.toContain("$(");
-    expect(out).toContain("npx agentinbox-cli listen service install");
+    expect(out).toContain("npx xaq-cli listen service install");
     expect(out).not.toContain(FAKE_KEY);
   }, 30_000);
 
@@ -58,7 +58,7 @@ describe("agentinbox CLI (subprocess)", () => {
 
     const recipe = cli(["listen", "--print-recipe", "claude-code"], xdg);
     expect(await recipe.exit).toBe(0);
-    expect(recipe.output().trim()).toContain(`--mcp-config '${join(xdg.XDG_CONFIG_HOME!, "agentinbox", "mcp", "default.claude.json")}'`);
+    expect(recipe.output().trim()).toContain(`--mcp-config '${join(xdg.XDG_CONFIG_HOME!, "xaq", "mcp", "default.claude.json")}'`);
   }, 30_000);
 
   it("listen --recipe rejects unknown tools and --exec alongside it, before connecting", async () => {
@@ -83,10 +83,10 @@ describe("agentinbox CLI (subprocess)", () => {
     expect(bad.output()).not.toContain("hermes chat");
     const ok = cli(["listen", "--print-recipe", "hermes-oneshot", "--profile", "work"], xdg);
     expect(await ok.exit).toBe(0);
-    expect(ok.output()).toContain("-t mcp-agentinbox-work --query-file -");
+    expect(ok.output()).toContain("-t mcp-xaq-work --query-file -");
     const fwd = cli(["listen", "--print-recipe", "hermes", "--profile", "work"], xdg);
     expect(await fwd.exit).toBe(0);
-    expect(fwd.output().trim()).toBe("http://127.0.0.1:8644/webhooks/agentinbox-work");
+    expect(fwd.output().trim()).toBe("http://127.0.0.1:8644/webhooks/xaq-work");
   }, 30_000);
 
   it("listen exits 78 when access is revoked, so services don't restart-loop", async () => {

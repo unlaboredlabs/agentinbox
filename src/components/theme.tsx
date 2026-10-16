@@ -8,10 +8,11 @@ type Theme = 'light' | 'dark' | 'system'
 const ThemeContext = createContext<{ theme: Theme; setTheme: (t: Theme) => void }>({ theme: 'system', setTheme: () => {} })
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('agentinbox.theme') as Theme) ?? 'system')
+  const [theme, setTheme] = useState<Theme>(() => // 'agentinbox.theme': the choice made before the rename.
+    (localStorage.getItem('xaq.theme') ?? localStorage.getItem('agentinbox.theme')) as Theme ?? 'system')
 
   useEffect(() => {
-    localStorage.setItem('agentinbox.theme', theme)
+    localStorage.setItem('xaq.theme', theme)
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const apply = () => document.documentElement.classList.toggle('dark', theme === 'dark' || (theme === 'system' && media.matches))
     apply()

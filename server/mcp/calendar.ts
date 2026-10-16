@@ -217,7 +217,7 @@ function eventInput(a: {
 }
 
 const WRITE_RESULTS =
-  'The result\'s status says what happened: "applied" (in Google Calendar now), "deleted", or "pending_approval" (a human must approve it in the agentinbox console first; check it with get_send_status).';
+  'The result\'s status says what happened: "applied" (in Google Calendar now), "deleted", or "pending_approval" (a human must approve it in the xaq console first; check it with get_send_status).';
 const SERIES_NOTE =
   "list_calendar_events shows each occurrence of a repeating event with its own event_id: passing it affects only that occurrence. To change or answer every occurrence, pass the series id (series: in list_calendar_events, or Repeats in get_calendar_event) as event_id.";
 const NOTIFY_NOTE =

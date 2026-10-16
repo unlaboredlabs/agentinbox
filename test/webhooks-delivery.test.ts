@@ -300,7 +300,7 @@ describe("enqueue + delivery", () => {
 
     for (const r of rx.requests) {
       expect(r.headers["content-type"]).toBe("application/json");
-      expect(r.headers["user-agent"]).toBe("agentinbox/0.0.0-test");
+      expect(r.headers["user-agent"]).toBe("xaq/0.0.0-test");
       expect(r.headers["webhook-id"]).toMatch(/^dlv_/);
       const secret = r.headers["webhook-id"] && deliveries(ctx, all.webhook.id).some((d) => d.id === r.headers["webhook-id"]) ? all.secret : scoped.secret;
       expect(await verifyStandardWebhook(secret, r.headers, r.body)).toBe(true);
@@ -422,7 +422,7 @@ describe("enqueue + delivery", () => {
     expect(d).toMatchObject({ webhookId: webhook.id, status: "succeeded", attempts: 1, eventType: "message.received" });
     expect(d.eventId).toMatch(/^evt_/);
     const p = JSON.parse(rx.requests[0]!.body) as WebhookPayload;
-    expect(p.data).toMatchObject({ id: d.eventId, detail: { test: true }, accountEmail: "test@agentinbox.invalid" });
+    expect(p.data).toMatchObject({ id: d.eventId, detail: { test: true }, accountEmail: "test@xaq.invalid" });
     expect(p.data.seq).toBeLessThan(0);
     expect(p.data.content?.body).toMatch(/test delivery/);
     expect(mailCalls).toEqual([]);

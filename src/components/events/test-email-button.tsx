@@ -8,7 +8,7 @@ import { api, describeError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
- * "Send a test email": agentinbox mails the account from itself (POST /api/accounts/:id/test-email),
+ * "Send a test email": xaq mails the account from itself (POST /api/accounts/:id/test-email),
  * which shows up as a new event within moments. Errors (paused account, rate limit) are shown inline.
  */
 export function TestEmailButton({ accounts, className }: { accounts: Account[]; className?: string }) {

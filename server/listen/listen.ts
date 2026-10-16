@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import pc from "picocolors";
 import type { WebhookPayload } from "../../shared/types.ts";
+import { envVar, underService } from "../brand.ts";
 import { ackEvents, ApiError, getSelf } from "./api.ts";
 import { Dispatcher, type Job, type Target } from "./dispatcher.ts";
 import { parsePayload, skipReason } from "./event.ts";
@@ -139,10 +140,10 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     profile = next;
   }
   // Under launchd, stdout goes to a file nobody rotates; the rotated listen.log already has everything.
-  const quietConsole = process.env.AGENTINBOX_SERVICE === "1" && process.platform === "darwin";
+  const quietConsole = underService() && process.platform === "darwin";
   const backfill = !!opts.flags.backfill;
   const oneOff = backfill || !!opts.flags.dryRun;
-  const log = opts.log ?? createListenLogger({ path: oneOff ? oneOffLogPath(profileName) : logPath(profileName), debug: !!process.env.AGENTINBOX_DEBUG, console: !quietConsole });
+  const log = opts.log ?? createListenLogger({ path: oneOff ? oneOffLogPath(profileName) : logPath(profileName), debug: !!envVar("DEBUG"), console: !quietConsole });
   if (opts.flags.save) log.info(`Saved these settings to profile "${profileName}".`);
 
   const verdict = await checkTransport(profile.url, { insecure: config.insecure });
@@ -575,7 +576,7 @@ async function revokedExit(log: ListenLogger, status: StatusWriter, profileName:
   status.update({ connected: false, stoppedAt: new Date().toISOString(), exitReason: `revoked: ${safeText(reason, 300)}` });
   status.flush();
   // launchd can't be told "don't restart on this exit code": wait a long time first so it doesn't spin.
-  if (process.env.AGENTINBOX_SERVICE === "1" && process.platform === "darwin") {
+  if (underService() && process.platform === "darwin") {
     await new Promise((r) => setTimeout(r, opts.revokedExitDelayMs ?? 15 * 60_000));
   }
   return EXIT.revoked;
@@ -615,8 +616,8 @@ async function backfillEnd(profileName: string, profile: Profile, consumer: stri
   }
   if (!self.consumers) {
     throw new Error(
-      "This agentinbox daemon doesn't report where listeners started (it's older than this CLI), so a backfill could re-run mail the listener already handled.\n" +
-        `  Update agentinbox, or pass --until <event number>: the newest event to replay (events after it are the listener's).`,
+      "This xaq daemon doesn't report where listeners started (it's older than this CLI), so a backfill could re-run mail the listener already handled.\n" +
+        `  Update xaq, or pass --until <event number>: the newest event to replay (events after it are the listener's).`,
     );
   }
   if (!mine) {
@@ -627,7 +628,7 @@ async function backfillEnd(profileName: string, profile: Profile, consumer: stri
   }
   if (mine.startSeq === null) {
     throw new Error(
-      `The daemon doesn't know where consumer "${consumer}" started (it was created by an older agentinbox).\n` +
+      `The daemon doesn't know where consumer "${consumer}" started (it was created by an older xaq).\n` +
         `  Pass --until <event number>: the newest event to replay. The listener's first handled events are in ${NPX} listen status${p} and its log.`,
     );
   }
@@ -672,7 +673,7 @@ export function outputLine(profileName: string, c: { exec: string | null; forwar
 
 function printBanner(log: ListenLogger, name: string, profile: Profile, c: EffectiveConfig, dryRun: boolean, backfill = false): void {
   const lines = [
-    `${pc.bold("agentinbox listen")} ${pc.gray(`v${version}`)} · profile ${pc.cyan(name)} · agent ${pc.cyan(safeText(profile.agentName))}`,
+    `${pc.bold("xaq listen")} ${pc.gray(`v${version}`)} · profile ${pc.cyan(name)} · agent ${pc.cyan(safeText(profile.agentName))}`,
     `  daemon    ${profile.url}  ${pc.gray(`(consumer ${c.consumer} on ${hostname()})`)}`,
   ];
   if (dryRun) lines.push(`  mode      ${pc.yellow("dry run")}: matching events are printed; nothing runs and the cursor is not advanced`);

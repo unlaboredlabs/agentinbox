@@ -112,7 +112,7 @@ function ApprovalsPage() {
 
         <TabsContent value="access" className="mt-4 space-y-4">
           <p className="max-w-2xl text-sm text-muted-foreground">
-            Agents that ran <code className="font-mono text-foreground">npx agentinbox-cli connect</code> and are waiting for you. Names, hosts and
+            Agents that ran <code className="font-mono text-foreground">npx xaq-cli connect</code> and are waiting for you. Names, hosts and
             reasons come from the agent itself. Approve only requests you started, after checking the code in your terminal.
           </p>
           {link?.kind === "denied" ? (
@@ -171,7 +171,7 @@ function ApprovalsPage() {
                       </EmptyMedia>
                       <EmptyTitle>No agents waiting for access</EmptyTitle>
                       <EmptyDescription>
-                        Run <code className="font-mono">npx agentinbox-cli connect</code> on the agent's machine. Its request shows up here
+                        Run <code className="font-mono">npx xaq-cli connect</code> on the agent's machine. Its request shows up here
                         instantly.
                       </EmptyDescription>
                     </EmptyHeader>

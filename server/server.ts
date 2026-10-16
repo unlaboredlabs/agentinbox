@@ -1,13 +1,12 @@
 import { existsSync, rmdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { homedir, hostname, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { hostname, userInfo } from "node:os";
 import { type ServerType, serve } from "@hono/node-server";
 import open from "open";
 import pc from "picocolors";
 import { createApp, hasMcp } from "./app.ts";
 import { currentSetupToken } from "./auth/index.ts";
-import { type Config, type ConfigInput, loadConfig } from "./config.ts";
+import { type Config, type ConfigInput, loadConfig, resolveDataDir } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { acquireInstanceLock, assertMasterKeyUsable, cliCommand, type InstanceLock, serviceInstallCommand } from "./instance.ts";
 import { startMaintenance } from "./maintenance.ts";
@@ -120,7 +119,7 @@ function listen(fetch: Parameters<typeof serve>[0]["fetch"], hostname: string, p
 
 function friendlyListenError(err: unknown, port: number): Error {
   const code = (err as NodeJS.ErrnoException)?.code;
-  if (code === "EADDRINUSE") return new Error(`Port ${port} is already in use (is agentinbox already running?). Try --port <port>.`);
+  if (code === "EADDRINUSE") return new Error(`Port ${port} is already in use (is xaq already running?). Try --port <port>.`);
   if (code === "EACCES") return new Error(`Not allowed to listen on port ${port}. Use a port above 1024, e.g. --port 8425.`);
   if (code === "EADDRNOTAVAIL") return new Error(`Can't bind to that address. Check --host.`);
   return err instanceof Error ? err : new Error(String(err));
@@ -132,9 +131,9 @@ export interface RunOptions extends ConfigInput {
   version: string;
 }
 
-/** `agentinbox start`: runs in the foreground until SIGINT/SIGTERM. */
+/** `xaq start`: runs in the foreground until SIGINT/SIGTERM. */
 export async function runForeground(opts: RunOptions): Promise<void> {
-  const dataDir = resolve(opts.dataDir ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
+  const dataDir = resolveDataDir(opts.dataDir, { quiet: true });
   const existed = existsSync(dataDir);
   const config = loadConfig(opts, opts.version);
   let running: RunningServer;
@@ -159,9 +158,9 @@ export async function runForeground(opts: RunOptions): Promise<void> {
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
-      console.log(pc.dim(`\n  Stopping agentinbox…`));
+      console.log(pc.dim(`\n  Stopping xaq…`));
       setTimeout(() => {
-        console.error(`agentinbox did not stop within ${SHUTDOWN_TIMEOUT_MS / 1000} s; exiting anyway.`);
+        console.error(`xaq did not stop within ${SHUTDOWN_TIMEOUT_MS / 1000} s; exiting anyway.`);
         process.exit(1);
       }, SHUTDOWN_TIMEOUT_MS).unref();
       running.close().then(
@@ -259,7 +258,7 @@ export function bannerLines(ctx: AppContext, info: { mcp: boolean }, e: BannerEn
   const local = config.dev ? "http://localhost:5173" : null;
   const urls = local ? [local] : isWildcardHost(config.host) ? [`http://localhost:${config.port}`, ...e.addresses.map((a) => `http://${a}:${config.port}`)] : consoleUrls(config.host, config.port);
   const token = currentSetupToken(ctx);
-  const out: string[] = ["", `  ${pc.bold("agentinbox is running.")} ${pc.dim(`v${config.version} · data in ${config.dataDir}`)}`, ""];
+  const out: string[] = ["", `  ${pc.bold("xaq is running.")} ${pc.dim(`v${config.version} · data in ${config.dataDir}`)}`, ""];
 
   if (token && config.service) {
     // Service logs are often readable by others (journal, log files): never print the token there.

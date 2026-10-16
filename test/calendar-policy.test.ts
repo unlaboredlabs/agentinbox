@@ -82,7 +82,7 @@ describe("account and capability resolution", () => {
     const s = setup({}, { calendar: false });
     const r = await s.run("list_calendar_events", (c) => c.listEvents(ME, WINDOW));
     expect(r).toMatchObject({ outcome: "error", reason: "calendar_not_granted" });
-    expect(messageOf(r)).toBe("Google Calendar isn't connected for me@acme.com yet. Ask the operator to add Google Calendar for me@acme.com in the agentinbox console.");
+    expect(messageOf(r)).toBe("Google Calendar isn't connected for me@acme.com yet. Ask the operator to add Google Calendar for me@acme.com in the xaq console.");
     expect(s.cal.calls).toEqual([]);
   });
 
@@ -97,7 +97,7 @@ describe("account and capability resolution", () => {
     s.ctx.db.run("UPDATE accounts SET status = 'needs_reauth' WHERE id = 'acc_a'");
     const r = await s.run("list_calendar_events", (c) => c.listEvents(ME, WINDOW));
     expect(r.reason).toBe("needs_reauth");
-    expect(messageOf(r)).toBe("The Google account me@acme.com needs to be reconnected. Ask the operator to reconnect it in the agentinbox console.");
+    expect(messageOf(r)).toBe("The Google account me@acme.com needs to be reconnected. Ask the operator to reconnect it in the xaq console.");
   });
 
   it("turns Google's disabled-API and missing-scope answers into words", async () => {

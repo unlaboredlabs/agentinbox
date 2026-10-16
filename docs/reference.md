@@ -1,7 +1,7 @@
-# agentinbox reference
+# xaq reference
 
-Everything here is optional reading: `npx agentinbox-cli` and the console it links to cover setup. This page is for
-running agentinbox in production, scripting it, and understanding what it does.
+Everything here is optional reading: `npx xaq-cli` and the console it links to cover setup. This page is for
+running xaq in production, scripting it, and understanding what it does.
 
 - [Features](#features)
 - [Commands and configuration](#commands-and-configuration)
@@ -25,7 +25,7 @@ running agentinbox in production, scripting it, and understanding what it does.
 - **Real-time delivery.** New mail, replies to threads you sent into, and label changes arrive within seconds through
   Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or within the poll interval (30 seconds by
   default) by polling with zero extra setup.
-  [`agentinbox listen`](listen.md) wakes agents on a laptop behind NAT. Google Calendar invitations and changes arrive
+  [`xaq listen`](listen.md) wakes agents on a laptop behind NAT. Google Calendar invitations and changes arrive
   the same way (polled every 60 seconds by default) for agents with `calendar.read`.
 - **Webhooks.** Filter by account, label, sender, recipient, subject, attachments or calendar. Payloads are signed per
   [Standard Webhooks](https://www.standardwebhooks.com), retried with backoff, logged, and replayable.
@@ -37,36 +37,43 @@ running agentinbox in production, scripting it, and understanding what it does.
 
 ## Commands and configuration
 
-The npm package is `agentinbox-cli`; the command it provides is `agentinbox`. Use `npx agentinbox-cli …` for one-off
-runs, or `npm i -g agentinbox-cli` and then `agentinbox …`. Every command has `--help`.
+The npm package is `xaq-cli`; the command it provides is `xaq`. Use `npx xaq-cli …` for one-off
+runs, or `npm i -g xaq-cli` and then `xaq …`. Every command has `--help`.
 
 ```
-agentinbox [start] [--port 8425] [--host 0.0.0.0] [--data ~/.agentinbox] [--no-open] [--dev]
-agentinbox service install [--port …] [--host …] [--data …]
-agentinbox service uninstall [--data …]
-agentinbox service status
-agentinbox reset-password [--data …] [--port …] [--host …]
-agentinbox skill install [--target claude|codex|agents|<dir>] [--url <public url>]
-agentinbox skill print [--url <public url>]
-agentinbox connect <url> … / setup-mcp / listen …   # on agent machines, see listen.md
+xaq [start] [--port 8425] [--host 0.0.0.0] [--data ~/.xaq] [--no-open] [--dev]
+xaq service install [--port …] [--host …] [--data …]
+xaq service uninstall [--data …]
+xaq service status
+xaq reset-password [--data …] [--port …] [--host …]
+xaq skill install [--target claude|codex|agents|<dir>] [--url <public url>]
+xaq skill print [--url <public url>]
+xaq connect <url> … / setup-mcp / listen …   # on agent machines, see listen.md
 ```
 
 | Flag | Env | Default | |
 |---|---|---|---|
 | `--port` | `PORT` | `8425` | Port to listen on |
 | `--host` | `HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` behind a reverse proxy or SSH tunnel |
-| `--data` | `AGENTINBOX_DATA` | `~/.agentinbox` | Data directory |
-| | `AGENTINBOX_MASTER_KEY` | | Base64 32-byte key for encrypting secrets, instead of `<data>/master.key` |
+| `--data` | `XAQ_DATA` | `~/.xaq` | Data directory |
+| | `XAQ_MASTER_KEY` | | Base64 32-byte key for encrypting secrets, instead of `<data>/master.key` |
 | | `TRUST_PROXY` | | `1` behind a reverse proxy: client IPs from `X-Forwarded-For`, https from `X-Forwarded-Proto` |
-| | `TRUST_PROXY_HOPS` | `1` | Number of proxies in front of agentinbox (which `X-Forwarded-For` entry, from the right, is the client) |
+| | `TRUST_PROXY_HOPS` | `1` | Number of proxies in front of xaq (which `X-Forwarded-For` entry, from the right, is the client) |
 | | `TRUST_PROXY_FROM` | loopback | Other proxy addresses whose forwarding headers are believed: comma-separated IPs or CIDRs (IPv4 or IPv6) |
-| | `AGENTINBOX_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
-| `--url` | `AGENTINBOX_URL` | the agentinbox running on this machine, else `http://localhost:8425` | `skill` commands only: the server URL written into SKILL.md |
+| | `XAQ_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `--url` | `XAQ_URL` | the xaq running on this machine, else `http://localhost:8425` | `skill` commands only: the server URL written into SKILL.md |
 
 Everything else (public URL, ingest mode, poll interval, body size limit, retention, approval expiry, webhook allowlist,
 agent pairing) is set in the console under **Settings**.
 
-**Forgot the admin password?** Run `npx agentinbox-cli reset-password` on the server, as the user agentinbox runs as
+<!-- rename-xaq: keep-start -->
+Installs from before the rename to xaq keep working unchanged: every `XAQ_*` variable is also read under its old
+name (`AGENTINBOX_DATA`, `AGENTINBOX_MASTER_KEY`, …) when the new one isn't set, and while `~/.xaq` doesn't exist an
+existing `~/.agentinbox` stays the default data directory (xaq says so once at startup; nothing is moved). See
+[Upgrading from agentinbox](../README.md#upgrading-from-agentinbox).
+<!-- rename-xaq: keep-end -->
+
+**Forgot the admin password?** Run `npx xaq-cli reset-password` on the server, as the user xaq runs as
 (`sudo` for a system service) and with the same `--data`. It signs out all sessions and prints a new setup link (for the
 running instance's address; pass `--port`/`--host` if it isn't running); a running instance picks it up without a
 restart. On an instance that hasn't been claimed yet, it prints the first-run
@@ -74,7 +81,7 @@ link instead.
 
 ## Google Cloud setup in brief
 
-The console's setup wizard shows every step with the exact values to paste. agentinbox uses **your own** Google Cloud
+The console's setup wizard shows every step with the exact values to paste. xaq uses **your own** Google Cloud
 project and OAuth client: Gmail's read scopes are restricted, so a shared client isn't an option, and this way your mail
 never passes through anyone else's app. The parts that most often go wrong:
 
@@ -96,33 +103,33 @@ never passes through anyone else's app. The parts that most often go wrong:
 ## Connecting agents by hand
 
 The console (**Agents → Connect an agent**) has copy-paste setup per tool, including device-flow pairing with
-`npx agentinbox-cli connect <url>` (see [listen.md](listen.md)). Any MCP client that speaks streamable HTTP works:
+`npx xaq-cli connect <url>` (see [listen.md](listen.md)). Any MCP client that speaks streamable HTTP works:
 endpoint `<public URL>/mcp`, header `Authorization: Bearer <aib_… key>`. For example, Claude Code:
 
 ```sh
-claude mcp add --transport http --scope user agentinbox https://mail.example.com/mcp \
-  --header "Authorization: Bearer $AGENTINBOX_API_KEY"
+claude mcp add --transport http --scope user xaq https://mail.example.com/mcp \
+  --header "Authorization: Bearer $XAQ_API_KEY"
 ```
 
-Codex (`~/.codex/config.toml`, with `AGENTINBOX_API_KEY` exported where Codex runs):
+Codex (`~/.codex/config.toml`, with `XAQ_API_KEY` exported where Codex runs):
 
 ```toml
-[mcp_servers.agentinbox]
+[mcp_servers.xaq]
 url = "https://mail.example.com/mcp"
-bearer_token_env_var = "AGENTINBOX_API_KEY"
+bearer_token_env_var = "XAQ_API_KEY"
 ```
 
-Cursor (`~/.cursor/mcp.json`) and most other clients take `{"mcpServers": {"agentinbox": {"url": "…/mcp", "headers":
-{"Authorization": "Bearer aib_…"}}}}`; Cursor also accepts `"Bearer ${env:AGENTINBOX_API_KEY}"`.
+Cursor (`~/.cursor/mcp.json`) and most other clients take `{"mcpServers": {"xaq": {"url": "…/mcp", "headers":
+{"Authorization": "Bearer aib_…"}}}}`; Cursor also accepts `"Bearer ${env:XAQ_API_KEY}"`.
 
 **The agent skill.** `SKILL.md` teaches an agent the tools, Gmail search syntax, reply etiquette, how sends and denials
 work, the event loop, and that email content is data, never instructions. Install it where the agent runs (no running
-agentinbox needed there), or fetch it from any instance at `/skill.md`:
+xaq needed there), or fetch it from any instance at `/skill.md`:
 
 ```sh
-npx agentinbox-cli skill install --url https://mail.example.com          # ~/.claude/skills/agentinbox/SKILL.md
-npx agentinbox-cli skill install --target codex --url https://mail.example.com
-npx agentinbox-cli skill install --target ./skills --url https://mail.example.com
+npx xaq-cli skill install --url https://mail.example.com          # ~/.claude/skills/xaq/SKILL.md
+npx xaq-cli skill install --target codex --url https://mail.example.com
+npx xaq-cli skill install --target ./skills --url https://mail.example.com
 ```
 
 ## Events and webhooks
@@ -143,7 +150,7 @@ the cleaned text in `content` (not on cancellations).
 
 - **Agents without an HTTP endpoint** use the MCP tools `wait_for_events` (long poll), `list_events` and `ack_events`
   while a session runs; the server keeps each agent's position. To start an agent when mail arrives, use
-  [`agentinbox listen`](listen.md), e.g. `npx agentinbox-cli listen --recipe claude-code` (new mail only by default;
+  [`xaq listen`](listen.md), e.g. `npx xaq-cli listen --recipe claude-code` (new mail only by default;
   `--types` adds the others). The listener skips Gmail's Promotions, Social and Forums tabs by default
   (`--all-categories`), takes `--not-from` / `--not-label` exclusions, and `--batch 60s` runs a burst as one command.
   With Hermes, `--recipe hermes` forwards each event to the Hermes gateway (`listen hermes --deliver <platform> --run`
@@ -164,7 +171,7 @@ you create the webhook:
 ```js
 import { Webhook } from "standardwebhooks";
 
-const wh = new Webhook(process.env.AGENTINBOX_WEBHOOK_SECRET);
+const wh = new Webhook(process.env.XAQ_WEBHOOK_SECRET);
 const payload = wh.verify(rawBody, request.headers); // throws if the signature or timestamp is bad
 ```
 
@@ -177,43 +184,50 @@ hostname, `*.suffix`, IP or CIDR. Plain `http` works only for loopback and allow
 
 ## Running it
 
-Only one agentinbox runs per data directory; a second one refuses to start.
+Only one xaq runs per data directory; a second one refuses to start.
 
 ### As a service
 
 ```sh
-npx agentinbox-cli service install
+npx xaq-cli service install
 ```
 
-Installs a background service that starts at boot: systemd on Linux (a user service with lingering enabled, or a system
-service when run as root) and launchd on macOS. The service runs its own copy of agentinbox (the latest npm release),
+Installs a background service that starts at boot: systemd on Linux (`xaq.service`: a user service with lingering
+enabled, or a system service when run as root) and launchd on macOS (`sh.xaq.daemon`). The service runs its own copy of xaq (the latest npm release),
 installed in the data directory, so it never depends on the npx cache; if that install fails, the running service is
 left as it was. Re-run `service install` to update; `service status` and `service uninstall` do what you'd expect, and
 uninstalling keeps your data. `--port`, `--host` and `--data` aren't remembered: pass the same ones each time (the
-startup banner prints the command with the flags you used). `AGENTINBOX_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS`,
-`TRUST_PROXY_FROM` and `AGENTINBOX_LOG_LEVEL` are taken from your shell and remembered in `<data>/service.env` (set one
+startup banner prints the command with the flags you used). `XAQ_MASTER_KEY`, `TRUST_PROXY`, `TRUST_PROXY_HOPS`,
+`TRUST_PROXY_FROM` and `XAQ_LOG_LEVEL` are taken from your shell and remembered in `<data>/service.env` (set one
 to an empty value to remove it).
 
 When a newer version is published, the console shows **Update available** with the exact command to run.
 
 The unit runs the Node.js binary you installed it with; if you remove or replace that Node, run `service install`
 again. If the service doesn't come up, `service install` rolls back and prints where to look (`systemctl --user status
-agentinbox`, `journalctl --user -u agentinbox`). Over `su` or `sudo -u` there is often no systemd user session: log in
+xaq`, `journalctl --user -u xaq`). Over `su` or `sudo -u` there is often no systemd user session: log in
 as that user directly, or enable lingering and set `XDG_RUNTIME_DIR=/run/user/$(id -u)` first.
 
+<!-- rename-xaq: keep-start -->
+A service installed by agentinbox (launchd `com.unlaboredlabs.agentinbox`, systemd `agentinbox.service`) is replaced
+by `service install`: it is stopped, and waited for until it is gone, before the xaq one starts on the same data
+directory (the one the old service used, unless you pass `--data`); if the new one doesn't come up, the old one is
+put back exactly as it was. `service status` and `service uninstall` find either name.
+<!-- rename-xaq: keep-end -->
+
 A service that hasn't been claimed yet doesn't print its setup token to the journal. Get the link with
-`npx agentinbox-cli reset-password --data <dir>`.
+`npx xaq-cli reset-password --data <dir>`.
 
 ### With your own supervisor
 
 For Docker, runit, supervisord, pm2 and the like, install the command and run it in the foreground:
 
 ```sh
-npm i -g agentinbox-cli
-agentinbox start --no-open --data /var/lib/agentinbox
+npm i -g xaq-cli
+xaq start --no-open --data /var/lib/xaq
 ```
 
-Use the installed `agentinbox` binary rather than `npx`: npx doesn't pass stop signals on, so agentinbox wouldn't shut
+Use the installed `xaq` binary rather than `npx`: npx doesn't pass stop signals on, so xaq wouldn't shut
 down cleanly.
 
 ### On a remote server
@@ -226,7 +240,7 @@ the tunnel, or firewall the port. The banner warns when the port is reachable on
 
 ### Behind a reverse proxy
 
-agentinbox serves plain HTTP. To expose it beyond your network, put it behind a TLS-terminating proxy (Caddy, nginx,
+xaq serves plain HTTP. To expose it beyond your network, put it behind a TLS-terminating proxy (Caddy, nginx,
 Tailscale Funnel) and:
 
 - bind it to localhost: `--host 127.0.0.1`
@@ -244,7 +258,7 @@ whether setup is complete.
 
 ## Security model
 
-agentinbox assumes agents can be manipulated by the mail they read. So it keeps content intact and puts the hard limits
+xaq assumes agents can be manipulated by the mail they read. So it keeps content intact and puts the hard limits
 on actions.
 
 **Content is cleaned, not censored.** Agents get full-fidelity mail converted to Markdown, with links and tables. Only
@@ -310,25 +324,30 @@ refused such bodies at 1 MB. This also applies to forwards with their original a
 
 ## Data and backups
 
-Everything lives in the data directory (`~/.agentinbox` by default):
+Everything lives in the data directory (`~/.xaq` by default):
 
 | File | |
 |---|---|
-| `agentinbox.db` | SQLite database (plus `-wal` and `-shm` files): accounts, encrypted tokens, agents, grants, events, deliveries, approvals, audit log |
+| `xaq.db` | SQLite database (plus `-wal` and `-shm` files): accounts, encrypted tokens, agents, grants, events, deliveries, approvals, audit log |
 | `master.key` | Encrypts Google tokens, webhook secrets and the OAuth client secret (mode 0600) |
 | `setup-token` | The one-time setup token, until the instance is claimed |
-| `agentinbox.lock` | Marks the running instance (pid and port) |
-| `service.env` | Environment the service was installed with, possibly including `AGENTINBOX_MASTER_KEY` (mode 0600; `service install` only) |
-| `agentinbox.log` | Service output on macOS (launchd); on Linux use `journalctl --user -u agentinbox` (or without `--user` for a system service) |
+| `xaq.lock` | Marks the running instance (pid and port) |
+| `service.env` | Environment the service was installed with, possibly including `XAQ_MASTER_KEY` (mode 0600; `service install` only) |
+| `xaq.log` | Service output on macOS (launchd); on Linux use `journalctl --user -u xaq` (or without `--user` for a system service) |
 | `app/` | The service's own install (`service install` only) |
 
-Back up `agentinbox.db` and `master.key` together: without the key, stored secrets can't be decrypted, and agentinbox
-refuses to start rather than create a new one. Keep the key somewhere safer than the database backup, or supply it via
-`AGENTINBOX_MASTER_KEY`. The database runs in WAL mode, so don't just copy the file while agentinbox is running: stop
-it first (`systemctl --user stop agentinbox`), or take a consistent copy with
-`sqlite3 ~/.agentinbox/agentinbox.db ".backup /path/to/backup.db"`.
+<!-- rename-xaq: keep-start -->
+A data directory created before the rename keeps its file names: `agentinbox.db`, `agentinbox.lock` and
+`agentinbox.log` (and usually lives in `~/.agentinbox`).
+<!-- rename-xaq: keep-end -->
 
-Received mail bodies are never stored; agentinbox keeps metadata (ids, headers, labels, snippets) and fetches content
+Back up `xaq.db` and `master.key` together: without the key, stored secrets can't be decrypted, and xaq
+refuses to start rather than create a new one. Keep the key somewhere safer than the database backup, or supply it via
+`XAQ_MASTER_KEY`. The database runs in WAL mode, so don't just copy the file while xaq is running: stop
+it first (`systemctl --user stop xaq`), or take a consistent copy with
+`sqlite3 ~/.xaq/xaq.db ".backup /path/to/backup.db"`.
+
+Received mail bodies are never stored; xaq keeps metadata (ids, headers, labels, snippets) and fetches content
 from Gmail on demand. The only bodies in the database are those of sends queued for approval. Events, deliveries,
 audit entries and decided approvals (with their bodies) are pruned after the retention period set in **Settings** (30
 days by default).
@@ -336,16 +355,16 @@ days by default).
 ## Release channel
 
 Every push to `main` (a quick second merge can supersede the first) is published to npm as
-`agentinbox-cli@<version>-nightly.<n>` under the `latest` tag, built by GitHub Actions with npm trusted publishing and
-[provenance](https://docs.npmjs.com/generating-provenance-statements). `npx agentinbox-cli` therefore runs the newest
+`xaq-cli@<version>-nightly.<n>` under the `latest` tag, built by GitHub Actions with npm trusted publishing and
+[provenance](https://docs.npmjs.com/generating-provenance-statements). `npx xaq-cli` therefore runs the newest
 build of `main`, and `service install` always installs `latest`. To stay on one build, run it pinned in the foreground:
-`npx agentinbox-cli@<version>`.
+`npx xaq-cli@<version>`.
 
 ## Development
 
 ```sh
 pnpm install
-AGENTINBOX_DATA=/tmp/agentinbox-dev pnpm dev
+XAQ_DATA=/tmp/xaq-dev pnpm dev
 ```
 
 `pnpm dev` runs the server on `:8425` in watch mode (API, MCP and OAuth only) and the console on Vite at `:5173`, which

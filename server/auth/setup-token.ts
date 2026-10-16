@@ -25,7 +25,7 @@ export function ensureSetupToken(dataDir: string): string {
   return token;
 }
 
-/** Replaces any existing token (e.g. after `agentinbox reset-password`). */
+/** Replaces any existing token (e.g. after `xaq reset-password`). */
 export function regenerateSetupToken(dataDir: string): string {
   deleteSetupToken(dataDir);
   return ensureSetupToken(dataDir);

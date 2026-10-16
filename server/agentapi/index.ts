@@ -1,5 +1,5 @@
 // Agent-facing API under /agent/v1 (contract: shared/agent-api.ts): device-flow pairing for
-// `npx agentinbox-cli connect` and the event stream for `npx agentinbox-cli listen`. Mounted at the
+// `npx xaq-cli connect` and the event stream for `npx xaq-cli listen`. Mounted at the
 // root; it uses bearer keys or no auth, so it sits outside the console's cookie/CSRF guard, behind
 // its own browser/DNS-rebinding guard instead.
 
@@ -126,7 +126,7 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
       throw new HttpError(
         403,
         "pairing_disabled",
-        "Pairing is turned off on this agentinbox",
+        "Pairing is turned off on this xaq",
         "An admin can turn on pairing in the console under Settings, or create the agent under Agents and copy its key.",
       );
     }

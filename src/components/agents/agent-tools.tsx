@@ -13,7 +13,7 @@ import { ProfileHint, ToolTabs, toolName, usePublicUrl } from "./connect-agent-g
 import { TestConnection } from "./test-connection";
 import { explainReason } from "@/lib/labels";
 
-/** "Not called yet" / "Last tool call 2 minutes ago": whether the agent's own tool reaches agentinbox. */
+/** "Not called yet" / "Last tool call 2 minutes ago": whether the agent's own tool reaches xaq. */
 export function McpStatus({ agent, label }: { agent: Agent; label: string }) {
   const { calls, connectedAt } = useMcpActivity(agent);
   // The last successful call; without one, the last call marked with what went wrong (no tick).
@@ -38,7 +38,7 @@ export function McpStatus({ agent, label }: { agent: Agent; label: string }) {
       ) : (
         <>
           <CircleDashedIcon className="size-4 shrink-0 text-muted-foreground" />
-          <span className="text-muted-foreground">Not called yet: {label} hasn't used agentinbox's tools with this agent's key.</span>
+          <span className="text-muted-foreground">Not called yet: {label} hasn't used xaq's tools with this agent's key.</span>
         </>
       )}
     </p>
@@ -63,7 +63,7 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
       <CardHeader>
         <CardTitle>Give it the tools</CardTitle>
         <CardDescription>
-          This agent was connected from its terminal, so its key is saved on that machine. Register agentinbox in its tool from there; the key is
+          This agent was connected from its terminal, so its key is saved on that machine. Register xaq in its tool from there; the key is
           never shown.
         </CardDescription>
       </CardHeader>
@@ -75,7 +75,7 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
             <p className="text-sm text-muted-foreground">
               Point your agent's MCP client at <code className="font-mono break-all text-foreground">{publicUrl}/mcp</code> with the header{" "}
               <code className="font-mono text-foreground">Authorization: Bearer &lt;key&gt;</code>. The key is the "apiKey" field in{" "}
-              <code className="font-mono break-all text-foreground">~/.config/agentinbox/profiles/default.json</code> on that machine.
+              <code className="font-mono break-all text-foreground">~/.config/xaq/profiles/default.json</code> on that machine.
             </p>
           ) : (
             <>
@@ -87,7 +87,7 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
               {c.mcpCheck && (
                 <p className="text-sm text-muted-foreground">
                   Check that {label} has it: <code className="font-mono text-foreground">{c.mcpCheck}</code> lists{" "}
-                  <span className="font-mono text-foreground">agentinbox</span>.
+                  <span className="font-mono text-foreground">xaq</span>.
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
@@ -95,7 +95,7 @@ function PairedTools({ agent, initialTool }: { agent: Agent; initialTool: AgentT
               </p>
             </>
           )}
-          <p className="text-sm text-muted-foreground">Teach it the rules with the agentinbox skill:</p>
+          <p className="text-sm text-muted-foreground">Teach it the rules with the xaq skill:</p>
           <Command code={c.skillInstall} label="skill install command" />
         </div>
         <TestConnection agentId={agent.id} />
@@ -109,7 +109,7 @@ function KeyTools({ agent, apiKey }: { agent: Agent; apiKey?: string }) {
     <Card>
       <CardHeader>
         <CardTitle>Give it the tools</CardTitle>
-        <CardDescription>Add agentinbox as an MCP server in your agent with this agent's key.</CardDescription>
+        <CardDescription>Add xaq as an MCP server in your agent with this agent's key.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
         <McpStatus agent={agent} label="your agent" />

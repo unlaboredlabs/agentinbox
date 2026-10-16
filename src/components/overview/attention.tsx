@@ -71,7 +71,7 @@ export function ApprovalsCallout({ approvals }: { approvals: Approval[] }) {
   );
 }
 
-/** Agents waiting for access via `npx agentinbox-cli connect`. */
+/** Agents waiting for access via `npx xaq-cli connect`. */
 export function PairingCallout({ pairings }: { pairings: PairingRequest[] }) {
   const waiting = pairings.filter((p) => p.status === "pending");
   if (!waiting.length) return null;

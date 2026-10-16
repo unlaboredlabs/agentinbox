@@ -88,7 +88,7 @@ describe("connect account", () => {
   it("uses paste mode when publicUrl is plain http on a non-localhost host", async () => {
     const before = await s.admin.get<Settings>("/api/settings");
     try {
-      await s.admin.patch("/api/settings", { publicUrl: `http://agentinbox.lan:${s.config.port}` });
+      await s.admin.patch("/api/settings", { publicUrl: `http://xaq.lan:${s.config.port}` });
       const view = await s.admin.get<GoogleClientView>("/api/google/client");
       expect(view.callbackMode).toBe("paste");
       expect(view.redirectUri).toBe(`http://localhost:${s.config.port}/oauth/callback`);

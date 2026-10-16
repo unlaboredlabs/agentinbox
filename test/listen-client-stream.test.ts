@@ -18,7 +18,7 @@ beforeEach(async () => {
   env = isolateXdg();
   api = await new FakeAgentApi().start();
   out = join(env.root, "handled.txt");
-  // Inherited by the command (only AGENTINBOX_* variables are stripped).
+  // Inherited by the command (only XAQ_* variables are stripped).
   process.env.LISTEN_TEST_OUT = out;
   output = "";
   vi.spyOn(process.stdout, "write").mockImplementation((c: unknown) => ((output += String(c)), true));
@@ -29,7 +29,7 @@ beforeEach(async () => {
     agentId: "agt_1",
     agentName: "Test agent",
     consumer: "testhost-default",
-    exec: `printf '%s\\n' "$AGENTINBOX_EVENT_SEQ" >> "$LISTEN_TEST_OUT"`,
+    exec: `printf '%s\\n' "$XAQ_EVENT_SEQ" >> "$LISTEN_TEST_OUT"`,
   });
 });
 
@@ -53,7 +53,7 @@ describe("listen stream", () => {
     const l = start();
     await waitFor(() => api.live.size === 1, 5000, "stream");
     expect(api.streamRequests[0]).toMatchObject({ consumer: "testhost-default", authorization: `Bearer ${FAKE_KEY}`, lastEventId: null });
-    expect(api.streamRequests[0]!.userAgent).toMatch(/^agentinbox\//);
+    expect(api.streamRequests[0]!.userAgent).toMatch(/^xaq\//);
     // The daemon reads listener client info from this header (server/agentapi/stream.ts).
     expect(JSON.parse(api.streamRequests[0]!.client!)).toEqual({ hostname: hostname(), platform: process.platform, version: expect.any(String) });
 

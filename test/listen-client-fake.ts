@@ -268,7 +268,7 @@ export async function waitFor(cond: () => boolean, timeoutMs = 10_000, what = "c
 
 /** Points XDG config/state/data at a fresh temp dir. Returns the root and a restore function. */
 export function isolateXdg(): { root: string; restore: () => void } {
-  const root = mkdtempSync(join(tmpdir(), "agentinbox-listen-test-"));
+  const root = mkdtempSync(join(tmpdir(), "xaq-listen-test-"));
   const saved = { c: process.env.XDG_CONFIG_HOME, s: process.env.XDG_STATE_HOME, d: process.env.XDG_DATA_HOME };
   process.env.XDG_CONFIG_HOME = join(root, "config");
   process.env.XDG_STATE_HOME = join(root, "state");

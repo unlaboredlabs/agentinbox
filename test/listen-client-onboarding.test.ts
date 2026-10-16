@@ -110,7 +110,7 @@ describe("connect", () => {
     const start = { userCode: "AB12-CD34", verificationUrl: "http://localhost:8425/approvals?pairing=AB12-CD34" };
     expect(approveLinks("http://localhost:8425", start)).toEqual({ primary: start.verificationUrl, publicUrl: null });
     expect(approveLinks("http://127.0.0.1:8425", start)).toEqual({ primary: "http://127.0.0.1:8425/approvals?pairing=AB12-CD34", publicUrl: start.verificationUrl });
-    expect(approveLinks("https://box.example.com/agentinbox", start).primary).toBe("https://box.example.com/agentinbox/approvals?pairing=AB12-CD34");
+    expect(approveLinks("https://box.example.com/xaq", start).primary).toBe("https://box.example.com/xaq/approvals?pairing=AB12-CD34");
   });
 
   it("next steps: foreground listen first, then the console's test email, then the service", async () => {
@@ -145,7 +145,7 @@ describe("setup-mcp", () => {
       else process.env[k] = v;
     }
   });
-  const target = { name: "agentinbox", url: "https://mail.example.com/mcp", key: FAKE_KEY, profile: "default" };
+  const target = { name: "xaq", url: "https://mail.example.com/mcp", key: FAKE_KEY, profile: "default" };
 
   it("--dry-run lists the exact Claude Code commands and changes nothing", () => {
     const bin = join(env.root, "bin");
@@ -159,8 +159,8 @@ describe("setup-mcp", () => {
     const r = setupMcp("claude-code", target, "/p.json", { dryRun: true });
     expect(r).toMatchObject({ ok: true, dryRun: true });
     const text = r.changes!.join("\n");
-    expect(text).toContain("run: claude mcp remove agentinbox --scope user");
-    expect(text).toContain("run: claude mcp add-json --scope user agentinbox '");
+    expect(text).toContain("run: claude mcp remove xaq --scope user");
+    expect(text).toContain("run: claude mcp add-json --scope user xaq '");
     expect(text).toContain("headersHelper");
     expect(text).toContain(`back up ${join(home, ".claude.json")}`);
     expect(r.verify!.join(" ")).toContain("claude mcp list");
@@ -173,13 +173,13 @@ describe("setup-mcp", () => {
   it("--dry-run for Codex, Cursor and Hermes shows the file, the entry (key redacted) and writes nothing", () => {
     const codex = setupMcp("codex", target, "/p.json", { dryRun: true });
     expect(codex.changes!.join("\n")).toContain(join(home, ".codex", "config.toml"));
-    expect(codex.changes!.join("\n")).toContain("[mcp_servers.agentinbox]");
+    expect(codex.changes!.join("\n")).toContain("[mcp_servers.xaq]");
     expect(codex.verify!.join(" ")).toContain("codex mcp list");
     const cursor = setupMcp("cursor", target, "/p.json", { dryRun: true });
     expect(cursor.changes!.join("\n")).toContain(join(home, ".cursor", "mcp.json"));
     const hermes = setupMcp("hermes", target, "/p.json", { dryRun: true });
-    expect(hermes.changes!.join("\n")).toContain("AGENTINBOX_API_KEY=<the key from your agentinbox profile>");
-    expect(hermes.verify!.join(" ")).toContain("hermes mcp test agentinbox");
+    expect(hermes.changes!.join("\n")).toContain("XAQ_API_KEY=<the key from your xaq profile>");
+    expect(hermes.verify!.join(" ")).toContain("hermes mcp test xaq");
     for (const r of [codex, cursor, hermes]) {
       expect(r.dryRun).toBe(true);
       expect(JSON.stringify(r)).not.toContain(FAKE_KEY);
@@ -225,7 +225,7 @@ describe("listen", () => {
     const runs = join(env.root, "backfill.txt");
     // The listener starts at the head (#3) and handles what arrives after it.
     api.acked = 3; // the fake's shared cursor: where a new consumer starts
-    const listener = start({ flags: { exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${listenerRuns}` } });
+    const listener = start({ flags: { exec: `echo "$XAQ_EVENT_SEQ" >> ${listenerRuns}` } });
     await waitFor(() => api.live.size === 1, 5000, "listener stream");
     expect(api.consumers.get("c")?.startSeq).toBe(3);
     api.publish(makeEvent(4));
@@ -233,7 +233,7 @@ describe("listen", () => {
     await waitFor(() => lines(listenerRuns).length === 2, 5000, "listener handled #4, #5");
 
     const began = Date.now();
-    const bf = start({ flags: { backfill: true, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` } });
+    const bf = start({ flags: { backfill: true, exec: `echo "$XAQ_EVENT_SEQ" >> ${runs}` } });
     expect(await bf.done).toBe(EXIT.ok);
     // It stopped at the end seq (#4 arrived past it), not on the 60 s safety net.
     expect(Date.now() - began).toBeLessThan(10_000);
@@ -260,7 +260,7 @@ describe("listen", () => {
     api.reportConsumers = false;
     await expect(start({ flags: { backfill: true } }).done).rejects.toThrow(/older than this CLI/);
     const runs = join(env.root, "until.txt");
-    expect(await start({ flags: { backfill: true, until: 2, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` } }).done).toBe(EXIT.ok);
+    expect(await start({ flags: { backfill: true, until: 2, exec: `echo "$XAQ_EVENT_SEQ" >> ${runs}` } }).done).toBe(EXIT.ok);
     expect(lines(runs)).toEqual(["1", "2"]);
   });
 
@@ -273,7 +273,7 @@ describe("listen", () => {
 
     api.consumers.delete("c-replay");
     const runs = join(env.root, "past.txt");
-    expect(await start({ flags: { backfill: true, until: 3, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` } }).done).toBe(EXIT.ok);
+    expect(await start({ flags: { backfill: true, until: 3, exec: `echo "$XAQ_EVENT_SEQ" >> ${runs}` } }).done).toBe(EXIT.ok);
     expect(plain()).toContain("--until #3 is past where the listener started (#2): event #3 was (or will be) handled by the listener too, so it runs twice");
     expect(lines(runs)).toEqual(["1", "2", "3"]);
   });
@@ -305,7 +305,7 @@ describe("listen", () => {
     api.consumers.set("c", { startSeq: 3, acked: 3 });
     api.hidden.add(3); // e.g. filtered out: the stream never sends it
     const runs = join(env.root, "safety.txt");
-    expect(await start({ flags: { backfill: true, exec: `echo "$AGENTINBOX_EVENT_SEQ" >> ${runs}` }, backfillIdleMs: 300 }).done).toBe(EXIT.ok);
+    expect(await start({ flags: { backfill: true, exec: `echo "$XAQ_EVENT_SEQ" >> ${runs}` }, backfillIdleMs: 300 }).done).toBe(EXIT.ok);
     expect(lines(runs)).toEqual(["1", "2"]);
     expect(plain()).toContain("aren't visible to this listener");
 
@@ -318,7 +318,7 @@ describe("listen", () => {
     saveProfile("default", { ...baseProfile(), exec: undefined });
     const l = start({ flags: { exec: "my-handler --x" } });
     await waitFor(() => api.live.size === 1, 5000, "stream");
-    expect(plain()).toContain("npx agentinbox-cli listen --backfill --exec 'my-handler --x'");
+    expect(plain()).toContain("npx xaq-cli listen --backfill --exec 'my-handler --x'");
     l.stop();
     await l.done;
   });
@@ -326,8 +326,8 @@ describe("listen", () => {
   it("the backfill hint gives a recipe back as --recipe <tool>", () => {
     const profile = { ...baseProfile(), exec: undefined };
     const hint = (flags: { recipe?: string; exec?: string }, name = "default") => backfillCommand(name, profile, resolveListen(name, profile, flags).config);
-    expect(hint({ recipe: "hermes" })).toBe("npx agentinbox-cli listen --backfill --recipe hermes");
-    expect(hint({ recipe: "claude-code" }, "work")).toBe("npx agentinbox-cli listen --profile work --backfill --recipe claude-code");
+    expect(hint({ recipe: "hermes" })).toBe("npx xaq-cli listen --backfill --recipe hermes");
+    expect(hint({ recipe: "claude-code" }, "work")).toBe("npx xaq-cli listen --profile work --backfill --recipe claude-code");
     // An edited recipe is no longer the recipe: it is printed as the command it is.
     expect(hint({ exec: `${recipe("codex").exec} --x` })).toContain("--backfill --exec 'codex exec");
   });
@@ -388,7 +388,7 @@ describe("data directory notice", () => {
 
       const used = join(root, "used");
       mkdirSync(used);
-      writeFileSync(join(used, "agentinbox.db"), "");
+      writeFileSync(join(used, "xaq.db"), "");
       chmodSync(used, 0o755);
       loadConfig({ dataDir: used });
       expect(statSync(used).mode & 0o777).toBe(0o700);

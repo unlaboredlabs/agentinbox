@@ -92,7 +92,7 @@ export function callbackPage(p: PageInput): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>${escapeHtml(p.title)} · agentinbox</title>
+<title>${escapeHtml(p.title)} · xaq</title>
 <style>
   :root { color-scheme: light dark; --bg: #f6f7f9; --card: #fff; --fg: #111827; --muted: #6b7280; --border: #e5e7eb;
     --ok: #16a34a; --ok-bg: #dcfce7; --err: #dc2626; --err-bg: #fee2e2; --link: #2563eb; }
@@ -121,7 +121,7 @@ export function callbackPage(p: PageInput): string {
   <p>${escapeHtml(p.message)}</p>
   ${p.hint ? `<p class="hint">${escapeHtml(p.hint)}</p>` : ""}
   <a class="button" href="${escapeHtml(p.ok && p.email ? `/accounts?connected=${encodeURIComponent(p.email)}` : "/accounts")}">${p.already ? "Back to the console" : "Go to accounts"}</a>
-  <div class="brand">agentinbox</div>
+  <div class="brand">xaq</div>
 </main>
 <script type="application/json" id="oauth-result">${scriptJson(result)}</script>
 <script>${OAUTH_CALLBACK_SCRIPT}</script>
@@ -171,7 +171,7 @@ export function oauthRoutes(ctx: AppContext) {
           ok: false,
           title: known && e.code === "oauth_access_denied" ? "Connection cancelled" : "Couldn't connect the account",
           message: known ? e.message : "Something went wrong while finishing the connection.",
-          hint: known ? e.hint : "Check the agentinbox server log, then try connecting again from the console.",
+          hint: known ? e.hint : "Check the xaq server log, then try connecting again from the console.",
           code: known ? e.code : "internal",
           targetOrigin,
         }),

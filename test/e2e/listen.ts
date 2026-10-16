@@ -1,5 +1,5 @@
 // Harness hooks for device-flow pairing and the /agent/v1 listener stream (feat/listen-server) and
-// for the `agentinbox connect` / `listen` CLI (feat/listen-client). Contract: shared/agent-api.ts on
+// for the `xaq connect` / `listen` CLI (feat/listen-client). Contract: shared/agent-api.ts on
 // feat/listen-server. Types are local so this file compiles on main before those PRs land.
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
@@ -72,7 +72,7 @@ async function call<T>(url: string, init: { method?: string; body?: unknown; hea
 
 const bearer = (key: string) => ({ authorization: `Bearer ${key}` });
 
-/** POST /agent/v1/pairings (public), as `agentinbox connect` does. */
+/** POST /agent/v1/pairings (public), as `xaq connect` does. */
 export const startPairing = (base: string, input: { name: string; description?: string; requested?: Record<string, unknown>; client?: Record<string, unknown> }, headers?: Record<string, string>) =>
   call<PairingStart>(`${base}/agent/v1/pairings`, { body: input, headers });
 
@@ -156,7 +156,7 @@ export interface StreamQuery {
   lastEventId?: number;
 }
 
-/** Opens the listener stream with a bearer key, as `agentinbox listen` does, parsing id/event/data frames. */
+/** Opens the listener stream with a bearer key, as `xaq listen` does, parsing id/event/data frames. */
 export async function openAgentStream(base: string, apiKey: string, q: StreamQuery): Promise<AgentStream> {
   const qs = new URLSearchParams({ consumer: q.consumer });
   if (q.after !== undefined) qs.set("after", String(q.after));
@@ -237,7 +237,7 @@ function tempDir(prefix: string, parent = tmpdir()): string {
  */
 export function buildCli(): string {
   if (builtCli) return builtCli;
-  const root = tempDir("e2e-cli-", join(REPO_ROOT, "node_modules", ".cache", "agentinbox-e2e"));
+  const root = tempDir("e2e-cli-", join(REPO_ROOT, "node_modules", ".cache", "xaq-e2e"));
   const outDir = join(root, "dist");
   copyFileSync(join(REPO_ROOT, "package.json"), join(root, "package.json"));
   const config = join(root, "tsdown.e2e.config.mjs");
@@ -284,7 +284,7 @@ export interface CliHome {
 
 /** An isolated HOME with XDG config/state/data dirs, so profiles and logs never touch the real ones. */
 export function cliHome(): CliHome {
-  const root = tempDir("agentinbox-cli-");
+  const root = tempDir("xaq-cli-");
   const configDir = join(root, ".config");
   const stateDir = join(root, ".local", "state");
   const env = { HOME: root, XDG_CONFIG_HOME: configDir, XDG_STATE_HOME: stateDir, XDG_DATA_HOME: join(root, ".local", "share") };
@@ -304,7 +304,7 @@ export interface CliProcess {
 /** Runs `node dist/cli.js <args>` with an argv array (no shell) in an isolated home. */
 export function spawnCli(args: string[], home: CliHome, extraEnv: Record<string, string> = {}): CliProcess {
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("AGENTINBOX_") && !k.startsWith("XDG_")) env[k] = v;
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("XAQ_") && !k.startsWith("XDG_")) env[k] = v;
   const proc = spawn(process.execPath, [buildCli(), ...args], {
     cwd: home.root,
     env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0", ...home.env, ...extraEnv },
@@ -334,16 +334,16 @@ export function spawnCli(args: string[], home: CliHome, extraEnv: Record<string,
 }
 
 /** A fresh dir for a command recorder (removed by cleanupListenTemp). */
-export const execDir = () => tempDir("agentinbox-exec-");
+export const execDir = () => tempDir("xaq-exec-");
 
 // ───────────── Command recorder (the --exec target) ─────────────
 
 export interface RecordedCall {
   stdin: string;
   argv: string[];
-  /** AGENTINBOX_* variables the command saw. */
+  /** XAQ_* variables the command saw. */
   env: Record<string, string>;
-  /** $AGENTINBOX_EVENT_FILE as the command saw it (content and permission bits). */
+  /** $XAQ_EVENT_FILE as the command saw it (content and permission bits). */
   eventFile: { content: string; mode: number } | { error: string } | null;
 }
 
@@ -355,7 +355,7 @@ export interface CommandRecorder {
   canary: string;
 }
 
-/** A node script that records stdin, argv and AGENTINBOX_* env of each invocation as one JSON file. */
+/** A node script that records stdin, argv and XAQ_* env of each invocation as one JSON file. */
 export function commandRecorder(dir: string): CommandRecorder {
   const calls = join(dir, "calls");
   mkdirSync(calls, { recursive: true });
@@ -364,10 +364,10 @@ export function commandRecorder(dir: string): CommandRecorder {
     script,
     `import { readFileSync, statSync, writeFileSync } from "node:fs";
 const stdin = readFileSync(0, "utf8");
-const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("AGENTINBOX_")));
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("XAQ_")));
 let eventFile = null;
 try {
-  const f = process.env.AGENTINBOX_EVENT_FILE;
+  const f = process.env.XAQ_EVENT_FILE;
   if (f) eventFile = { content: readFileSync(f, "utf8"), mode: statSync(f).mode & 0o777 };
 } catch (e) { eventFile = { error: String(e) }; }
 writeFileSync(${JSON.stringify(calls)} + "/" + process.hrtime.bigint() + "-" + process.pid + ".json", JSON.stringify({ stdin, argv: process.argv.slice(2), env, eventFile }));

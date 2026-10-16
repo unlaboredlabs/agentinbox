@@ -12,7 +12,7 @@ import { isHermesRoute } from "./recipes.ts";
 import { DEFAULT_PROFILE, deadPath, logPath, profilePath, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
 import { DEFAULT_LISTEN_TYPES, forwardSecret } from "./options.ts";
-import { isServiceInstalled, launchdLabel, unitName } from "./service.ts";
+import { installedServiceLabel } from "./service.ts";
 import { type DeadEntry, pidAlive, readDead, readStatus, writeDead } from "./state.ts";
 import { checkTransport, TransportError } from "./transport.ts";
 import { formatDuration, safeText } from "./ui.ts";
@@ -39,7 +39,7 @@ export function printSecret(profileName: string, opts: { rotate?: boolean }): vo
     saveProfile(name, profile);
     process.stderr.write(pc.gray(`${opts.rotate ? "Rotated" : "Generated"} the forward signing secret for profile "${name}"${opts.rotate ? "; restart the listener" : ""}.\n`));
   }
-  // The secret alone on stdout, so `export AGENTINBOX_WEBHOOK_SECRET=$(agentinbox listen secret)` works.
+  // The secret alone on stdout, so `export XAQ_WEBHOOK_SECRET=$(xaq listen secret)` works.
   out(secret);
 }
 
@@ -84,7 +84,8 @@ export async function printStatus(profileName: string): Promise<void> {
 
   let svc = "not installed";
   if (process.platform === "linux" || process.platform === "darwin") {
-    if (isServiceInstalled(name)) svc = `installed (${process.platform === "linux" ? unitName(name) : launchdLabel(name)}; details: ${NPX} listen service status${flagFor(name)})`;
+    const installed = installedServiceLabel(name);
+    if (installed) svc = `installed (${installed}; details: ${NPX} listen service status${flagFor(name)})`;
   }
   out(`${pc.bold("Service")}   ${svc}`);
 

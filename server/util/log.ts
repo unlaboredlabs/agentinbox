@@ -1,8 +1,9 @@
 import pc from "picocolors";
+import { envVar } from "../brand.ts";
 
 type Level = "debug" | "info" | "warn" | "error";
 const order: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
-const min = order[(process.env.AGENTINBOX_LOG_LEVEL as Level) ?? "info"] ?? 20;
+const min = order[(envVar("LOG_LEVEL") as Level) ?? "info"] ?? 20;
 const color: Record<Level, (s: string) => string> = { debug: pc.gray, info: pc.cyan, warn: pc.yellow, error: pc.red };
 
 export interface Logger {
@@ -13,7 +14,7 @@ export interface Logger {
   child(scope: string): Logger;
 }
 
-export function createLogger(scope = "agentinbox"): Logger {
+export function createLogger(scope = "xaq"): Logger {
   const emit = (level: Level, msg: string, meta?: Record<string, unknown>) => {
     if (order[level] < min) return;
     const ts = new Date().toISOString().slice(11, 19);

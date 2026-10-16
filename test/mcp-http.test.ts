@@ -47,7 +47,7 @@ function setup() {
 }
 
 async function mcpClient(http: Hono, key: string) {
-  const transport = new StreamableHTTPClientTransport(new URL("http://agentinbox.test/mcp"), {
+  const transport = new StreamableHTTPClientTransport(new URL("http://xaq.test/mcp"), {
     requestInit: { headers: { Authorization: `Bearer ${key}` } },
     fetch: async (url, init) => http.request(String(url), init as RequestInit),
   });

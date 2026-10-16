@@ -8,18 +8,18 @@ export const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 /** Same as PROJECT_ID_RE, also accepting the legacy domain-scoped form (`example.com:my-project`) the server accepts. */
 export const PROJECT_ID_WITH_DOMAIN_RE = /^([a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 
-/** A fresh project ID suggestion: "agentinbox-" + 6 random digits (Google IDs are global, so make a clash unlikely). */
+/** A fresh project ID suggestion: "xaq-" + 6 random digits (Google IDs are global, so make a clash unlikely). */
 export function generateProjectId(): string {
   const n = crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000;
-  return `agentinbox-${String(n).padStart(6, "0")}`;
+  return `xaq-${String(n).padStart(6, "0")}`;
 }
 
 /** Specific, fixable message for a project ID, or null when it's valid. */
 export function projectIdProblem(raw: string): string | null {
   const v = raw.trim();
   if (!v) return "Enter the project ID.";
-  if (/^\d+$/.test(v)) return "That's the project number. Use the project ID: lowercase letters, digits and hyphens, like agentinbox-123456.";
-  if (/[A-Z ]/.test(v)) return "That looks like the project name. Use the project ID: lowercase, no spaces, like agentinbox-123456.";
+  if (/^\d+$/.test(v)) return "That's the project number. Use the project ID: lowercase letters, digits and hyphens, like xaq-123456.";
+  if (/[A-Z ]/.test(v)) return "That looks like the project name. Use the project ID: lowercase, no spaces, like xaq-123456.";
   if (v.length < 6 || v.length > 30) return "Project IDs are 6 to 30 characters long.";
   if (!/^[a-z]/.test(v)) return "Project IDs start with a lowercase letter.";
   if (/-$/.test(v)) return "Project IDs can't end with a hyphen.";
@@ -40,9 +40,9 @@ export function projectCommand(id: string, inOrg: boolean): string | null {
   if (!PROJECT_ID_RE.test(id)) return null;
   const org = inOrg ? ` --organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"` : "";
   return (
-    `gcloud projects create ${id} --name=agentinbox${org} && ` +
+    `gcloud projects create ${id} --name=xaq${org} && ` +
     `gcloud services enable gmail.googleapis.com ${CALENDAR_API} --project=${id} && ` +
-    `echo "agentinbox: project ${id} is ready"`
+    `echo "xaq: project ${id} is ready"`
   );
 }
 

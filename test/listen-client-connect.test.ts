@@ -67,7 +67,7 @@ describe("connect (device flow)", () => {
     expect(await runConnect(api.url, {}, { pollIntervalMs: 10 })).toBe(CONNECT_EXIT.denied);
     expect(output).toContain("denied");
     expect(output).toContain("not this one");
-    expect(() => loadProfile()).toThrow(/No agentinbox profile/);
+    expect(() => loadProfile()).toThrow(/No xaq profile/);
   });
 
   it("reports expiry (3) and consumed (4)", async () => {

@@ -15,7 +15,7 @@ export const HAS_AGENTS = ["server/policy/index.ts", "server/mcp/index.ts", "ser
 /** feat/listen-server: device-flow pairing and the /agent/v1 event stream (needs policy). */
 export const HAS_AGENT_API = HAS_AGENTS && existsSync(file("server/agentapi/index.ts")) && existsSync(file("server/api/pairings.ts"));
 
-/** feat/listen-client: `agentinbox connect` / `listen` in the CLI (end to end it also needs the server side). */
+/** feat/listen-client: `xaq connect` / `listen` in the CLI (end to end it also needs the server side). */
 export const HAS_LISTEN_CLIENT = existsSync(file("server/listen/listen.ts")) && existsSync(file("server/listen/connect.ts"));
 
 export const REPO_ROOT = REPO;

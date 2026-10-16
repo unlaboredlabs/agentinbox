@@ -2,8 +2,10 @@
 // Everything crossing the HTTP boundary of the console API (/api/*) is typed here.
 // Timestamps are ISO-8601 strings in UTC. IDs are prefixed opaque strings (e.g. "agt_…").
 
-/** The npm package (`npx agentinbox-cli`); the command it installs is `agentinbox`. */
-export const NPM_PACKAGE = "agentinbox-cli";
+/** The npm package (`npx xaq-cli`); the command it installs is `xaq`. */
+export const NPM_PACKAGE = "xaq-cli";
+/** The command the package installs (`npm i -g xaq-cli`, or the copy a service runs). */
+export const CLI_NAME = "xaq";
 
 // ───────────────────────────── Domain enums ─────────────────────────────
 
@@ -116,7 +118,7 @@ export interface SystemInfo {
   version: string;
   nodeVersion: string;
   dataDir: string;
-  /** Running under `agentinbox service install` (systemd/launchd). */
+  /** Running under `xaq service install` (systemd/launchd). */
   service: boolean;
   /** URLs this machine is reachable at (localhost first, then LAN addresses). */
   addresses: string[];
@@ -267,7 +269,7 @@ export interface Settings {
    * "10.0.0.0/8", "n8n.internal"). Defaults to loopback only.
    */
   webhookAllowlist: string[];
-  /** Accept device-flow pairing requests from `npx agentinbox-cli connect` (each still needs approval). */
+  /** Accept device-flow pairing requests from `npx xaq-cli connect` (each still needs approval). */
   pairingEnabled: boolean;
 }
 
@@ -470,7 +472,7 @@ export interface ConnectAccountResponse {
 
 // ───────────────────────────── Agents & grants ─────────────────────────────
 
-/** How an agent was added: approved from `agentinbox connect` (its key lives in a profile on that machine), or created here with a copied key. */
+/** How an agent was added: approved from `xaq connect` (its key lives in a profile on that machine), or created here with a copied key. */
 export type AgentOrigin = "paired" | "key";
 
 export interface Agent {
@@ -487,7 +489,7 @@ export interface Agent {
   lastMcpAt: string | null;
   createdAt: string;
   grants: Grant[];
-  /** `agentinbox listen` instances (one per consumer name) and their stream position. */
+  /** `xaq listen` instances (one per consumer name) and their stream position. */
   listeners: ListenerInfo[];
 }
 
@@ -513,7 +515,7 @@ export interface ListenerInfo {
 
 export type PairingStatus = "pending" | "approved" | "denied" | "expired";
 
-/** A device-flow pairing request from `npx agentinbox-cli connect`, shown in the approvals inbox. */
+/** A device-flow pairing request from `npx xaq-cli connect`, shown in the approvals inbox. */
 export interface PairingRequest {
   id: string; // par_…
   /** The code the agent's terminal shows; the human must match it before approving. */
@@ -922,7 +924,7 @@ export interface CalendarApprovalDetail {
   calendarId: string;
   calendarName: string | null;
   /**
-   * Target event (update/delete/rsvp). For create, the id agentinbox chose when queuing (Google accepts
+   * Target event (update/delete/rsvp). For create, the id xaq chose when queuing (Google accepts
    * client ids), so a retried apply can't create a second event.
    */
   eventId: string | null;
@@ -947,7 +949,7 @@ export interface CalendarApprovalDetail {
    */
   checked?: string[];
   /**
-   * When agentinbox last started sending this change to Google (set before each attempt). Once set, a later
+   * When xaq last started sending this change to Google (set before each attempt). Once set, a later
    * attempt can't assume the earlier one didn't land: it checks the event first.
    */
   attemptedAt?: string | null;
@@ -1097,7 +1099,7 @@ export interface ApiError {
 //   GET    /api/google/calendar                       → CalendarSetupState
 //   PATCH  /api/google/calendar CalendarSetupInput    → CalendarSetupState   (enable = start "Add Google Calendar"; dismiss the notice)
 //   POST   /api/google/calendar/check                 → CalendarSetupState   (probes every account with the scopes: API on? scopes still granted?)
-//   POST   /api/accounts/:id/test-email               → TestEmailResult   (sends "agentinbox test: your setup works" from the
+//   POST   /api/accounts/:id/test-email               → TestEmailResult   (sends "xaq test: your setup works" from the
 //          account to itself, then processes new mail at once; the resulting events are message.sent and message.received
 //          (the latter only for this test message). Audited as account.test_email. 409 account_paused | 409 needs_reauth
 //          | 429 rate_limited (5 per account per 10 min; hint says when to retry))

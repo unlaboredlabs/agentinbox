@@ -5,3 +5,4 @@ dist
 .env
 .data
 coverage
+!/shim/agentinbox-cli/dist/

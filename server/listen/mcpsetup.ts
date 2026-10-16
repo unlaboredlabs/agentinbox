@@ -12,7 +12,7 @@ import { NPX } from "./version.ts";
 import { safeText } from "./ui.ts";
 
 /**
- * `--setup-mcp`: registers the agentinbox MCP server in the agent's own tool without the key ever
+ * `--setup-mcp`: registers the xaq MCP server in the agent's own tool without the key ever
  * being shown or pasted. Every file we modify is backed up first; the key is redacted from any
  * output we relay.
  */
@@ -40,8 +40,8 @@ export interface McpSetupOptions {
 }
 
 /** Placeholder shown wherever the key would go in printed file contents. */
-const KEY_SHOWN = "<the key from your agentinbox profile>";
-const backupLine = (file: string) => (existsSync(file) ? `back up ${file} to ${file}.agentinbox-backup-<timestamp> (0600)` : `${file} doesn't exist yet: nothing to back up`);
+const KEY_SHOWN = "<the key from your xaq profile>";
+const backupLine = (file: string) => (existsSync(file) ? `back up ${file} to ${file}.xaq-backup-<timestamp> (0600)` : `${file} doesn't exist yet: nothing to back up`);
 const indent = (text: string) =>
   text
     .replace(/\n$/, "")
@@ -106,7 +106,7 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
     backupLine(file),
     `run: claude mcp remove ${t.name} --scope user   (drops an earlier "${t.name}" entry, if any)`,
     `run: ${addCommand}`,
-    `the key stays in your agentinbox profile: neither the command line nor ${file} contains it`,
+    `the key stays in your xaq profile: neither the command line nor ${file} contains it`,
   ];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Claude Code: nothing was changed. setup-mcp would:`, changes, verify, notes };
   const probe = spawnSync("claude", ["--version"], { stdio: "ignore" });
@@ -122,7 +122,7 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
   if (existsSync(file) && isTooOpen(file)) chmodSync(file, 0o600);
   return {
     ok: true,
-    message: `Registered MCP server "${t.name}" in Claude Code (user scope). The key stays in your agentinbox profile; Claude Code asks for it through a header helper.`,
+    message: `Registered MCP server "${t.name}" in Claude Code (user scope). The key stays in your xaq profile; Claude Code asks for it through a header helper.`,
     backup,
     changes: [`ran: ${addCommand}`, `${file} now lists "${t.name}" (user scope)`],
     verify,
@@ -142,19 +142,21 @@ export function removeTomlServer(toml: string, name: string): string | null {
   const keyForms = `(?:${escapeRe(name)}|"${escapeRe(name)}"|'${escapeRe(name)}')`;
   const header = new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${keyForms}\\s*(?:\\.[^\\]]*)?\\]\\s*(?:#.*)?$`);
   const anyHeader = /^\s*\[/;
-  // Inline or dotted definitions (`mcp_servers = { … }`, `mcp_servers.agentinbox.url = …`): leave to the human.
+  // Inline or dotted definitions (`mcp_servers = { … }`, `mcp_servers.xaq.url = …`): leave to the human.
   if (new RegExp(`^\\s*mcp_servers\\s*(?:=|\\.\\s*${keyForms}\\s*[.=])`, "m").test(toml)) return null;
   const out: string[] = [];
   let skipping = false;
   for (const line of toml.split("\n")) {
     if (anyHeader.test(line)) skipping = header.test(line);
     // Our own marker comment sits just above the table: drop it too, so re-running doesn't pile them up.
-    if (!skipping && line.trim() !== CODEX_MARKER) out.push(line);
+    if (!skipping && line.trim() !== CODEX_MARKER && line.trim() !== LEGACY_CODEX_MARKER) out.push(line);
   }
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-const CODEX_MARKER = "# Added by `agentinbox setup-mcp`. The key is also in your agentinbox profile; rotate it in the console.";
+const CODEX_MARKER = "# Added by `xaq setup-mcp`. The key is also in your xaq profile; rotate it in the console.";
+/** The marker setup-mcp wrote before the rename: dropped too when the table is rewritten. */
+const LEGACY_CODEX_MARKER = "# Added by `agentinbox setup-mcp`. The key is also in your agentinbox profile; rotate it in the console.";
 
 export function codexBlock(t: McpSetupTarget): string {
   return [
@@ -162,7 +164,7 @@ export function codexBlock(t: McpSetupTarget): string {
     `[mcp_servers.${t.name}]`,
     `url = ${tomlString(t.url)}`,
     `http_headers = { Authorization = ${tomlString(`Bearer ${t.key}`)} }`,
-    `# codex exec never prompts: approve agentinbox tools up front (the grant's send mode still applies).`,
+    `# codex exec never prompts: approve ${t.name} tools up front (the grant's send mode still applies).`,
     `default_tools_approval_mode = "approve"`,
     "",
   ].join("\n");
@@ -233,7 +235,7 @@ function setupCursor(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
 /**
  * The Hermes home a bare `hermes` uses (hermes_constants.py / hermes_cli/profiles.py): $HERMES_HOME, else
  * ~/.hermes (plus HERMES_DATA_DIR_SUFFIX), switched to profiles/<name> by the sticky `active_profile` file.
- * Commands agentinbox runs get HERMES_HOME set to this, so they edit the same files.
+ * Commands xaq runs get HERMES_HOME set to this, so they edit the same files.
  */
 export function hermesHome(env: NodeJS.ProcessEnv = process.env): string {
   const set = env.HERMES_HOME?.trim();

@@ -77,7 +77,7 @@ export function AppSidebar() {
               <Link to="/" onClick={close}>
                 <Logo className="size-8 shrink-0" />
                 <div className="grid flex-1 text-left leading-tight">
-                  <span className="truncate font-semibold">agentinbox</span>
+                  <span className="truncate font-semibold">xaq</span>
                   <span className="truncate text-xs text-muted-foreground">Gmail for your agents</span>
                 </div>
               </Link>

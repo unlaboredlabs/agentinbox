@@ -1,4 +1,4 @@
-// How quickly agentinbox notices mail someone else sends, for the console's speed claims.
+// How quickly xaq notices mail someone else sends, for the console's speed claims.
 // Relative (not @shared): unit tests type-check this file under the server config.
 import { type Account, GMAIL_WATCH_ERROR, type IngestStatus, type PubsubState } from "../../shared/types.ts";
 
@@ -18,7 +18,7 @@ export function intervalInWords(seconds: number): string {
  *   polls meanwhile). Other account errors (a failed sync) don't make push itself not work.
  * - inactive: the account asked about is paused, needs reconnecting or is gone: it isn't synced at all, so
  *   make no speed claim (neutral wording), and don't call real-time broken.
- * Outside realtime, mail shows up within the poll interval. Mail agentinbox sends itself (the setup test
+ * Outside realtime, mail shows up within the poll interval. Mail xaq sends itself (the setup test
  * email) shows up at once either way: it syncs right after sending.
  */
 export type DeliveryMode = "realtime" | "poll" | "unfinished" | "broken" | "inactive";

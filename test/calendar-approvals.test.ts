@@ -179,7 +179,7 @@ describe("approve", () => {
     s.cal.put(ME, { id: a.calendar!.eventId!, summary: "Once, renamed by a human since" });
     expect(s.approvals.recoverInterrupted()).toBe(1);
     expect(s.approvals.get(a.id)!.error).toBe(
-      "Applying the change was interrupted before it finished. Approve again to retry: agentinbox checks Google Calendar first, so it is never applied twice.",
+      "Applying the change was interrupted before it finished. Approve again to retry: xaq checks Google Calendar first, so it is never applied twice.",
     );
     expect(await s.approvals.approve(a.id)).toMatchObject({ status: "sent" });
     expect(s.cal.calendars.get(ME)!.events.size).toBe(1);
@@ -207,7 +207,7 @@ describe("approve", () => {
     // Unknown to us, it landed after all; then a human renamed the event.
     s.cal.put(ME, { ...s.cal.event(ME, "m1")!, summary: "Theirs" });
     const done = await s.approvals.approve(a.id);
-    expect(done).toMatchObject({ status: "failed", error: "The change may already have been applied, but the event has changed in Google Calendar since, so agentinbox can't tell. Check Google Calendar." });
+    expect(done).toMatchObject({ status: "failed", error: "The change may already have been applied, but the event has changed in Google Calendar since, so xaq can't tell. Check Google Calendar." });
     expect(s.cal.writes).toEqual([]);
   });
 
@@ -228,7 +228,7 @@ describe("approve", () => {
     const s = setup();
     const a = await s.queue("create_calendar_event", (c) => c.createEvent(ME, TEAM, { summary: "x", ...AT }, {}));
     s.ctx.calendar.calendars = async () => {
-      throw new HttpError(409, "needs_reauth", "me@acme.com needs to be reconnected before agentinbox can read its calendars.", "Accounts → Reconnect.");
+      throw new HttpError(409, "needs_reauth", "me@acme.com needs to be reconnected before xaq can read its calendars.", "Accounts → Reconnect.");
     };
     expect(await s.approvals.approve(a.id)).toMatchObject({ status: "pending" });
   });

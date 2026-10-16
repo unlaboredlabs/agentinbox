@@ -66,7 +66,7 @@ function headline(e: MailEvent) {
 }
 
 /**
- * `agentinbox listen` instances that got this event: their agent may see it (account and label
+ * `xaq listen` instances that got this event: their agent may see it (account and label
  * scope), it is of a type the listener asked for, it came after the listener started, and the
  * listener acknowledged it (ran its command, or skipped it by its own --from/--to/--label/--subject
  * filter, which only the listener's machine knows).

@@ -12,7 +12,7 @@ import { queries } from "@/lib/queries";
 import { useAgentOrigin } from "./agent-status";
 import { InsecureTransportAlert, ListenCommands, ToolTabs } from "./connect-agent-guide";
 
-/** `agentinbox listen` instances for this agent, and how to add one. */
+/** `xaq listen` instances for this agent, and how to add one. */
 export function AgentListeners({ agent }: { agent: Agent }) {
   const settings = useQuery(queries.settings());
   const origin = useAgentOrigin(agent);
@@ -83,7 +83,7 @@ export function AgentListeners({ agent }: { agent: Agent }) {
         <div className="space-y-3">
           <div className="text-sm font-medium">{listeners.length ? "Add or update a listener" : "Start a listener"}</div>
           <p className="text-sm text-muted-foreground">
-            Run these on the machine where this agent was connected with <code className="font-mono text-foreground">npx agentinbox-cli connect</code>:
+            Run these on the machine where this agent was connected with <code className="font-mono text-foreground">npx xaq-cli connect</code>:
             the listener uses the key connect saved there. For an agent created here with a copied key, use a webhook instead.
           </p>
           <ToolTabs value={tool} onChange={setTool} />

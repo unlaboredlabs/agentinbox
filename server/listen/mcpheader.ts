@@ -3,6 +3,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MIN_NODE, nodeVersionError } from "../node-check.ts";
 import { writePrivateFile } from "./fsutil.ts";
+import { profileBrand } from "./names.ts";
 import { configDir, profilePath, validProfileName } from "./paths.ts";
 import { loadProfile } from "./profile.ts";
 
@@ -22,8 +23,8 @@ const sq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
 export function helperScript(profilesDir: string): string {
   return `#!/usr/bin/env node
-// agentinbox MCP header helper (written by \`agentinbox connect\` / \`setup-mcp\`). Prints the
-// Authorization header for one agentinbox profile as JSON for Claude Code's headersHelper.
+// xaq MCP header helper (written by \`xaq connect\` / \`setup-mcp\`). Prints the
+// Authorization header for one xaq profile as JSON for Claude Code's headersHelper.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 const name = process.argv[2] || "default";
@@ -114,7 +115,7 @@ export interface ServiceNodeChoice extends NodeChoice {
 /**
  * The node the listener service runs on: the same stable-path preference as the header helper (a path
  * that survives fnm/nvm/Homebrew upgrades), but only a candidate that is trusted (trustedNodeFile) and new
- * enough for agentinbox (MIN_NODE); else this shell's node, reported as version-specific.
+ * enough for xaq (MIN_NODE); else this shell's node, reported as version-specific.
  */
 export function serviceNode(
   execPath = process.execPath,
@@ -174,12 +175,13 @@ export function claudeServerEntry(url: string, profile: string, opts: { install?
 /** Writes the per-profile MCP config the Claude Code listener recipe uses. Returns its path. */
 export function writeClaudeMcpConfig(profile: string, url: string): string {
   const path = claudeMcpConfigPath(profile);
-  // The recipe allows exactly `mcp__agentinbox`, so the server is always named agentinbox in this file.
-  writePrivateFile(path, JSON.stringify({ mcpServers: { agentinbox: claudeServerEntry(url, profile) } }, null, 2) + "\n");
+  // The recipe allows exactly `mcp__<brand>`, so the server is always named that in this file: xaq, or
+  // agentinbox for a profile from before the rename, whose saved recipe allows `mcp__agentinbox`.
+  writePrivateFile(path, JSON.stringify({ mcpServers: { [profileBrand(profile)]: claudeServerEntry(url, profile) } }, null, 2) + "\n");
   return path;
 }
 
-/** `agentinbox mcp-header`: the header JSON for MCP clients that run a helper. Refuses to print to a terminal. */
+/** `xaq mcp-header`: the header JSON for MCP clients that run a helper. Refuses to print to a terminal. */
 export function printMcpHeader(profile: string): number {
   const name = validProfileName(profile);
   if (process.stdout.isTTY) {

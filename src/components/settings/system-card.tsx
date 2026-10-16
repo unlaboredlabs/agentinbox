@@ -15,7 +15,7 @@ export function SystemCard() {
     <Card>
       <CardHeader>
         <CardTitle>System</CardTitle>
-        <CardDescription>This agentinbox instance.</CardDescription>
+        <CardDescription>This xaq instance.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {system.isPending ? (
@@ -73,7 +73,7 @@ export function SystemCard() {
               <p className="text-xs text-muted-foreground">
                 {s?.service
                   ? "Run this on the server. It reinstalls the service with the latest version; data, accounts and agents are kept."
-                  : "Stop agentinbox, then run this on the server. Your data is kept."}
+                  : "Stop xaq, then run this on the server. Your data is kept."}
               </p>
               <CodeBlock code={latest.data.command} />
             </div>

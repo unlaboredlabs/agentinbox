@@ -1,15 +1,21 @@
 // Must stay the first import: exits with a clear message on a too-old Node.
 import "./node-check.ts";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { basename, join, sep } from "node:path";
 import type { Command as CommandType } from "commander";
+import { envVar, underService } from "./brand.ts";
 
 // Loaded after the Node check (static imports are hoisted above it in the bundle).
 const { Command, InvalidArgumentError } = await import("commander");
 const { default: pc } = await import("picocolors");
 
-process.title = "agentinbox";
+process.title = "xaq";
+
+// `agentinbox` stays an alias of `xaq` for a release cycle (the old agentinbox-cli package, now a shim,
+// says the same before it runs us: it sets the flag so the notice isn't printed twice).
+if (basename(process.argv[1] ?? "") === "agentinbox" && !(globalThis as { __xaqShimNotice?: boolean }).__xaqShimNotice && !underService()) {
+  process.stderr.write("agentinbox is now xaq: use `npx xaq-cli …` (or `xaq …` once installed with npm i -g xaq-cli).\n");
+}
 
 // node:sqlite is stable enough for us but still warns on Node 22. This runs before any server
 // module loads: everything that touches node:sqlite is imported dynamically below.
@@ -58,11 +64,11 @@ const withServerOptions = (cmd: CommandType) =>
   cmd
     .option("-p, --port <port>", "port to listen on (default 8425, env PORT)", parsePort)
     .option("--host <host>", "bind address (default 0.0.0.0, env HOST)")
-    .option("-d, --data <dir>", "data directory (default ~/.agentinbox, env AGENTINBOX_DATA)");
+    .option("-d, --data <dir>", "data directory (default ~/.xaq, or an existing ~/.agentinbox; env XAQ_DATA)");
 
 const configInput = (o: ServerFlags) => ({ port: portOption(o.port), host: o.host, dataDir: o.data });
 
-const program = new Command("agentinbox")
+const program = new Command("xaq")
   .description(
     "Self-hosted Gmail broker for AI agents. Start it, open the link it prints, and the web console " +
       "walks you through the rest (Google Cloud, connecting Gmail, your first agent).",
@@ -73,32 +79,33 @@ const program = new Command("agentinbox")
     "after",
     `
 Examples:
-  npx agentinbox-cli                     start the server and print the setup link
-  npx agentinbox-cli service install     keep it running in the background, also after a reboot
-  npx agentinbox-cli reset-password      print a new setup link (forgot the console password)
-  npx agentinbox-cli connect https://mail.example.com --tool claude-code --setup-mcp
-                                         on an agent's machine: pair it (you approve in the console)
-  npx agentinbox-cli listen --recipe claude-code
-                                         on an agent's machine: wake Claude Code on new mail
+  npx xaq-cli                     start the server and print the setup link
+  npx xaq-cli service install     keep it running in the background, also after a reboot
+  npx xaq-cli reset-password      print a new setup link (forgot the console password)
+  npx xaq-cli connect https://mail.example.com --tool claude-code --setup-mcp
+                                  on an agent's machine: pair it (you approve in the console)
+  npx xaq-cli listen --recipe claude-code
+                                  on an agent's machine: wake Claude Code on new mail
 
-Run any command with --help for details. Install it with npm i -g agentinbox-cli to type agentinbox instead.
-Docs: https://github.com/wynn-dev/agentinbox/blob/main/docs/reference.md`,
+Run any command with --help for details. Install it with npm i -g xaq-cli to type xaq instead.
+Coming from agentinbox? Your data, keys and services carry over: see "Upgrading from agentinbox" in the README.
+Docs: https://github.com/wynn-dev/xaq/blob/main/docs/reference.md`,
   )
   .showSuggestionAfterError();
 
-const SERVER_GROUP = "Run agentinbox:";
+const SERVER_GROUP = "Run xaq:";
 const AGENT_GROUP = "On an agent's machine:";
 
 withServerOptions(
   program
     .command("start", { isDefault: true })
-    .description("run agentinbox in this terminal and print the setup link (the default command)")
+    .description("run xaq in this terminal and print the setup link (the default command)")
     .summary("run it in this terminal (the default command)")
     .helpGroup(SERVER_GROUP),
 )
   .option("--no-open", "don't open a browser on first run")
   .option("--dev", "development: API only, the console runs on Vite (:5173)")
-  // `agentinbox typo` lands here as an extra argument: report it as the unknown command it is.
+  // `xaq typo` lands here as an extra argument: report it as the unknown command it is.
   .allowExcessArguments()
   .action(async (o: ServerFlags & { open: boolean; dev?: boolean }, cmd: CommandType) => {
     if (cmd.args.length) throw new Error(unknownCommand(cmd.args[0]!));
@@ -108,24 +115,33 @@ withServerOptions(
 
 const service = program
   .command("service")
-  .description("run agentinbox in the background as a systemd / launchd service, started at boot")
+  .description("run xaq in the background as a systemd / launchd service, started at boot")
   .summary("run it in the background (systemd / launchd)")
   .helpGroup(SERVER_GROUP);
 
-withServerOptions(service.command("install").description("install and start the service; re-run it to change the port or update")).action(async (o: ServerFlags) => {
-  const { loadConfig } = await import("./config.ts");
-  const { installService } = await import("./service.ts");
-  await installService(loadConfig(configInput(o), version));
+withServerOptions(
+  service.command("install").description("install and start the service; re-run it to change the port or update (replaces an agentinbox service, keeping its data)"),
+).action(async (o: ServerFlags) => {
+  const { legacyDataDir, loadConfig } = await import("./config.ts");
+  const { installedDaemonDataDir, installService, legacyDaemonUnit, systemOps } = await import("./service.ts");
+  // Replacing a service from before the rename: keep the data directory it runs on unless told otherwise.
+  // A service already moved keeps ~/.agentinbox too, even if a ~/.xaq has appeared since.
+  const ops = systemOps();
+  const installed = installedDaemonDataDir(ops);
+  const dataDir =
+    o.data ?? (envVar("DATA") || undefined) ?? legacyDaemonUnit(ops)?.dataDir ?? (installed && installed === legacyDataDir() ? installed : undefined) ?? undefined;
+  await installService(loadConfig({ ...configInput(o), dataDir }, version));
 });
 
 service
   .command("uninstall")
   .description("stop and remove the service (keeps your data)")
-  .option("-d, --data <dir>", "data directory, if the installed service doesn't say (default ~/.agentinbox, env AGENTINBOX_DATA)")
+  .option("-d, --data <dir>", "data directory, if the installed service doesn't say (default ~/.xaq, or an existing ~/.agentinbox; env XAQ_DATA)")
   .action(async (o: ServerFlags) => {
     const { uninstallService } = await import("./service.ts");
+    const { resolveDataDir } = await import("./config.ts");
     // No loadConfig: uninstalling must not create a data directory.
-    uninstallService({ dataDir: resolve(o.data ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox")) });
+    uninstallService({ dataDir: resolveDataDir(o.data, { quiet: true }) });
   });
 
 service
@@ -138,14 +154,14 @@ service
 
 const skill = program
   .command("skill")
-  .description("the agentinbox agent skill (SKILL.md): teaches an agent how to use agentinbox's tools")
+  .description("the xaq agent skill (SKILL.md): teaches an agent how to use xaq's tools")
   .summary("install the agent skill (SKILL.md)")
   .helpGroup(AGENT_GROUP);
 
 skill
   .command("print")
   .description("print SKILL.md to stdout")
-  .option("--url <url>", "agentinbox server URL to fill in (env AGENTINBOX_URL)")
+  .option("--url <url>", "xaq server URL to fill in (env XAQ_URL)")
   .action(async (o: { url?: string }) => {
     const { renderSkill } = await import("./skill/index.ts");
     process.stdout.write(renderSkill(await serverUrl(o.url)));
@@ -155,15 +171,17 @@ skill
   .command("install")
   .description("install SKILL.md for an agent (no running server needed)")
   .option("-t, --target <target>", "claude, codex, agents, or a skills directory path", "claude")
-  .option("--url <url>", "agentinbox server URL agents connect to (env AGENTINBOX_URL)")
+  .option("--url <url>", "xaq server URL agents connect to (env XAQ_URL)")
   .action(async (o: { target: string; url?: string }) => {
-    const { renderSkill, SKILL_TARGETS, skillPath, writeSkill } = await import("./skill/index.ts");
+    const { removeLegacySkill, renderSkill, SKILL_TARGETS, skillPath, writeSkill } = await import("./skill/index.ts");
     checkSkillTarget(o.target, Object.keys(SKILL_TARGETS));
     const url = await serverUrl(o.url);
     const path = skillPath(o.target);
     writeSkill(path, renderSkill(url));
-    console.log(`Installed the agentinbox skill to ${pc.cyan(path)} (server ${url}).`);
-    if (!o.url && !process.env.AGENTINBOX_URL) {
+    console.log(`Installed the xaq skill to ${pc.cyan(path)} (server ${url}).`);
+    const replaced = removeLegacySkill(o.target);
+    if (replaced) console.log(`Removed the agentinbox skill it replaces (${replaced}).`);
+    if (!o.url && !envVar("URL")) {
       console.log(pc.dim("Agents on other machines need the server's address: re-run with --url https://your-server."));
     }
   });
@@ -173,18 +191,19 @@ program
   .description("forgot the console password? Removes it and prints a new setup link (or the first-run link)")
   .summary("print a new setup link (forgot the password?)")
   .helpGroup(SERVER_GROUP)
-  .option("-d, --data <dir>", "data directory (default ~/.agentinbox, env AGENTINBOX_DATA)")
+  .option("-d, --data <dir>", "data directory (default ~/.xaq, or an existing ~/.agentinbox; env XAQ_DATA)")
   .option("-p, --port <port>", "port of the running instance, used for the printed link", parsePort)
   .option("--host <host>", "host of the running instance, used for the printed link")
   .action(
   async (o: ServerFlags) => {
     // Never create a data directory or master key here: a wrong --data (or a service running as
     // another user) must not silently produce a fresh instance.
-    const dataDir = resolve(o.data ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
-    const dbPath = join(dataDir, "agentinbox.db");
+    const { dataFiles, resolveDataDir } = await import("./config.ts");
+    const dataDir = resolveDataDir(o.data);
+    const dbPath = dataFiles(dataDir).db;
     if (!existsSync(dbPath)) {
       throw new Error(
-        `No agentinbox data in ${dataDir}. If agentinbox runs as a system service, run this with sudo; ` +
+        `No xaq data in ${dataDir}. If xaq runs as a system service, run this with sudo; ` +
           "otherwise pass the data directory it uses with --data.",
       );
     }
@@ -217,7 +236,7 @@ program
       const publicUrl = core.settings.publicUrl();
       if (!urls.includes(publicUrl)) urls.push(publicUrl);
       for (const url of urls) console.log(`  ${pc.cyan(`${url}/setup?token=${token}`)}`);
-      console.log(pc.dim(`\n  ${running ? "The running agentinbox picks this up immediately; no restart needed." : "Start agentinbox to use it."}\n`));
+      console.log(pc.dim(`\n  ${running ? "The running xaq picks this up immediately; no restart needed." : "Start xaq to use it."}\n`));
     } finally {
       db.close();
     }
@@ -231,7 +250,7 @@ registerListenCommands(program);
 // Short one-liners for the command list; each command's own --help keeps its full description.
 const AGENT_SUMMARIES: Record<string, string> = {
   connect: "pair an agent; you approve it in the console",
-  "setup-mcp": "add agentinbox to the agent's MCP config",
+  "setup-mcp": "add xaq to the agent's MCP config",
   "mcp-header": "print the agent's auth header (MCP clients)",
   listen: "wake the agent when new mail arrives",
 };
@@ -242,14 +261,15 @@ for (const cmd of program.commands) {
 program.commandsGroup(SERVER_GROUP).helpCommand("help [command]", "show help for a command").helpCommand(true);
 
 /**
- * The URL written into SKILL.md: --url, AGENTINBOX_URL, else the agentinbox running on this
+ * The URL written into SKILL.md: --url, XAQ_URL (AGENTINBOX_URL), else the xaq running on this
  * machine (its lock file), else http://localhost:8425.
  */
 async function serverUrl(flag: string | undefined): Promise<string> {
-  let raw = flag ?? process.env.AGENTINBOX_URL;
+  let raw = flag ?? envVar("URL");
   if (!raw) {
     const { runningInstance } = await import("./instance.ts");
-    const running = runningInstance(resolve(process.env.AGENTINBOX_DATA || join(homedir(), ".agentinbox")));
+    const { resolveDataDir } = await import("./config.ts");
+    const running = runningInstance(resolveDataDir(undefined, { quiet: true }));
     const host = running && !["0.0.0.0", "::", ""].includes(running.host) ? running.host : "localhost";
     raw = `http://${host.includes(":") ? `[${host}]` : host}:${running?.port || process.env.PORT || 8425}`;
   }
@@ -282,7 +302,7 @@ function isDir(path: string): boolean {
 
 function unknownCommand(name: string): string {
   const near = closest(name, [...program.commands.map((c) => c.name()), "help"]);
-  return `unknown command '${name}'${near ? `\n(Did you mean ${near}?)` : ""}\nRun agentinbox --help for the list of commands.`;
+  return `unknown command '${name}'${near ? `\n(Did you mean ${near}?)` : ""}\nRun xaq --help for the list of commands.`;
 }
 
 /** The candidate within edit distance 2 (or a prefix match), if any. */
@@ -312,6 +332,6 @@ try {
   await program.parseAsync(process.argv);
 } catch (err) {
   console.error(pc.red(err instanceof Error ? err.message : String(err)));
-  if (process.env.AGENTINBOX_DEBUG && err instanceof Error) console.error(err.stack);
+  if (envVar("DEBUG") && err instanceof Error) console.error(err.stack);
   process.exit(1);
 }

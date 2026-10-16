@@ -22,7 +22,7 @@ import { EventTypePicker, FilterBuilder, IncludeBodyField } from "./filter-build
 const PRIVATE_HOST = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$|.*\.(local|internal|lan|home)$)/i;
 
 function urlProblem(url: string): { error?: string; note?: string } {
-  if (!url.trim()) return { error: "Enter the URL agentinbox should POST events to." };
+  if (!url.trim()) return { error: "Enter the URL xaq should POST events to." };
   let u: URL;
   try {
     u = new URL(url.trim());
@@ -138,7 +138,7 @@ function WebhookForm({
     <form onSubmit={submit} noValidate className="flex min-h-0 flex-1 flex-col">
       <SheetHeader className="border-b">
         <SheetTitle>{webhook ? `Edit ${webhook.name}` : "New webhook"}</SheetTitle>
-        <SheetDescription>agentinbox POSTs a signed JSON payload to your URL for each matching event, retrying failures.</SheetDescription>
+        <SheetDescription>xaq POSTs a signed JSON payload to your URL for each matching event, retrying failures.</SheetDescription>
       </SheetHeader>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <FieldGroup>
@@ -175,7 +175,7 @@ function WebhookForm({
               inputMode="url"
               spellCheck={false}
               className="font-mono"
-              placeholder="https://example.com/hooks/agentinbox"
+              placeholder="https://example.com/hooks/xaq"
               value={draft.url}
               onChange={(e) => set({ url: e.target.value })}
               aria-invalid={touched && !!errors.url}

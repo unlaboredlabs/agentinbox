@@ -217,7 +217,7 @@ describe("connect", () => {
     expect(err.code).toBe("oauth_wrong_account");
     expect(err.message).toBe(
       "You were reconnecting frank@example.com, but signed in to Google as someone-else@example.com, so frank@example.com is still not reconnected. " +
-        "agentinbox didn't keep the sign-in for someone-else@example.com.",
+        "xaq didn't keep the sign-in for someone-else@example.com.",
     );
     expect(err.hint).toMatch(/^Reconnect frank@example.com again and pick frank@example.com in Google's account chooser/);
     expect(ctx.accounts.list()).toHaveLength(1);
@@ -237,7 +237,7 @@ describe("connect", () => {
     const landed = await consentRedirect("ben@example.com", {}, a.id);
     await expect(ctx.google.completeConnectFromUrl(landed.toString())).rejects.toThrow(
       "You were reconnecting anna@example.com, but signed in to Google as ben@example.com, so anna@example.com is still not reconnected. " +
-        "ben@example.com is also connected here, so agentinbox saved that new sign-in for ben@example.com; nothing else changed.",
+        "ben@example.com is also connected here, so xaq saved that new sign-in for ben@example.com; nothing else changed.",
     );
     expect(fake.revoked).toEqual([]);
     expect(accountEvents).toContainEqual({ email: "ben@example.com", status: "active" });
@@ -275,7 +275,7 @@ describe("connect", () => {
     await ctx.accounts.remove(a.id);
     const revokedBefore = fake.revoked.length;
     const landed = (await fetch(authUrl, { redirect: "manual" })).headers.get("location")!;
-    await expect(ctx.google.completeConnectFromUrl(landed)).rejects.toThrow(/was removed from agentinbox in the meantime\. agentinbox didn't keep the sign-in for gone@example.com/);
+    await expect(ctx.google.completeConnectFromUrl(landed)).rejects.toThrow(/was removed from xaq in the meantime\. xaq didn't keep the sign-in for gone@example.com/);
     expect(ctx.accounts.list()).toHaveLength(0);
     // Not connected here, so the fresh grant is revoked rather than left dangling.
     expect(fake.revoked.length).toBe(revokedBefore + 1);

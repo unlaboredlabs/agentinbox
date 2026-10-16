@@ -1,6 +1,6 @@
 // Screenshots of console routes against a running demo (scripts/demo/seed.ts).
 //
-//   node scripts/demo/shots.mjs --state /tmp/agentinbox-demo-8531.json --out /tmp/shots \
+//   node scripts/demo/shots.mjs --state /tmp/xaq-demo-8531.json --out /tmp/shots \
 //     --routes /,/accounts,/agents --sizes 1440x900,390x844 --themes light,dark [--full] [--scale 2] [--base http://127.0.0.1:5173]
 //
 // Needs playwright-core and a Chromium: set PLAYWRIGHT_CORE (module path) and CHROMIUM (executable) if
@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 
 const { values: a } = parseArgs({
   options: {
-    state: { type: "string", default: "/tmp/agentinbox-demo-8531.json" },
+    state: { type: "string", default: "/tmp/xaq-demo-8531.json" },
     out: { type: "string", default: "/tmp/shots" },
     routes: { type: "string", default: "/" },
     sizes: { type: "string", default: "1440x900" },
@@ -39,7 +39,7 @@ for (const theme of a.themes.split(",")) {
       const [name, value] = state.cookie.split("=");
       await context.addCookies([{ name, value, url: base }]);
     }
-    await context.addInitScript((t) => localStorage.setItem("agentinbox.theme", t), theme);
+    await context.addInitScript((t) => localStorage.setItem("xaq.theme", t), theme);
     const page = await context.newPage();
     page.on("pageerror", (e) => console.error("pageerror", e.message));
     page.on("console", (m) => m.type() === "error" && console.error("console", m.text()));

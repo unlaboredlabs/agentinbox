@@ -39,7 +39,7 @@ describe("address verdicts match the server", () => {
     ["https://box.tail1234.ts.net", "public-name", "direct", "https"],
     ["http://192.168.1.20:8425", "ip", "paste", "insecure"],
     ["https://192.168.1.20:8443", "ip", "rejected", "https"],
-    ["https://agentinbox.home.lan", "private-name", "rejected", "https"],
+    ["https://xaq.home.lan", "private-name", "rejected", "https"],
     ["https://nas.local", "private-name", "rejected", "https"],
     ["http://nas.local:8425", "private-name", "paste", "insecure"],
     ["https://mail.example.com", "public-name", "direct", "https"],
@@ -109,16 +109,16 @@ describe("address verdicts match the server", () => {
 
 describe("project IDs", () => {
   it.each([
-    ["agentinbox-123456", null],
+    ["xaq-123456", null],
     ["my-project", null],
     ["", /Enter/],
     ["471203994812", /project number/],
     ["My Project", /project name/],
-    ["Agentinbox", /project name/],
+    ["Xaq", /project name/],
     ["abc", /6 to 30/],
     ["a".repeat(31), /6 to 30/],
-    ["1agentinbox", /lowercase letter/],
-    ["agentinbox-", /hyphen/],
+    ["1xaq-mail", /lowercase letter/],
+    ["xaq-mail-", /hyphen/],
     ["agent_inbox", /only lowercase/],
   ] as const)("%j", (id, problem) => {
     const p = projectIdProblem(id);
@@ -129,35 +129,35 @@ describe("project IDs", () => {
 
   it("suggests valid, distinct IDs", () => {
     const ids = new Set(Array.from({ length: 20 }, generateProjectId));
-    for (const id of ids) expect(id).toMatch(/^agentinbox-\d{6}$/);
+    for (const id of ids) expect(id).toMatch(/^xaq-\d{6}$/);
     expect(ids.size).toBeGreaterThan(15);
   });
 
   it("builds the Cloud Shell command only for a valid ID", () => {
-    expect(projectCommand("agentinbox-123456", false)).toBe(
-      "gcloud projects create agentinbox-123456 --name=agentinbox && " +
-        "gcloud services enable gmail.googleapis.com calendar-json.googleapis.com --project=agentinbox-123456 && " +
-        'echo "agentinbox: project agentinbox-123456 is ready"',
+    expect(projectCommand("xaq-123456", false)).toBe(
+      "gcloud projects create xaq-123456 --name=xaq && " +
+        "gcloud services enable gmail.googleapis.com calendar-json.googleapis.com --project=xaq-123456 && " +
+        'echo "xaq: project xaq-123456 is ready"',
     );
-    expect(projectCommand("agentinbox-123456", true)).toContain(
+    expect(projectCommand("xaq-123456", true)).toContain(
       `--organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"`,
     );
-    for (const bad of ["", "x; rm -rf ~", "agentinbox-1 && curl evil", "$(id)", "My Project"]) expect(projectCommand(bad, false)).toBeNull();
+    for (const bad of ["", "x; rm -rf ~", "xaq-1 && curl evil", "$(id)", "My Project"]) expect(projectCommand(bad, false)).toBeNull();
   });
 
   it("enables Gmail and Calendar but not Pub/Sub in step 2 (Pub/Sub may need billing); step 6 links to enabling Pub/Sub", () => {
     // Google may require billing to enable Pub/Sub: that would fail the required Gmail path.
-    expect(projectCommand("agentinbox-123456", false)).not.toContain("pubsub");
-    expect(projectCommand("agentinbox-123456", true)).not.toContain("pubsub");
-    expect(cloudUrl.enableGmail("agentinbox-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=agentinbox-123456");
-    expect(cloudUrl.enablePubsub("agentinbox-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=agentinbox-123456");
+    expect(projectCommand("xaq-123456", false)).not.toContain("pubsub");
+    expect(projectCommand("xaq-123456", true)).not.toContain("pubsub");
+    expect(cloudUrl.enableGmail("xaq-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=xaq-123456");
+    expect(cloudUrl.enablePubsub("xaq-123456")).toBe("https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=xaq-123456");
   });
 
   it("enables the Calendar API under its service name, matching the server's link and command", () => {
-    expect(projectCommand("agentinbox-123456", false)).toContain(`${CALENDAR_API_SERVICE} --project=agentinbox-123456`);
-    expect(cloudUrl.enableCalendar("agentinbox-123456")).toBe(enableCalendarApiUrl("agentinbox-123456"));
-    expect(cloudUrl.enableCalendar("agentinbox-123456")).toBe(
-      "https://console.cloud.google.com/flows/enableapi?apiid=calendar-json.googleapis.com&project=agentinbox-123456",
+    expect(projectCommand("xaq-123456", false)).toContain(`${CALENDAR_API_SERVICE} --project=xaq-123456`);
+    expect(cloudUrl.enableCalendar("xaq-123456")).toBe(enableCalendarApiUrl("xaq-123456"));
+    expect(cloudUrl.enableCalendar("xaq-123456")).toBe(
+      "https://console.cloud.google.com/flows/enableapi?apiid=calendar-json.googleapis.com&project=xaq-123456",
     );
   });
 });
@@ -172,20 +172,20 @@ describe("scopes listed in the wizard", () => {
 
 describe("IAM binding command", () => {
   it("quotes the member and project for the shell", () => {
-    expect(iamBindingCommand("agentinbox-123456", "ops@acme.dev")).toBe(
-      "gcloud projects add-iam-policy-binding agentinbox-123456 --member=user:ops@acme.dev --role=roles/pubsub.admin",
+    expect(iamBindingCommand("xaq-123456", "ops@acme.dev")).toBe(
+      "gcloud projects add-iam-policy-binding xaq-123456 --member=user:ops@acme.dev --role=roles/pubsub.admin",
     );
     // A quote in the address (valid in an email local part) can't end the quoting.
-    expect(iamBindingCommand("agentinbox-123456", "o'brien@acme.dev")).toBe(
-      `gcloud projects add-iam-policy-binding agentinbox-123456 --member='user:o'"'"'brien@acme.dev' --role=roles/pubsub.admin`,
+    expect(iamBindingCommand("xaq-123456", "o'brien@acme.dev")).toBe(
+      `gcloud projects add-iam-policy-binding xaq-123456 --member='user:o'"'"'brien@acme.dev' --role=roles/pubsub.admin`,
     );
-    expect(iamBindingCommand("agentinbox-123456", "a$(id)@acme.dev")).toContain(`--member='user:a$(id)@acme.dev'`);
+    expect(iamBindingCommand("xaq-123456", "a$(id)@acme.dev")).toContain(`--member='user:a$(id)@acme.dev'`);
     expect(iamBindingCommand("example.com:my-project", "ops@acme.dev")).toContain(" example.com:my-project ");
   });
 
   it("returns null for an invalid project ID or an empty email", () => {
     for (const bad of ["", "x; rm -rf ~", "$(id)", "My Project"]) expect(iamBindingCommand(bad, "ops@acme.dev")).toBeNull();
-    expect(iamBindingCommand("agentinbox-123456", " ")).toBeNull();
+    expect(iamBindingCommand("xaq-123456", " ")).toBeNull();
   });
 });
 
@@ -212,8 +212,8 @@ describe("soft wrap points", () => {
   const segs = (text: string) => wrapParts(text).map((p) => ("space" in p ? " " : p.segments.join("|")));
 
   it("never breaks inside flags, hyphenated IDs or after =", () => {
-    expect(segs("gcloud projects create agentinbox-123456 --set-as-default --project=agentinbox-123456")).toEqual([
-      "gcloud", " ", "projects", " ", "create", " ", "agentinbox-123456", " ", "--set-as-default", " ", "--project=agentinbox-123456",
+    expect(segs("gcloud projects create xaq-123456 --set-as-default --project=xaq-123456")).toEqual([
+      "gcloud", " ", "projects", " ", "create", " ", "xaq-123456", " ", "--set-as-default", " ", "--project=xaq-123456",
     ]);
   });
 
@@ -317,7 +317,7 @@ describe("connect dialog: one sign-in attempt", () => {
     expect(checkAgainStep("pending", pubsubReauth)).toEqual({ kind: "note", note: "pending-reauth" });
   });
 
-  it("says agentinbox is unreachable when the status request fails, whatever the flow", () => {
+  it("says xaq is unreachable when the status request fails, whatever the flow", () => {
     for (const c of [add, reconnectWorking, reconnectBroken, pubsub, pubsubReauth]) expect(checkAgainStep(null, c)).toEqual({ kind: "note", note: "unreachable" });
   });
 

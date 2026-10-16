@@ -98,7 +98,7 @@ describe("history sync", () => {
     expect(acct.lastSyncAt).not.toBeNull();
   });
 
-  it("detects replies in threads the account sent into before agentinbox saw it", async () => {
+  it("detects replies in threads the account sent into before xaq saw it", async () => {
     const first = fake.deliver(ME, { from: CLIENT, subject: "Old thread", text: "hi" });
     await reply(first.threadId, "Re: Old thread");
     // Reset the cursor past those messages, as if they happened before connecting.
@@ -163,7 +163,7 @@ describe("history sync", () => {
     await reply(old.threadId, "Re: Old");
     fake.setLabels(ME, old.id, [], ["INBOX"]);
     fake.setLabels(ME, trashed.id, ["TRASH"], ["INBOX"]);
-    // These happened before agentinbox saw the mailbox.
+    // These happened before xaq saw the mailbox.
     ctx.db.run("UPDATE accounts SET history_id = ?", (await ctx.google.gmail(accountId).getProfile()).historyId);
     fake.setLabels(ME, old.id, ["INBOX"], []);
     fake.setLabels(ME, trashed.id, ["INBOX"], ["TRASH"]);

@@ -376,7 +376,7 @@ describe("instance lock: lost setup link", () => {
       writeFileSync(join(config.dataDir, "setup-token"), "tok\n");
       expect(() => acquireInstanceLock(config)).toThrow(`Lost its setup link? \`${resetPasswordCommand(config.dataDir)}\` prints it again.`);
       expect(resetPasswordCommand(config.dataDir)).toMatch(/reset-password --data \S+/);
-      expect(resetPasswordCommand(join(homedir(), ".agentinbox"))).toMatch(/reset-password$/);
+      expect(resetPasswordCommand(join(homedir(), ".xaq"))).toMatch(/reset-password$/);
       expect(resetPasswordCommand("/srv/agent inbox")).toMatch(/reset-password --data '\/srv\/agent inbox'$/);
       lock.release();
     } finally {

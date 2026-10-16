@@ -41,8 +41,8 @@ export function StepAccounts({ index, onBack, onNext }: StepProps) {
       title={STEP_META.accounts.title}
       description={
         withCalendar
-          ? "Sign in with Google for each mailbox your agents should work with: one sign-in covers its Gmail and Google Calendar. agentinbox keeps the sign-in; agents never see it."
-          : "Sign in with Google for each mailbox your agents should work with. agentinbox keeps the sign-in; agents never see it."
+          ? "Sign in with Google for each mailbox your agents should work with: one sign-in covers its Gmail and Google Calendar. xaq keeps the sign-in; agents never see it."
+          : "Sign in with Google for each mailbox your agents should work with. xaq keeps the sign-in; agents never see it."
       }
       footer={
         <StepFooter
@@ -74,7 +74,7 @@ export function StepAccounts({ index, onBack, onNext }: StepProps) {
               </li>
               {!internal && (
                 <li>
-                  “Google hasn't verified this app”: expected for your own app. Click <Path items={["Advanced", "Go to agentinbox (unsafe)"]} />.
+                  “Google hasn't verified this app”: expected for your own app. Click <Path items={["Advanced", "Go to xaq (unsafe)"]} />.
                 </li>
               )}
               {withCalendar ? (
@@ -90,7 +90,7 @@ export function StepAccounts({ index, onBack, onNext }: StepProps) {
               )}
               <li>
                 {paste
-                  ? "The window lands on a localhost page that may not load: copy its address and paste it into agentinbox (the dialog walks you through it)."
+                  ? "The window lands on a localhost page that may not load: copy its address and paste it into xaq (the dialog walks you through it)."
                   : "The window closes and the account shows up here as Active."}
               </li>
             </ol>

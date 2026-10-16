@@ -3,8 +3,8 @@ import { useEffect, useSyncExternalStore } from "react";
 import { queries } from "@/lib/queries";
 import { allStepsDone, type SetupDraft, STEP_IDS, stepStatuses } from "./steps";
 
-// Per instance: the same browser may set up several agentinbox daemons.
-const KEY = `agentinbox.setup:${typeof window === "undefined" ? "" : window.location.host}`;
+// Per instance: the same browser may set up several xaq daemons.
+const KEY = `xaq.setup:${typeof window === "undefined" ? "" : window.location.host}`;
 const listeners = new Set<() => void>();
 let cache: SetupDraft | null = null;
 

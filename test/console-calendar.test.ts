@@ -374,7 +374,7 @@ describe("calendar event rows", () => {
   });
 
   it("says when the earlier version wasn't seen", () => {
-    expect(changesInWords({ changes: null })).toBe("Changed (agentinbox hadn't seen the earlier version)");
+    expect(changesInWords({ changes: null })).toBe("Changed (xaq hadn't seen the earlier version)");
     expect(changesInWords({ changes: ["summary", "attendees", "responses"] })).toBe("Changed: title, guests and answers");
   });
 

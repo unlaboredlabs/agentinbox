@@ -61,7 +61,7 @@ describe("startup banner", () => {
   it("first run on a desktop: one setup link, how to keep it running, no tunnel", () =>
     withHarness((h) => {
       const out = text(bannerLines(h.ctx, { mcp: true }, desktop));
-      expect(out).toContain("agentinbox is running.");
+      expect(out).toContain("xaq is running.");
       expect(out).toContain("Open this link to finish setup (the console walks you through Google and your first agent):");
       expect(out).toContain(`http://127.0.0.1:8425/setup?token=${h.setupToken()}`);
       expect(out).toContain("Keep this terminal open; Ctrl-C stops it.");
@@ -198,10 +198,10 @@ describe("cli", () => {
     expect(cli("--version").trim()).toBe(pkg.version);
     expect(cli("skill", "print", "--url", "https://mail.example.com/")).toContain("https://mail.example.com/mcp");
 
-    const dir = mkdtempSync(join(tmpdir(), "agentinbox-skills-"));
+    const dir = mkdtempSync(join(tmpdir(), "xaq-skills-"));
     try {
       cli("skill", "install", "--target", dir, "--url", "http://10.0.0.5:8425");
-      expect(readFileSync(join(dir, "agentinbox", "SKILL.md"), "utf8")).toContain("http://10.0.0.5:8425/mcp");
+      expect(readFileSync(join(dir, "xaq", "SKILL.md"), "utf8")).toContain("http://10.0.0.5:8425/mcp");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -210,9 +210,9 @@ describe("cli", () => {
   it("groups commands for a newcomer and shows examples", () => {
     const help = cli("--help");
     expect(help).toContain("open the link it prints");
-    expect(help).toMatch(/Run agentinbox:\n\s+start/);
+    expect(help).toMatch(/Run xaq:\n\s+start/);
     expect(help).toMatch(/On an agent's machine:[\s\S]*connect[\s\S]*listen/);
-    expect(help).toContain("npx agentinbox-cli connect https://mail.example.com");
+    expect(help).toContain("npx xaq-cli connect https://mail.example.com");
     expect(help).toContain("docs/reference.md");
   });
 

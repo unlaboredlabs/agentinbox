@@ -53,7 +53,7 @@ const join = (xs: string[]) => (xs.length < 2 ? (xs[0] ?? "") : `${xs.slice(0, -
 /** detail.changes of calendar.event_updated in words, e.g. "Changed: time and place"; null = unknown. */
 export function changesInWords(detail: MailEvent["detail"]): string {
   const changes = detail?.changes;
-  if (!Array.isArray(changes)) return "Changed (agentinbox hadn't seen the earlier version)";
+  if (!Array.isArray(changes)) return "Changed (xaq hadn't seen the earlier version)";
   const words = (changes as CalendarEventChange[]).map((c) => CALENDAR_CHANGE_LABEL[c] ?? c);
   return words.length ? `Changed: ${join(words)}` : "Changed";
 }

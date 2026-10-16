@@ -101,8 +101,8 @@ describe("local filter", () => {
     expect(resolveListen("default", profile, { recipe: "hermes-oneshot", forward: "http://localhost:9/y" }).config).toMatchObject({ exec: recipe("hermes-oneshot").exec, forward: { url: "http://localhost:9/y" } });
     // hermes is the gateway forward: the profile's secret signs it, and it replaces a saved exec.
     const h = resolveListen("work", profile, { recipe: "hermes", save: true });
-    expect(h.config).toMatchObject({ exec: null, forward: { url: "http://127.0.0.1:8644/webhooks/agentinbox-work", secret: "whsec_x" } });
-    expect(h.next.forward?.url).toBe("http://127.0.0.1:8644/webhooks/agentinbox-work");
+    expect(h.config).toMatchObject({ exec: null, forward: { url: "http://127.0.0.1:8644/webhooks/xaq-work", secret: "whsec_x" } });
+    expect(h.next.forward?.url).toBe("http://127.0.0.1:8644/webhooks/xaq-work");
     expect(() => resolveListen("default", profile, { recipe: "hermes", forward: "http://localhost:9/y" })).toThrow(/already forwards/);
     expect(() => resolveListen("default", profile, { recipe: "codex", exec: "x" })).toThrow(/--recipe and --exec can't be combined/);
     expect(() => resolveListen("default", profile, { recipe: "vim" })).toThrow(/Unknown --recipe "vim"\. Built-in recipes: claude-code, codex, cursor, hermes, hermes-oneshot\./);
@@ -185,7 +185,7 @@ describe("retries and dead letters", () => {
     const run = runListener({
       flags: {
         // Event 1 always fails; the others succeed.
-        exec: `echo "$AGENTINBOX_EVENT_SEQ" >> "$LISTEN_TEST_OUT"; [ "$AGENTINBOX_EVENT_SEQ" != 1 ]`,
+        exec: `echo "$XAQ_EVENT_SEQ" >> "$LISTEN_TEST_OUT"; [ "$XAQ_EVENT_SEQ" != 1 ]`,
         maxAttempts: 3,
         from: ["*@example.com"],
         save: true,

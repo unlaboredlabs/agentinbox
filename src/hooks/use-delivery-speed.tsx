@@ -6,7 +6,7 @@ import { queries } from "@/lib/queries";
 export type DeliverySpeed = { ready: false } | { ready: true; mode: DeliveryMode; interval: number };
 
 /**
- * How quickly new mail reaches agentinbox (see deliveryMode). With `accountId`, also requires that
+ * How quickly new mail reaches xaq (see deliveryMode). With `accountId`, also requires that
  * account's Gmail watch for real-time. `ready` is false until every query has data: show neutral copy.
  */
 export function useDeliverySpeed(accountId?: string): DeliverySpeed {

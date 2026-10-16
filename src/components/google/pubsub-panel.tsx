@@ -190,10 +190,10 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
           >
             <p>
               {grantedFor !== null
-                ? "Google didn't give agentinbox Pub/Sub access. Click Grant again and tick the Pub/Sub box on Google's screen."
+                ? "Google didn't give xaq Pub/Sub access. Click Grant again and tick the Pub/Sub box on Google's screen."
                 : (
                   <>
-                    Connecting Gmail only asked for mail access. To create its notification channel, agentinbox also needs Pub/Sub access from{" "}
+                    Connecting Gmail only asked for mail access. To create its notification channel, xaq also needs Pub/Sub access from{" "}
                     <span className="font-medium text-foreground">{principal?.email ?? "the account it sets up with"}</span>. You'll see a Google
                     window once.
                   </>
@@ -249,7 +249,7 @@ export function PubsubPanel({ compact }: { compact?: boolean }) {
             <p>
               To use real-time anyway, someone with the Organization Policy Administrator role opens the policy for this project, temporarily
               allows all values (Manage policy → Override parent's policy → Allow all), you click Try again here, and then they restore the
-              policy. The permission agentinbox granted stays in place.
+              policy. The permission xaq granted stays in place.
             </p>
             <CopyField value="roles/orgpolicy.policyAdmin" label="Copy Organization Policy Administrator role" />
             <p className="text-xs">

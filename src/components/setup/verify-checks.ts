@@ -5,7 +5,7 @@
 import type { AuditEntry, EventType, ListenerInfo, MailEvent, TestEmailResult } from "../../../shared/types.ts";
 import { listenerHandled } from "../agents/listener-handled.ts";
 
-export const TEST_SUBJECT = "agentinbox test: your setup works";
+export const TEST_SUBJECT = "xaq test: your setup works";
 /** A test email older than this is forgotten: its events may have scrolled out of the first page. */
 export const TEST_TTL_MS = 60 * 60_000;
 /** Read-type tools: the agent reading the test email over MCP. */
@@ -133,13 +133,13 @@ export type DoneLine =
   | { id: "checked" }
   /** Finished with "Finish without checking". */
   | { id: "skipped" }
-  /** The agent reached agentinbox: its last successful tool call, else when it last connected. */
+  /** The agent reached xaq: its last successful tool call, else when it last connected. */
   | { id: "mcp"; at: string; action: string | null }
   | { id: "listener"; connected: boolean; hostname: string | null; at: string | null }
   | { id: "mcpOnly" }
   /** A test email was sent from this browser. */
   | { id: "test"; at: string }
-  /** How it was finished is unknown here, and agentinbox has no record of any agent working. */
+  /** How it was finished is unknown here, and xaq has no record of any agent working. */
   | { id: "unchecked" };
 
 /** The completed step's summary of what was verified, from what is still known now. */

@@ -11,7 +11,7 @@ export function KeyReveal({ apiKey }: { apiKey: string }) {
         <ShieldAlertIcon />
         <AlertTitle>Copy this key now. It won't be shown again.</AlertTitle>
         <AlertDescription>
-          agentinbox only stores a hash of it. Treat it like a password: anyone with it can act as this agent within its grants. If it leaks or
+          xaq only stores a hash of it. Treat it like a password: anyone with it can act as this agent within its grants. If it leaks or
           gets lost, rotate the key.
         </AlertDescription>
       </Alert>

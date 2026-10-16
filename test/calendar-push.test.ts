@@ -39,7 +39,7 @@ describe("pushAddress: only public https", () => {
 
   it("uses publicUrl (with its path) for public https", async () => {
     expect(await pushAddress(PUBLIC, resolveTo("93.184.216.34"))).toBe(`${PUBLIC}${CALENDAR_PUSH_PATH}`);
-    expect(await pushAddress("https://example.com/agentinbox", resolveTo("2606:2800:220:1::1"))).toBe(`https://example.com/agentinbox${CALENDAR_PUSH_PATH}`);
+    expect(await pushAddress("https://example.com/xaq", resolveTo("2606:2800:220:1::1"))).toBe(`https://example.com/xaq${CALENDAR_PUSH_PATH}`);
     expect(await pushAddress("https://93.184.216.34", resolveTo())).toBe(`https://93.184.216.34${CALENDAR_PUSH_PATH}`);
   });
 });
@@ -192,7 +192,7 @@ describe("push channels", () => {
     expect(cal.channels[2]!.address).toBe(`https://mail.example.com${CALENDAR_PUSH_PATH}`);
   });
 
-  it("replaces channels that point at an old publicUrl (changed while agentinbox was stopped)", async () => {
+  it("replaces channels that point at an old publicUrl (changed while xaq was stopped)", async () => {
     await push.reconcile();
     for (const ch of cal.channels) notify(ch, "sync");
     ctx.settings.update({ publicUrl: "https://mail.example.com" });

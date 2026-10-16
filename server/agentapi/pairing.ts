@@ -231,7 +231,7 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
     const r = row(id);
     if (!r) throw notFound("Pairing request");
     if (r.status !== "pending") {
-      throw new HttpError(409, "conflict", `This pairing request is already ${r.status}`, "Run `npx agentinbox-cli connect` again to start a new one.");
+      throw new HttpError(409, "conflict", `This pairing request is already ${r.status}`, "Run `npx xaq-cli connect` again to start a new one.");
     }
     return r;
   }

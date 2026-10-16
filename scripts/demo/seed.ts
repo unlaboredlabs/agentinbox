@@ -1,4 +1,4 @@
-// Demo environment for the web console: the real agentinbox server against test/fake-google.ts,
+// Demo environment for the web console: the real xaq server against test/fake-google.ts,
 // seeded through the real APIs with a realistic, good-looking state (used for screenshots and
 // manual UX passes). Binds to 127.0.0.1 only.
 //
@@ -10,9 +10,9 @@
 //   --hidden-chars                      add a pending send whose subject/body hide bidi and zero-width characters
 //
 // Serves the console from dist/web (run `pnpm build` or `pnpm exec vite build` first), or point
-// Vite at it: AGENTINBOX_DEV_SERVER=http://127.0.0.1:8531 pnpm exec vite --host 127.0.0.1
+// Vite at it: XAQ_DEV_SERVER=http://127.0.0.1:8531 pnpm exec vite --host 127.0.0.1
 //
-// Writes /tmp/agentinbox-demo-<port>.json with { url, password, cookie } for screenshot scripts
+// Writes /tmp/xaq-demo-<port>.json with { url, password, cookie } for screenshot scripts
 // (--fresh: { url, setupUrl, client }, the OAuth client to import).
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -55,7 +55,7 @@ const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 
 // ───────────── Boot ─────────────
 
-const dataDir = mkdtempSync(join(tmpdir(), "agentinbox-demo-"));
+const dataDir = mkdtempSync(join(tmpdir(), "xaq-demo-"));
 const fake = await startFakeGoogle();
 fake.pullWaitMs = 1000;
 const proxy = await startClientProxy(fake.url);
@@ -101,25 +101,25 @@ if (args.fresh) {
     const claim = await post("/api/setup/claim", { token, password: PASSWORD });
     const cookie = claim.headers.get("set-cookie")!.split(";")[0]!;
     await fetch(base + "/api/settings", { method: "PATCH", headers: { cookie, "x-agentinbox-csrf": "1", "content-type": "application/json" }, body: JSON.stringify({ publicUrl: base }) });
-    await post("/api/google/client", { ...DEMO_CLIENT, projectId: "acme-agentinbox", appType: "internal" }, cookie);
+    await post("/api/google/client", { ...DEMO_CLIENT, projectId: "acme-xaq", appType: "internal" }, cookie);
     fake.consentAs(OPS, { scopes: consentScopes });
     const { authUrl } = (await (await post("/api/accounts/connect", {}, cookie)).json()) as { authUrl: string };
     const location = (await fetch(authUrl, { redirect: "manual" })).headers.get("location")!;
     await post("/api/accounts/connect/complete", { url: location }, cookie);
-    writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify({ url: base, password: PASSWORD, cookie, fresh: true }));
-    console.log(`\n  agentinbox demo (wizard at the Pub/Sub step${fail ? `, provisioning fails: ${fail}` : ""}) on ${base}\n  Password: ${PASSWORD}\n`);
+    writeFileSync(`/tmp/xaq-demo-${PORT}.json`, JSON.stringify({ url: base, password: PASSWORD, cookie, fresh: true }));
+    console.log(`\n  xaq demo (wizard at the Pub/Sub step${fail ? `, provisioning fails: ${fail}` : ""}) on ${base}\n  Password: ${PASSWORD}\n`);
     if (consentScopes) setInterval(() => fake.consentAs(OPS, { scopes: [...consentScopes, "https://www.googleapis.com/auth/pubsub"] }), 3000).unref();
     await new Promise(() => {});
   }
   console.log(`
-  agentinbox demo (fresh, unclaimed) on ${base}
+  xaq demo (fresh, unclaimed) on ${base}
 
   Setup link:     ${base}/setup?token=${token}
   OAuth client:   ${DEMO_CLIENT.clientId}
   Client secret:  ${DEMO_CLIENT.clientSecret}
   Fake accounts:  ${OPS} (consent is automatic; queue another with the next connect)
 `);
-  writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify({ url: base, setupUrl: `${base}/setup?token=${token}`, fresh: true, client: DEMO_CLIENT }));
+  writeFileSync(`/tmp/xaq-demo-${PORT}.json`, JSON.stringify({ url: base, setupUrl: `${base}/setup?token=${token}`, fresh: true, client: DEMO_CLIENT }));
   // The only mailbox consents automatically; with --pubsub-fail scope, consent is Gmail-only.
   if (consentScopes) setInterval(() => fake.consentAs(OPS, { scopes: consentScopes }), 3000).unref();
   await new Promise(() => {});
@@ -147,7 +147,7 @@ await api("POST", "/api/setup/claim", { token: readSetupToken(dataDir), password
 await api("PATCH", "/api/settings", { publicUrl, pollIntervalSeconds: 30, webhookAllowlist: ["localhost", "127.0.0.0/8", "::1", "*.localhost"] }).catch(
   async () => api("PATCH", "/api/settings", { publicUrl, pollIntervalSeconds: 30 }),
 );
-await api("PUT", "/api/google/client", { ...DEMO_CLIENT, projectId: "acme-agentinbox", appType: "internal" });
+await api("PUT", "/api/google/client", { ...DEMO_CLIENT, projectId: "acme-xaq", appType: "internal" });
 log("claimed, Google client configured");
 
 /** `scopes` overrides what the user grants on the consent screen (e.g. adds Calendar). */
@@ -268,7 +268,7 @@ async function poll(deviceCode: string): Promise<PairingPoll> {
 }
 const setPairingIp = (userCode: string, ip: string) => ctx.db.run("UPDATE pairings SET ip = ? WHERE user_code = ?", ip, userCode);
 
-/** A listener like `agentinbox listen`: holds the stream open and acks what it receives. */
+/** A listener like `xaq listen`: holds the stream open and acks what it receives. */
 function listen(apiKey: string, consumer: string, client: { hostname: string; platform: string; version: string }) {
   const ac = new AbortController();
   streams.push(ac);
@@ -276,7 +276,7 @@ function listen(apiKey: string, consumer: string, client: { hostname: string; pl
     while (!ac.signal.aborted) {
       try {
         const res = await fetch(`${base}/agent/v1/events/stream?consumer=${encodeURIComponent(consumer)}`, {
-          headers: { authorization: `Bearer ${apiKey}`, "x-agentinbox-client": JSON.stringify(client), "user-agent": `agentinbox-cli/${client.version}` },
+          headers: { authorization: `Bearer ${apiKey}`, "x-agentinbox-client": JSON.stringify(client), "user-agent": `xaq-cli/${client.version}` },
           signal: ac.signal,
         });
         if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
@@ -634,13 +634,13 @@ const webhooks = await api<Webhook[]>("GET", "/api/webhooks");
 for (const w of webhooks) log(`webhook ${w.name}: ${w.stats.succeeded24h} ok / ${w.stats.failed24h} failed`);
 
 const state = { url: base, password: PASSWORD, cookie, publicUrl, dataDir };
-writeFileSync(`/tmp/agentinbox-demo-${PORT}.json`, JSON.stringify(state, null, 2));
+writeFileSync(`/tmp/xaq-demo-${PORT}.json`, JSON.stringify(state, null, 2));
 console.log(`
-  agentinbox demo ready on ${base}  (publicUrl ${publicUrl})
+  xaq demo ready on ${base}  (publicUrl ${publicUrl})
 
   Password:   ${PASSWORD}
   Session:    ${cookie}
-  State file: /tmp/agentinbox-demo-${PORT}.json
+  State file: /tmp/xaq-demo-${PORT}.json
   Pairing:    ${pending ? `${base}/approvals?pairing=${(pending as { start: PairingStart }).start.userCode}` : "-"}
 
   Ctrl-C to stop (the temp data dir is removed).

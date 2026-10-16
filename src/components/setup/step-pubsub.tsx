@@ -39,7 +39,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
     <StepCard
       index={index}
       title={STEP_META.pubsub.title}
-      description={`Optional. Without this, agentinbox checks for new mail every ${interval} seconds, which works fine. With it, Google tells agentinbox about new mail within seconds.`}
+      description={`Optional. Without this, xaq checks for new mail every ${interval} seconds, which works fine. With it, Google tells xaq about new mail within seconds.`}
       footer={
         <StepFooter
           onBack={onBack}
@@ -56,7 +56,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
             <ZapIcon className="size-4 text-chart-1" aria-hidden /> Within seconds
           </div>
           <p className="text-muted-foreground">
-            Uses Google Cloud Pub/Sub, Google's notification service, in your project. agentinbox sets it up for you in one click; works even when
+            Uses Google Cloud Pub/Sub, Google's notification service, in your project. xaq sets it up for you in one click; works even when
             this machine isn't reachable from the internet. No cost at this volume.
           </p>
         </div>
@@ -65,7 +65,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
             <TimerIcon className="size-4 text-muted-foreground" aria-hidden /> Every {interval} seconds
             {shared && <Badge variant="secondary">Recommended for a shared project</Badge>}
           </div>
-          <p className="text-muted-foreground">Called polling: agentinbox asks Gmail for changes on a timer. Nothing to set up, no billing account, and the automatic fallback.</p>
+          <p className="text-muted-foreground">Called polling: xaq asks Gmail for changes on a timer. Nothing to set up, no billing account, and the automatic fallback.</p>
         </div>
       </div>
 
@@ -73,7 +73,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
         <p className="flex items-start gap-2 text-sm text-muted-foreground">
           <InfoIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
           <span>
-            You reused a project. The Pub/Sub permission agentinbox would ask for reaches every Pub/Sub topic that account can manage, including the
+            You reused a project. The Pub/Sub permission xaq would ask for reaches every Pub/Sub topic that account can manage, including the
             other apps'. Polling avoids that.
           </span>
         </p>
@@ -83,7 +83,7 @@ export function StepPubsub({ index, onBack, onNext }: StepProps) {
           <InfoIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
           <span>
             Google Workspace: if your admin set a Google Cloud session length, the Pub/Sub permission makes Google ask you to sign in again regularly.
-            An admin can exempt the app (Admin console → Security → Access and data control → Google Cloud session control → mark agentinbox
+            An admin can exempt the app (Admin console → Security → Access and data control → Google Cloud session control → mark xaq
             trusted and tick “Exempt trusted apps”), or stay on polling.
           </span>
         </p>

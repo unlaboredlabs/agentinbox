@@ -1,14 +1,14 @@
-# agentinbox
+# xaq
 
-[![CI](https://github.com/wynn-dev/agentinbox/actions/workflows/ci.yml/badge.svg)](https://github.com/wynn-dev/agentinbox/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/agentinbox-cli)](https://www.npmjs.com/package/agentinbox-cli)
+[![CI](https://github.com/wynn-dev/xaq/actions/workflows/ci.yml/badge.svg)](https://github.com/wynn-dev/xaq/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/xaq-cli)](https://www.npmjs.com/package/xaq-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A self-hosted Gmail broker for AI agents: one small server holds your Gmail credentials and gives each agent scoped,
+A self-hosted Gmail broker for AI agents (formerly agentinbox, see [Upgrading from agentinbox](#upgrading-from-agentinbox)): one small server holds your Gmail credentials and gives each agent scoped,
 audited access through MCP tools and webhooks.
 
 ```sh
-npx agentinbox-cli
+npx xaq-cli
 ```
 
 Open the link it prints: the console walks you through the rest (Google Cloud setup, connecting Gmail, your first
@@ -21,11 +21,51 @@ Google Calendar". Details: [docs/calendar.md](docs/calendar.md).
 
 ![Overview](docs/screenshots/overview.png)
 
+<!-- rename-xaq: keep-start -->
+## Upgrading from agentinbox
+
+xaq is the new name of agentinbox (the npm package `agentinbox-cli` is now `xaq-cli`). An existing install keeps
+working as it is; to move it to the new names, run one command per service, on the machine it runs on:
+
+```sh
+npx xaq-cli service install                             # the daemon
+npx xaq-cli listen service install                      # each listener (add --profile <name> for other profiles)
+npx xaq-cli skill install --target <claude|codex|…> --url <your server>   # each agent's skill, if you installed it
+```
+
+Each `service install` finds the agentinbox service (launchd `com.unlaboredlabs.agentinbox…`, systemd
+`agentinbox.service` / `agentinbox-listen-<profile>.service`), stops it and waits until it is gone, then installs and
+starts the xaq one (launchd `sh.xaq.daemon` / `sh.xaq.listen.<profile>`, systemd `xaq.service` /
+`xaq-listen-<profile>.service`). The two never run at the same time, and if the new one doesn't start, the old one
+is put back exactly as it was. Running it again is a normal reinstall. Mail that arrives meanwhile waits on the daemon
+and is delivered once the listener is back: nothing is lost or delivered twice.
+
+**Kept:**
+- the data directory: `~/.agentinbox` (or the `--data` directory the old service used) stays in use, with its
+  `master.key`, `agentinbox.db` and settings. Nothing is moved; `~/.xaq` is only for new installs.
+- every agent key (`aib_…`), Gmail and Calendar connection, grant, webhook and Pub/Sub setup;
+- the listener's profiles, keys, logs and event cursor (`~/.config/agentinbox`, `~/.local/state/agentinbox`,
+  `~/.local/share/agentinbox` stay in use while the `…/xaq` ones don't exist);
+- the names your agents already use: a profile set up with agentinbox keeps its MCP server name `agentinbox`
+  (`agentinbox-<profile>`), so Hermes routes confined to `["mcp-agentinbox"]`, cron jobs limited to
+  `["agentinbox"]`, the Hermes route `/webhooks/agentinbox…` and Claude Code's `mcp__agentinbox` keep working;
+- `AGENTINBOX_*` environment variables: still read when the `XAQ_*` one isn't set, and `--exec` commands still get
+  `AGENTINBOX_EVENT_FILE` and the other ids next to the new `XAQ_*` ones.
+
+**Changes:**
+- the command is `xaq` (`npx xaq-cli …`); `agentinbox` still works for a release as an alias, and
+  `npx agentinbox-cli …` runs xaq after saying so;
+- the service names above, and the services write `XAQ_*` variables;
+- new profiles and setups use `xaq` / `xaq-<profile>` for the MCP server and Hermes route, and the skill is
+  installed as `xaq` (replacing the `agentinbox` one);
+- the console, logs and messages say xaq.
+<!-- rename-xaq: keep-end -->
+
 ## More
 
 - [Reference](docs/reference.md): features, configuration, running as a service or behind a proxy, security model,
   webhooks, data and backups, development
-- [Waking local agents with `agentinbox listen`](docs/listen.md), e.g. `npx agentinbox-cli listen --recipe claude-code`
+- [Waking local agents with `xaq listen`](docs/listen.md), e.g. `npx xaq-cli listen --recipe claude-code`
 - [Screenshots](docs/screenshots/README.md)
 
 ## License

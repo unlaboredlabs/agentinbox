@@ -82,7 +82,7 @@ export function urlVerdict(a: UrlAnalysis, browserRemote: boolean): { google: [T
           : ["bad", "Won't work: Google refuses https addresses on a raw IP or a private name (like .lan or .local). Use a real domain, a *.ts.net name or localhost through an SSH tunnel."];
   const agents: [Tone, string] =
     a.transport === "loopback"
-      ? ["info", "Only agents on the same machine as agentinbox can reach it."]
+      ? ["info", "Only agents on the same machine as xaq can reach it."]
       : a.transport === "tailscale"
         ? ["good", "Agents on your tailnet can connect (Tailscale encrypts the traffic)."]
         : a.transport === "https"

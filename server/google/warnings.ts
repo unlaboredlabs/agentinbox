@@ -41,7 +41,7 @@ export function setupWarnings(ctx: Ctx): SetupWarning[] {
       out.push({
         code: "needs_reauth",
         severity: "error",
-        message: `${row.email} is disconnected: Google rejected its saved sign-in, so agentinbox can't read or send its mail.`,
+        message: `${row.email} is disconnected: Google rejected its saved sign-in, so xaq can't read or send its mail.`,
         hint:
           `Accounts → ${row.email} → Reconnect, and sign in as ${row.email}.` +
           (row.refresh_expiry_kind === "testing" && row.refresh_expires_at
@@ -149,7 +149,7 @@ function calendarWarnings(ctx: Ctx, rows: AccountRow[]): SetupWarning[] {
     out.push({
       code: "calendar_not_added",
       severity: "info",
-      message: "agentinbox can now give your agents Google Calendar too: reading events, scheduling and answering invitations.",
+      message: "xaq can now give your agents Google Calendar too: reading events, scheduling and answering invitations.",
       hint:
         `Click Add Google Calendar. It walks you through it: turn on the Calendar API (${enableSteps}), then approve Calendar access for each account. ` +
         "Mail keeps working throughout, and no agent gets calendar access until you grant it.",
@@ -186,7 +186,7 @@ function calendarWarnings(ctx: Ctx, rows: AccountRow[]): SetupWarning[] {
         code: "calendar_sync_failing",
         severity: "error",
         message: `Google Calendar sync for ${row.email} is failing${row.calendar_error ? `: ${row.calendar_error}` : "."}`,
-        hint: "agentinbox retries on every poll, and calendar events arrive late until it works again. If it keeps failing, check the agentinbox log. Mail is unaffected.",
+        hint: "xaq retries on every poll, and calendar events arrive late until it works again. If it keeps failing, check the xaq log. Mail is unaffected.",
         accountId: row.id,
       });
     }

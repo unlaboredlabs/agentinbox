@@ -8,7 +8,7 @@ export function UnverifiedTip() {
       <AlertTitle>Seeing "Google hasn't verified this app"?</AlertTitle>
       <AlertDescription>
         That's expected: it's your own OAuth app, not a third party's. Click <strong>Advanced</strong>, then{" "}
-        <strong>Go to agentinbox (unsafe)</strong>. On the permissions screen, tick the Gmail box (or Select all).
+        <strong>Go to xaq (unsafe)</strong>. On the permissions screen, tick the Gmail box (or Select all).
       </AlertDescription>
     </Alert>
   );

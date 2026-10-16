@@ -27,7 +27,7 @@ export function clientIdError(v: string) {
 export function projectIdError(v: string) {
   if (!v.trim()) return "Enter the project ID.";
   if (!PROJECT_ID_RE.test(v.trim()))
-    return "Project IDs are 6–30 lowercase letters, digits or hyphens, starting with a letter (e.g. agentinbox-123456). Use the ID, not the display name.";
+    return "Project IDs are 6–30 lowercase letters, digits or hyphens, starting with a letter (e.g. xaq-123456). Use the ID, not the display name.";
   return null;
 }
 

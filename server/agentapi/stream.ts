@@ -40,7 +40,8 @@ function clientInfo(c: Context): ListenerInfo["client"] {
   } catch {
     // Ignore a malformed header: it's informational.
   }
-  const ua = /agentinbox[\w-]*\/(\S+)/i.exec(c.req.header("user-agent") ?? "")?.[1];
+  // xaq/<version>, or agentinbox/<version> from a listener older than the rename.
+  const ua = /(?:xaq|agentinbox)[\w-]*\/(\S+)/i.exec(c.req.header("user-agent") ?? "")?.[1];
   const info: ListenerInfo["client"] = {
     hostname: short(raw.hostname) ?? short(c.req.query("hostname")),
     platform: short(raw.platform, 50) ?? short(c.req.query("platform"), 50),
@@ -66,10 +67,10 @@ function parseTypes(raw: string | undefined): EventType[] | undefined {
 }
 
 const OPEN_REFUSALS: Record<RevokeReason, [string, string]> = {
-  agent_deleted: ["This agent no longer exists", "Pair again with `npx agentinbox-cli connect`."],
-  agent_disabled: ["This agent is disabled", "Enable it in the agentinbox console under Agents."],
-  key_rotated: ["This API key was replaced", "Pair again with `npx agentinbox-cli connect`, or use the new key."],
-  no_read_grant: ["This agent has no read access to any account", "Grant it read or calendar.read on an account in the agentinbox console."],
+  agent_deleted: ["This agent no longer exists", "Pair again with `npx xaq-cli connect`."],
+  agent_disabled: ["This agent is disabled", "Enable it in the xaq console under Agents."],
+  key_rotated: ["This API key was replaced", "Pair again with `npx xaq-cli connect`, or use the new key."],
+  no_read_grant: ["This agent has no read access to any account", "Grant it read or calendar.read on an account in the xaq console."],
 };
 
 /** Destroys the underlying socket (a stalled client never drains, so a graceful end would hang). */
@@ -102,7 +103,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
   if (problem) throw new HttpError(403, problem, ...OPEN_REFUSALS[problem]);
   const maxStreams = opts.maxStreams ?? 5;
   if ((opts.open.get(agentId) ?? 0) >= maxStreams) {
-    throw new HttpError(429, "too_many_streams", `This agent already has ${maxStreams} open streams`, "Stop a running `agentinbox listen` first.");
+    throw new HttpError(429, "too_many_streams", `This agent already has ${maxStreams} open streams`, "Stop a running `xaq listen` first.");
   }
 
   const { db } = ctx;

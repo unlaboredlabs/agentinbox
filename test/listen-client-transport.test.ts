@@ -8,7 +8,7 @@ import { FAKE_KEY, FakeAgentApi, isolateXdg } from "./listen-client-fake.ts";
 describe("transport rule", () => {
   it("accepts https and loopback http", async () => {
     expect((await checkTransport("https://mail.example.com")).kind).toBe("https");
-    for (const u of ["http://localhost:8425", "http://127.0.0.1:8425", "http://127.9.9.9", "http://[::1]:8425", "http://agentinbox.localhost"]) {
+    for (const u of ["http://localhost:8425", "http://127.0.0.1:8425", "http://127.9.9.9", "http://[::1]:8425", "http://xaq.localhost"]) {
       expect((await checkTransport(u)).kind, u).toBe("loopback");
     }
   });

@@ -50,7 +50,7 @@ describe("audit", () => {
 
 describe("migration 5", () => {
   it("backfills agent origin from kept pairings and listeners, defaulting to key", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agentinbox-mig-"));
+    const dir = mkdtempSync(join(tmpdir(), "xaq-mig-"));
     try {
       const path = join(dir, "db.sqlite");
       const raw = new DatabaseSync(path);
@@ -102,7 +102,7 @@ describe("migration 6", () => {
   };
 
   it("keeps an install verified where an agent already reached /mcp (its audit rows may be pruned)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agentinbox-mig-"));
+    const dir = mkdtempSync(join(tmpdir(), "xaq-mig-"));
     try {
       const db = new Db(upTo5(dir, true));
       const v = db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'setup.verifiedAt'");

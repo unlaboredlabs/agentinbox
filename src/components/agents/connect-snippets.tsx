@@ -6,21 +6,21 @@ import { NPX, shellQuote, transportOf } from "@/lib/cli";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { queries } from "@/lib/queries";
 
-export const KEY_PLACEHOLDER = "<your-agentinbox-key>";
+export const KEY_PLACEHOLDER = "<your-xaq-key>";
 
 export function snippets(publicUrl: string, key: string) {
   const mcp = `${publicUrl}/mcp`;
   return {
-    claude: `claude mcp add --transport http --scope user agentinbox ${shellQuote(mcp)} \\\n  --header "Authorization: Bearer ${key}"`,
-    codexToml: `[mcp_servers.agentinbox]\nurl = ${JSON.stringify(mcp)}\nbearer_token_env_var = "AGENTINBOX_API_KEY"`,
-    codexEnv: `export AGENTINBOX_API_KEY="${key}"`,
-    cursor: JSON.stringify({ mcpServers: { agentinbox: { url: mcp, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+    claude: `claude mcp add --transport http --scope user xaq ${shellQuote(mcp)} \\\n  --header "Authorization: Bearer ${key}"`,
+    codexToml: `[mcp_servers.xaq]\nurl = ${JSON.stringify(mcp)}\nbearer_token_env_var = "XAQ_API_KEY"`,
+    codexEnv: `export XAQ_API_KEY="${key}"`,
+    cursor: JSON.stringify({ mcpServers: { xaq: { url: mcp, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
     generic: JSON.stringify(
-      { mcpServers: { agentinbox: { type: "http", url: mcp, headers: { Authorization: `Bearer ${key}` } } } },
+      { mcpServers: { xaq: { type: "http", url: mcp, headers: { Authorization: `Bearer ${key}` } } } },
       null,
       2,
     ),
-    hermes: `mcp_servers:\n  agentinbox:\n    url: ${JSON.stringify(mcp)}\n    headers:\n      Authorization: "Bearer ${key}"`,
+    hermes: `mcp_servers:\n  xaq:\n    url: ${JSON.stringify(mcp)}\n    headers:\n      Authorization: "Bearer ${key}"`,
     skill: `${NPX} skill install --url ${shellQuote(publicUrl)}`,
     mcpUrl: mcp,
     skillUrl: `${publicUrl}/skill.md`,
@@ -101,7 +101,7 @@ export function ConnectSnippets({ apiKey }: { apiKey?: string }) {
         </TabsContent>
         <TabsContent value="skill" className="space-y-2">
           <p className="text-sm text-muted-foreground">
-            The agentinbox skill teaches agents how to use the tools well: triage, replying in threads, handling approvals and treating email
+            The xaq skill teaches agents how to use the tools well: triage, replying in threads, handling approvals and treating email
             content as untrusted data. Install it next to your agent:
           </p>
           <CodeBlock code={s.skill} wrap />

@@ -7,7 +7,7 @@ import { createAppContext, type ServiceOverrides, stopServices } from "../server
 
 /** A config rooted in a fresh temp data dir. Pass `google` to point at test/fake-google.ts. */
 export function testConfig(patch: Partial<Config> = {}): Config {
-  const dataDir = mkdtempSync(join(tmpdir(), "agentinbox-test-"));
+  const dataDir = mkdtempSync(join(tmpdir(), "xaq-test-"));
   return { ...loadConfig({ dataDir, host: "127.0.0.1", port: 0 }, "0.0.0-test"), ...patch };
 }
 

@@ -27,11 +27,11 @@ function ProjectSaved({ index, onBack, onNext, projectId }: StepProps & { projec
     <StepCard
       index={index}
       title={STEP_META.project.title}
-      description="agentinbox signs in to Gmail through your own Google Cloud project."
+      description="xaq signs in to Gmail through your own Google Cloud project."
       footer={<StepFooter onBack={onBack} onNext={onNext} />}
     >
       <p className="text-sm">
-        agentinbox uses the project <code className="font-mono font-medium">{projectId}</code> (saved with the OAuth client in step 4).
+        xaq uses the project <code className="font-mono font-medium">{projectId}</code> (saved with the OAuth client in step 4).
       </p>
       <div className="flex flex-wrap gap-2">
         <CloudLink href={cloudUrl.dashboard(projectId)}>Open the project</CloudLink>
@@ -75,7 +75,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
     <StepCard
       index={index}
       title={STEP_META.project.title}
-      description="agentinbox signs in to Gmail through your own Google Cloud project, so your mail never passes through anyone else's. Free; no billing account needed."
+      description="xaq signs in to Gmail through your own Google Cloud project, so your mail never passes through anyone else's. Free; no billing account needed."
       footer={
         <StepFooter
           onBack={onBack}
@@ -113,7 +113,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
               ) : (
                 <FieldDescription>
                   Project IDs are unique across Google and permanent. If Google says this one is taken, click New ID and run the command again.
-                  The project name (agentinbox) is just a label.
+                  The project name (xaq) is just a label.
                 </FieldDescription>
               )}
             </div>
@@ -156,7 +156,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 {command ? <CodeBlock code={command} wrap copyLabel="Copy command" /> : <p className="text-critical">Fix the project ID above first.</p>}
                 <Expect>
                   maybe an “Authorize Cloud Shell” prompt (click <strong className="text-foreground">Authorize</strong>), then after about a minute{" "}
-                  <code className="font-mono text-foreground">agentinbox: project {id || "…"} is ready</code>.
+                  <code className="font-mono text-foreground">xaq: project {id || "…"} is ready</code>.
                 </Expect>
                 <Disclosure summary="The command printed an error?">
                   <ul className="list-disc space-y-1.5 pl-5">
@@ -205,14 +205,14 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 title="Create the project"
                 expect={
                   <>
-                    a notification “Create Project: agentinbox”, then <strong className="text-foreground">Select project</strong>.
+                    a notification “Create Project: xaq”, then <strong className="text-foreground">Select project</strong>.
                   </>
                 }
               >
                 <p>Open the form and fill it in like this:</p>
                 <FormValues
                   rows={[
-                    { label: "Project name", value: "agentinbox" },
+                    { label: "Project name", value: "xaq" },
                     {
                       label: "Project ID",
                       value: id,
@@ -235,7 +235,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
 
           <Disclosure summary="Use an existing project instead (advanced)">
             <p>
-              A dedicated project is safer: agentinbox shares a project's sign-in screen, limits and settings with every other app in it. Only
+              A dedicated project is safer: xaq shares a project's sign-in screen, limits and settings with every other app in it. Only
               reuse a project if you can't create one.
             </p>
             <Button variant="outline" size="sm" onClick={() => updateDraft({ projectMode: "existing" })}>
@@ -317,7 +317,7 @@ function ReuseRisks() {
   return (
     <Alert variant="warning">
       <AlertTriangleIcon />
-      <AlertTitle>Reusing a project: what agentinbox shares with the other apps in it</AlertTitle>
+      <AlertTitle>Reusing a project: what xaq shares with the other apps in it</AlertTitle>
       <AlertDescription>
         <ul className="list-disc space-y-1 pl-4">
           <li>One sign-in screen: its name, logo and support email, audience (Internal/External) and publishing status.</li>
@@ -329,7 +329,7 @@ function ReuseRisks() {
         <p className="pt-1 font-medium text-foreground">If you reuse it:</p>
         <ul className="list-disc space-y-1 pl-4">
           <li>Don't rename or rebrand the existing sign-in screen; leave it as it is.</li>
-          <li>Create a separate OAuth client for agentinbox, and don't touch the other app's client.</li>
+          <li>Create a separate OAuth client for xaq, and don't touch the other app's client.</li>
           <li>Prefer polling over Pub/Sub for new mail (step 6).</li>
         </ul>
       </AlertDescription>

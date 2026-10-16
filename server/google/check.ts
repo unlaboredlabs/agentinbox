@@ -101,7 +101,7 @@ async function probeSecret(ctx: Ctx, clientId: string, clientSecret: string, red
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
-      code: `4/0agentinbox-check-${randomBytes(12).toString("hex")}`,
+      code: `4/0xaq-check-${randomBytes(12).toString("hex")}`,
       client_id: clientId,
       client_secret: clientSecret,
       redirect_uri: redirectUri,

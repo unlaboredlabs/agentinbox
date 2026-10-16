@@ -1,14 +1,14 @@
 {
-  "name": "agentinbox-cli",
+  "name": "xaq-cli",
   "version": "0.1.0",
-  "description": "Self-hosted Gmail broker for AI agents: one place for credentials, MCP tools, real-time webhooks, guardrails, and a web console.",
+  "description": "Self-hosted Gmail broker for AI agents (formerly agentinbox): one place for credentials, MCP tools, real-time webhooks, guardrails, and a web console.",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wynn-dev/agentinbox.git"
+    "url": "git+https://github.com/wynn-dev/xaq.git"
   },
-  "homepage": "https://github.com/wynn-dev/agentinbox#readme",
+  "homepage": "https://github.com/wynn-dev/xaq#readme",
   "keywords": [
     "mcp",
     "gmail",
@@ -19,6 +19,7 @@
     "ai"
   ],
   "bin": {
+    "xaq": "dist/cli.js",
     "agentinbox": "dist/cli.js"
   },
   "files": [

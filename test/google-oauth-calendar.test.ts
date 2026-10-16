@@ -176,7 +176,7 @@ describe("Add Calendar to an existing account", () => {
     const err = (await ctx.google.completeConnectFromUrl(`?error=admin_policy_enforced&state=${state}`).catch((e: unknown) => e)) as HttpError;
     expect(err).toMatchObject({
       code: "oauth_admin_policy_enforced",
-      message: `Your Google Workspace admin doesn't allow agentinbox to use Google Calendar, so nothing changed for ${ME}: its mail is unaffected.`,
+      message: `Your Google Workspace admin doesn't allow xaq to use Google Calendar, so nothing changed for ${ME}: its mail is unaffected.`,
     });
     expect(err.hint).toContain(`trust the OAuth client ID ${FAKE_CLIENT.clientId}`);
     expect(ctx.google.connectAttempt(state)).toMatchObject({ status: "failed", code: "oauth_admin_policy_enforced", error: err.message });
@@ -189,7 +189,7 @@ describe("Add Calendar to an existing account", () => {
     expect(error).toMatchObject({ code: "oauth_wrong_account" });
     expect(error!.message).toBe(
       `You were adding Google Calendar to ${ME}, but signed in to Google as other@example.com, so nothing changed for ${ME}: its mail keeps working. ` +
-        "other@example.com is also connected here, so agentinbox saved that new sign-in for other@example.com, which adds Google Calendar to it.",
+        "other@example.com is also connected here, so xaq saved that new sign-in for other@example.com, which adds Google Calendar to it.",
     );
     expect((error as HttpError).hint).toMatch(/^Click Add Calendar for me@example.com again and pick me@example.com/);
     expect(ctx.accounts.get(other.id)!.calendar?.status).toBe("active");

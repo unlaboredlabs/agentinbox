@@ -266,7 +266,7 @@ export class Approvals {
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
         isCalendarApprovalKind(kind)
-          ? "Applying the change was interrupted before it finished. Approve again to retry: agentinbox checks Google Calendar first, so it is never applied twice."
+          ? "Applying the change was interrupted before it finished. Approve again to retry: xaq checks Google Calendar first, so it is never applied twice."
           : "Sending was interrupted before it finished. Approve again to retry (if it was actually sent, the retry fails harmlessly).",
         id,
       );

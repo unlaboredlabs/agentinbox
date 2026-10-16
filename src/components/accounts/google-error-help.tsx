@@ -5,7 +5,7 @@ import { Disclosure, Path } from "@/components/setup/wizard-shell";
 import { queries } from "@/lib/queries";
 
 /**
- * What to do about the errors Google shows on its own pages (they never reach agentinbox), plus the
+ * What to do about the errors Google shows on its own pages (they never reach xaq), plus the
  * unverified-app notice. Used in the connect dialog and on the wizard's accounts step.
  */
 export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
@@ -18,12 +18,12 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
       <dl className="space-y-3">
         {!internal && (
           <Item title="“Google hasn't verified this app”">
-            Expected: it's your own app. Click <Path items={["Advanced", "Go to agentinbox (unsafe)"]} />, then continue.
+            Expected: it's your own app. Click <Path items={["Advanced", "Go to xaq (unsafe)"]} />, then continue.
           </Item>
         )}
         <Item title="A list of permissions with checkboxes">
           Click <strong className="text-foreground">Select all</strong> (or tick each box), then <strong className="text-foreground">Continue</strong>.
-          Gmail is required: without it agentinbox can't read mail. Calendar's boxes are optional: unticked, mail still works and you can add
+          Gmail is required: without it xaq can't read mail. Calendar's boxes are optional: unticked, mail still works and you can add
           Calendar later.
         </Item>
         <Item title="“Error 400: redirect_uri_mismatch”">
@@ -39,11 +39,11 @@ export function GoogleErrorHelp({ defaultOpen }: { defaultOpen?: boolean }) {
             )}
           </p>
         </Item>
-        <Item title="“Access blocked: agentinbox can only be used within its organization” (org_internal)">
+        <Item title="“Access blocked: xaq can only be used within its organization” (org_internal)">
           The app is Internal, and this account isn't in its Google Workspace. Sign in with an account of that organization, or make the app
           External (<Path items={["Audience", "Make external"]} />), publish it, and set the audience to External in step 3.
         </Item>
-        <Item title="“Access blocked: agentinbox has not completed the Google verification process” (Error 403: access_denied on Google's page)">
+        <Item title="“Access blocked: xaq has not completed the Google verification process” (Error 403: access_denied on Google's page)">
           The app is still in Testing. Publish it: <Path items={["Audience", "Publish app", "Push to production?", "Confirm"]} />
           {project && (
             <>

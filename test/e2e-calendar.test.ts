@@ -312,12 +312,12 @@ describe("upgrading a pre-calendar install (2 Gmail accounts, Pub/Sub) with mail
 
     // Update and restart: the pre-calendar database, mail arriving while the server is down.
     await u.stopServer();
-    rewindToPreCalendar(join(u.dataDir, "agentinbox.db"));
+    rewindToPreCalendar(join(u.dataDir, "xaq.db"));
     for (const to of addresses) deliver(to, "While restarting");
     await u.startServer();
     for (const to of addresses) for (const id of delivered.get(to)!) await evented(id);
 
-    const migrated = new DatabaseSync(join(u.dataDir, "agentinbox.db"), { readOnly: true });
+    const migrated = new DatabaseSync(join(u.dataDir, "xaq.db"), { readOnly: true });
     try {
       expect(migrated.prepare("SELECT MAX(version) AS v FROM _migrations").get()).toEqual({ v: MIGRATIONS.length });
     } finally {

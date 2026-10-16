@@ -26,7 +26,7 @@ export function useAgentOrigin(agent: Agent | undefined): { paired: boolean; too
 export const isToolCall = (e: AuditEntry, agentId: string) => e.actorType === "agent" && e.actorId === agentId && isMcpToolAction(e.action);
 
 /**
- * Evidence that the agent's tool talks to agentinbox over MCP.
+ * Evidence that the agent's tool talks to xaq over MCP.
  * - lastToolCall: an MCP tool call in the audit log (exact).
  * - connectedAt: `lastMcpAt`, set by any request to /mcp (including the tools/list a tool runs at
  *   startup, which isn't audited), never by `listen`.

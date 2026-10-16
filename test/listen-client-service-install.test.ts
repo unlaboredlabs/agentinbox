@@ -56,15 +56,15 @@ function fakeOps(failOn?: (cmd: string, args: string[]) => boolean, state: { act
 let version = 0;
 /** Fake npm install: writes a dist/cli.js tagged with an increasing version. */
 const stage = (staging: string) => {
-  mkdirSync(join(staging, "node_modules/agentinbox-cli/dist"), { recursive: true });
-  writeFileSync(join(staging, "node_modules/agentinbox-cli/dist/cli.js"), `// v${++version}\n`);
+  mkdirSync(join(staging, "node_modules/xaq-cli/dist"), { recursive: true });
+  writeFileSync(join(staging, "node_modules/xaq-cli/dist/cli.js"), `// v${++version}\n`);
   return staging;
 };
 const failingStage = () => {
-  throw new Error("Installing agentinbox failed, so the existing service was left as it was. npm ERR!");
+  throw new Error("Installing xaq failed, so the existing service was left as it was. npm ERR!");
 };
-const installed = () => readFileSync(join(listenAppDir(), "node_modules/agentinbox-cli/dist/cli.js"), "utf8");
-const unit = (p: string) => join(env.root, "units", `agentinbox-listen-${p}.service`);
+const installed = () => readFileSync(join(listenAppDir(), "node_modules/xaq-cli/dist/cli.js"), "utf8");
+const unit = (p: string) => join(env.root, "units", `xaq-listen-${p}.service`);
 const ok = async () => PID;
 const never = async () => null;
 const node = { path: "/usr/local/bin/node", version: "22.20.0", versioned: false, why: "a stable path that survives fnm/nvm upgrades" };
@@ -99,7 +99,7 @@ function fakeLaunchd(opts: { lingers?: number; bootstrapFails?: boolean; pid?: n
           return "state = running\n\tpid = 1\n"; // the old job, on its way out
         }
         if (!ops.loaded) throw fail(cmd, "Could not find service");
-        return `com.unlaboredlabs.agentinbox.listen.default = {\n\tstate = running\n\tpid = ${opts.pid ?? PID}\n}\n`;
+        return `sh.xaq.listen.default = {\n\tstate = running\n\tpid = ${opts.pid ?? PID}\n}\n`;
       }
       if (args[0] === "bootstrap") {
         if (opts.bootstrapFails || ops.loaded) throw fail(cmd, "Bootstrap failed: 5: Input/output error\n");
@@ -110,7 +110,7 @@ function fakeLaunchd(opts: { lingers?: number; bootstrapFails?: boolean; pid?: n
   };
   return ops;
 }
-const plist = () => join(env.root, "units", "com.unlaboredlabs.agentinbox.listen.default.plist");
+const plist = () => join(env.root, "units", "sh.xaq.listen.default.plist");
 
 describe("listen service install (launchd)", () => {
   it("waits for the old job to unload before bootstrapping, then confirms launchd runs the new listener", async () => {
@@ -147,7 +147,7 @@ describe("listen service install", () => {
     expect(existsSync(unit("default"))).toBe(false);
     expect(existsSync(listenAppDir())).toBe(false);
     expect(loadProfile().exec).toBe("cat > /dev/null");
-    expect(ops.calls).toContain("systemctl --user disable --now agentinbox-listen-default");
+    expect(ops.calls).toContain("systemctl --user disable --now xaq-listen-default");
   });
 
   it("a failed re-install (readiness timeout) restores the previous unit, install and settings, and restarts it", async () => {
@@ -160,7 +160,7 @@ describe("listen service install", () => {
     expect(installed()).toBe(before.app);
     expect(loadProfile()).toMatchObject({ exec: "cat > /dev/null" });
     expect(loadProfile().concurrency).toBeUndefined();
-    expect(ops.calls.filter((c) => c === "systemctl --user restart agentinbox-listen-default")).toHaveLength(2); // new attempt, then the restored one
+    expect(ops.calls.filter((c) => c === "systemctl --user restart xaq-listen-default")).toHaveLength(2); // new attempt, then the restored one
   });
 
   it("a failed npm install changes nothing (settings included)", async () => {
@@ -177,8 +177,8 @@ describe("listen service install", () => {
     await installListenService({ profile: "work" }, { ops, stage, waitStarted: ok, node });
     ops.calls.length = 0;
     await installListenService({}, { ops, stage, waitStarted: ok, node });
-    expect(ops.calls).toContain("systemctl --user try-restart agentinbox-listen-work");
-    expect(ops.calls).not.toContain("systemctl --user try-restart agentinbox-listen-default");
+    expect(ops.calls).toContain("systemctl --user try-restart xaq-listen-work");
+    expect(ops.calls).not.toContain("systemctl --user try-restart xaq-listen-default");
     expect(installed()).toBe(`// v${version}\n`);
 
     uninstallListenService("default", true, { ops });
@@ -204,7 +204,7 @@ describe("listen service install", () => {
     const checked: string[] = [];
     const gatewayCheck = async (url: string) => (checked.push(url), "The Hermes gateway isn't answering at http://127.0.0.1:8644/health.");
     await installListenService({ recipe: "hermes" }, { ops: fakeOps(), stage, waitStarted: ok, node, gatewayCheck });
-    expect(checked).toEqual(["http://127.0.0.1:8644/webhooks/agentinbox"]);
+    expect(checked).toEqual(["http://127.0.0.1:8644/webhooks/xaq"]);
     const text = vi.mocked(console.log).mock.calls.flat().join("\n");
     expect(text).toContain("--recipe hermes now forwards each email to your running Hermes gateway");
     expect(text).toContain("Warning:   The Hermes gateway isn't answering");
@@ -216,7 +216,7 @@ describe("listen service install", () => {
     let restarts = 0;
     const flaky = fakeOps((cmd, args) => cmd === "systemctl" && args.includes("restart") && ++restarts === 2);
     await expect(installListenService({ exec: "new-cmd" }, { ops: flaky, stage, waitStarted: never, node })).rejects.toThrow(
-      /Put the previous install back, but restarting it failed \(Command failed: systemctl --user restart agentinbox-listen-default\), so no listener service is running now/,
+      /Put the previous install back, but restarting it failed \(Command failed: systemctl --user restart xaq-listen-default\), so no listener service is running now/,
     );
   });
 
@@ -235,7 +235,7 @@ describe("listen service install", () => {
     await installListenService({}, { ops, stage, waitStarted: ok, node }); // stale lock taken over
     expect(existsSync(join(dataDir(), "install.lock"))).toBe(false);
 
-    writeFileSync(join(dataDir(), "agentinbox.db"), "");
-    await expect(installListenService({}, { ops, stage, waitStarted: ok, node })).rejects.toThrow(/holds an agentinbox daemon's data/);
+    writeFileSync(join(dataDir(), "xaq.db"), "");
+    await expect(installListenService({}, { ops, stage, waitStarted: ok, node })).rejects.toThrow(/holds a xaq daemon's data/);
   });
 });

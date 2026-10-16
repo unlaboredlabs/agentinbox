@@ -26,7 +26,7 @@ const isChunkLoadError = (error: unknown) =>
 
 /**
  * Network failures: the request never got an answer (fetch threw), a proxy in front said the
- * upstream is down (a 502-504 that isn't agentinbox's own JSON error), or a code chunk failed to load.
+ * upstream is down (a 502-504 that isn't xaq's own JSON error), or a code chunk failed to load.
  */
 function isUnreachable(error: unknown): boolean {
   if (error instanceof ApiError) return error.status === 0 || (error.status >= 502 && error.status <= 504 && error.code.startsWith("http_"));
@@ -38,7 +38,7 @@ function RootError({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : String(error);
   if (isUnreachable(error)) {
     return (
-      <AuthShell title="Can't reach agentinbox" description="The agentinbox daemon didn't respond. Check that it's running, then try again.">
+      <AuthShell title="Can't reach xaq" description="The xaq daemon didn't respond. Check that it's running, then try again.">
         <div className="flex flex-col items-center gap-4">
           <div className="flex max-w-full items-center gap-2 rounded-md border bg-background px-3 py-2 font-mono text-xs break-all text-muted-foreground">
             <UnplugIcon className="size-3.5 shrink-0" />
@@ -56,7 +56,7 @@ function RootError({ error }: { error: unknown }) {
     <AuthShell
       wide
       title="Something went wrong on this page"
-      description="The console hit an error showing this page. agentinbox itself is still running; reloading usually fixes it."
+      description="The console hit an error showing this page. xaq itself is still running; reloading usually fixes it."
     >
       <div className="flex flex-col items-center gap-4">
         <details className="w-full rounded-md border bg-background text-xs">

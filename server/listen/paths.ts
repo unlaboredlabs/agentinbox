@@ -1,12 +1,15 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { LEGACY_PRODUCT, pickDir, PRODUCT } from "../brand.ts";
 
 /**
  * Agent-side locations (the machine running `connect` / `listen`, not the daemon). XDG on Linux and
  * macOS alike, so one set of paths works everywhere:
- *   config  $XDG_CONFIG_HOME/agentinbox  (~/.config/agentinbox)       profiles/<name>.json (0600)
- *   state   $XDG_STATE_HOME/agentinbox   (~/.local/state/agentinbox)  listen/<name>/{listen.log,dead.jsonl,status.json}
- *   data    $XDG_DATA_HOME/agentinbox    (~/.local/share/agentinbox)  app/ (stable install the services run)
+ *   config  $XDG_CONFIG_HOME/xaq  (~/.config/xaq)       profiles/<name>.json (0600)
+ *   state   $XDG_STATE_HOME/xaq   (~/.local/state/xaq)  listen/<name>/{listen.log,dead.jsonl,status.json}
+ *   data    $XDG_DATA_HOME/xaq    (~/.local/share/xaq)  app/ (stable install the services run)
+ * Each one is still the pre-rename `…/agentinbox` while that exists and the `…/xaq` one doesn't: existing
+ * profiles, keys, logs and the listener services' install stay where they are. Nothing is moved.
  */
 
 const xdg = (envVar: string, fallback: string) => {
@@ -15,9 +18,11 @@ const xdg = (envVar: string, fallback: string) => {
   return v && v.startsWith("/") ? v : join(homedir(), fallback);
 };
 
-export const configDir = () => join(xdg("XDG_CONFIG_HOME", ".config"), "agentinbox");
-export const stateDir = () => join(xdg("XDG_STATE_HOME", ".local/state"), "agentinbox");
-export const dataDir = () => join(xdg("XDG_DATA_HOME", ".local/share"), "agentinbox");
+const named = (base: string) => pickDir(join(base, PRODUCT), join(base, LEGACY_PRODUCT)).dir;
+
+export const configDir = () => named(xdg("XDG_CONFIG_HOME", ".config"));
+export const stateDir = () => named(xdg("XDG_STATE_HOME", ".local/state"));
+export const dataDir = () => named(xdg("XDG_DATA_HOME", ".local/share"));
 
 export const profilesDir = () => join(configDir(), "profiles");
 export const profilePath = (name: string) => join(profilesDir(), `${name}.json`);

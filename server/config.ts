@@ -1,6 +1,7 @@
-import { chmodSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { envVar, LEGACY_PRODUCT, pickDir, PRODUCT, underService } from "./brand.ts";
 
 export interface Config {
   dataDir: string;
@@ -12,7 +13,7 @@ export interface Config {
   dev: boolean;
   /** Honor X-Forwarded-For / X-Forwarded-Proto (behind a reverse proxy). */
   trustProxy: boolean;
-  /** Running under `agentinbox service install` (set via AGENTINBOX_SERVICE=1 in the unit/plist). */
+  /** Running under `xaq service install` (XAQ_SERVICE=1 in the unit/plist; AGENTINBOX_SERVICE=1 in units from before the rename). */
   service: boolean;
   version: string;
   /**
@@ -32,28 +33,67 @@ export interface ConfigInput {
 
 export const DEFAULT_PORT = 8425;
 
+/** New installs keep their data here. */
+export const newDataDir = () => join(homedir(), `.${PRODUCT}`);
+/** Where installs from before the rename keep theirs; still used while `~/.xaq` doesn't exist. */
+export const legacyDataDir = () => join(homedir(), `.${LEGACY_PRODUCT}`);
+
+/**
+ * The data directory when neither --data nor XAQ_DATA / AGENTINBOX_DATA says: `~/.xaq`, or `~/.agentinbox`
+ * when only that one exists (an install from before the rename). Nothing is moved: master.key stays put.
+ */
+export const defaultDataDir = () => resolve(pickDir(newDataDir(), legacyDataDir()).dir);
+
+let toldLegacy = false;
+
+/**
+ * The data directory: --data, else XAQ_DATA (AGENTINBOX_DATA), else the default. Says once per process
+ * when the default is the pre-rename `~/.agentinbox` (unless `quiet`).
+ */
+export function resolveDataDir(flag?: string, opts: { quiet?: boolean } = {}): string {
+  const given = flag ?? (envVar("DATA") || undefined);
+  if (given !== undefined) return resolve(given);
+  const { dir, legacy } = pickDir(newDataDir(), legacyDataDir());
+  if (legacy && !opts.quiet && !toldLegacy) {
+    toldLegacy = true;
+    process.stderr.write(`${PRODUCT}: using the existing data directory ${dir} (from before agentinbox was renamed to ${PRODUCT}; new installs use ${newDataDir()}).\n`);
+  }
+  return resolve(dir);
+}
+
+/**
+ * The database, lock and log files in a data directory: `xaq.*`, or in a data directory from before the
+ * rename (it has agentinbox.db and no xaq.db) `agentinbox.*`. The lock keeps the name an older
+ * agentinbox (from before the rename) still running on that directory uses, so the two never run at once.
+ */
+export function dataFiles(dataDir: string): { db: string; lock: string; log: string } {
+  const legacy = !existsSync(join(dataDir, `${PRODUCT}.db`)) && existsSync(join(dataDir, `${LEGACY_PRODUCT}.db`));
+  const base = legacy ? LEGACY_PRODUCT : PRODUCT;
+  return { db: join(dataDir, `${base}.db`), lock: join(dataDir, `${base}.lock`), log: join(dataDir, `${base}.log`) };
+}
+
 export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
-  const dataDir = resolve(input.dataDir ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
+  const dataDir = resolveDataDir(input.dataDir);
   // Only a directory that already had files in it can have exposed anything.
   const existed = hasFiles(dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   restrictDir(dataDir, existed);
   return {
     dataDir,
-    dbPath: join(dataDir, "agentinbox.db"),
+    dbPath: dataFiles(dataDir).db,
     masterKeyPath: join(dataDir, "master.key"),
     host: input.host ?? process.env.HOST ?? "0.0.0.0",
     port: input.port ?? (process.env.PORT ? Number(process.env.PORT) : DEFAULT_PORT),
     dev: input.dev ?? false,
     trustProxy: process.env.TRUST_PROXY === "1",
-    service: process.env.AGENTINBOX_SERVICE === "1",
+    service: underService(),
     version,
     google: {
-      oauthBase: process.env.AGENTINBOX_GOOGLE_OAUTH_BASE ?? "https://oauth2.googleapis.com",
-      authBase: process.env.AGENTINBOX_GOOGLE_AUTH_BASE ?? "https://accounts.google.com",
-      gmailBase: process.env.AGENTINBOX_GOOGLE_GMAIL_BASE ?? "https://gmail.googleapis.com",
-      pubsubBase: process.env.AGENTINBOX_GOOGLE_PUBSUB_BASE ?? "https://pubsub.googleapis.com",
-      calendarBase: process.env.AGENTINBOX_GOOGLE_CALENDAR_BASE ?? "https://www.googleapis.com",
+      oauthBase: envVar("GOOGLE_OAUTH_BASE") ?? "https://oauth2.googleapis.com",
+      authBase: envVar("GOOGLE_AUTH_BASE") ?? "https://accounts.google.com",
+      gmailBase: envVar("GOOGLE_GMAIL_BASE") ?? "https://gmail.googleapis.com",
+      pubsubBase: envVar("GOOGLE_PUBSUB_BASE") ?? "https://pubsub.googleapis.com",
+      calendarBase: envVar("GOOGLE_CALENDAR_BASE") ?? "https://www.googleapis.com",
     },
   };
 }
@@ -74,7 +114,7 @@ function restrictDir(dir: string, existed: boolean): void {
   try {
     if (process.platform !== "win32" && statSync(dir).mode & 0o077) {
       chmodSync(dir, 0o700);
-      if (existed) process.stderr.write(`agentinbox: made ${dir} private to your user (it was readable by other users).\n`);
+      if (existed) process.stderr.write(`xaq: made ${dir} private to your user (it was readable by other users).\n`);
     }
   } catch {
     // Not ours to change; the files inside are still created owner-only.
