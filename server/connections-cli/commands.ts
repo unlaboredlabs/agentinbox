@@ -102,6 +102,20 @@ Examples:
       process.exitCode = await withApi(o, (deps) => disableConnection(slug, deps));
     });
 
+  dataOption(
+    connections
+      .command("rename")
+      .description("change a connection's short name (agents see its tools as <name>__<tool>) or its display name")
+      .argument("<name>", "the connection's current short name (or its id)"),
+  )
+    .option("--slug <new>", "the new short name: 1-24 lowercase letters, digits and dashes (calls by the old tool names stop working)")
+    .option("--name <display-name>", "a new display name")
+    .option("-y, --yes", "don't ask")
+    .action(async (target: string, o: { data?: string; yes?: boolean; slug?: string; name?: string }) => {
+      const { renameConnection } = await import("./manage.ts");
+      process.exitCode = await withApi(o, (deps) => renameConnection(target, o, deps));
+    });
+
   dataOption(connections.command("remove").description("remove a connection and delete its credentials").argument("<name>", "the connection's name"))
     .option("-y, --yes", "don't ask")
     .action(async (slug: string, o: { data?: string; yes?: boolean }) => {
