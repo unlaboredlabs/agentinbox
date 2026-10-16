@@ -8,6 +8,7 @@ import {
   LogOutIcon,
   MailIcon,
   PlugIcon,
+  PuzzleIcon,
   RocketIcon,
   ScrollTextIcon,
   SettingsIcon,
@@ -36,7 +37,7 @@ import { useSignOut } from "@/hooks/use-sign-out";
 import { queries } from "@/lib/queries";
 
 type NavItem = {
-  to: "/" | "/approvals" | "/events" | "/audit" | "/accounts" | "/connections" | "/agents" | "/webhooks" | "/settings";
+  to: "/" | "/approvals" | "/events" | "/audit" | "/accounts" | "/connections" | "/extensions" | "/agents" | "/webhooks" | "/settings";
   label: string;
   icon: typeof InboxIcon;
   /** Only with Settings.brokerUpstreams. */
@@ -58,6 +59,7 @@ const NAV: { label: string; items: NavItem[] }[] = [
     items: [
       { to: "/accounts", label: "Gmail accounts", icon: MailIcon },
       { to: "/connections", label: "Connections", icon: PlugIcon, broker: true },
+      { to: "/extensions", label: "Extensions", icon: PuzzleIcon, broker: true },
       { to: "/agents", label: "Agents", icon: BotIcon },
       { to: "/webhooks", label: "Webhooks", icon: WebhookIcon },
       { to: "/settings", label: "Settings", icon: SettingsIcon },

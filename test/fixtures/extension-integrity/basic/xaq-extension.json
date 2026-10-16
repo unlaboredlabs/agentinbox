@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "name": "basic",
+  "displayName": "Basic",
+  "version": "1.0.0",
+  "description": "An integrity test vector.",
+  "kind": "code",
+  "slug": "basic",
+  "code": { "entry": "dist/server.mjs", "node": ">=22.13", "auth": { "type": "none" }, "network": ["api.example.com"], "events": [] }
+}

@@ -27,6 +27,15 @@ Calendar scopes on the consent screen, Calendar added to each account, and `cale
 `calendar.write`) on the agent's grant. The console's setup covers all of it; existing installs use Overview → "Add
 Google Calendar". Details: [docs/calendar.md](docs/calendar.md).
 
+## Extensions
+
+Integrations are extensions: `npx xaq-cli ext add notion` installs one from the official
+[xaq-extensions](https://github.com/wynn-dev/xaq-extensions) registry, pinned to a commit and an integrity hash, and
+`ext list`, `ext update` (shows the change, asks first; nothing updates on its own) and `ext remove` manage them, as
+does the console's Extensions page. A GitHub URL, another git URL or a local directory works too, as a third-party
+extension, after a warning: a `code` extension runs on your machine with network access. Node's permission model
+limits its files, child processes and workers, not its network. Details: [Extensions](docs/reference.md#extensions).
+
 ![Overview](docs/screenshots/overview.png)
 
 <!-- rename-xaq: keep-start -->
