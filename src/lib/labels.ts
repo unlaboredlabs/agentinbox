@@ -120,6 +120,16 @@ export const EVENT_TYPE_INFO: Record<EventType, { label: string; description: st
     label: "Invitation received",
     description: "Someone invited the account to an event and is waiting for an answer.",
   },
+  "connection.auth_failed": {
+    label: "Connection auth failed",
+    description: "An integration's credential stopped working; it needs to be reconnected.",
+  },
+  "connection.tool_changed": {
+    label: "Tool changed",
+    description: "An integration's tool changed or appeared and is held until you accept it.",
+  },
+  "connection.expiring": { label: "Connection expiring", description: "An integration's sign-in stops working soon; reconnect it before then." },
+  "approval.requested": { label: "Approval requested", description: "An agent's risky tool call waits for your approval." },
 };
 
 export const ACCOUNT_STATUS: Record<AccountStatus, { label: string; tone: Tone; description: string }> = {

@@ -413,7 +413,7 @@ function formatCalendarFeedEvent(e: MailEvent, c: CalendarEventSummary): string 
 
 function formatEvent(e: MailEvent, labels: Map<string, GmailLabel[] | null>): string {
   if (e.calendarEvent && isCalendarEventType(e.type)) return formatCalendarFeedEvent(e, e.calendarEvent);
-  const lines = [`#${e.seq} ${e.type} · ${e.accountEmail} · ${e.createdAt}`];
+  const lines = [`#${e.seq} ${e.type} · ${e.connectionId ? `connection ${e.connectionId}` : e.accountEmail} · ${e.createdAt}`];
   const m = e.message;
   if (m) {
     lines.push(`  From: ${formatAddress(m.from)} · To: ${clip(formatAddresses(m.to), 120)} · Subject: ${clip(m.subject, 160) || "(no subject)"}`);

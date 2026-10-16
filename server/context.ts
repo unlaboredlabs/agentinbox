@@ -9,6 +9,7 @@
 //   other domains.
 
 import { AuditLog } from "./audit.ts";
+import type { BrokerService } from "./broker/service.ts";
 import { type Bus, createBus } from "./bus.ts";
 import type { CalendarService } from "./calendar/types.ts";
 import type { Config } from "./config.ts";
@@ -47,12 +48,14 @@ export interface Services {
   mail: MailService;
   webhooks: WebhooksService;
   calendar: CalendarService;
+  /** The MCP broker (server/broker/service.ts), inert while Settings.brokerUpstreams is off. */
+  broker: BrokerService;
 }
 
 export interface AppContext extends CoreContext, Services {}
 
 /** Start order. Policy and events first (no I/O), ingest and calendar sync last so everything they emit into is running. */
-export const SERVICE_ORDER: (keyof Services)[] = ["policy", "accounts", "events", "webhooks", "mail", "google", "ingest", "calendar"];
+export const SERVICE_ORDER: (keyof Services)[] = ["policy", "accounts", "events", "webhooks", "mail", "google", "broker", "ingest", "calendar"];
 
 export function createCore(config: Config): CoreContext {
   const db = new Db(config.dbPath);

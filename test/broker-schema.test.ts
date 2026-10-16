@@ -426,7 +426,7 @@ describe("migration 8 on a fresh database", () => {
     expect(db.all("PRAGMA foreign_key_check")).toEqual([]);
   });
 
-  it("reads an mcp.call approval as McpCallApproval (no account, no draft); it can be rejected but not approved by this version", async () => {
+  it("reads an mcp.call approval as McpCallApproval (no account, no draft); approving goes through the broker", async () => {
     const config = testConfig();
     db.close();
     const ctx = createAppContext(config, { google: () => new FakeGoogle().service(), accounts: (c) => fakeAccounts(c) });
@@ -445,9 +445,8 @@ describe("migration 8 on a fresh database", () => {
         call: { tool: "notion-delete-pages", exposedName: "notion__notion-delete-pages", args: '{"page_id":"p1"}' },
       });
       expect(a.calendar).toBeUndefined();
-      await expect(ctx.mail.approve("apr_1")).rejects.toMatchObject({ status: 409 });
-      expect(ctx.mail.getApproval("apr_1")!.status).toBe("pending");
-      expect(await ctx.mail.reject("apr_1")).toMatchObject({ status: "rejected" });
+      // The broker's runner (M1 PR 7) re-checks first: the agent has no grant on the connection, so it's cancelled, never run.
+      expect(await ctx.mail.approve("apr_1")).toMatchObject({ status: "rejected" });
     } finally {
       await stopServices(ctx);
       rmSync(config.dataDir, { recursive: true, force: true });
