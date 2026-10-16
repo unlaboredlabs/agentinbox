@@ -33,6 +33,12 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
   step 6 warns.
 - The real unverified-app and Gmail-permission consent screens, and how Gmail labels the self-sent test email.
 
+## Open decisions (Wynn)
+- **Forums in the listener's default category skip.** Shipped default: Promotions, Social and Forums are skipped.
+  Proposed: drop Forums from the default (Workspace Google Groups and team lists land there, and Gmail sets the
+  label even with inbox tabs off), and have the console say "skipped by listener filter" instead of "Delivered to …"
+  for events a listener skipped. Undecided; the default stays as shipped until Wynn decides.
+
 ## Calendar + listener-recipe round (Oct 2026)
 - The calendar scheduler runs two SQL queries per second, even on mail-only installs.
 - An RSVP retry after a 5xx can email the organizer twice.
