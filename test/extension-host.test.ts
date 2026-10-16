@@ -5,6 +5,8 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -251,6 +253,26 @@ describe("the protocol", () => {
     const listed = await s.listTools(AbortSignal.timeout(5000));
     expect(listed.tools.map((t) => t.name)).toContain("echo");
     expect(listed.instructions).toBe("Echo test extension.");
+  });
+
+  it("fetch works under the real flags (the network isn't sandboxed): a loopback HTTP request from the child", async () => {
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "text/plain" }).end("pong");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const s = open();
+      const r = jsonOf(await s.callTool("fetch", { url: `http://127.0.0.1:${port}/ping?x=1` }, ctl()));
+      expect(r).toEqual({ status: 200, body: "pong" });
+      expect(seen).toEqual(["GET /ping?x=1"]);
+      // Under the exact argv the spawn test pins.
+      expect(jsonOf<{ execArgv: string[] }>(await s.callTool("argv", {}, ctl())).execArgv[0]).toBe("--permission");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
   });
 
   it("a refused credential (needs re-auth) is a JSON-RPC error to the extension", async () => {

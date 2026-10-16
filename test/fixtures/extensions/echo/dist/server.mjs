@@ -54,6 +54,7 @@ const TOOLS = [
   { name: "log", description: "Logs through xaq/log.", inputSchema: { type: "object", properties: { msg: { type: "string" }, n: { type: "number" } } } },
   { name: "state", description: "Writes and reads a file in the state directory.", inputSchema: { type: "object", properties: { text: { type: "string" } } } },
   { name: "env", description: "Lists the environment's keys.", inputSchema: { type: "object", properties: {} } },
+  { name: "fetch", description: "Fetches a URL (the network isn't sandboxed).", inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
   { name: "argv", description: "Reports how it was started.", inputSchema: { type: "object", properties: {} } },
   { name: "escape", description: "Tries to escape the sandbox.", inputSchema: { type: "object", properties: { paths: { type: "object" } } } },
   { name: "slow", description: "Sleeps.", inputSchema: { type: "object", properties: { ms: { type: "number" } } } },
@@ -88,6 +89,10 @@ async function callTool(name, args) {
     }
     case "env":
       return text(Object.keys(process.env).sort());
+    case "fetch": {
+      const res = await fetch(String(args.url));
+      return text({ status: res.status, body: await res.text() });
+    }
     case "argv":
       return text({ execArgv: process.execArgv, entry: process.argv[1], cwd: process.cwd(), env: process.env });
     case "escape":

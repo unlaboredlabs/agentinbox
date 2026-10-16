@@ -201,6 +201,11 @@ export type PresetAuth =
       /** Setup inputs that hold the client id / secret. */
       clientIdInput: string;
       clientSecretInput: string;
+      /**
+       * Additive (extensions): sent as `scope` on every refresh request when set (WHOOP: "offline", which its docs
+       * require to renew the refresh token). Unset: no `scope`, the originally granted scope (RFC 6749 §6).
+       */
+      refreshScope?: string;
     };
 
 /** A pre-made integration. Remote presets are proxied MCP servers; native ones provide their own ToolSource. FROZEN. */

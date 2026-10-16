@@ -42,7 +42,8 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
     "auth": {                       // OAuth is done by xaq core; the extension only ever gets access tokens
       "type": "user_app",           // or "none"
       "authorizeUrl": "…", "tokenUrl": "…", "scopes": ["…"],
-      "clientIdInput": "client_id", "clientSecretInput": "client_secret"
+      "clientIdInput": "client_id", "clientSecretInput": "client_secret",
+      "refreshScope": "offline"     // optional: sent as `scope` on refresh (WHOOP needs "offline"); omit to send none
     },
     "network": ["api.example.com"],      // declared hosts: shown at install and in the warning (not enforced, see Sandbox)
     "events": ["example.item_updated"]   // the event types it may emit (`<name>.<event>`); anything else is dropped and logged
@@ -176,8 +177,9 @@ that talks to the child.
   `user_app` OAuth with refresh, private-target allow, expiry, events and outbox.
   - *Clarified (B3):* `user_app` OAuth is `server/broker/upstream/user-app.ts`, driven by the preset's auth (a code
     manifest's `code.auth`): authorization code with the client secret in the body, no PKCE, https endpoints only.
-    The refresh request sends no `scope`, so the originally granted scope applies (RFC 6749 §6). The native WHOOP
-    code sent `scope=offline`. There's no user-id lookup: it only routed webhooks. The generic
+    The refresh request sends `scope=<code.auth.refreshScope>` when the manifest sets it, and no `scope` otherwise
+    (the originally granted scope applies, RFC 6749 §6). WHOOP's manifest sets `"refreshScope": "offline"`: WHOOP's
+    documented refresh request includes it, as the native code did. There's no user-id lookup: it only routed webhooks. The generic
     `/hooks/connections/:id` route stays mounted but answers 404, because no preset in core handles webhooks.
 - **Pins:** core carries `server/extensions/bootstrap.json`, the pins (name, commit, integrity) of the official notion,
   t3code, whoop and brightspace extensions at release time. It holds pins only, no code.

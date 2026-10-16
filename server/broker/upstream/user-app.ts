@@ -3,8 +3,9 @@
 // the preset's auth (a code extension's manifest `code.auth`): the authorize and token URLs, the scopes and the input
 // keys holding the client id and secret. Authorization code with the client secret in the body
 // (client_secret_post), no PKCE, `state` from the runtime. Refresh tokens may rotate and be single-use: the
-// TokenRefresher's compare-and-swap saves each new one before it's used. The refresh request carries no `scope`
-// (RFC 6749 §6: the originally granted scope).
+// TokenRefresher's compare-and-swap saves each new one before it's used. The refresh request carries `scope` only
+// when the auth sets `refreshScope` (WHOOP: "offline", which renews its refresh token); otherwise none (RFC 6749 §6:
+// the originally granted scope).
 // Code extensions only ever get access tokens (xaq/credentials/get); the client secret and the refresh token never
 // leave core.
 
@@ -74,7 +75,13 @@ export function userAppRefreshFn(auth: UserAppAuth, client: UserAppClient, opts:
     if (!current.refreshToken) throw new SourceError("needs_reauth", `${opts.displayName ?? "The provider"} has no refresh token for this connection`);
     const next = await tokenRequest(
       auth,
-      { grant_type: "refresh_token", refresh_token: current.refreshToken, client_id: client.clientId, client_secret: client.clientSecret },
+      {
+        grant_type: "refresh_token",
+        refresh_token: current.refreshToken,
+        client_id: client.clientId,
+        client_secret: client.clientSecret,
+        ...(auth.refreshScope ? { scope: auth.refreshScope } : {}),
+      },
       { ...opts, signal },
     );
     return { ...next, refreshToken: next.refreshToken ?? current.refreshToken, scope: next.scope ?? current.scope };

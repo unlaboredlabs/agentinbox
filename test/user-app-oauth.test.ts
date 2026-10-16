@@ -71,6 +71,21 @@ describe("user_app OAuth", () => {
     await expect(refresh({ ...current, refreshToken: null }, AbortSignal.timeout(5000))).rejects.toMatchObject({ code: "needs_reauth" });
   });
 
+  it("refresh with the manifest's refreshScope (WHOOP: offline) sends it as scope; the runtime flow passes it through", async () => {
+    const t = tokenEndpoint(() => ({ body: { access_token: "at2", refresh_token: "rt2", expires_in: 60 } }));
+    const whoop: UserAppAuth = { ...AUTH, refreshScope: "offline" };
+    const current: StoredTokens = { accessToken: "at1", refreshToken: "rt1", expiresAt: 0, scope: "offline read:recovery", issuer: null };
+    await userAppRefreshFn(whoop, CLIENT, { fetch: t.fetch })(current, AbortSignal.timeout(5000));
+    expect(Object.fromEntries(t.forms[0]!)).toEqual({ grant_type: "refresh_token", refresh_token: "rt1", client_id: "cid-123", client_secret: "csecret-456", scope: "offline" });
+    // Through the flow the runtime builds from the preset's auth.
+    const flow = userAppFlow({ id: "whoop", displayName: "WHOOP", auth: whoop }, { fetch: t.fetch });
+    await flow.refreshFn({ client_id: CLIENT.clientId, client_secret: CLIENT.clientSecret })!(current, AbortSignal.timeout(5000));
+    expect(t.forms[1]!.get("scope")).toBe("offline");
+    // The code exchange never carries it.
+    await userAppExchange(whoop, "code", { client: CLIENT, redirectUri: "r" }, { fetch: t.fetch });
+    expect(t.forms[2]!.has("scope")).toBe(false);
+  });
+
   it("maps token endpoint failures: invalid_grant/invalid_client → needs_reauth, 429 → rate_limited, 5xx → unavailable", async () => {
     const at = (status: number, body: unknown, headers?: Record<string, string>) => userAppExchange(AUTH, "c", { client: CLIENT, redirectUri: "r" }, { fetch: tokenEndpoint(() => ({ status, body, headers })).fetch });
     await expect(at(400, { error: "invalid_grant" })).rejects.toMatchObject({ code: "needs_reauth" });
