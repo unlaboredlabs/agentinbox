@@ -2,7 +2,7 @@ import type { GoogleAppType, GoogleClientView } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangleIcon, BuildingIcon, GlobeIcon, InfoIcon } from "lucide-react";
 import { ChoiceCards } from "@/components/choice-cards";
-import { CopyField } from "@/components/common";
+import { CodeBlock } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -11,14 +11,12 @@ import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
 import { keys, queries } from "@/lib/queries";
 import { STEP_META, updateDraft, useSetupProgress } from "./progress";
+import { SCOPES } from "@/lib/gcp-project";
 import { cloudUrl } from "./step-project";
 import type { StepProps } from "./step-url";
 import { CloudLink, Disclosure, FormValues, GoogleTabNote, Guide, GuideStep, Path, StepCard, StepFooter } from "./wizard-shell";
 
-export const SCOPES = {
-  gmail: "https://www.googleapis.com/auth/gmail.modify",
-  pubsub: "https://www.googleapis.com/auth/pubsub",
-};
+export { SCOPES } from "@/lib/gcp-project";
 
 export const UNVERIFIED_PATH = ["Google hasn't verified this app", "Advanced", "Go to agentinbox (unsafe)"];
 
@@ -53,7 +51,7 @@ export function StepConsent({ index, onBack, onNext }: StepProps) {
     <StepCard
       index={index}
       title={STEP_META.consent.title}
-      description="Google shows this screen when you connect a Gmail account to agentinbox. You set it up once: who may connect, and the name they see."
+      description="Google shows this screen when you connect a Google account to agentinbox. You set it up once: who may connect, and the name they see."
       footer={
         <StepFooter
           onBack={onBack}
@@ -185,21 +183,38 @@ export function StepConsent({ index, onBack, onNext }: StepProps) {
         )}
       </Guide>
 
-      {appType === "external" && (
-        <Disclosure summary="Optional: list Gmail on the Data access page" badge={<Badge variant="outline">Optional</Badge>}>
-          <p>
-            Not needed: agentinbox asks for Gmail access when you connect an account, and it works the same either way. Add it only if you want
-            Google's overview to list it. Google calls it a “restricted” scope; for your own app that just means the unverified-app notice.
-          </p>
-          <p>
-            <Path items={["Data access", "Add or remove scopes"]} />, paste this under “Manually add scopes”, then <Path items={["Add to table", "Update", "Save"]} />.
-          </p>
-          <CopyField value={SCOPES.gmail} label="Copy Gmail scope" />
-          <CloudLink href={cloudUrl.authScopes(project)} disabled={!project}>
-            Open Data access
-          </CloudLink>
-        </Disclosure>
-      )}
+      <DataAccess project={project} appType={appType} />
     </StepCard>
   );
 }
+
+const DATA_ACCESS_SCOPES = [SCOPES.gmail, ...SCOPES.calendar].join("\n");
+
+/**
+ * The Data access page: optional, since agentinbox asks for each scope when an account connects. Listing
+ * them there is what Google's own overview shows; for External apps it also names them on the consent screen.
+ */
+function DataAccess({ project, appType }: { project: string; appType: GoogleAppType | undefined }) {
+  return (
+    <Disclosure
+      summary="List Gmail and Google Calendar on the Data access page"
+      badge={<Badge variant="outline">{appType === "external" ? "Recommended" : "Optional"}</Badge>}
+    >
+      <p>
+        agentinbox asks for this access when you connect an account and works the same either way. Listing it here makes Google Cloud show
+        what the app uses{appType === "external" ? ", and the sign-in screen name it" : ""}. Google calls Gmail a “restricted” scope and the
+        Calendar ones “sensitive”; for your own app that just means the unverified-app notice.
+      </p>
+      <p>
+        <Path items={["Data access", "Add or remove scopes"]} />, paste these under “Manually add scopes”, then{" "}
+        <Path items={["Add to table", "Update", "Save"]} />. The first is Gmail; the other three are Calendar's events, calendar list and
+        free/busy.
+      </p>
+      <CodeBlock code={DATA_ACCESS_SCOPES} wrap copyLabel="Copy scopes" />
+      <CloudLink href={cloudUrl.authScopes(project)} disabled={!project}>
+        Open Data access
+      </CloudLink>
+    </Disclosure>
+  );
+}
+

@@ -3,6 +3,7 @@ import { Outlet, createFileRoute, redirect, useNavigate, useRouterState } from "
 import { useEffect } from "react";
 import { ConnectAccountHost } from "@/components/accounts/connect-host";
 import { AppSidebar } from "@/components/app-sidebar";
+import { CalendarSetupHost } from "@/components/google/calendar-setup";
 import { ConnectionIndicator } from "@/components/connection-indicator";
 import { PairingNotifier } from "@/components/pairing-notifier";
 import { ThemeToggle } from "@/components/theme";
@@ -62,6 +63,7 @@ function AppLayout() {
         </SidebarInset>
       </SidebarProvider>
       <ConnectAccountHost />
+      <CalendarSetupHost />
       <PairingNotifier />
     </StreamProvider>
   );

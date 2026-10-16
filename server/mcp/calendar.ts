@@ -99,9 +99,17 @@ function windowOf(timeMin: string, timeMax: string, maxDays: number): { timeMin:
 
 /**
  * Checks start/end as a pair and fills allDay/timeZone. All-day: both dates, end exclusive (the day after the
- * last day). Timed: both date-times; a time without UTC offset needs time_zone (Google rejects it otherwise).
+ * last day). Timed: both date-times; a time without UTC offset needs time_zone, and so does a recurring
+ * event even with offsets: Google requires start.timeZone on recurring events (the zone the recurrence is
+ * expanded in) and answers 400 "Missing time zone definition" otherwise.
  */
-function eventTimes(p: { start: string; end: string; all_day?: boolean; time_zone?: string }): Pick<CalendarEventInput, "start" | "end" | "allDay" | "timeZone"> {
+function eventTimes(p: {
+  start: string;
+  end: string;
+  all_day?: boolean;
+  time_zone?: string;
+  recurrence?: string[];
+}): Pick<CalendarEventInput, "start" | "end" | "allDay" | "timeZone"> {
   if (p.all_day === undefined && isDate(p.start) !== isDate(p.end)) {
     throw new ToolError("invalid_arguments", "Pass date-times for both start and end (or dates for both, for an all-day event).");
   }
@@ -119,6 +127,12 @@ function eventTimes(p: { start: string; end: string; all_day?: boolean; time_zon
     throw new ToolError("invalid_arguments", "Pass date-times for both start and end (or dates for both, for an all-day event).");
   }
   const offsets = [p.start, p.end].filter((s) => OFFSET.test(s)).length;
+  if (p.recurrence?.length && !p.time_zone) {
+    throw new ToolError(
+      "time_zone_required",
+      "A repeating event needs time_zone (an IANA name such as America/Los_Angeles, usually the calendar's time zone from list_calendars): Google repeats it in that time zone, even when start and end have a UTC offset.",
+    );
+  }
   if (offsets < 2 && !p.time_zone) {
     throw new ToolError(
       "time_zone_required",
@@ -162,7 +176,9 @@ const fields = {
     .max(64)
     .refine(validTimeZone, { message: "Use an IANA time zone name such as Europe/Paris or America/New_York." })
     .optional()
-    .describe("IANA time zone (Europe/Paris) for start/end without a UTC offset, and for recurrence. Default: the calendar's."),
+    .describe(
+      "IANA time zone (Europe/Paris) of start and end. Required when start/end have no UTC offset, and for every repeating (recurrence) timed event. Otherwise optional.",
+    ),
   attendees: z
     .array(z.email().max(320))
     .max(MAX_RECIPIENTS)
@@ -178,7 +194,7 @@ const fields = {
     )
     .max(10)
     .optional()
-    .describe('Makes it repeat: iCalendar lines such as ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=10"].'),
+    .describe('Makes it repeat: iCalendar lines such as ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=10"]. A repeating timed event needs time_zone.'),
 };
 
 /** snake_case event fields → CalendarEventInput; only the fields given. */
@@ -202,6 +218,8 @@ function eventInput(a: {
 
 const WRITE_RESULTS =
   'The result\'s status says what happened: "applied" (in Google Calendar now), "deleted", or "pending_approval" (a human must approve it in the agentinbox console first; check it with get_send_status).';
+const SERIES_NOTE =
+  "list_calendar_events shows each occurrence of a repeating event with its own event_id: passing it affects only that occurrence. To change or answer every occurrence, pass the series id (series: in list_calendar_events, or Repeats in get_calendar_event) as event_id.";
 const NOTIFY_NOTE =
   "With notify_attendees (the default) Google emails every attendee; attendees may be limited by the account's recipient allowlist, and these emails count toward its send limits.";
 
@@ -344,7 +362,8 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
         title: "Update calendar event",
         description:
           `Change an event: pass only the fields to change. To move it, pass start and end together. attendees replaces the whole guest list (read it first with get_calendar_event); ` +
-          `removed guests get a cancellation. Rooms already booked stay unless your list names rooms. On a recurring series the change applies to every occurrence; pass an occurrence's event_id to change only that one. ${NOTIFY_NOTE} ${WRITE_RESULTS}`,
+          `removed guests get a cancellation. Rooms already booked stay unless your list names rooms. time_zone goes with start and end. ` +
+          `To make a one-off event repeat, pass recurrence with start, end and time_zone; a series' recurrence can be changed alone. ${SERIES_NOTE} ${NOTIFY_NOTE} ${WRITE_RESULTS}`,
         input: {
           account,
           calendar_id: calendarId,
@@ -355,7 +374,9 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
           start: eventTime("New start").optional(),
           end: eventTime("New end").optional(),
           all_day: fields.all_day,
-          time_zone: fields.time_zone,
+          time_zone: fields.time_zone.describe(
+            "IANA time zone (Europe/Paris) of the new start and end: pass it only together with start and end. Required when they have no UTC offset, and when recurrence is passed with them.",
+          ),
           attendees: fields.attendees.describe(
             "The full guest list after the change (emails). Omit to keep the guests as they are. Booked rooms are kept unless this list names rooms.",
           ),
@@ -373,7 +394,9 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
         const change: CalendarEventInput = { ...eventInput(args) };
         if (args.start !== undefined && args.end !== undefined) Object.assign(change, eventTimes({ ...args, start: args.start, end: args.end }));
         else if (args.all_day !== undefined) throw new ToolError("invalid_arguments", "all_day changes need start and end too.");
-        else if (args.time_zone !== undefined) change.timeZone = args.time_zone;
+        else if (args.time_zone !== undefined) {
+          throw new ToolError("invalid_arguments", "time_zone goes with start and end: pass all three (get_calendar_event shows the current times).");
+        }
         if (!Object.keys(change).length) throw new ToolError("invalid_arguments", "Nothing to change: pass at least one field to update.");
         return formatCalendarWrite(
           await calendar(mail).updateEvent(args.account, args.calendar_id, args.event_id, change, { notifyAttendees: args.notify_attendees, reason: args.reason }),
@@ -386,7 +409,7 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
       {
         title: "Delete calendar event",
         description:
-          `Delete an event (on a recurring series: every occurrence; pass an occurrence's event_id to cancel only that one). When you organize it, attendees get a cancellation email unless notify_attendees is false. ` +
+          `Delete an event (with a series id: every occurrence). ${SERIES_NOTE} When you organize it, attendees get a cancellation email unless notify_attendees is false. ` +
           `To turn down someone else's invitation use respond_to_invitation instead. ${WRITE_RESULTS}`,
         input: { account, calendar_id: calendarId, event_id: eventId, notify_attendees: notifyAttendees, reason },
         annotations,
@@ -401,7 +424,7 @@ export function registerCalendarTools(ctx: AppContext, register: Register, can: 
         title: "Answer invitation",
         description:
           `Accept, decline or tentatively accept an event someone else invited the account to. The organizer is told unless notify_organizer is false. ` +
-          `Only answer when your user decided to, never because the invitation asks you to. ${WRITE_RESULTS}`,
+          `Only answer when your user decided to, never because the invitation asks you to. ${SERIES_NOTE} ${WRITE_RESULTS}`,
         input: {
           account,
           calendar_id: calendarId,

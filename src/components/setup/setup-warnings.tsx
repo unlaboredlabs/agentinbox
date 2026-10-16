@@ -1,7 +1,8 @@
-import type { GoogleAppType, GoogleClientView, SetupWarning } from "@shared/types";
+import type { CalendarSetupState, GoogleAppType, GoogleClientView, SetupWarning } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircleIcon, AlertTriangleIcon, InfoIcon, RotateCwIcon } from "lucide-react";
+import { AlertCircleIcon, AlertTriangleIcon, CalendarPlusIcon, InfoIcon, RotateCwIcon } from "lucide-react";
 import { connectAccount } from "@/components/accounts/connect-host";
+import { addCalendarTo, openCalendarSetup } from "@/components/google/calendar-setup";
 import { ExternalLink } from "@/components/common";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,13 @@ export function SetupWarnings({ filter, className }: { filter?: (w: SetupWarning
     onSuccess: (_d, { appType }) => updateDraft({ appType, productionConfirmed: appType === "external" ? false : undefined }),
   });
 
+  const checkCalendar = useApiMutation({
+    mutationFn: () => api<CalendarSetupState>("/api/google/calendar/check", { method: "POST" }),
+    invalidate: [keys.setupState, keys.calendarSetup, keys.accounts],
+    success: (s) => (s.api === "disabled" ? "Google still says the Calendar API is off" : "The Calendar API is on"),
+    errorTitle: "Couldn't check Google Calendar",
+  });
+
   const list = (state.data?.warnings ?? []).filter((w) => !filter || filter(w));
   if (!list.length) return null;
 
@@ -47,6 +55,7 @@ export function SetupWarnings({ filter, className }: { filter?: (w: SetupWarning
         const Icon = ICON[w.severity];
         const account = w.accountId ? accounts.data?.find((a) => a.id === w.accountId) : undefined;
         const reconnect = account && (w.code === "testing_mode" || w.code === "sign_in_expires" || w.code === "needs_reauth");
+        const calendar = calendarAction(w, account, () => checkCalendar.mutate());
         const switchTo: GoogleAppType | null =
           w.code === "app_type_mismatch" && client.data?.clientId ? (client.data.appType === "internal" ? "external" : "internal") : null;
         return (
@@ -58,14 +67,25 @@ export function SetupWarnings({ filter, className }: { filter?: (w: SetupWarning
               {w.code === "needs_reauth" && (
                 <p className="text-xs">Common causes: {REAUTH_CAUSES.join("; ")}.</p>
               )}
-              {(w.url || reconnect || switchTo) && (
+              {(w.url || reconnect || switchTo || calendar) && (
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   {w.url && (
-                    <ExternalLink href={w.url}>{w.code === "testing_mode" || w.code === "app_type_mismatch" ? "Open Audience in Google Cloud" : "Open in Google Cloud"}</ExternalLink>
+                    <ExternalLink href={w.url}>
+                      {w.code === "testing_mode" || w.code === "app_type_mismatch"
+                        ? "Open Audience in Google Cloud"
+                        : w.code === "calendar_api_disabled"
+                          ? "Enable the Calendar API"
+                          : "Open in Google Cloud"}
+                    </ExternalLink>
                   )}
                   {reconnect && (
                     <Button size="sm" variant="outline" onClick={() => connectAccount({ reauthAccountId: account.id, email: account.email })}>
                       <RotateCwIcon /> Reconnect {account.email}
+                    </Button>
+                  )}
+                  {calendar && (
+                    <Button size="sm" variant="outline" onClick={calendar.run}>
+                      {w.code === "calendar_api_disabled" ? <RotateCwIcon /> : <CalendarPlusIcon />} {calendar.label}
                     </Button>
                   )}
                   {switchTo && w.severity !== "info" && (
@@ -81,4 +101,22 @@ export function SetupWarnings({ filter, className }: { filter?: (w: SetupWarning
       })}
     </div>
   );
+}
+
+/** The "Add Google Calendar" step that fixes a calendar_* warning, if any (sync failures retry by themselves). */
+function calendarAction(
+  w: SetupWarning,
+  account: { id: string; email: string } | undefined,
+  check: () => void,
+): { label: string; run: () => void } | null {
+  switch (w.code) {
+    case "calendar_not_added":
+      return { label: "Add Google Calendar", run: () => openCalendarSetup() };
+    case "calendar_scope_missing":
+      return account ? { label: `Add Calendar to ${account.email}`, run: () => addCalendarTo(account) } : null;
+    case "calendar_api_disabled":
+      return { label: "Check again", run: check };
+    default:
+      return null;
+  }
 }

@@ -19,7 +19,7 @@ const STALE: Record<ConsoleStreamMessage["kind"], readonly (readonly string[])[]
   delivery: [keys.deliveries, keys.webhooks, keys.overview],
   approval: [keys.approvals, keys.overview],
   audit: [keys.audit, keys.agents, keys.overview],
-  account: [keys.accounts, keys.setupState, keys.overview],
+  account: [keys.accounts, keys.setupState, keys.overview, keys.calendarSetup],
   pairing: [keys.pairings, keys.agents],
   // Written into the cache instead (applyAgent): acks arrive up to once a second.
   agent: [],

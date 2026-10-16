@@ -261,7 +261,7 @@ function eventLines(e: CalendarEventSummary, accountEmail: string, indent: strin
     e.attendeeCount ? `${e.attendeeCount} attendee${e.attendeeCount === 1 ? "" : "s"}` : null,
     e.selfResponse ? `your response: ${RESPONSE_HELP[e.selfResponse]}` : null,
     e.conferenceUrl ? "video call" : null,
-    e.recurringEventId || e.recurring ? "recurring" : null,
+    e.recurringEventId ? `recurring, series: ${clip(e.recurringEventId, 1024)}` : e.recurring ? "recurring series" : null,
     e.status !== "confirmed" ? `status: ${e.status}` : null,
     e.eventType !== "default" ? `type: ${clip(e.eventType, 40)}` : null,
     ...eventFlags(e, accountEmail),

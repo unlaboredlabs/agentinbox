@@ -66,3 +66,23 @@ export function streamUpdateConcerns(accountId: string, c: { reauthAccountId?: s
 export function answerApplies(phase: { kind: string; res?: { state: string } } | null | undefined, state: string): boolean {
   return phase?.kind === "waiting" && phase.res?.state === state;
 }
+
+/**
+ * Sign-in failures a caller that shows the outcome itself (handBack: "Add Google Calendar") takes over:
+ * nothing is broken, the user cancelled or unticked Calendar, and the account's mail is unaffected.
+ */
+export const handsBack = (code: string): boolean => code === "oauth_calendar_not_granted" || code === "oauth_access_denied";
+
+/**
+ * "Connect with mail only" after Google refused a sign-in that asked for Calendar (a Workspace admin may
+ * block Calendar for unconfigured apps, which rejects the whole consent). Such a consent: Calendar is on for
+ * the install, or a reconnect (it re-asks for Calendar the account had). Not for "Add Calendar to X" (its
+ * mail is unaffected), nor after a mail-only attempt (then the admin blocks the app itself).
+ */
+export function offersMailOnly(
+  code: string | undefined,
+  req: { reauthAccountId?: string; scopes?: readonly string[]; mailOnly?: boolean },
+  calendarOn: boolean,
+): boolean {
+  return code === "oauth_admin_policy_enforced" && !req.scopes?.length && !req.mailOnly && (calendarOn || !!req.reauthAccountId);
+}

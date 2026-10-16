@@ -9,7 +9,7 @@ Taken from demos against a fake Google (`scripts/demo/seed.ts`) by `scripts/demo
 | `wizard-2-project.png` | Step 2: a new Google Cloud project, created with one Cloud Shell command |
 | `wizard-3-signin-screen.png` | Step 3: the Google sign-in screen, External chosen, with the "publish the app" step |
 | `wizard-4-oauth-client.png` | Step 4: OAuth client form values, the imported client JSON, and Google's client check (all green) |
-| `wizard-5-gmail.png` | Step 5: a connected Gmail account |
+| `wizard-5-gmail.png` | Step 5: a connected Google account (Gmail and Calendar in one sign-in) |
 | `wizard-6-delivery.png` | Step 6: real-time delivery with one-click Pub/Sub (after turning on its API), or polling every 30 seconds |
 | `wizard-6-delivery-org-policy.png` | Step 6 error help: Pub/Sub blocked by an organization policy, and what to do |
 | `wizard-7-agent.png` | Step 7: a `connect` request from the agent's terminal, approved inline with its code |
@@ -17,7 +17,7 @@ Taken from demos against a fake Google (`scripts/demo/seed.ts`) by `scripts/demo
 | `overview.png` | Overview: account needing reconnect, agent asking for access, pending approval, 24 h stats and activity |
 | `overview-dark.png` | The same in dark mode |
 | `overview-mobile.png` | Overview on a phone (390 px, 2×) |
-| `accounts.png` | Gmail accounts, one needing reconnect, with the agents using each |
+| `accounts.png` | Gmail accounts with their Calendar status, one needing reconnect, with the agents using each |
 | `agents.png` | Agents list with the "Connect an agent" entry point and a pending access request |
 | `connect-agent.png` | Connect an agent: the `connect` command per tool and a waiting request to approve |
 | `agent-grant-editor.png` | Agent detail: grant editor (capabilities, thread-level label scope, send mode, recipients, caps) |
