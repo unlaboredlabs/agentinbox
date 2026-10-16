@@ -23,7 +23,7 @@ const ROOT = join(import.meta.dirname, "..");
 const check = process.argv.includes("--check");
 
 /** File types the rename looks at. */
-const INCLUDE = /\.(ts|tsx|mts|mjs|js|cjs|md|html|css|json|txt|sh)$/;
+const INCLUDE = /\.(ts|tsx|mts|mjs|js|cjs|md|html|css|json|txt|sh|ya?ml|toml|env)$/;
 
 /** Never touched: history, plans, generated or owned elsewhere. */
 const EXCLUDE = [
@@ -73,9 +73,6 @@ const PROTECTED = [
   "formerly agentinbox",
   "Upgrading from agentinbox",
   "upgrading-from-agentinbox",
-  // Names in agents' configs from before the rename, which profiles made then keep (server/listen/names.ts).
-  "mcp-agentinbox",
-  "mcp__agentinbox",
   "com.unlaboredlabs.agentinbox",
   "x-agentinbox-",
   "X-Agentinbox-",
@@ -88,6 +85,13 @@ const PROTECTED = [
   "agentinboxTest",
   "agentinbox.theme",
 ];
+
+/**
+ * Protected only in one file. SKILL.md (served to agents, so no keep markers in it) names the tools an agent set up
+ * before the rename may still have (server/listen/names.ts). Elsewhere, e.g. in tests of new profiles, those names
+ * mean the product's own server and are renamed.
+ */
+const PROTECTED_IN = { "server/skill/SKILL.md": ["mcp-agentinbox", "mcp__agentinbox"] };
 
 /** In order. Each is idempotent: no replacement contains its own search string. */
 const REPLACEMENTS = [
@@ -116,21 +120,23 @@ const EXPLAINED = new RegExp(
 
 const files = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
 
-const protect = (line) => {
+const protectedFor = (file) => [...PROTECTED, ...(PROTECTED_IN[file] ?? [])];
+const protect = (line, file) => {
+  const list = protectedFor(file);
   let out = line;
   // Private-use characters as placeholders: they never occur in the sources.
-  PROTECTED.forEach((p, i) => (out = out.split(p).join(`\uE000${i}\uE001`)));
+  list.forEach((p, i) => (out = out.split(p).join(`\uE000${i}\uE001`)));
   return out;
 };
-const unprotect = (line) => line.replace(/\uE000(\d+)\uE001/g, (_, i) => PROTECTED[Number(i)]);
-const rename = (line) => {
-  let out = protect(line);
+const unprotect = (line, file) => line.replace(/\uE000(\d+)\uE001/g, (_, i) => protectedFor(file)[Number(i)]);
+const rename = (line, file = "") => {
+  let out = protect(line, file);
   for (const [from, to] of REPLACEMENTS) out = out.split(from).join(to);
-  return unprotect(out);
+  return unprotect(out, file);
 };
 
 /** The text with every replaceable line renamed; keep markers respected. */
-function renameText(text) {
+function renameText(text, file) {
   let keeping = false;
   return text
     .split("\n")
@@ -141,7 +147,7 @@ function renameText(text) {
         return line;
       }
       if (keeping || line.includes("rename-xaq: keep")) return line;
-      return rename(line);
+      return rename(line, file);
     })
     .join("\n");
 }
@@ -165,7 +171,7 @@ for (const file of files) {
   if (!INCLUDE.test(file) || !existsSync(join(ROOT, file))) continue;
   const path = join(ROOT, file);
   const before = readFileSync(path, "utf8");
-  const after = renameText(before);
+  const after = renameText(before, file);
   if (after !== before) {
     const count = before.split("\n").filter((l, i) => l !== after.split("\n")[i]).length;
     replacements += count;

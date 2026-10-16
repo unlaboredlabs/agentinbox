@@ -457,7 +457,13 @@ The bar: the CLI wizard and console guide every step end to end, with deep links
 - **CLI.** `npx agentinbox-cli connections add notion|whoop|<url>` runs interactively in the terminal: it opens the
   browser for OAuth (or uses paste mode over SSH) and asks the one access question. `connections list|reconnect|disable`.
   Writing the broker's database needs the admin, so the CLI talks to the local daemon's admin API with a one-time
-  local token.
+  local token. **As built (server/connections-cli/admin.ts):** whoever can write the data directory already holds
+  `master.key` and the database (`reset-password` relies on the same thing). So the CLI inserts a one-time
+  `admin_sessions` row, of which only sha256(token) is stored. The row has a 15-minute hard limit: its `created_at` is
+  set so that the sliding refresh can never extend it. The CLI sends that token as the session cookie, plus the CSRF
+  header, to the daemon's own `/api` on loopback, and deletes the row when the command exits. Nothing new listens,
+  and no token file sits on disk. The daemon's `requireAdmin`, audit and rate limits apply unchanged. Paste mode POSTs
+  the address the browser landed on to `/api/connections/finish`.
 - **Every failure names its fix in the UI:** `needs_reauth` → Reconnect, an expiring cap → a dated reminder, a 429 →
   retry-after, an SSRF block → "allow this host in Settings".
 
