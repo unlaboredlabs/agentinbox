@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { type CalendarEventSummary, EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
+import { type CalendarEventSummary, type EventType, isConnectionEventType, isEventType, type WebhookFilter } from "../../shared/types.ts";
 import type { StoredEvent } from "../events/types.ts";
 import { matchesAnyGlob } from "../util/glob.ts";
 import { RE2_SYNTAX_HINT, subjectMatches, subjectPatternError } from "./regex.ts";
@@ -50,7 +50,10 @@ const webhookFields = {
     .max(2048)
     .refine((u) => URL.canParse(u) && /^https?:$/.test(new URL(u).protocol), "URL must be a full http(s) URL, e.g. https://example.com/hooks/mail")
     .refine((u) => !URL.canParse(u) || (!new URL(u).username && !new URL(u).password), "URL must not contain credentials; verify requests with the signing secret instead"),
-  eventTypes: z.array(z.enum(EVENT_TYPES)).min(1, "Pick at least one event type"),
+  eventTypes: z
+    .array(z.string().refine(isEventType, "Unknown event type"))
+    .min(1, "Pick at least one event type")
+    .transform((t) => t as EventType[]),
   filter: webhookFilterSchema,
   includeBody: z.boolean(),
   enabled: z.boolean(),
@@ -83,6 +86,8 @@ export function normalizeFilter(f: WebhookFilter): WebhookFilter {
 export function matchesFilter(f: WebhookFilter, ev: StoredEvent): boolean {
   if (f.accountIds?.length && !f.accountIds.includes(ev.accountId)) return false;
   if (ACCOUNT_EVENT_TYPES.includes(ev.type)) return true;
+  // Connection events have no account (an accountIds filter excludes them, above) and no message.
+  if (isConnectionEventType(ev.type)) return true;
   if (ev.calendarEvent) return matchesCalendar(f, ev.calendarEvent, ev.accountEmail);
   const hasMessageCriteria = !!(f.labelIds?.length || f.from?.length || f.to?.length || f.subject || f.hasAttachments !== undefined);
   const m = ev.message;

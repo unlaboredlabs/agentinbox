@@ -1,0 +1,396 @@
+// /api/connections: the MCP broker's connections admin API (docs/MCP-BROKER.md, routes in shared/types.ts).
+// Console session + CSRF like every /api router (server/app.ts). 404 while Settings.brokerUpstreams is off.
+// Credentials never cross this boundary: a static header goes in through /connect and is never returned.
+
+import { z } from "zod";
+import {
+  ACCESS_LEVELS,
+  type AccessLevel,
+  CONNECTION_KINDS,
+  CONNECTION_SLUG_RE,
+  type Connection,
+  type ConnectionAuthType,
+  type ConnectionGrant,
+  type ConnectionKind,
+  type ConnectionView,
+  type HeldToolView,
+  type PresetView,
+  type StartConnectResult,
+  type ToolDiffLine,
+  type ToolHeldReason,
+  type UpstreamToolDefinition,
+} from "../../shared/types.ts";
+import { exposedName } from "../broker/catalog/index.ts";
+import { connectionView, getConnection, listConnections, notifyAgent } from "../broker/service.ts";
+import { Approvals } from "../mail/approvals.ts";
+import { connectionHookUrl } from "../integrations/hooks.ts";
+import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
+import type { AppContext } from "../context.ts";
+import { json, now } from "../db/index.ts";
+import { badRequest, conflict, HttpError, notFound } from "../util/errors.ts";
+import { newId, randomToken } from "../util/ids.ts";
+import { ADMIN_ACTOR, readBody, router } from "./util.ts";
+
+const httpUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine((u) => URL.canParse(u) && /^https?:$/.test(new URL(u).protocol), "URL must be a full http(s) URL, e.g. https://mcp.example.com/mcp")
+  .refine((u) => !URL.canParse(u) || (!new URL(u).username && !new URL(u).password), "URL must not contain credentials; add them when connecting instead");
+const slug = z.string().trim().regex(CONNECTION_SLUG_RE, "Slug must be 1-24 lowercase letters, digits or dashes");
+const name = z.string().trim().min(1, "Name is required").max(100, "Name must be at most 100 characters");
+const level = z.enum(ACCESS_LEVELS);
+
+const createSchema = z
+  .object({
+    preset: z.string().min(1).max(64).optional(),
+    url: httpUrl.optional(),
+    name: name.optional(),
+    slug: slug.optional(),
+    levelDefault: level.optional(),
+    agentIds: z.array(z.string().min(1)).max(1000).optional(),
+  })
+  .strict();
+
+const patchSchema = z.object({ name: name.optional(), slug: slug.optional(), url: httpUrl.optional(), levelDefault: level.optional() }).strict();
+const grantsSchema = z.object({ grants: z.array(z.object({ agentId: z.string().min(1), level })).max(1000) }).strict();
+const privateTargetSchema = z.object({ allow: z.boolean() }).strict();
+const acceptSchema = z.object({ candidateHash: z.string().min(1).max(128) }).strict();
+const probeSchema = z.object({ url: httpUrl, connectionId: z.string().optional() }).strict();
+const connectSchema = z
+  .object({
+    header: z.object({ name: z.string().trim().regex(/^[A-Za-z0-9-]{1,100}$/, "Header name must be letters, digits or dashes"), value: z.string().min(1).max(8192) }).strict().optional(),
+    inputs: z.record(z.string().max(100), z.string().max(8192)).optional(),
+  })
+  .strict();
+
+const authTypeOf = (a: PresetAuth): ConnectionAuthType => (a.type === "none" ? "none" : a.type === "header" ? "header" : "oauth");
+
+/** `scheme://host:port` of a URL, with the default port spelled out (the private-target allow is pinned to it). */
+export function exactOrigin(url: string): string {
+  const u = new URL(url);
+  return `${u.protocol}//${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+}
+
+/** A free slug from a host or preset slug: lowercase, dashes, at most 24, suffixed -2, -3… on collision. */
+function freeSlug(ctx: AppContext, base: string): string {
+  const root = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "mcp";
+  const taken = (s: string) => !!ctx.db.get("SELECT 1 FROM connections WHERE slug = ?", s);
+  if (!taken(root)) return root;
+  for (let i = 2; ; i++) if (!taken(`${root}-${i}`)) return `${root}-${i}`;
+}
+
+/** Line diff of two pretty-printed definitions (LCS; small inputs). */
+export function definitionDiff(before: UpstreamToolDefinition | null, after: UpstreamToolDefinition): ToolDiffLine[] {
+  const a = before ? JSON.stringify(before, null, 2).split("\n") : [];
+  const b = JSON.stringify(after, null, 2).split("\n");
+  if (a.length * b.length > 4_000_000) return [...a.map((text) => ({ op: "-" as const, text })), ...b.map((text) => ({ op: "+" as const, text }))];
+  const lcs = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) lcs[i]![j] = a[i] === b[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
+  }
+  const out: ToolDiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      out.push({ op: " ", text: a[i]! });
+      i++;
+      j++;
+    } else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) out.push({ op: "-", text: a[i++]! });
+    else out.push({ op: "+", text: b[j++]! });
+  }
+  while (i < a.length) out.push({ op: "-", text: a[i++]! });
+  while (j < b.length) out.push({ op: "+", text: b[j++]! });
+  return out;
+}
+
+export function connectionsApi(ctx: AppContext) {
+  const app = router();
+  const approvals = new Approvals(ctx);
+  const audit = (action: string, target: string, detail: Record<string, unknown> | null = null) =>
+    ctx.audit.record({ ...ADMIN_ACTOR, action, target, outcome: "ok", detail });
+
+  // Everything here is the unreleased broker: invisible until the setting is on.
+  const gate = async (_c: unknown, next: () => Promise<void>) => {
+    if (!ctx.broker.enabled()) throw new HttpError(404, "not_found", "No such API route");
+    await next();
+  };
+  app.use("/connections", gate);
+  app.use("/connections/*", gate);
+
+  const requireConnection = (id: string): Connection => {
+    const c = getConnection(ctx, id);
+    if (!c) throw notFound("Connection");
+    return c;
+  };
+  const view = (id: string): ConnectionView => connectionView(ctx, requireConnection(id));
+  const grantsOf = (connectionId: string): ConnectionGrant[] =>
+    ctx.db
+      .all<{ agent_id: string; level: AccessLevel; created_at: string; updated_at: string }>(
+        "SELECT agent_id, level, created_at, updated_at FROM connection_grants WHERE connection_id = ? ORDER BY created_at, agent_id",
+        connectionId,
+      )
+      .map((r) => ({ agentId: r.agent_id, connectionId, level: r.level, createdAt: r.created_at, updatedAt: r.updated_at }));
+  const requireAgents = (ids: string[]) => {
+    const missing = ids.filter((id) => !ctx.db.get("SELECT 1 FROM agents WHERE id = ?", id));
+    if (missing.length) throw badRequest(`Unknown agent ${missing.join(", ")}`);
+  };
+  const heldOf = (connectionId: string): HeldToolView[] =>
+    ctx.db
+      .all<{ name: string; exposed_name: string; held_reason: ToolHeldReason; definition: string | null; candidate_definition: string; candidate_hash: string; updated_at: string }>(
+        "SELECT name, exposed_name, held_reason, definition, candidate_definition, candidate_hash, updated_at FROM upstream_tools WHERE connection_id = ? AND state = 'held' ORDER BY name",
+        connectionId,
+      )
+      .map((r) => {
+        const pinned = json.parse<UpstreamToolDefinition | null>(r.definition, null);
+        const candidate = json.parse<UpstreamToolDefinition>(r.candidate_definition, { inputSchema: {} });
+        return {
+          name: r.name,
+          exposedName: r.exposed_name,
+          heldReason: r.held_reason,
+          pinned,
+          candidate,
+          candidateHash: r.candidate_hash,
+          diff: definitionDiff(pinned, candidate),
+          updatedAt: r.updated_at,
+        };
+      });
+
+  const presetView = (p: IntegrationPreset): PresetView => {
+    const publicUrl = ctx.settings.publicUrl();
+    const steps = p.setupSteps({
+      publicUrl,
+      redirectUri: `${publicUrl}/oauth/connections/callback`,
+      // Per connection (POST /hooks/connections/:id): no connection exists yet while choosing a preset.
+      webhookUrl: publicUrl.startsWith("https://") ? connectionHookUrl(publicUrl, "<connection id>") : null,
+    });
+    return {
+      id: p.id,
+      displayName: p.displayName,
+      slug: p.slug,
+      kind: p.kind,
+      url: p.url ?? null,
+      authType: authTypeOf(p.auth),
+      setupSteps: steps.map((s) => ({ ...s })),
+      reconnectPolicy: p.reconnectPolicy ?? null,
+    };
+  };
+
+  app.get("/connections", (c) => c.json<ConnectionView[]>(listConnections(ctx).map((x) => connectionView(ctx, x))));
+
+  app.get("/connections/presets", (c) => c.json<PresetView[]>(ctx.broker.presets().map(presetView)));
+
+  app.post("/connections/probe", async (c) => {
+    const body = await readBody(c, probeSchema);
+    const conn = body.connectionId ? requireConnection(body.connectionId) : null;
+    // The allow only covers the exact origin it was granted for.
+    const privateTarget = conn?.privateTarget && conn.privateTarget === exactOrigin(body.url) ? conn.privateTarget : null;
+    return c.json(await ctx.broker.connector.probe({ url: body.url, privateTarget }, c.req.raw.signal));
+  });
+
+  app.post("/connections", async (c) => {
+    const body = await readBody(c, createSchema);
+    const preset = body.preset ? (ctx.broker.presets().find((p) => p.id === body.preset) ?? null) : null;
+    if (body.preset && !preset) throw badRequest(`The ${body.preset} integration isn't available in this version`);
+    const url = preset?.url ?? body.url ?? null;
+    if (!preset && !url) throw badRequest("Pass a url, or a preset");
+    const kind: ConnectionKind = preset?.kind === "native" ? (`native_${preset.id}` as ConnectionKind) : "remote_http";
+    if (!(CONNECTION_KINDS as readonly string[]).includes(kind)) throw badRequest(`The ${preset!.id} integration isn't available in this version`);
+    if (kind === "remote_http" && !url) throw badRequest("This integration has no URL");
+    const chosenSlug = body.slug ?? freeSlug(ctx, preset?.slug ?? new URL(url!).hostname.split(".").find((p) => p !== "mcp" && p !== "www") ?? "mcp");
+    if (ctx.db.get("SELECT 1 FROM connections WHERE slug = ?", chosenSlug)) throw conflict(`The slug ${chosenSlug} is taken`, "Pick another: tools are named <slug>__<tool>.");
+    const agentIds = body.agentIds ?? ctx.db.all<{ id: string }>("SELECT id FROM agents ORDER BY created_at").map((a) => a.id);
+    requireAgents(agentIds);
+    const levelDefault = body.levelDefault ?? "ask";
+    const id = newId("con");
+    const t = now();
+    ctx.db.tx(() => {
+      ctx.db.run(
+        `INSERT INTO connections (id, kind, preset, slug, name, url, auth_type, level_default, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        id,
+        kind,
+        preset?.id ?? null,
+        chosenSlug,
+        body.name ?? preset?.displayName ?? new URL(url!).hostname,
+        url,
+        preset ? authTypeOf(preset.auth) : "none",
+        levelDefault,
+        t,
+        t,
+      );
+      for (const agentId of new Set(agentIds)) {
+        ctx.db.run("INSERT INTO connection_grants (agent_id, connection_id, level, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", agentId, id, levelDefault, t, t);
+      }
+    });
+    ctx.broker.invalidate("all");
+    ctx.broker.attach(id);
+    audit("connection.create", id, { slug: chosenSlug, preset: preset?.id ?? null, agents: agentIds.length, level: levelDefault });
+    for (const agentId of new Set(agentIds)) notifyAgent(ctx, agentId);
+    return c.json<ConnectionView>(view(id), 201);
+  });
+
+  app.get("/connections/:id", (c) => c.json<ConnectionView>(view(c.req.param("id"))));
+
+  app.patch("/connections/:id", async (c) => {
+    const id = c.req.param("id");
+    const before = requireConnection(id);
+    const body = await readBody(c, patchSchema);
+    const changed: string[] = [];
+    let credentialsCleared = false;
+    let cancelled = 0;
+    ctx.db.tx(() => {
+      const t = now();
+      if (body.name !== undefined && body.name !== before.name) {
+        ctx.db.run("UPDATE connections SET name = ?, updated_at = ? WHERE id = ?", body.name, t, id);
+        changed.push("name");
+      }
+      if (body.levelDefault !== undefined && body.levelDefault !== before.levelDefault) {
+        ctx.db.run("UPDATE connections SET level_default = ?, updated_at = ? WHERE id = ?", body.levelDefault, t, id);
+        changed.push("levelDefault");
+      }
+      if (body.slug !== undefined && body.slug !== before.slug) {
+        if (ctx.db.get("SELECT 1 FROM connections WHERE slug = ? AND id <> ?", body.slug, id)) throw conflict(`The slug ${body.slug} is taken`);
+        ctx.db.run("UPDATE connections SET slug = ?, updated_at = ? WHERE id = ?", body.slug, t, id);
+        // Exposed names follow the slug, by the catalog's rule (sanitised, cut to 64 with a hash suffix); the
+        // registry recomputes them from the slug anyway. Approval rules keep the upstream name, so they survive.
+        const tools = ctx.db.all<{ name: string }>("SELECT name FROM upstream_tools WHERE connection_id = ?", id);
+        // Two passes so a rename can't collide with this connection's own old names midway.
+        for (const tool of tools) ctx.db.run("UPDATE upstream_tools SET exposed_name = ? WHERE connection_id = ? AND name = ?", `x_renaming_${randomToken(20)}`, id, tool.name);
+        for (const tool of tools) {
+          const exposed = exposedName(body.slug, tool.name);
+          if (!exposed) throw badRequest(`With the slug ${body.slug}, the tool ${tool.name.slice(0, 64)} can't be named; pick another slug`);
+          try {
+            ctx.db.run("UPDATE upstream_tools SET exposed_name = ? WHERE connection_id = ? AND name = ?", exposed, id, tool.name);
+          } catch {
+            throw conflict(`With the slug ${body.slug}, the tool name ${exposed} is already taken; pick another slug`);
+          }
+        }
+        changed.push("slug");
+      }
+      if (body.url !== undefined && body.url !== before.url) {
+        if (before.kind !== "remote_http" || before.preset) throw badRequest("Only custom MCP connections have an editable URL", "Add a new connection instead.");
+        // A new URL is a new server: the old credentials must never be sent to it. They're deleted, the
+        // connection needs reconnecting, its cached negotiation and expiry go, the private-target allow (granted
+        // for the old host) goes, and pending calls (approved against the old server) are cancelled.
+        ctx.db.run(
+          `UPDATE connections SET url = ?, private_target = NULL, status = 'needs_reauth', status_reason = 'URL changed; reconnect',
+             expires_at = NULL, protocol = NULL, protocol_checked_at = NULL, updated_at = ? WHERE id = ?`,
+          body.url,
+          t,
+          id,
+        );
+        credentialsCleared = ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", id).changes > 0;
+        cancelled = approvals.cancelForConnection(id, null, `${before.name}'s URL changed`);
+        changed.push("url");
+      }
+    });
+    if (changed.includes("url")) {
+      ctx.broker.catalog.detach(id);
+      await ctx.broker.reload(id);
+      if (before.privateTarget) audit("connection.private_target.revoke", id, { target: before.privateTarget, why: "url_changed" });
+    }
+    if (changed.includes("slug") || changed.includes("url")) ctx.broker.invalidate({ connectionId: id });
+    if (changed.length) audit("connection.update", id, { changed, ...(changed.includes("url") ? { credentialsCleared, cancelled } : {}) });
+    return c.json<ConnectionView>(view(id));
+  });
+
+  app.delete("/connections/:id", async (c) => {
+    await ctx.broker.remove(c.req.param("id"));
+    return c.body(null, 204);
+  });
+
+  // Mounted before the policy's own /connections/:id/kill (server/api/broker-approvals.ts): the service runs the
+  // onKill hooks (a revoke needs the token) before the policy clears the credentials.
+  app.post("/connections/:id/kill", async (c) => {
+    const id = c.req.param("id");
+    requireConnection(id);
+    await ctx.broker.kill(id, "killed by the owner");
+    return c.body(null, 204);
+  });
+
+  app.post("/connections/:id/connect", async (c) => {
+    const id = c.req.param("id");
+    const conn = requireConnection(id);
+    const body = await readBody(c, connectSchema);
+    const r = await ctx.broker.connector.startConnect(conn, body, c.req.raw.signal);
+    await ctx.broker.reload(id);
+    if (r.status === "connected") ctx.broker.attach(id);
+    audit("connection.connect", id, { status: r.status, header: !!body.header });
+    if (r.status === "connected") return c.json<StartConnectResult>({ status: "connected", connection: view(id) });
+    return c.json<StartConnectResult>(r);
+  });
+
+  app.get("/connections/:id/grants", (c) => {
+    const id = c.req.param("id");
+    requireConnection(id);
+    return c.json<ConnectionGrant[]>(grantsOf(id));
+  });
+
+  app.put("/connections/:id/grants", async (c) => {
+    const id = c.req.param("id");
+    requireConnection(id);
+    const body = await readBody(c, grantsSchema);
+    const next = new Map(body.grants.map((g) => [g.agentId, g.level]));
+    requireAgents([...next.keys()]);
+    const before = new Map(grantsOf(id).map((g) => [g.agentId, g.level]));
+    const removed = [...before.keys()].filter((a) => !next.has(a));
+    const changed = [...next].filter(([a, l]) => before.get(a) !== l).map(([a]) => a);
+    ctx.db.tx(() => {
+      const t = now();
+      for (const agentId of removed) ctx.db.run("DELETE FROM connection_grants WHERE agent_id = ? AND connection_id = ?", agentId, id);
+      for (const [agentId, lvl] of next) {
+        ctx.db.run(
+          `INSERT INTO connection_grants (agent_id, connection_id, level, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, connection_id) DO UPDATE SET level = excluded.level, updated_at = excluded.updated_at WHERE level <> excluded.level`,
+          agentId,
+          id,
+          lvl,
+          t,
+          t,
+        );
+      }
+    });
+    // Fresh tool views first, then the policy cancels pending calls and deletes "always allow" rules of removed
+    // grants, and re-checks changed ones.
+    for (const agentId of new Set([...removed, ...changed])) ctx.broker.invalidate({ agentId });
+    for (const agentId of removed) ctx.broker.onGrantRemoved(agentId, id);
+    for (const agentId of changed.filter((a) => before.has(a))) ctx.broker.onGrantChanged(agentId, id);
+    if (removed.length || changed.length) audit("connection.grants", id, { removed, changed });
+    for (const agentId of new Set([...removed, ...changed])) notifyAgent(ctx, agentId);
+    return c.json<ConnectionGrant[]>(grantsOf(id));
+  });
+
+  app.put("/connections/:id/private-target", async (c) => {
+    const id = c.req.param("id");
+    const conn = requireConnection(id);
+    const { allow } = await readBody(c, privateTargetSchema);
+    if (allow && !conn.url) throw badRequest("This connection has no URL to allow");
+    const target = allow ? exactOrigin(conn.url!) : null;
+    if (target !== conn.privateTarget) {
+      ctx.db.run("UPDATE connections SET private_target = ?, updated_at = ? WHERE id = ?", target, now(), id);
+      await ctx.broker.reload(id);
+      audit(allow ? "connection.private_target.allow" : "connection.private_target.revoke", id, { target: target ?? conn.privateTarget });
+    }
+    return c.json<ConnectionView>(view(id));
+  });
+
+  app.get("/connections/:id/held", (c) => {
+    const id = c.req.param("id");
+    requireConnection(id);
+    return c.json<HeldToolView[]>(heldOf(id));
+  });
+
+  app.post("/connections/:id/held/:name/accept", async (c) => {
+    const id = c.req.param("id");
+    requireConnection(id);
+    const toolName = c.req.param("name");
+    // The hash of the candidate the owner saw: a tool that changed again since is refused (409), never accepted blind.
+    const { candidateHash } = await readBody(c, acceptSchema);
+    ctx.broker.acceptTool(id, toolName, candidateHash);
+    return c.json<HeldToolView[]>(heldOf(id));
+  });
+
+  return app;
+}

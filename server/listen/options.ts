@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
-import { EVENT_TYPES, type EventType, type WebhookFilter } from "../../shared/types.ts";
+import { EVENT_TYPES, type EventType, isEventType, type WebhookFilter } from "../../shared/types.ts";
 import { normalizeFilter, webhookFilterSchema } from "../webhooks/filter.ts";
 import { resolve } from "node:path";
 import { newSecret, validateForwardUrl } from "./forward.ts";
@@ -130,7 +130,7 @@ export function parseTypes(value: string): EventType[] {
     if (list.length > 1) throw new Error(`--types all can't be combined with other types.`);
     return [...EVENT_TYPES];
   }
-  const bad = list.filter((t) => !(EVENT_TYPES as readonly string[]).includes(t));
+  const bad = list.filter((t) => !isEventType(t));
   if (bad.length) throw new Error(`Unknown event type${bad.length > 1 ? "s" : ""} ${bad.join(", ")}. Choose from: ${EVENT_TYPES.join(", ")}.`);
   return [...new Set(list)] as EventType[];
 }
