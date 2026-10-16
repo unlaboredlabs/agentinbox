@@ -27,10 +27,13 @@ export function projectIdProblem(raw: string): string | null {
   return null;
 }
 
+/** The Google Calendar API's service name (docs/calendar.md, "API id"). */
+export const CALENDAR_API = "calendar-json.googleapis.com";
+
 /**
- * The Cloud Shell command: create the project, then enable the Gmail API in it. Only Gmail: Google
- * may want a billing account before it enables Pub/Sub, which would fail the whole command on the
- * required path. Pub/Sub is enabled in the optional real-time delivery step instead.
+ * The Cloud Shell command: create the project, then enable the Gmail and Calendar APIs in it. Not
+ * Pub/Sub: Google may want a billing account before it enables Pub/Sub, which would fail the whole
+ * command on the required path. Pub/Sub is enabled in the optional real-time delivery step instead.
  * Returns null for an invalid ID (it goes into a shell, so only ever a validated one).
  */
 export function projectCommand(id: string, inOrg: boolean): string | null {
@@ -38,7 +41,7 @@ export function projectCommand(id: string, inOrg: boolean): string | null {
   const org = inOrg ? ` --organization="$(gcloud organizations list --format='value(name.basename())' --limit=1)"` : "";
   return (
     `gcloud projects create ${id} --name=agentinbox${org} && ` +
-    `gcloud services enable gmail.googleapis.com --project=${id} && ` +
+    `gcloud services enable gmail.googleapis.com ${CALENDAR_API} --project=${id} && ` +
     `echo "agentinbox: project ${id} is ready"`
   );
 }
@@ -52,6 +55,17 @@ export function iamBindingCommand(projectId: string, email: string): string | nu
   return `gcloud projects add-iam-policy-binding ${shellQuote(projectId)} --member=${shellQuote(`user:${email.trim()}`)} --role=roles/pubsub.admin`;
 }
 
+// ───────────── OAuth scopes (mirrors server/google/scopes.ts; a test keeps them equal) ─────────────
+
+const G = "https://www.googleapis.com/auth/";
+
+/** What the wizard lists on the Data access page: Gmail (restricted), then Calendar's three (sensitive). */
+export const SCOPES = {
+  gmail: `${G}gmail.modify`,
+  pubsub: `${G}pubsub`,
+  calendar: [`${G}calendar.events`, `${G}calendar.calendarlist.readonly`, `${G}calendar.events.freebusy`],
+} as const;
+
 // ───────────── Google Cloud console links ─────────────
 
 const p = (id: string) => encodeURIComponent(id);
@@ -60,8 +74,10 @@ const p = (id: string) => encodeURIComponent(id);
 export const cloudUrl = {
   cloudShell: "https://shell.cloud.google.com/?show=terminal",
   createProject: "https://console.cloud.google.com/projectcreate",
-  /** The Gmail API only (step 2): enabling Pub/Sub may need billing, so it is enabled in step 6. */
+  /** The Gmail API (step 2): enabling Pub/Sub may need billing, so it is enabled in step 6. */
   enableGmail: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com&project=${p(id)}`,
+  /** The Calendar API (step 2, and "Add Google Calendar" on installs from before Calendar). */
+  enableCalendar: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=${CALENDAR_API}&project=${p(id)}`,
   enablePubsub: (id: string) => `https://console.cloud.google.com/flows/enableapi?apiid=pubsub.googleapis.com&project=${p(id)}`,
   dashboard: (id: string) => `https://console.cloud.google.com/home/dashboard?project=${p(id)}`,
   authOverview: (id: string) => `https://console.cloud.google.com/auth/overview?project=${p(id)}`,
