@@ -49,6 +49,25 @@ approvals.
 | forge | `http://100.104.249.49:3773` | OAuth | M1 OAuth connection, private-target allow (Tailscale CGNAT) |
 | t3code-worldstream | `100.91.67.127` | OAuth | Retired around 10-19; not migrated |
 
+**The T3 servers' OAuth** (probed read-only on forge, 2026-10-16):
+- **Discovery is standard.** A 401 carries `WWW-Authenticate: Bearer resource_metadata=".../.well-known/oauth-protected-resource/mcp"`.
+- **Resource:** `http://100.104.249.49:3773/mcp`, with scopes `orchestration:read` and `orchestration:operate`.
+- **Authorization server:** the same origin, over plain http. It offers DCR at `/oauth/mcp/register`, public clients
+  (`token_endpoint_auth_methods_supported: ["none"]`), PKCE S256 and the RFC 9207 `iss` parameter.
+- **No refresh:** `grant_types_supported` is only `["authorization_code"]`. T3 issues no refresh tokens, and that's
+  the real cause of Hermes's 30-day manual re-auth. No broker can refresh these tokens.
+
+For T3, the broker's job is therefore:
+- to warn with dates ("t3 forge expires in 7 days / 1 day");
+- to make re-auth one click (Reconnect) with no reconfiguration;
+- to keep the expiry from ever surfacing as a 401 in the middle of a task.
+
+Getting T3 to issue refresh tokens is question 10.
+
+**Discovery has to be strict.** `/.well-known/openid-configuration` on the same server answers 200 with the T3 web
+app's HTML (an SPA fallback). Discovery must require `application/json`, parse it, and check `issuer`. A 200 alone
+proves nothing.
+
 Four of the six that move are on loopback or Tailscale's CGNAT range (100.64.0.0/10), and three speak plain `http`.
 So the SSRF guard needs the [private-target allow](#private-targets) below, or M1's Hermes goal can't be reached.
 
@@ -705,3 +724,7 @@ works.
    more than about 30 tools**, with real tool names kept for agents under that.
 9. **Order after M1:** **Rec: M2 WHOOP, then M3 search mode.** If Hermes's tool count is already over about 50 after
    M1, swap the order.
+10. **T3 refresh tokens** (T3 Code's MCP authorization server issues only `authorization_code` grants, so its tokens
+    can't be refreshed). **Rec:** accept dated warnings and one-click Reconnect in M1. Separately, ask T3 Code
+    upstream to add the `refresh_token` grant, so the broker can then keep it alive indefinitely, as it will for
+    Notion and WHOOP.
