@@ -4,6 +4,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IntegrationEvent, NativeEvents, NativeSourceDeps } from "../../broker/types.ts";
 import { type Page, type Recovery, type Sleep, type Workout, PATHS, apiGet } from "./api.ts";
+import { whoopUserIdFrom } from "./oauth.ts";
 
 export const WHOOP_EVENT_TYPES = [
   "whoop.recovery_updated",
@@ -16,15 +17,16 @@ export const WHOOP_EVENT_TYPES = [
 
 export const SIGNATURE_HEADER = "x-whoop-signature";
 export const TIMESTAMP_HEADER = "x-whoop-signature-timestamp";
-/** WHOOP documents no window; 5 minutes either way of our clock. A replay outside it is refused (401). */
-export const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
+/**
+ * WHOOP documents no window, and retries a failed delivery five times over about an hour (possibly with the original
+ * timestamp), so 2 hours either way of our clock. Replays inside it are absorbed by the trace_id dedupe (the route's
+ * memory, then the outbox's dedupeKey); outside it they're refused (401).
+ */
+export const SIGNATURE_TOLERANCE_MS = 2 * 3_600_000;
 export const POLL_INTERVAL_MS = 15 * 60_000;
 /** How far back a poll looks for changed records (a sleep scored this morning started last night). */
 const POLL_LOOKBACK_MS = 48 * 3_600_000;
 const POLL_MAX_PAGES = 4;
-/** Longer than WHOOP's retry window (five retries over about an hour). */
-const DEDUPE_TTL_MS = 3 * 3_600_000;
-const DEDUPE_MAX = 2_000;
 
 const header = (headers: Record<string, string>, name: string): string | undefined => {
   for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === name) return v;
@@ -57,28 +59,8 @@ const WEBHOOK_TYPES: Record<string, { type: string; idKey: "sleepId" | "workoutI
   "workout.deleted": { type: "whoop.workout_deleted", idKey: "workoutId" },
 };
 
-/** Remembers recent trace_ids per connection (WHOOP may deliver an event more than once). */
-class Seen {
-  private readonly byConnection = new Map<string, Map<string, number>>();
-  constructor(private readonly now: () => number) {}
-
-  /** True when this key was already seen (and not expired); records it otherwise. */
-  check(connectionId: string, key: string): boolean {
-    let seen = this.byConnection.get(connectionId);
-    if (!seen) this.byConnection.set(connectionId, (seen = new Map()));
-    const t = this.now();
-    const at = seen.get(key);
-    if (at !== undefined && t - at < DEDUPE_TTL_MS) return true;
-    seen.delete(key);
-    seen.set(key, t);
-    // Oldest first (insertion order): drop expired entries and anything over the cap.
-    for (const [k, v] of seen) {
-      if (seen.size <= DEDUPE_MAX && t - v < DEDUPE_TTL_MS) break;
-      seen.delete(k);
-    }
-    return false;
-  }
-}
+/** What the webhook route passes in: the contract's deps plus the stored client record (CredentialStore.client). */
+export type WhoopWebhookDeps = NativeSourceDeps & { clientSecret: string; client?: Record<string, unknown> | null };
 
 export interface WhoopEventsOptions {
   now?: () => number;
@@ -98,7 +80,6 @@ function parseCursor(cursor: string | null): PollCursor | null {
 
 export function createWhoopEvents(opts: WhoopEventsOptions = {}): NativeEvents {
   const now = opts.now ?? Date.now;
-  const seen = new Seen(now);
 
   return {
     types: WHOOP_EVENT_TYPES,
@@ -120,9 +101,18 @@ export function createWhoopEvents(opts: WhoopEventsOptions = {}): NativeEvents {
         deps.log.info("whoop webhook ignored", { connectionId: deps.connectionId, type: typeof body?.type === "string" ? body.type.slice(0, 50) : null });
         return [];
       }
-      if (seen.check(deps.connectionId, traceId)) return [];
+      // One app's webhook URL receives every member who authorized the app: only this connection's member counts.
+      const expected = whoopUserIdFrom((deps as WhoopWebhookDeps).client);
+      if (expected === null) {
+        deps.log.warn("whoop webhook dropped: the connection has no stored WHOOP user id (reconnect it)", { connectionId: deps.connectionId });
+        return [];
+      }
+      if (String(body.user_id) !== expected) {
+        deps.log.warn("whoop webhook dropped: another WHOOP member of the same app", { connectionId: deps.connectionId });
+        return [];
+      }
+      // Stateless: the route dedupes on dedupeKey, and only after the events are safely emitted.
       const data: Record<string, unknown> = { [mapped.idKey]: id, traceId };
-      if (typeof body.user_id === "number") data.whoopUserId = body.user_id;
       return [{ type: mapped.type, connectionId: deps.connectionId, dedupeKey: `whoop:${traceId}`, data }];
     },
 

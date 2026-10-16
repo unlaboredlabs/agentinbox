@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { type NativeSourceDeps, SourceError, type StoredTokens, type ToolSource } from "../server/broker/types.ts";
 import { presetById, presets } from "../server/integrations/index.ts";
 import { WHOOP_SCOPES } from "../server/integrations/whoop/api.ts";
-import { SIGNATURE_TOLERANCE_MS, createWhoopEvents, verifyWhoopSignature } from "../server/integrations/whoop/events.ts";
-import { authorizeUrl, checkClient, exchangeCode, whoopPreset, whoopRefreshFn } from "../server/integrations/whoop/index.ts";
+import { SIGNATURE_TOLERANCE_MS, type WhoopWebhookDeps, createWhoopEvents, verifyWhoopSignature } from "../server/integrations/whoop/events.ts";
+import { authorizeUrl, checkClient, exchangeCode, whoopPreset, whoopRefreshFn, whoopUserIdFrom } from "../server/integrations/whoop/index.ts";
 import { WHOOP_TOOLS } from "../server/integrations/whoop/tools.ts";
 import { FAKE_REDIRECT, FAKE_WHOOP_CLIENT, FakeWhoop } from "./fake-whoop.ts";
 
@@ -19,11 +19,12 @@ function clock(start = Date.parse("2026-10-16T12:00:00Z")) {
   return { now: () => t, advance: (ms: number) => (t += ms) };
 }
 
-async function connect(fake: FakeWhoop): Promise<StoredTokens> {
+async function connectFull(fake: FakeWhoop) {
   const back = new URL(fake.approve(authorizeUrl({ clientId: FAKE_WHOOP_CLIENT.clientId, redirectUri: FAKE_REDIRECT, state: STATE })));
   expect(back.searchParams.get("state")).toBe(STATE);
   return exchangeCode(back.searchParams.get("code")!, { id: "conn1", redirectUri: FAKE_REDIRECT, client: CLIENT_RECORD }, { fetch: fake.fetch, now: fake.now });
 }
+const connect = async (fake: FakeWhoop): Promise<StoredTokens> => (await connectFull(fake)).tokens;
 
 /**
  * NativeSourceDeps with a minimal stand-in for the TokenRefresher: single-flight, proactive refresh 60 s before expiry.
@@ -31,6 +32,7 @@ async function connect(fake: FakeWhoop): Promise<StoredTokens> {
  */
 async function connected(fake: FakeWhoop) {
   let tokens = await connect(fake);
+  fake.requests = []; // count only what happens after connecting
   const refresh = whoopRefreshFn(FAKE_WHOOP_CLIENT, { fetch: fake.fetch, now: fake.now });
   let inflight: Promise<StoredTokens> | null = null;
   const deps: NativeSourceDeps = {
@@ -80,10 +82,23 @@ describe("WHOOP OAuth", () => {
   it("exchanges the code with the client secret in the form body", async () => {
     const c = clock();
     const fake = new FakeWhoop({ now: c.now });
-    const tokens = await connect(fake);
+    const { tokens, client } = await connectFull(fake);
     expect(tokens).toMatchObject({ refreshToken: expect.stringMatching(/^rt-/), expiresAt: c.now() + 3_600_000, scope: WHOOP_SCOPES.join(" "), issuer: null });
     expect(fake.tokenRequests[0]).toMatchObject({ grant_type: "authorization_code", redirect_uri: FAKE_REDIRECT, client_id: FAKE_WHOOP_CLIENT.clientId, client_secret: FAKE_WHOOP_CLIENT.clientSecret });
     expect(fake.tokenRequests[0]).not.toHaveProperty("code_verifier");
+    // The connected member is recorded from the profile, for the caller to store (setClient) next to the app.
+    expect(client).toEqual({ ...CLIENT_RECORD, whoop_user_id: 10129 });
+    expect(whoopUserIdFrom(client)).toBe("10129");
+    expect(fake.requests).toContain("GET /developer/v2/user/profile/basic");
+  });
+
+  it("fails the connect when the profile can't be read", async () => {
+    const fake = new FakeWhoop();
+    const back = new URL(fake.approve(authorizeUrl({ clientId: FAKE_WHOOP_CLIENT.clientId, redirectUri: FAKE_REDIRECT, state: STATE })));
+    const originalFetch = fake.fetch;
+    const noProfile: typeof fetch = async (input, init) =>
+      String(input).includes("/v2/user/profile/basic") ? new Response("{}", { status: 404 }) : originalFetch(input, init);
+    await expect(exchangeCode(back.searchParams.get("code")!, { id: "c", redirectUri: FAKE_REDIRECT, client: CLIENT_RECORD }, { fetch: noProfile })).rejects.toMatchObject({ code: "protocol" });
   });
 
   it("refuses a grant without offline (no refresh token)", async () => {
@@ -208,6 +223,15 @@ describe("WHOOP tools", () => {
     expect(textOf(one)).toContain("7 hours 30 minutes asleep");
   });
 
+  it("sleep needed sums every component; the nap credit is already negative", async () => {
+    const fake = new FakeWhoop();
+    const napped = fake.sleeps[1]!;
+    expect(napped.score!.sleep_needed.need_from_recent_nap_milli).toBe(-45 * 60_000);
+    const r = await (await source(fake)).callTool("get_sleep", { id: napped.id }, ctx());
+    // 8 h baseline + 20 min debt + 10 min strain − 45 min nap.
+    expect(textOf(r)).toContain("; sleep needed 7 hours 45 minutes");
+  });
+
   it("get_cycles, get_workouts, get_profile and get_body", async () => {
     const fake = new FakeWhoop();
     const src = await source(fake);
@@ -292,7 +316,16 @@ const createWhoopSourceFor = (deps: NativeSourceDeps, now: () => number) => whoo
 
 describe("WHOOP webhooks", () => {
   const T = Date.parse("2026-10-16T12:00:00Z");
-  const hookDeps = (fake: FakeWhoop) => ({ connectionId: "conn1", fetch: fake.fetch, log: silent, accessToken: async () => "unused", clientSecret: FAKE_WHOOP_CLIENT.clientSecret });
+  /** The route's deps: the contract's plus the stored client record (with the connected member's id). */
+  const hookDeps = (fake: FakeWhoop) =>
+    ({
+      connectionId: "conn1",
+      fetch: fake.fetch,
+      log: silent,
+      accessToken: async () => "unused",
+      clientSecret: FAKE_WHOOP_CLIENT.clientSecret,
+      client: { ...CLIENT_RECORD, whoop_user_id: fake.profile.user_id },
+    }) as WhoopWebhookDeps;
 
   it("verifies base64(HMAC-SHA256(timestamp + body)) with a timestamp window", () => {
     const fake = new FakeWhoop();
@@ -321,30 +354,40 @@ describe("WHOOP webhooks", () => {
     ];
     for (const [i, [whoopType, type, ids]] of cases.entries()) {
       const out = await events.handleWebhook!(fake.webhook({ type: whoopType, id: "id-1", trace_id: `trace-${i}` }), hookDeps(fake));
-      expect(out).toEqual([{ type, connectionId: "conn1", dedupeKey: `whoop:trace-${i}`, data: { ...ids, traceId: `trace-${i}`, whoopUserId: 10129 } }]);
+      expect(out).toEqual([{ type, connectionId: "conn1", dedupeKey: `whoop:trace-${i}`, data: { ...ids, traceId: `trace-${i}` } }]);
     }
   });
 
-  it("bad signature or stale timestamp → null; duplicates and unknown types → no events", async () => {
+  it("tolerates WHOOP's hour of retries (2 h window); older or future-dated → null", async () => {
+    const fake = new FakeWhoop();
+    const events = createWhoopEvents({ now: () => T });
+    expect(SIGNATURE_TOLERANCE_MS).toBe(2 * 3_600_000);
+    const retried = fake.webhook({ type: "sleep.updated", id: "a", trace_id: "late" }, { timestamp: T - 90 * 60_000 });
+    expect(await events.handleWebhook!(retried, hookDeps(fake))).toHaveLength(1);
+    expect(await events.handleWebhook!(fake.webhook({ type: "sleep.updated", id: "a", trace_id: "x" }, { timestamp: T - 3 * 3_600_000 }), hookDeps(fake))).toBeNull();
+    expect(await events.handleWebhook!(fake.webhook({ type: "sleep.updated", id: "a", trace_id: "x" }, { timestamp: T + 3 * 3_600_000 }), hookDeps(fake))).toBeNull();
+  });
+
+  it("bad signature → null; unknown types → no events; the handler is stateless (the route dedupes)", async () => {
     const fake = new FakeWhoop();
     const events = createWhoopEvents({ now: () => T });
     expect(await events.handleWebhook!(fake.webhook({ type: "sleep.updated", id: "a", trace_id: "x" }, { secret: "forged" }), hookDeps(fake))).toBeNull();
-    expect(await events.handleWebhook!(fake.webhook({ type: "sleep.updated", id: "a", trace_id: "x" }, { timestamp: T - 10 * 60_000 }), hookDeps(fake))).toBeNull();
     const msg = fake.webhook({ type: "sleep.updated", id: "a", trace_id: "dup" });
     expect(await events.handleWebhook!(msg, hookDeps(fake))).toHaveLength(1);
-    expect(await events.handleWebhook!(msg, hookDeps(fake))).toEqual([]);
-    // Same trace on another connection is its own event.
-    expect(await events.handleWebhook!(msg, { ...hookDeps(fake), connectionId: "conn2" })).toHaveLength(1);
+    expect(await events.handleWebhook!(msg, hookDeps(fake))).toHaveLength(1);
     expect(await events.handleWebhook!(fake.webhook({ type: "cycle.updated", id: 1, trace_id: "y" }), hookDeps(fake))).toEqual([]);
   });
 
-  it("dedupe memory expires after WHOOP's retry window", async () => {
+  it("drops (validly signed) events for another WHOOP member of the same app, and fails closed without a stored id", async () => {
     const fake = new FakeWhoop();
-    const c = clock(T);
-    const events = createWhoopEvents({ now: c.now });
-    expect(await events.handleWebhook!(fake.webhook({ type: "sleep.updated", id: "a", trace_id: "z" }, { timestamp: c.now() }), hookDeps(fake))).toHaveLength(1);
-    c.advance(4 * 3_600_000);
-    expect(await events.handleWebhook!(fake.webhook({ type: "sleep.updated", id: "a", trace_id: "z" }, { timestamp: c.now() }), hookDeps(fake))).toHaveLength(1);
+    const events = createWhoopEvents({ now: () => T });
+    const stranger = fake.webhook({ type: "recovery.updated", id: "their-sleep", trace_id: "s1", user_id: 777 });
+    expect(await events.handleWebhook!(stranger, hookDeps(fake))).toEqual([]);
+    const mine = fake.webhook({ type: "recovery.updated", id: "my-sleep", trace_id: "s2" });
+    expect(await events.handleWebhook!(mine, { ...hookDeps(fake), client: CLIENT_RECORD } as never)).toEqual([]);
+    expect(await events.handleWebhook!(mine, { ...hookDeps(fake), client: null } as never)).toEqual([]);
+    // Stored as a string works too (JSON round trips).
+    expect(await events.handleWebhook!(mine, { ...hookDeps(fake), client: { ...CLIENT_RECORD, whoop_user_id: "10129" } } as never)).toHaveLength(1);
   });
 });
 
