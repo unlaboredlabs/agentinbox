@@ -486,8 +486,8 @@ describe("account status", () => {
     const before = refreshes();
     await expect(sync()).rejects.toThrow(/insufficient authentication scopes/);
     expect(refreshes()).toBe(before + 1);
-    // With scope backfill on refresh (workstream D) the account reads not_granted; until then, an error.
-    expect(["not_granted", "error"]).toContain(account().calendar!.status);
+    // The refresh backfilled the scopes: no calendar scope is left, so Account.calendar is null (not granted).
+    expect(account().calendar?.status ?? "not_granted").toBe("not_granted");
   });
 });
 

@@ -1,7 +1,7 @@
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
 import { errorMessage, notFound } from "../util/errors.ts";
-import { type AccountRow, getRow, updateRow } from "./accounts.ts";
+import { type AccountRow, accountScopes, getRow, updateRow } from "./accounts.ts";
 import { clientCredentials } from "./client.ts";
 import {
   backoffMs,
@@ -56,6 +56,8 @@ export function refreshExpiryKind(t: TokenResponse): "testing" | "time_based" | 
   if (!s) return null;
   return Math.abs(s - TESTING_LIFETIME_S) <= TESTING_TOLERANCE_S ? "testing" : "time_based";
 }
+
+const sameScopes = (a: string[], b: string[]) => a.length === b.length && a.every((s) => b.includes(s));
 
 /** Refresh this long before the access token expires. */
 const EARLY_REFRESH_MS = 60_000;
@@ -155,15 +157,40 @@ export class TokenManager {
       throw err;
     }
     const expiresAt = new Date(Date.now() + (res.expires_in ?? 3600) * 1000).toISOString();
-    updateRow(this.ctx, row.id, {
+    // Scope backfill: the response says what the account grants right now (Calendar added or revoked
+    // elsewhere, a granular consent). No `scope` means unchanged, never "nothing".
+    const granted = (res.scope ?? "").split(/\s+/).filter(Boolean);
+    const patch: Record<string, string> = {
       access_token_enc: this.ctx.crypto.encrypt(res.access_token),
       access_expires_at: expiresAt,
       // Google may rotate refresh tokens.
       ...(res.refresh_token ? { refresh_token_enc: this.ctx.crypto.encrypt(res.refresh_token) } : {}),
       // Testing-mode tokens report their remaining lifetime on every refresh. A response without it leaves
       // the stored expiry alone: a token issued in Testing keeps expiring even after the app is published.
-      ...(refreshExpiry(res) ? { refresh_expires_at: refreshExpiry(res) } : {}),
-    });
+      ...(refreshExpiry(res) ? { refresh_expires_at: refreshExpiry(res)! } : {}),
+      ...(granted.length ? { scopes: JSON.stringify(granted) } : {}),
+    };
+    // Only if the refresh token used is still the stored one: a consent (e.g. "Add Calendar") may have
+    // swapped in a new token while this refresh was in flight, and its access token and scopes win.
+    const entries = Object.entries(patch);
+    const { changes } = this.ctx.db.run(
+      `UPDATE accounts SET ${entries.map(([k]) => `${k} = ?`).join(", ")} WHERE id = ? AND refresh_token_enc = ?`,
+      ...entries.map(([, v]) => v),
+      row.id,
+      row.refresh_token_enc,
+    );
+    if (!changes) {
+      const fresh = getRow(this.ctx, row.id);
+      if (fresh?.access_token_enc && fresh.access_expires_at && Date.parse(fresh.access_expires_at) - EARLY_REFRESH_MS > Date.now()) {
+        return this.ctx.crypto.decrypt(fresh.access_token_enc);
+      }
+      // Still valid for whatever the old token covers (Google never revokes it on a new consent).
+      return res.access_token;
+    }
+    if (granted.length && !sameScopes(granted, accountScopes(row))) {
+      this.ctx.log.child("google").info("Granted scopes changed", { email: row.email, scopes: granted });
+      updateRow(this.ctx, row.id, {}, true);
+    }
     return res.access_token;
   }
 

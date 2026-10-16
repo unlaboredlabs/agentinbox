@@ -6,6 +6,7 @@
 import type { MessageContent } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { CalendarEventRaw } from "../google/calendar.ts";
+import type { Lane } from "../mail/pool.ts";
 import { notImplemented } from "./todo.ts";
 
 /**
@@ -14,6 +15,16 @@ import { notImplemented } from "./todo.ts";
  */
 export function eventDescriptionContent(_event: CalendarEventRaw, _opts: { accountEmail: string; maxChars: number }): MessageContent | null {
   throw notImplemented("eventDescriptionContent", "C");
+}
+
+/** eventDescriptionContent with HTML conversion in the content worker pool (stub; C implements it). */
+export async function cleanEventDescription(
+  _ctx: AppContext,
+  _event: CalendarEventRaw,
+  _opts: { accountEmail: string; maxChars: number },
+  _lane: Lane = "interactive",
+): Promise<MessageContent | null> {
+  throw notImplemented("cleanEventDescription", "C");
 }
 
 /** Fetches the event and returns eventDescriptionContent (webhook includeBody). */

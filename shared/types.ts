@@ -182,7 +182,7 @@ export interface SetupState {
  * - calendar_api_disabled: Google said the Calendar API is disabled in the project (SERVICE_DISABLED). "error"
  *   when some grant has a calendar capability, else "warning". `url` = the enable-API deep link.
  * - calendar_scope_missing: Calendar is added to this install but this account hasn't granted the calendar
- *   scopes (Account.calendar.missingScopes). One per account. "warning" ("error" when a grant on the account
+ *   scopes (Account.calendar.missingScopes). One per account. "info" ("error" when a grant on the account
  *   has a calendar capability). Fixed by the per-account incremental consent.
  * - calendar_sync_failing: calendar sync for this account keeps failing (Account.calendar.error). "error".
  */
@@ -766,6 +766,11 @@ export interface CalendarSetupInput {
 export interface ConnectAccountInput {
   reauthAccountId?: string;
   scopes?: ExtraScopeName[];
+  /**
+   * Ask for mail only: no calendar scopes, even while Calendar is enabled or the account had them. For
+   * Workspace admins who block Calendar (Google then rejects any consent that includes it). Not with scopes ["calendar"].
+   */
+  mailOnly?: boolean;
 }
 /** "pubsub": the Pub/Sub scope for the provisioning account. "calendar": CALENDAR_SCOPES. */
 export const EXTRA_SCOPE_NAMES = ["pubsub", "calendar"] as const;
@@ -916,7 +921,10 @@ export const isCalendarApprovalKind = (k: string): k is CalendarApprovalKind => 
 export interface CalendarApprovalDetail {
   calendarId: string;
   calendarName: string | null;
-  /** Target event (update/delete/rsvp); for create, the created event's id once applied (else null). */
+  /**
+   * Target event (update/delete/rsvp). For create, the id agentinbox chose when queuing (Google accepts
+   * client ids), so a retried apply can't create a second event.
+   */
   eventId: string | null;
   /** create: the new event; update: only the changed fields; delete/rsvp: {}. */
   change: CalendarEventInput;
@@ -926,10 +934,23 @@ export interface CalendarApprovalDetail {
   etag: string | null;
   /** rsvp only. */
   response: CalendarResponseStatus | null;
+  /** rsvp only: the note sent to the organizer with the answer. */
+  comment?: string | null;
   /** Google emails attendees (sendUpdates "all"); false = "none". */
   notifyAttendees: boolean;
-  /** Addresses Google will email when applied (checked against allowTo again at approval). */
+  /** Addresses Google will email when applied. */
   notified: string[];
+  /**
+   * Addresses the grant's allowTo had to cover when queued (attendees after the change, another organizer,
+   * everyone emailed; see attendeeImpact), checked again at approval. Absent on approvals from before it
+   * existed: then recomputed from the change.
+   */
+  checked?: string[];
+  /**
+   * When agentinbox last started sending this change to Google (set before each attempt). Once set, a later
+   * attempt can't assume the earlier one didn't land: it checks the event first.
+   */
+  attemptedAt?: string | null;
 }
 
 /**
@@ -1053,7 +1074,11 @@ export interface ApiError {
 //   POST   /api/accounts/connect ConnectAccountInput  → ConnectAccountResponse
 //          400 google_client_missing (no OAuth client saved yet)
 //          {reauthAccountId, scopes:["calendar"]}: the per-account "Add Google Calendar" consent (include_granted_scopes:
-//          mail keeps working throughout; denying or unticking Calendar changes nothing)
+//          mail keeps working throughout; denying or unticking Calendar changes nothing). Its completion fails with
+//          400 oauth_calendar_not_granted when Calendar was (partly) unticked, and a cancel's oauth_access_denied says
+//          nothing changed, as does oauth_admin_policy_enforced (ask the admin to trust the app). On other consents that
+//          asked for Calendar, oauth_admin_policy_enforced hints at reconnecting with {mailOnly:true} or turning Calendar
+//          off (PATCH /api/google/calendar {enabled:false}).
 //   POST   /api/accounts/connect/complete {url}       → Account   (paste mode)
 //   POST   /api/accounts/connect/status {state}       → ConnectAttempt (the console's fallback when the callback page can't post to it)
 //          Connect failures (same codes on this endpoint and in the callback page's OAuthCallbackMessage):

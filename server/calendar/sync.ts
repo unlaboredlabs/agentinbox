@@ -34,6 +34,7 @@ import {
   updateSyncRow,
   upsertSyncCalendar,
 } from "./state.ts";
+import { noteCalendarApi } from "./setup.ts";
 import { isInvitation, summarizeEvent } from "./summary.ts";
 import type { CalendarService } from "./types.ts";
 
@@ -467,7 +468,7 @@ class Sync implements CalendarSync {
     switch (classifyCalendarError(err)) {
       case "api_disabled":
         this.setStatus(row.id, "api_disabled", errorMessage(err));
-        this.noteApi("disabled", errorMessage(err));
+        this.noteApi("disabled", err as GoogleApiError);
         return;
       case "scope_missing": {
         // A refresh re-reads the granted scopes (the token response's `scope`); the status then derives from them.
@@ -485,11 +486,12 @@ class Sync implements CalendarSync {
     }
   }
 
-  /** CalendarSetupState.api as last observed (written on change only). */
-  private noteApi(state: "enabled" | "disabled", error: string | null = null): void {
-    const setup = this.ctx.settings.getState("calendar.setup");
-    if (setup?.api?.state === state) return;
-    this.ctx.settings.setState("calendar.setup", { enabled: true, ...setup, api: { state, at: now(), error } });
+  /**
+   * CalendarSetupState.api as last observed, shared with setup's probes: "enabled" also clears api_disabled
+   * on every account (the API is per project), "disabled" keeps Google's activationUrl.
+   */
+  private noteApi(state: "enabled" | "disabled", err: GoogleApiError | null = null): void {
+    noteCalendarApi(this.ctx, state, err);
   }
 }
 
