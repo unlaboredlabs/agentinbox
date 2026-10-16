@@ -28,6 +28,7 @@ import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
 import { removeConnectionState } from "../extensions/host/spawn.ts";
+import { extensionStore } from "../extensions/store.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -188,13 +189,13 @@ export function stubParts(): Pick<BrokerParts, "registry" | "connector"> {
   };
 }
 
-function unavailableSource(connectionId: string): ToolSource {
+function unavailableSource(connectionId: string, message = UNAVAILABLE): ToolSource {
   return {
     connectionId,
     listTools: async () => {
-      throw new SourceError("unavailable", UNAVAILABLE);
+      throw new SourceError("unavailable", message);
     },
-    callTool: async () => unavailable(),
+    callTool: async () => ({ isError: true, content: [{ type: "text", text: message }] }),
     close: async () => {},
   };
 }
@@ -299,7 +300,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   function createSource(c: Connection): ToolSource {
     if (c.kind === "remote_http") return parts.connector.createSource(c);
     const preset = presetOf(c);
-    if (!preset?.createSource) return unavailableSource(c.id);
+    if (!preset) return unavailableSource(c.id, c.preset ? missingExtensionMessage(c.preset) : UNAVAILABLE);
+    if (!preset.createSource) return unavailableSource(c.id);
     return preset.createSource(parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
   }
 
@@ -312,8 +314,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     dataDir: ctx.config.dataDir,
     emit: (e) => {
       const conn = getConnection(ctx, c.id);
-      const preset = conn ? presetOf(conn) : null;
-      if (conn && preset) emitIntegrationEvents(conn, preset, [e]);
+      // A disabled (killed) connection emits nothing, even from a child that hasn't stopped yet.
+      if (!conn || conn.status === "disabled" || !enabled()) {
+        log.warn("Dropped an event from a disabled connection", { connection: c.id, type: e.type.slice(0, 80) });
+        return;
+      }
+      const preset = presetOf(conn);
+      if (preset) emitIntegrationEvents(conn, preset, [e]);
     },
     setError: (reason) => {
       if (reason === null) {
@@ -356,6 +363,16 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   };
 
   const presetOf = (c: Connection): IntegrationPreset | null => presetFor(c.preset);
+
+  /** Every connection bound to the extension (preset id = extension name): closed, then listed again. */
+  async function reloadExtension(name: string): Promise<void> {
+    for (const c of listConnections(ctx)) {
+      if (c.preset !== name) continue;
+      await closeSource(c.id);
+      invalidate({ connectionId: c.id });
+      if (c.status !== "disabled") attach(c.id);
+    }
+  }
 
   /** The client registration (e.g. WHOOP's pasted client id and secret). */
   const clientRecord = (connectionId: string): Record<string, unknown> | null => credentials.client(connectionId);
@@ -558,6 +575,18 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     }),
 
     start() {
+      // Extension installs, updates and removals (server/extensions/store.ts) restart the connections that use the
+      // extension: the old child stops, and the next use starts the new code (after its integrity check).
+      try {
+        extensionStore(ctx).setHooks({
+          onChange: ({ from, to }) => {
+            const name = (to ?? from)?.name;
+            if (name) void reloadExtension(name);
+          },
+        });
+      } catch (err) {
+        log.error("Couldn't watch extension changes", { error: errorMessage(err) });
+      }
       // Agents from before search mode keep their full tool list (once per install; docs/MCP-BROKER.md).
       try {
         const pinned = pinExistingAgentsDirect(ctx.db, ctx.settings);
@@ -659,8 +688,18 @@ export function listConnections(ctx: Pick<AppContext, "db">): Connection[] {
 
 const DAY_MS = 86_400_000;
 
-/** The list/get shape: tool count, agents and days to expiry. */
-export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = Date.now()): ConnectionView {
+/** What a connection says when its preset's extension isn't installed (a code connection can't run without it). */
+export const missingExtensionMessage = (name: string) => `Needs the ${name} extension. Install it with \`xaq ext add ${name}\`, or from Extensions in the console.`;
+
+/**
+ * The list/get shape: tool count, agents and days to expiry. With `presets`, a non-remote connection whose preset
+ * (extension) isn't installed reads as `error` with missingExtensionMessage, not `active` with failing calls. A
+ * remote one keeps working as a generic MCP connection meanwhile (docs/EXTENSIONS.md "Migration").
+ */
+export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = Date.now(), presets?: readonly IntegrationPreset[]): ConnectionView {
+  if (presets && c.kind !== "remote_http" && c.preset && c.status !== "disabled" && !presets.some((p) => p.id === c.preset)) {
+    c = { ...c, status: "error", statusReason: missingExtensionMessage(c.preset) };
+  }
   const total = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM upstream_tools WHERE connection_id = ?", c.id)!.n;
   const agents = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM connection_grants WHERE connection_id = ?", c.id)!.n;
   const expiresInDays = c.expiresAt ? Math.max(0, Math.floor((Date.parse(c.expiresAt) - at) / DAY_MS)) : null;

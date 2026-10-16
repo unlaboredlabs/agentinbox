@@ -13,14 +13,18 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { IntegrationEvent } from "../server/broker/types.ts";
 import {
+  CHILD_PRELOAD,
+  CODE_EXTENSION_NODE_FLOOR,
   childArgs,
   childEnv,
+  codeExtensionNodeProblem,
   type CodeSourceDeps,
   type CodeToolSource,
   codeExtensionSource,
   createCodeSource,
   extensionStateDir,
   type InstalledExtension,
+  NODE_HAS_ALLOW_NET,
   removeConnectionState,
 } from "../server/extensions/host/index.ts";
 
@@ -47,7 +51,6 @@ function world(): World {
   cpSync(FIXTURE, installDir, { recursive: true });
   // What the sandbox must keep out of reach.
   writeFileSync(join(dataDir, "master.key"), "MASTER-KEY-SECRET", { mode: 0o600 });
-  writeFileSync(join(dataDir, "xaq.db"), "SQLite format 3\0 the database", { mode: 0o600 });
   const manifest = JSON.parse(readFileSync(join(installDir, "xaq-extension.json"), "utf8")) as unknown;
   const ext: InstalledExtension = {
     name: "echo",
@@ -120,11 +123,48 @@ afterEach(async () => {
   rmSync(w.dataDir, { recursive: true, force: true });
 });
 
+// Code extensions run only on Node releases without the known permission-model bypasses (spawn.ts). On older ones
+// (CI's 22.13 entry) every start is refused, which the "Node floor" tests check; the rest need a running child.
+const NODE_OK = codeExtensionNodeProblem() === null;
+const live = describe.skipIf(!NODE_OK);
+
+// If a signal ever got through, it must not open this test process's inspector.
+process.on("SIGUSR1", () => {});
+
+describe("Node floor", () => {
+  it("refuses releases with known permission-model bypasses, with a plain message; allows the patched ones", () => {
+    expect(CODE_EXTENSION_NODE_FLOOR).toEqual({ 22: "22.23.2", 24: "24.18.1", 26: "26.5.1" });
+    for (const v of ["22.23.2", "22.23.3", "22.30.0", "24.18.1", "24.22.0", "26.5.1", "26.12.0", "27.0.0", "v24.22.0"]) expect(codeExtensionNodeProblem(v), v).toBeNull();
+    expect(codeExtensionNodeProblem("22.13.0")).toBe("Code extensions need Node ≥ 22.23.2 (xaq is running on 22.13.0). Update Node and restart xaq.");
+    expect(codeExtensionNodeProblem("22.22.0")).toMatch(/≥ 22\.23\.2/);
+    expect(codeExtensionNodeProblem("24.13.0")).toMatch(/≥ 24\.18\.1 \(xaq is running on 24\.13\.0\)/);
+    expect(codeExtensionNodeProblem("26.3.1")).toMatch(/≥ 26\.5\.1/);
+    expect(codeExtensionNodeProblem("23.11.0")).toMatch(/22\.23\.2, 24\.18\.1, 26\.5\.1 or newer on those lines/);
+    expect(codeExtensionNodeProblem("25.8.2")).not.toBeNull();
+  });
+
+  it("an old Node never spawns: the connection says why", async () => {
+    const s = open("con_a", { nodeVersion: "22.13.0" });
+    await expect(s.listTools(AbortSignal.timeout(5000))).rejects.toMatchObject({ code: "unavailable", message: expect.stringContaining("Code extensions need Node ≥ 22.23.2") });
+    expect(s.pid).toBeNull();
+    expect(w.errors.at(-1)).toBe("Code extensions need Node ≥ 22.23.2 (xaq is running on 22.13.0). Update Node and restart xaq.");
+  });
+
+  it.skipIf(NODE_OK)("this Node is below the floor: the real start is refused", async () => {
+    const s = open("con_a");
+    await expect(s.listTools(AbortSignal.timeout(5000))).rejects.toMatchObject({ code: "unavailable", message: expect.stringContaining("Code extensions need Node") });
+    expect(s.pid).toBeNull();
+  });
+});
+
 describe("spawn", () => {
-  it("argv: --permission and one flag per allowed path, never the comma form, nothing else", () => {
-    const args = childArgs("/data/extensions/echo/ab12", "/data/extension-state/echo/con_a", "/data/extensions/echo/ab12/dist/server.mjs");
+  it("argv: --permission, no sqlite, the signal preload, one flag per allowed path, never the comma form, nothing else", () => {
+    const args = childArgs("/data/extensions/echo/ab12", "/data/extension-state/echo/con_a", "/data/extensions/echo/ab12/dist/server.mjs", { allowNet: false });
     expect(args).toEqual([
       "--permission",
+      "--no-experimental-sqlite",
+      "--import",
+      CHILD_PRELOAD,
       "--allow-fs-read=/data/extensions/echo/ab12",
       "--allow-fs-read=/data/extension-state/echo/con_a",
       "--allow-fs-write=/data/extension-state/echo/con_a",
@@ -132,10 +172,16 @@ describe("spawn", () => {
     ]);
     // Node 22.13 and 24 read `--allow-fs-read=a,b` as one literal path: it must never come back.
     expect(args.filter((a) => a.startsWith("--allow-fs-")).every((a) => !a.includes(","))).toBe(true);
-    expect(args.join(" ")).not.toMatch(/--allow-(child-process|worker|addons|wasi)|--experimental/);
+    expect(args.join(" ")).not.toMatch(/--allow-(child-process|worker|addons|wasi|net)|--experimental/);
+    // Node 25+ gates the network too: there (only), `--allow-net` keeps it open, as the contract says.
+    expect(childArgs("/i", "/s", "/i/e.mjs", { allowNet: true }).slice(-2)).toEqual(["--allow-net", "/i/e.mjs"]);
+    expect(NODE_HAS_ALLOW_NET).toBe(process.allowedNodeEnvironmentFlags.has("--allow-net"));
+    // The preload is a data: URL (no file-system allow) that pins every signal route.
+    expect(CHILD_PRELOAD).toMatch(/^data:text\/javascript,/);
+    for (const k of ['"kill"', '"_kill"', '"_debugProcess"', '"_debugEnd"', "writable:false", "configurable:false", 'process.on("SIGUSR1"']) expect(CHILD_PRELOAD).toContain(k);
   });
 
-  it("the live child got exactly that argv, cwd = its state dir (0700), and only the contract's environment", async () => {
+  it.skipIf(!NODE_OK)("the live child got exactly that argv, cwd = its state dir (0700), and only the contract's environment", async () => {
     const saved = { ...process.env };
     // Secrets and noise xaq's own environment might hold; NODE_OPTIONS would break the child if it leaked.
     Object.assign(process.env, {
@@ -157,7 +203,7 @@ describe("spawn", () => {
     }
     const stateDir = extensionStateDir(w.dataDir, "echo", "con_a");
     const r = jsonOf<{ execArgv: string[]; entry: string; cwd: string; env: Record<string, string> }>(await s!.callTool("argv", {}, ctl()));
-    expect(r.execArgv).toEqual(["--permission", `--allow-fs-read=${w.installDir}`, `--allow-fs-read=${stateDir}`, `--allow-fs-write=${stateDir}`]);
+    expect(r.execArgv).toEqual(["--permission", "--no-experimental-sqlite", "--import", CHILD_PRELOAD, `--allow-fs-read=${w.installDir}`, `--allow-fs-read=${stateDir}`, `--allow-fs-write=${stateDir}`, ...(NODE_HAS_ALLOW_NET ? ["--allow-net"] : [])]);
     expect(r.entry).toBe(join(w.installDir, "dist/server.mjs"));
     expect(r.cwd).toBe(stateDir);
     expect(statSync(stateDir).mode & 0o777).toBe(0o700);
@@ -188,13 +234,13 @@ describe("spawn", () => {
   });
 });
 
-describe("the sandbox (every escape attempt fails)", () => {
+live("the sandbox (every escape attempt fails)", () => {
   it("can't read master.key or the DB, another connection's state, /proc or /etc; can't write outside its state; can't spawn, fork workers, load addons or open the inspector; sees no secrets; can't get another connection's credentials", async () => {
     const other = extensionStateDir(w.dataDir, "echo", "con_b");
     mkdirSync(other, { recursive: true, mode: 0o700 });
     writeFileSync(join(other, "secret.txt"), "OTHER-CONNECTION-STATE");
-    // Files xaq holds open while it spawns (a real SQLite DB, master.key): none may be inherited.
-    const db = new DatabaseSync(join(w.dataDir, "real.db"));
+    // Files xaq holds open while it spawns (its real SQLite DB, master.key): none may be inherited.
+    const db = new DatabaseSync(join(w.dataDir, "xaq.db"));
     db.exec("CREATE TABLE t (x TEXT); INSERT INTO t VALUES ('secret row')");
     const keyFd = openSync(join(w.dataDir, "master.key"), "r");
     const s = open("con_a");
@@ -211,10 +257,13 @@ describe("the sandbox (every escape attempt fails)", () => {
     expect(Object.keys(r).sort()).toEqual(
       [
         "addon",
+        "builtinProcessKill",
+        "debugProcessParent",
         "envSecrets",
         "hardlinkToMasterKey",
         "inheritedFiles",
         "inspector",
+        "killParent",
         "listDataDir",
         "otherConnectionCredentials",
         "processBinding",
@@ -224,9 +273,17 @@ describe("the sandbox (every escape attempt fails)", () => {
         "readOtherState",
         "readOtherStateViaDotDot",
         "readParentEnviron",
+        "signalParentUsr1",
         "spawnShell",
         "spawnSync",
+        "sqliteAttach",
+        "sqliteBuiltin",
+        "sqliteCreateOutside",
+        "sqliteImport",
+        "sqliteOpenDb",
         "symlinkToMasterKey",
+        "underscoreKillParent",
+        "unpinKill",
         "worker",
         "writeDataDir",
         "writeInstallDir",
@@ -238,12 +295,19 @@ describe("the sandbox (every escape attempt fails)", () => {
     expect(r.envSecrets).toBe("denied: NO_SECRETS");
     expect(r.inheritedFiles).toBe("denied: NO_INHERITED_FILES");
     expect(r.otherConnectionCredentials).toMatch(/^denied: rpc -32602/);
+    // node:sqlite is gone entirely (it would ignore --permission), and nothing was created outside the state dir.
+    for (const k of ["sqliteImport", "sqliteOpenDb", "sqliteAttach", "sqliteCreateOutside"]) expect(r[k], k).toBe("denied: ERR_UNKNOWN_BUILTIN_MODULE");
+    expect(r.sqliteBuiltin).toBe("denied: UNDEFINED");
+    expect(existsSync(join(w.dataDir, "created.db"))).toBe(false);
+    // Every signal route throws (the preload), and the pins can't be undone.
+    for (const k of ["signalParentUsr1", "killParent", "underscoreKillParent", "debugProcessParent", "builtinProcessKill"]) expect(r[k], k).toBe("denied: Signals are disabled for xaq extensions");
+    expect(r.unpinKill).toMatch(/^denied: Cannot redefine property: kill/);
     expect(existsSync(join(w.dataDir, "planted.txt"))).toBe(false);
     expect(existsSync(join(w.installDir, "dist", "planted.txt"))).toBe(false);
   });
 });
 
-describe("the protocol", () => {
+live("the protocol", () => {
   it("a tool call, the state dir, xaq/credentials/get for this connection only (never the refresh token or client secret)", async () => {
     const s = open();
     expect(textOf(await s.callTool("echo", { text: "hi there" }, ctl()))).toBe("hi there");
@@ -321,7 +385,7 @@ describe("the protocol", () => {
   });
 });
 
-describe("lifecycle", () => {
+live("lifecycle", () => {
   it("re-verifies the integrity before every start: a mismatch never spawns and marks the connection error", async () => {
     let verified = 0;
     const s = open("con_a", { verify: () => (verified++, false) });
@@ -391,7 +455,57 @@ describe("lifecycle", () => {
   });
 });
 
-describe("limits", () => {
+live("a child that misbehaves while starting never wedges its connection", () => {
+  /** The fixture reads `<stateDir>/mode` at startup. */
+  const withMode = (connectionId: string, mode: string) => {
+    const dir = extensionStateDir(w.dataDir, "echo", connectionId);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "mode"), mode);
+  };
+  const quick = { restartBaseMs: 60_000, startTimeoutMs: 1500, killAfterMs: 500 };
+
+  for (const mode of ["die-after-init", "die-before-init"]) {
+    it(`${mode}: the start fails at once (a crash, with backoff), calls fail fast, close resolves promptly`, async () => {
+      for (let round = 0; round < 3; round++) {
+        const id = `con_${mode.replace(/-/g, "_")}_${round}`;
+        withMode(id, mode);
+        const s = open(id, { limits: quick });
+        const started = Date.now();
+        await expect(s.listTools(AbortSignal.timeout(10_000))).rejects.toMatchObject({ code: expect.stringMatching(/unavailable|protocol/) });
+        expect(Date.now() - started).toBeLessThan(1400); // before the start deadline: the exit itself fails it
+        await until(() => s.status.state === "backoff");
+        await expect(s.callTool("echo", { text: "x" }, ctl())).rejects.toMatchObject({ code: "unavailable", message: expect.stringMatching(/restarting/) });
+        const t = Date.now();
+        await s.close();
+        expect(Date.now() - t).toBeLessThan(1000);
+      }
+    });
+  }
+
+  it("hang-init: the start deadline fails it; the caller's own signal comes first; close and kill resolve promptly", async () => {
+    withMode("con_hang", "hang-init");
+    const s = open("con_hang", { limits: { ...quick, maxConcurrent: 2 } });
+    // The caller's signal bounds its wait, and its slot comes back.
+    for (let i = 0; i < 4; i++) await expect(s.listTools(AbortSignal.timeout(100))).rejects.toBeDefined();
+    const started = Date.now();
+    await expect(s.ready()).rejects.toMatchObject({ code: "timeout", message: expect.stringMatching(/didn't start within 2 s/) });
+    expect(Date.now() - started).toBeLessThan(2500);
+    expect(s.status.state).toBe("backoff");
+
+    // Closing while a start hangs: killed, resolved within the grace period.
+    withMode("con_hang2", "hang-init");
+    const t = open("con_hang2", { limits: { ...quick, startTimeoutMs: 30_000 } });
+    await sleep(300);
+    const pid = (t as unknown as { lastTransport: { pid: number | null } }).lastTransport.pid!;
+    expect(alive(pid)).toBe(true);
+    const c = Date.now();
+    await t.close();
+    expect(Date.now() - c).toBeLessThan(1000);
+    await until(() => !alive(pid));
+  });
+});
+
+live("limits", () => {
   it("concurrent calls are capped", async () => {
     const s = open("con_a", { limits: { maxConcurrent: 2 } });
     await s.ready();
@@ -418,7 +532,7 @@ describe("limits", () => {
   });
 });
 
-describe("codeExtensionSource", () => {
+live("codeExtensionSource", () => {
   it("builds the deps from the broker's (state dir under dataDir, emit, the store's verify)", async () => {
     const checked: string[] = [];
     const base = w.deps("con_a");

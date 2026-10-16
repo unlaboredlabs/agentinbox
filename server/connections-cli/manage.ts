@@ -1,4 +1,5 @@
 import pc from "picocolors";
+import { renameWarning, slugProblem } from "../../shared/connection-rename.ts";
 import type { SetupStepView, StartConnectInput } from "../../shared/types.ts";
 import { safeText } from "../listen/ui.ts";
 import { NPX } from "../listen/version.ts";
@@ -354,7 +355,7 @@ export async function listConnections(deps: ManageDeps): Promise<number> {
   const { api, prompter: p } = deps;
   const all = await api.list();
   if (!all.length) {
-    p.print(`No connections yet. Add one: ${NPX} connections add notion|whoop|<url>`);
+    p.print(`No connections yet. Add one: ${NPX} connections add notion|t3code|<url>`);
     return 0;
   }
   const w = Math.max(4, ...all.map((c) => c.slug.length));
@@ -387,6 +388,42 @@ export async function disableConnection(slug: string, deps: ManageDeps): Promise
   if (!(await p.confirm(`Disable "${slug}"? Agents lose its tools at once, its pending approvals are cancelled and its stored credentials are deleted.`, false))) return 0;
   await api.kill(c.id);
   p.print(`${pc.green("✔")} Disabled "${slug}". To use it again, turn it on in the console's Connections page and reconnect.`);
+  return 0;
+}
+
+/** `connections rename <slug|id> --slug <new> [--name <name>]`: the PATCH the console's "Change short name" uses. */
+export async function renameConnection(target: string, flags: { slug?: string; name?: string }, deps: ManageDeps): Promise<number> {
+  const { api, prompter: p } = deps;
+  if (flags.slug === undefined && flags.name === undefined) throw new Error("Pass --slug <new-name> (and/or --name <display name>).");
+  const all = await api.list();
+  const c = all.find((x) => x.slug === target || x.id === target);
+  if (!c) throw new Error(`No connection "${target}". ${all.length ? `There are: ${all.map((x) => x.slug).join(", ")}.` : "There are none yet."}`);
+  const patch: { slug?: string; name?: string } = {};
+  if (flags.slug !== undefined && flags.slug !== c.slug) {
+    const slug = flags.slug.trim();
+    const problem = slugProblem(slug, c, all.map((x) => ({ ...x, name: safeText(x.name, 60) })));
+    if (problem) throw new Error(`--slug "${slug}": ${problem}`);
+    patch.slug = slug;
+  }
+  if (flags.name !== undefined && flags.name.trim() !== c.name) {
+    const name = flags.name.trim();
+    if (!name) throw new Error("--name can't be empty.");
+    patch.name = name;
+  }
+  if (!Object.keys(patch).length) {
+    p.print(`"${c.slug}" already has that ${flags.slug !== undefined ? "short name" : "name"}; nothing to change.`);
+    return 0;
+  }
+  if (patch.slug) {
+    p.print(pc.yellow(renameWarning(c.slug, patch.slug)));
+    if (!(await p.confirm(`Rename "${c.slug}" to "${patch.slug}"?`, false))) {
+      p.print("Nothing was changed.");
+      return 0;
+    }
+  }
+  const after = await api.update(c.id, patch);
+  const parts = [patch.slug ? `its tools are now ${after.slug}__<tool>` : "", patch.name ? `its name is now "${safeText(after.name, 100)}"` : ""].filter(Boolean);
+  p.print(`${pc.green("✔")} Renamed "${c.slug}": ${parts.join("; ")}.`);
   return 0;
 }
 

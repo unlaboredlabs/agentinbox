@@ -49,15 +49,15 @@ async function selfOrigins(dataDir: string): Promise<string[]> {
 export function registerConnectionsCommands(program: Command): void {
   const connections = program
     .command("connections", { hidden: !CONNECTIONS_VISIBLE })
-    .description("the MCP servers xaq connects agents to (Notion, WHOOP, any MCP URL); run on xaq's machine")
+    .description("the MCP servers xaq connects agents to (Notion, T3 Code, any MCP URL, installed extensions); run on xaq's machine")
     .summary("add, list, reconnect or remove connected MCP servers")
     .helpGroup(GROUP);
 
   dataOption(
     connections
       .command("add")
-      .description("connect an integration (notion, whoop, t3code) or any MCP server URL, interactively")
-      .argument("<integration-or-url>", "notion, whoop, t3code, or an MCP server URL such as https://mcp.example.com/mcp"),
+      .description("connect an integration (notion, t3code, or an installed extension such as whoop) or any MCP server URL, interactively")
+      .argument("<integration-or-url>", "notion, t3code, an installed extension (whoop: `xaq ext add whoop` first), or an MCP server URL such as https://mcp.example.com/mcp"),
   )
     .option("--url <address>", "t3code: your T3 Code server's address, e.g. http://100.101.102.103:3773 (asked when omitted)")
     .option("--slug <name>", "its short name: agents see its tools as <name>__<tool>")
@@ -100,6 +100,20 @@ Examples:
     .action(async (slug: string, o: { data?: string; yes?: boolean }) => {
       const { disableConnection } = await import("./manage.ts");
       process.exitCode = await withApi(o, (deps) => disableConnection(slug, deps));
+    });
+
+  dataOption(
+    connections
+      .command("rename")
+      .description("change a connection's short name (agents see its tools as <name>__<tool>) or its display name")
+      .argument("<name>", "the connection's current short name (or its id)"),
+  )
+    .option("--slug <new>", "the new short name: 1-24 lowercase letters, digits and dashes (calls by the old tool names stop working)")
+    .option("--name <display-name>", "a new display name")
+    .option("-y, --yes", "don't ask")
+    .action(async (target: string, o: { data?: string; yes?: boolean; slug?: string; name?: string }) => {
+      const { renameConnection } = await import("./manage.ts");
+      process.exitCode = await withApi(o, (deps) => renameConnection(target, o, deps));
     });
 
   dataOption(connections.command("remove").description("remove a connection and delete its credentials").argument("<name>", "the connection's name"))

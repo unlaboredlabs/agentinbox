@@ -10,7 +10,8 @@ agentinbox grows from a Gmail/Calendar broker into an **MCP broker**:
 
 - **One endpoint per agent.** It unifies all of that agent's MCP servers.
 - **Pre-made integrations**, starting with **Notion** and **WHOOP**. Gmail and Calendar stay as the built-in native
-  integration.
+  integration. *(2026-10: pre-made integrations are now extensions, [EXTENSIONS.md](EXTENSIONS.md). WHOOP is a code
+  extension, so the native WHOOP described below has left core.)*
 - **The broker holds every upstream credential.** Agents never see them.
 - **Each agent gets only the tools it's allowed.**
 - **Existing machinery is reused:** approvals, the audit log, signed webhooks and the listener relay.
@@ -406,6 +407,10 @@ REST tool set on an internal token. It goes later, and only if asked for.
 
 ### WHOOP: native, each user's own app
 
+*Superseded (2026-10): WHOOP is now a code extension ([EXTENSIONS.md](EXTENSIONS.md)) that reads the API live, with no
+events, polling or webhooks. Core keeps only the generic `user_app` OAuth (`server/broker/upstream/user-app.ts`). This
+section records the M2 design.*
+
 The official v2 API ([WHOOP API](https://developer.whoop.com/api/), [OAuth](https://developer.whoop.com/docs/developing/oauth)):
 - **Scopes:** `read:recovery|cycles|workout|sleep|profile|body_measurement`, plus `offline` for a refresh token.
 - **Tokens:** 1 h access tokens. Refresh tokens rotate and are single-use. Refreshing needs the client secret, and
@@ -790,6 +795,9 @@ until PR 8, so existing users see nothing half-built:
 | 10 | E2E (done-when #1), docs, SKILL.md; then the Notion check and the Hermes migration on Wynn's install; then the persona walk | M |
 
 ### M2: WHOOP native
+
+*Superseded (2026-10): see the WHOOP section above; the native integration was removed when WHOOP became a code
+extension.*
 
 **Scope:** the guided per-user app setup, the WHOOP tools, the refresh worker, webhooks or polling, and the
 `whoop.*` events.

@@ -7,7 +7,19 @@ import { extensionStateDir } from "./spawn.ts";
 import type { ExtensionVerifier, InstalledExtension } from "./types.ts";
 
 export { CodeToolSource, CREDENTIALS_ERROR, createCodeSource } from "./source.ts";
-export { childArgs, childEnv, ensureStateDir, entryPath, extensionStateDir, removeConnectionState, XAQ_EXT_PROTOCOL } from "./spawn.ts";
+export {
+  CHILD_PRELOAD,
+  CODE_EXTENSION_NODE_FLOOR,
+  childArgs,
+  childEnv,
+  codeExtensionNodeProblem,
+  ensureStateDir,
+  entryPath,
+  extensionStateDir,
+  NODE_HAS_ALLOW_NET,
+  removeConnectionState,
+  XAQ_EXT_PROTOCOL,
+} from "./spawn.ts";
 export type { CodeManifest, CodeSourceDeps, ExtensionVerifier, HostLimits, InstalledExtension } from "./types.ts";
 export { codeManifestOf, DEFAULT_LIMITS } from "./types.ts";
 

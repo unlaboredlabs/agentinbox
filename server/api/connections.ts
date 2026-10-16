@@ -30,6 +30,9 @@ import { badRequest, conflict, errorMessage, HttpError, notFound } from "../util
 import { newId, randomToken } from "../util/ids.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
+/** A preset that takes no webhooks: no webhook step, no Funnel offer, no reachability check. */
+const NO_WEBHOOKS: WebhookReachability = { reach: "unknown", webhookBase: null, funnel: null, reason: "no preset takes webhooks" };
+
 /** The upstream runtime's URL rule (http(s), no userinfo): the same check the connect flow applies. */
 const httpUrl = z
   .string()
@@ -122,7 +125,7 @@ export function connectionsApi(ctx: AppContext) {
     if (!c) throw notFound("Connection");
     return c;
   };
-  const view = (id: string): ConnectionView => connectionView(ctx, requireConnection(id));
+  const view = (id: string): ConnectionView => connectionView(ctx, requireConnection(id), Date.now(), ctx.broker.presets());
   const grantsOf = (connectionId: string): ConnectionGrant[] =>
     ctx.db
       .all<{ agent_id: string; level: AccessLevel; created_at: string; updated_at: string }>(
@@ -159,11 +162,16 @@ export function connectionsApi(ctx: AppContext) {
     };
   };
 
-  app.get("/connections", (c) => c.json<ConnectionView[]>(listConnections(ctx).map((x) => connectionView(ctx, x))));
+  app.get("/connections", (c) => {
+    const presets = ctx.broker.presets();
+    return c.json<ConnectionView[]>(listConnections(ctx).map((x) => connectionView(ctx, x, Date.now(), presets)));
+  });
 
   app.get("/connections/presets", async (c) => {
-    const reach = await ctx.broker.webhookReachability();
-    return c.json<PresetView[]>(ctx.broker.presets().map((p) => presetView(p, reach)));
+    const presets = ctx.broker.presets();
+    // The reachability check (DNS, the Tailscale CLI) only for a preset that takes webhooks: none does today.
+    const reach: WebhookReachability = presets.some((p) => p.events?.handleWebhook) ? await ctx.broker.webhookReachability() : NO_WEBHOOKS;
+    return c.json<PresetView[]>(presets.map((p) => presetView(p, p.events?.handleWebhook ? reach : NO_WEBHOOKS)));
   });
 
   app.post("/connections/probe", async (c) => {

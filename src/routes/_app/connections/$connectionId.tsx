@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftIcon, NetworkIcon, PauseIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { ArrowLeftIcon, NetworkIcon, PauseIcon, PencilIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { useState } from "react";
 import { PageHeader, QueryError, TimeAgo, ToneBadge } from "@/components/common";
 import { connectionStatusView, grantedScopesView, hostPort } from "@/components/connections/connection-flow";
 import { useConnectionActions, useReconnect } from "@/components/connections/connection-row";
+import { RenameSlugDialog } from "@/components/connections/rename-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -24,6 +26,7 @@ function ConnectionPage() {
   const now = useNow(60_000);
   const { askDisable, askRemove } = useConnectionActions();
   const { reconnect, dialog } = useReconnect();
+  const [renaming, setRenaming] = useState(false);
   const qc = useQueryClient();
   // "Refresh tools": list the server's tools again now (a changed or new tool is used at once; the audit log notes it).
   const refresh = useMutation({
@@ -84,10 +87,14 @@ function ConnectionPage() {
         }
       />
       {dialog}
+      <RenameSlugDialog connection={c} open={renaming} onOpenChange={setRenaming} />
 
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-        <span>
+        <span className="inline-flex items-center gap-1">
           Tools as <code className="font-mono text-foreground">{c.slug}__…</code>
+          <Button variant="ghost" size="xs" className="text-muted-foreground" onClick={() => setRenaming(true)}>
+            <PencilIcon /> Change short name
+          </Button>
         </span>
         <span>
           {c.tools.total} tool{c.tools.total === 1 ? "" : "s"}

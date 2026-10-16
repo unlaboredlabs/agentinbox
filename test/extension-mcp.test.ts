@@ -18,7 +18,8 @@ import {
 import { createBrokerService } from "../server/broker/service.ts";
 import type { IntegrationPreset, ToolSource } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
-import { codeExtensionSource, extensionStateDir, type InstalledExtension } from "../server/extensions/host/index.ts";
+import { codeExtensionNodeProblem, codeExtensionSource, extensionStateDir, type InstalledExtension } from "../server/extensions/host/index.ts";
+import { extensionStore } from "../server/extensions/store.ts";
 import { type FakeMcpUpstream, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
 import { CSRF, harness, json } from "./platform-helpers.ts";
 
@@ -109,7 +110,11 @@ async function world(opts: { level?: "read" | "ask" | "full" } = {}) {
   return { h, ctx, up, api, agent, apiKey, remote, connect };
 }
 
-describe("prompts and resources on /mcp", () => {
+/** Resource text comes wrapped as untrusted, like tool output. */
+const wrapped = (source: string, text: string) => expect.stringMatching(new RegExp(`^<tool_output source="${source}" nonce="[A-Za-z0-9_-]+" untrusted>\\n${text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\n</tool_output>$`));
+
+// The code-extension half needs a Node without the known permission-model bypasses (on older ones it's refused).
+describe.skipIf(codeExtensionNodeProblem() !== null)("prompts and resources on /mcp", () => {
   for (const mode of [undefined, "search"]) {
     it(`lists and routes both connections' prompts and resources, namespaced (${mode ?? "direct"} mode)`, async () => {
       const { ctx, agent, apiKey, connect, up } = await world();
@@ -130,13 +135,13 @@ describe("prompts and resources on /mcp", () => {
         [`xaq://fake/${encodeURIComponent("https://pages.example/p/1")}`, "fake__page-1"],
       ]);
       const note = await client.readResource({ uri: `xaq://echo/${encodeURIComponent("echo://notes/today")}` });
-      expect(note.contents).toEqual([{ uri: `xaq://echo/${encodeURIComponent("echo://notes/today")}`, mimeType: "text/plain", text: "note for echo://notes/today" }]);
+      expect(note.contents).toEqual([{ uri: `xaq://echo/${encodeURIComponent("echo://notes/today")}`, mimeType: "text/plain", text: wrapped("echo/resource", "note for echo://notes/today") }]);
 
       const templates = (await client.listResourceTemplates()).resourceTemplates;
       expect(templates.map((t) => t.uriTemplate).sort()).toEqual(["xaq://echo/echo%3A%2F%2Fnotes%2F{day}", "xaq://fake/https%3A%2F%2Fpages.example%2Fp%2F{id}"]);
       // A client expands the template; the URI decodes back to the upstream's own.
       const page = await client.readResource({ uri: "xaq://fake/https%3A%2F%2Fpages.example%2Fp%2F42" });
-      expect(page.contents).toEqual([{ uri: "xaq://fake/https%3A%2F%2Fpages.example%2Fp%2F42", mimeType: "text/markdown", text: "# https://pages.example/p/42" }]);
+      expect(page.contents).toEqual([{ uri: "xaq://fake/https%3A%2F%2Fpages.example%2Fp%2F42", mimeType: "text/markdown", text: wrapped("fake/resource", "# https://pages.example/p/42") }]);
       expect(up.requests.some((r) => r.body.includes('"resources/read"') && r.body.includes("https://pages.example/p/42"))).toBe(true);
 
       // Tools work alongside (the code extension's through the policy path).
@@ -193,8 +198,65 @@ describe("prompts and resources on /mcp", () => {
     expect(escape).toContain("inheritedFiles");
     expect(escape).not.toContain("ALLOWED");
 
+    // An install or update of the extension (the store's onChange) restarts its connections: a new child.
+    const pidOf = () => (ctx.broker.source("con_echo") as unknown as { pid: number | null }).pid;
+    const oldPid = pidOf();
+    expect(oldPid).toBeTypeOf("number");
+    ctx.broker.start?.(); // where the broker subscribes to the store (the harness doesn't start services)
+    await extensionStore(ctx).install(FIXTURE, { confirmThirdParty: true });
+    const until2 = Date.now() + 5000;
+    while ((pidOf() === oldPid || pidOf() === null) && Date.now() < until2) await new Promise((r) => setTimeout(r, 20));
+    expect(pidOf()).not.toBe(oldPid);
+    expect(textOf(await client.callTool({ name: "echo__echo", arguments: { text: "after update" } }))).toContain("after update");
+
+    // Killed: the child is stopped, and anything it still sent would be dropped, not delivered.
+    const before = ctx.events.feed(agent.id).events.length;
+    const src = ctx.broker.source("con_echo");
+    await ctx.broker.kill("con_echo", "test");
+    expect(ctx.broker.source("con_echo")).toBeNull();
+    expect(src).not.toBeNull();
+    expect(ctx.events.feed(agent.id).events.length).toBe(before);
+
     await ctx.broker.remove("con_echo");
     expect(existsSync(stateDir)).toBe(false);
+  });
+});
+
+describe("connections without their extension", () => {
+  it("a code connection whose extension isn't installed says so (status error), and calls say so too; the presets list skips the reachability check", async () => {
+    let checks = 0;
+    const h = harness({
+      broker: (ctx) =>
+        createBrokerService(ctx, {
+          presets: () => [],
+          reachability: {
+            lookup: async () => {
+              checks++;
+              return [{ address: "93.184.216.34", family: 4 }];
+            },
+            tailscale: async () => {
+              checks++;
+              return null;
+            },
+          },
+        }),
+    });
+    cleanup.push(() => h.dispose());
+    const { ctx } = h;
+    const cookie = await h.claim();
+    ctx.settings.update({ brokerUpstreams: true, publicUrl: "https://inbox.example.com" });
+    const t = new Date().toISOString();
+    ctx.db.run("INSERT INTO connections (id, kind, preset, slug, name, auth_type, created_at, updated_at) VALUES ('con_w', 'native_whoop', 'whoop', 'whoop', 'WHOOP', 'oauth', ?, ?)", t, t);
+    const view = await json(await h.request("/api/connections/con_w", { cookie, headers: CSRF }));
+    expect(view).toMatchObject({ status: "error", statusReason: expect.stringContaining("Needs the whoop extension") });
+    expect((await json(await h.request("/api/connections", { cookie, headers: CSRF })))[0]).toMatchObject({ status: "error" });
+    const r = await ctx.broker.source("con_w")!.callTool("x", {}, { agentId: "a", connectionId: "con_w", signal: AbortSignal.timeout(1000), auditDetail: {} });
+    expect(r).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("Needs the whoop extension") }] });
+    // Stored status untouched: installing the extension fixes it without a write.
+    expect(ctx.db.get<{ status: string }>("SELECT status FROM connections WHERE id = 'con_w'")!.status).toBe("active");
+
+    expect(await json(await h.request("/api/connections/presets", { cookie, headers: CSRF }))).toEqual([]);
+    expect(checks).toBe(0);
   });
 });
 
@@ -221,7 +283,7 @@ describe("passthrough names and URIs", () => {
         listPrompts: async () => [{ name: "ok" }, { name: "bad name" }, { name: "x".repeat(200) }],
         getPrompt: async () => ({
           messages: [
-            { role: "user", content: { type: "text", text: `key ${secret}` } },
+            { role: "user", content: { type: "text", text: `key ${secret} \u001b[31mred\u001b[0m hid\u200bden` } },
             { role: "user", content: { type: "resource", resource: { uri: "doc://1", text: `again ${secret}` } } },
             { role: "user", content: { type: "image", data: "A".repeat(8 * 1024 * 1024), mimeType: "image/png" } },
           ],
@@ -247,11 +309,15 @@ describe("passthrough names and URIs", () => {
     const r = await pass.getPrompt("agt", "acme__ok", {}, signal);
     expect(JSON.stringify(r)).not.toContain(secret);
     expect(r.messages).toHaveLength(2);
+    // Cleaned like tool output (ANSI, invisible characters); a prompt's own text isn't wrapped, embedded resource text is.
+    expect(r.messages[0]!.content).toEqual({ type: "text", text: "key [redacted] red hidden" });
+    expect((r.messages[1]!.content as unknown as { resource: { text: string } }).resource.text).toMatch(/^<tool_output source="acme\/ok" nonce="[^"]+" untrusted>\nagain \[redacted\]\n<\/tool_output>$/);
     expect(r.messages[1]!.content).toMatchObject({ type: "resource", resource: { uri: "xaq://acme/doc%3A%2F%2F1" } });
     const read = await pass.readResource("agt", exposedResourceUri("acme", "doc://2"), signal);
     expect(JSON.stringify(read)).not.toContain(secret);
     expect(read.contents.map((c) => c.uri)).toEqual(["xaq://acme/doc%3A%2F%2F2", "xaq://acme/doc%3A%2F%2F2"]);
     expect(read.contents[1]).toMatchObject({ text: expect.stringContaining("left out a binary resource") });
+    expect((read.contents[0] as { text: string }).text).toMatch(/^<tool_output source="acme\/resource" nonce="[^"]+" untrusted>\nsecret \[redacted\]\n<\/tool_output>$/);
     expect(audits).toHaveLength(2);
   });
 });

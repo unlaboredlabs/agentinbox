@@ -12,6 +12,7 @@
 
 import { Client, ProtocolError, SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import { z } from "zod";
+import { untilAborted } from "../../broker/credentials/refresher.ts";
 import { scrubText } from "../../broker/credentials/scrub.ts";
 import {
   type PromptDef,
@@ -28,7 +29,7 @@ import {
 } from "../../broker/types.ts";
 import { toDef, toResult } from "../../broker/upstream/source.ts";
 import { errorMessage } from "../../util/errors.ts";
-import { childArgs, childEnv, ensureStateDir, entryPath, XAQ_EXT_PROTOCOL } from "./spawn.ts";
+import { childArgs, childEnv, codeExtensionNodeProblem, ensureStateDir, entryPath, XAQ_EXT_PROTOCOL } from "./spawn.ts";
 import { ChildTransport } from "./transport.ts";
 import { type CodeManifest, codeManifestOf, type CodeSourceDeps, DEFAULT_LIMITS, type HostLimits, type InstalledExtension } from "./types.ts";
 
@@ -192,6 +193,9 @@ export class CodeToolSource implements ToolSource {
 
   private async spawnChild(): Promise<Live> {
     if (this.ext.kind !== "code" || !this.manifest) this.refuse(`${this.ext.name} isn't a code extension xaq can run`);
+    // Node releases with known permission-model bypasses never run extension code (spawn.ts lists them).
+    const nodeProblem = codeExtensionNodeProblem(this.deps.nodeVersion);
+    if (nodeProblem) this.refuse(nodeProblem);
     // Re-checked before every start: files changed since install never run.
     let intact = false;
     try {
@@ -228,11 +232,20 @@ export class CodeToolSource implements ToolSource {
     // No client capabilities: the extension can't ask for sampling, elicitation or roots.
     const client = new Client({ name: "xaq", version: XAQ_EXT_PROTOCOL }, { capabilities: {}, versionNegotiation: { mode: "legacy" } });
     this.installHostHandlers(client);
+    // The whole start (spawn, initialize, initialized) has one deadline: a child that dies or stalls at any point of
+    // the handshake fails the start instead of leaving it pending.
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new SourceError("timeout", `The ${this.ext.name} extension didn't start within ${Math.round(l.startTimeoutMs / 1000)} s`)), l.startTimeoutMs);
+    });
     try {
-      await client.connect(transport, { timeout: l.startTimeoutMs, signal: AbortSignal.timeout(l.startTimeoutMs) });
+      await Promise.race([client.connect(transport, { timeout: l.startTimeoutMs, signal: AbortSignal.timeout(l.startTimeoutMs) }), deadline]);
     } catch (err) {
+      transport.kill();
       await Promise.allSettled([transport.close(), client.close()]);
       throw err;
+    } finally {
+      clearTimeout(timer);
     }
     return { client, transport, startedAt: Date.now() };
   }
@@ -286,7 +299,11 @@ export class CodeToolSource implements ToolSource {
     this.live = null;
     const starting = this.starting;
     if (live) await this.stop(live);
-    else if (starting) await starting.catch(() => {});
+    else if (starting) {
+      // Still starting: stop that child now (it may be wedged mid-handshake), then give the start a bounded moment.
+      this.lastTransport?.kill();
+      await Promise.race([starting.catch(() => {}), new Promise((r) => setTimeout(r, this.limits.killAfterMs).unref())]);
+    }
   }
 
   private async stop(live: Live): Promise<void> {
@@ -363,7 +380,8 @@ export class CodeToolSource implements ToolSource {
     }
     this.inflight++;
     try {
-      const live = await this.ensure();
+      // A start that takes its time never holds the caller past its own signal (or its slot past that).
+      const live = await untilAborted(this.ensure(), signal);
       return await op(live.client);
     } catch (err) {
       throw this.mapError(err, signal, timeout);

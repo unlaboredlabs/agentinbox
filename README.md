@@ -12,12 +12,12 @@ server, Gmail and Google Calendar) and gives each agent a single MCP endpoint wi
 npx xaq-cli
 ```
 
-Open the link it prints and pick what to connect first: Notion, WHOOP, T3 Code, another MCP server, or Gmail and
-Calendar.
+Open the link it prints and pick what to connect first: Notion, T3 Code, another MCP server, or Gmail and
+Calendar. WHOOP is an extension: `npx xaq-cli ext add whoop`, then add it like any other connection.
 Only Gmail and Calendar need a Google Cloud project; everything else is a few clicks. The console then connects your
-first agent. Requires Node.js 22.13 or newer.
+first agent. Requires Node.js 22.13 or newer (code extensions such as WHOOP need 22.23.2, 24.18.1 or newer).
 
-From the terminal on the same machine: `npx xaq-cli connections add notion` (or `whoop`, `t3code --url
+From the terminal on the same machine: `npx xaq-cli connections add notion` (or an installed extension such as `whoop`, `t3code --url
 http://<your T3 server>:3773`, or an MCP server URL),
 and `npx xaq-cli import --from hermes` (also `claude-code`, `cursor`, `codex`) to move an agent's existing MCP
 servers behind the broker. Details: [Connections](docs/reference.md#connections-mcp-broker).
@@ -26,6 +26,15 @@ For Gmail, Google Calendar is supported too (optional). It needs the Calendar AP
 Calendar scopes on the consent screen, Calendar added to each account, and `calendar.read` (and, to make changes,
 `calendar.write`) on the agent's grant. The console's setup covers all of it; existing installs use Overview → "Add
 Google Calendar". Details: [docs/calendar.md](docs/calendar.md).
+
+## Extensions
+
+Integrations are extensions: `npx xaq-cli ext add notion` installs one from the official
+[xaq-extensions](https://github.com/wynn-dev/xaq-extensions) registry, pinned to a commit and an integrity hash, and
+`ext list`, `ext update` (shows the change, asks first; nothing updates on its own) and `ext remove` manage them, as
+does the console's Extensions page. A GitHub URL, another git URL or a local directory works too, as a third-party
+extension, after a warning: a `code` extension runs on your machine with network access. Node's permission model
+limits its files, child processes and workers, not its network. Details: [Extensions](docs/reference.md#extensions).
 
 ![Overview](docs/screenshots/overview.png)
 

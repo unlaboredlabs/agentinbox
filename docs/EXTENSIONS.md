@@ -38,7 +38,7 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
   // kind "code":
   "code": {
     "entry": "dist/server.mjs",     // one self-contained ESM file: no node_modules, no install scripts, ever
-    "node": ">=22.13",
+    "node": ">=22.23.2",            // shown; the host enforces its own floor for code extensions (Sandbox limits)
     "auth": {                       // OAuth is done by xaq core; the extension only ever gets access tokens
       "type": "user_app",           // or "none"
       "authorizeUrl": "…", "tokenUrl": "…", "scopes": ["…"],
@@ -99,12 +99,25 @@ that talks to the child.
 
 ## The code-extension host
 
-- **One child per connection:** `process.execPath --permission --allow-fs-read=<installDir> --allow-fs-read=<stateDir> --allow-fs-write=<stateDir> <installDir>/<entry>`.
+- **One child per connection:** `process.execPath --permission --no-experimental-sqlite --import <signal preload> --allow-fs-read=<installDir> --allow-fs-read=<stateDir> --allow-fs-write=<stateDir> [--allow-net] <installDir>/<entry>`.
   - *Clarified (B3):* one flag per path. Node 22.13.0 and 24.22 both read the comma form
     (`--allow-fs-read=a,b`) as one literal path: on 22.13 the child can't even load its entry. A test pins the argv.
-  - No `--allow-child-process`, `--allow-worker`, `--allow-addons` or `--allow-wasi`. Without them, both versions
-    refuse `child_process`, `worker_threads`, WASI, `process.dlopen`, `process.binding` and the inspector, and
-    symlinks, hard links and `..` out of the allowed paths.
+  - No `--allow-child-process`, `--allow-worker`, `--allow-addons` or `--allow-wasi`. Without them, Node refuses
+    `child_process`, `worker_threads`, WASI, `process.dlopen`, `process.binding` and the inspector, and symlinks,
+    hard links and `..` out of the allowed paths.
+  - *Clarified (B3, from the security review):*
+    - `--no-experimental-sqlite`: `node:sqlite` ignores the permission model. It opens, ATTACHes and `VACUUM INTO`s
+      any path, xaq's own DB included. With the flag the module doesn't exist (`import` fails and
+      `getBuiltinModule` returns undefined).
+    - The signal preload is a `data:` URL, so it needs no file-system allow. It pins `process.kill`, `_kill`,
+      `_debugProcess` and `_debugEnd` to throwers (non-writable, non-configurable; `getBuiltinModule("node:process")`
+      is the same object), so the child can't SIGUSR1 xaq into opening its inspector, nor kill xaq or other
+      processes of the same user. It also ignores SIGUSR1 itself. xaq ignores SIGUSR1 too (`ignoreInspectorSignal`
+      at startup).
+    - `--allow-net` is added only on a Node that has it. From 25, `--permission` gates the network too: on 26.12.0,
+      fetch fails with ERR_ACCESS_DENIED without it. On 22.x and 24.x the flag doesn't exist and is fatal. The
+      contract leaves the network open, so the child's network is the same on every version.
+    - Verified on Node 22.13.0, 22.23.3, 24.22.0 and 26.12.0.
   - `cwd` is `<stateDir>`, stdio is pipes only, `detached: false`, and no other fds are passed (a test checks that
     no regular file xaq holds open, such as the DB, reaches the child).
 - **Environment, minimal:** only `XAQ_EXT_NAME`, `XAQ_EXT_CONNECTION_ID`, `XAQ_EXT_STATE_DIR`, `XAQ_EXT_PROTOCOL=1`,
@@ -116,6 +129,18 @@ that talks to the child.
 - **Sandbox limits** (documented in the README and the warning): Node's permission model restricts the file system,
   child processes, workers and addons. It does **not** restrict the network. It's a guard against accidents and
   sloppy code, not a hostile-code jail, which is why third-party code extensions get the warning.
+  - *Clarified (B3):*
+    - **Signals** aren't part of the permission model. They're blocked only by the preload above, from JavaScript.
+      Only OS-level isolation (a separate user, a container) closes this fully.
+    - **`node:sqlite`** is disabled in the child, because it would bypass the file-system rules.
+    - **Node floor for code extensions:** earlier releases have known permission-model bypasses, so code
+      extensions run only on Node ≥ 22.23.2, ≥ 24.18.1 or ≥ 26.5.1, the July 29, 2026 security releases. Those fix
+      CVE-2026-58043, where path matching over-granted file-system access. Earlier fixes include CVE-2025-55130
+      (symlinks), CVE-2025-55132 (`futimes`), CVE-2026-21715 and -21716, and CVE-2026-48617 and -48935. 22.13.0 also
+      has CVE-2025-23083 (`module.register` plus a diagnostics_channel worker). Lines 23 and 25 are end of life and
+      refused. Below the floor, the connection says "Code extensions need Node ≥ X (xaq is running on Y). Update Node
+      and restart xaq." and nothing is spawned.
+    - xaq itself still runs on ≥ 22.13: remote extensions and everything else work there.
 - **Protocol:** standard MCP over stdio, with xaq as the client. Extension-to-host custom JSON-RPC:
   - request `xaq/credentials/get`, params `{}`, returns `{ accessToken, expiresAt }` for **this connection only**. xaq
     refreshes it with its single-flight refresher. An error means needs-reauth.
@@ -164,9 +189,13 @@ that talks to the child.
     a client expands it as usual and the URI decodes back to the upstream's own URI. A variable's value reaches the
     upstream percent-decoded.
   - `prompts/get` and `resources/read` are routed by slug and audited like a read tool call (actions `prompts/get` and
-    `resources/read`, target the connection). The lists aren't audited, like `tools/list`. The connection's secrets
-    are scrubbed from the results. `uri`s inside them, such as an embedded resource, are rewritten to the `xaq://`
-    form, and binaries over 5 MB are left out.
+    `resources/read`, target the connection). The lists aren't audited, like `tools/list`.
+  - Results are cleaned like tool output: ANSI and control characters and invisible characters are removed, the
+    connection's secrets scrubbed, and xaq's delimiters escaped. `uri`s inside them, such as an embedded resource,
+    are rewritten to the `xaq://` form, and binaries over 5 MB are left out.
+  - Resource text, from `resources/read` or a resource embedded in a prompt, is wrapped as tool output is, in
+    `<tool_output source="<slug>/…" nonce="…" untrusted>`. Prompt messages aren't wrapped: a prompt is instructions
+    the user chose to send, and wrapping would defeat it.
   - The `/mcp` server declares `prompts` and `resources` only for an agent with at least one connection grant. Each
     list asks every granted connection in parallel; one that fails or takes longer than 10 s is left out of that
     answer.

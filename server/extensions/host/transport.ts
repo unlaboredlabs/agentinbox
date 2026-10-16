@@ -35,6 +35,10 @@ export class ChildTransport implements Transport {
   private readonly stderrRing: string[] = [];
   /** Why we killed it (message too large, protocol garbage), for the crash report. */
   private killReason: string | null = null;
+  /** The child exited (or never spawned). */
+  private gone = false;
+  /** close() or kill() was called: nothing more is sent, and a start() not yet run refuses. */
+  private closing = false;
 
   constructor(private readonly o: ChildTransportOptions) {}
 
@@ -49,6 +53,7 @@ export class ChildTransport implements Transport {
 
   start(): Promise<void> {
     if (this.child) throw new Error("ChildTransport already started");
+    if (this.closing) return Promise.reject(new Error("The extension was stopped before it started"));
     return new Promise((resolveStart, rejectStart) => {
       const child = spawn(this.o.command, this.o.args, {
         cwd: this.o.cwd,
@@ -62,11 +67,17 @@ export class ChildTransport implements Transport {
       let started = false;
       this.exited = new Promise((done) => {
         child.once("exit", (code, signal) => {
+          this.gone = true;
+          // Any write still waiting for `drain` fails now (its `close` listener).
+          child.stdin?.destroy();
           this.o.onExit?.({ code, signal, reason: this.killReason });
           done();
         });
         child.once("error", (err) => {
-          if (!started) done();
+          if (!started) {
+            this.gone = true;
+            done();
+          }
           this.onerror?.(err);
         });
       });
@@ -144,17 +155,54 @@ export class ChildTransport implements Transport {
     }
   }
 
+  /**
+   * Writes one message. Rejects at once when the child is gone, and when stdin closes or errors before the write
+   * drains (a child that exits right after a response must never leave a send pending: EPIPE emits no `drain`).
+   */
   send(message: JSONRPCMessage): Promise<void> {
     return new Promise((resolveSend, rejectSend) => {
       const stdin = this.child?.stdin;
-      if (!stdin || stdin.destroyed || !stdin.writable) return rejectSend(new Error("The extension isn't running"));
-      if (stdin.write(serializeMessage(message))) resolveSend();
-      else stdin.once("drain", () => resolveSend());
+      if (this.gone || this.closing || !stdin || stdin.destroyed || !stdin.writable || stdin.writableEnded) {
+        return rejectSend(new Error("The extension isn't running"));
+      }
+      let settled = false;
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        stdin.off("drain", onDrain);
+        stdin.off("close", onClose);
+        stdin.off("error", onError);
+        if (err) rejectSend(err);
+        else resolveSend();
+      };
+      const onDrain = () => settle();
+      const onClose = () => settle(new Error("The extension stopped reading its input"));
+      const onError = (err: Error) => settle(err);
+      stdin.once("close", onClose);
+      stdin.once("error", onError);
+      let flushed: boolean;
+      try {
+        flushed = stdin.write(serializeMessage(message), (err) => {
+          if (err) settle(err);
+        });
+      } catch (err) {
+        return settle(err as Error);
+      }
+      if (flushed) settle();
+      else stdin.once("drain", onDrain);
     });
+  }
+
+  /** SIGKILL now (a child that is still starting when its source closes). */
+  kill(): void {
+    this.closing = true;
+    const child = this.child;
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
 
   /** Ends stdin, sends SIGTERM, then SIGKILL after killAfterMs; resolves once the child has exited. */
   async close(): Promise<void> {
+    this.closing = true;
     const child = this.child;
     if (!child) return;
     if (child.exitCode === null && child.signalCode === null) {

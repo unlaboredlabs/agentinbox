@@ -6,18 +6,19 @@
 //   the URI a client expands decodes back to the upstream's own URI;
 // - prompts/get and resources/read are routed to the connection by slug and un-namespaced.
 // Both are "read" class: an agent sees them with any grant (any level) on an enabled connection. Lists aren't audited
-// (like tools/list); prompts/get and resources/read are, like a read tool call. Results have this connection's
-// secrets scrubbed, as tool output does.
+// (like tools/list); prompts/get and resources/read are, like a read tool call. Results are cleaned as tool output is
+// (ANSI, invisible characters, this connection's secrets, xaq's delimiters), and resource text is wrapped as
+// untrusted tool output (wrapResourceText).
 
 import type { AccessLevel } from "../../shared/types.ts";
 import type { AuditInput } from "../audit.ts";
 import type { Db } from "../db/index.ts";
-import { cleanLine } from "../mail/content.ts";
+import { cleanLine, escapeDelimiters, stripInvisible } from "../mail/content.ts";
 import { errorMessage } from "../util/errors.ts";
 import type { Logger } from "../util/log.ts";
 import { connectionGrantsOf } from "./access.ts";
 import { scrubText } from "./credentials/scrub.ts";
-import { connectionSecrets, makeScrubber, MAX_BINARY_BYTES, type Scrubber } from "./policy/output.ts";
+import { connectionSecrets, makeScrubber, MAX_BINARY_BYTES, newNonce, type Scrubber, stripAnsi } from "./policy/output.ts";
 import { type CredentialStore, type PromptDef, type PromptResult, type ResourceDef, type ResourceReadResult, type ResourceTemplateDef, SourceError, type ToolSource } from "./types.ts";
 
 export const XAQ_RESOURCE_SCHEME = "xaq:";
@@ -154,19 +155,44 @@ function cleanTemplate(slug: string, t: ResourceTemplateDef): ResourceTemplateDe
 
 const BINARY_KEYS = new Set(["data", "blob"]);
 
+/** Like tool output (server/broker/policy/output.ts): ANSI and controls, invisible characters, secrets, delimiters. */
+function cleanText(text: string, scrubber: Scrubber): string {
+  return escapeDelimiters(scrubber.scrub(stripInvisible(stripAnsi(text).text).text).text);
+}
+
 /**
- * Every string scrubbed of this connection's secrets (except base64 payloads), upstream resource URIs rewritten to
- * their xaq:// form, binaries over MAX_BINARY_BYTES left out.
+ * Resource text is third-party data, wrapped the way tool output is (one `<tool_output … untrusted>` per text, a fresh
+ * nonce per response). Prompt messages aren't: a prompt is instructions the user picked to send, and wrapping it would
+ * defeat it; they're cleaned all the same.
  */
-function scrubDeep(value: unknown, slug: string, scrubber: Scrubber, key = ""): unknown {
-  if (typeof value === "string") return BINARY_KEYS.has(key) ? value : scrubber.scrub(value).text;
-  if (Array.isArray(value)) return value.map((v) => scrubDeep(v, slug, scrubber));
+function wrapResourceText(text: string, source: string, nonce: string): string {
+  return `<tool_output source="${source.replace(/["<>&]/g, "")}" nonce="${nonce}" untrusted>\n${text}\n</tool_output>`;
+}
+
+interface Clean {
+  slug: string;
+  scrubber: Scrubber;
+  /** Wraps resource text as untrusted (wrapResourceText). */
+  wrap: (text: string) => string;
+}
+
+/**
+ * Every string cleaned (cleanText; base64 payloads untouched), upstream resource URIs rewritten to their xaq:// form.
+ * `inResource`: the value is a resource's contents (resources/read, or an embedded `resource` block), whose `text` is
+ * wrapped as untrusted.
+ */
+function scrubDeep(value: unknown, c: Clean, inResource: boolean, key = ""): unknown {
+  if (typeof value === "string") {
+    if (BINARY_KEYS.has(key)) return value;
+    const t = cleanText(value, c.scrubber);
+    return inResource && key === "text" ? c.wrap(t) : t;
+  }
+  if (Array.isArray(value)) return value.map((v) => scrubDeep(v, c, inResource));
   if (!value || typeof value !== "object") return value;
-  const o = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(o)) {
-    if (k === "uri" && typeof v === "string") out[k] = exposedResourceUri(slug, v);
-    else out[k] = scrubDeep(v, slug, scrubber, k);
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (k === "uri" && typeof v === "string") out[k] = exposedResourceUri(c.slug, v);
+    else out[k] = scrubDeep(v, c, inResource || k === "resource", k);
   }
   return out;
 }
@@ -245,9 +271,10 @@ export function createPassthrough(deps: PassthroughDeps): BrokerPassthrough {
       const scrubber = makeScrubber(connectionSecrets(deps.credentials, g.connectionId));
       return audited(agentId, "prompts/get", g, { prompt: parts.name.slice(0, 128) }, async () => {
         const r = await g.source.prompts.getPrompt(parts.name, args, signal);
+        const nonce = newNonce();
         const messages = (Array.isArray(r?.messages) ? r.messages : []).filter((m) => !(m?.content && (tooBig(m.content.data) || tooBig((m.content.resource as { blob?: unknown } | undefined)?.blob))));
         const description = text(r?.description, 2000);
-        return { ...(description ? { description } : {}), messages: scrubDeep(messages, g.slug, scrubber) as PromptResult["messages"] };
+        return { ...(description ? { description } : {}), messages: scrubDeep(messages, { slug: g.slug, scrubber, wrap: (t) => wrapResourceText(t, `${g.slug}/${parts.name}`, nonce) }, false) as PromptResult["messages"] };
       });
     },
 
@@ -258,10 +285,11 @@ export function createPassthrough(deps: PassthroughDeps): BrokerPassthrough {
       const scrubber = makeScrubber(connectionSecrets(deps.credentials, g.connectionId));
       return audited(agentId, "resources/read", g, { resource: scrubText(parsed.uri, [], 200) }, async () => {
         const r = await g.source.prompts.readResource(parsed.uri, signal);
+        const nonce = newNonce();
         const contents = (Array.isArray(r?.contents) ? r.contents : []).map((c) =>
           "blob" in c && tooBig(c.blob) ? { uri: c.uri, mimeType: "text/plain", text: `[xaq left out a binary resource over ${MAX_BINARY_BYTES / 1024 / 1024} MB]` } : c,
         );
-        return { contents: scrubDeep(contents, g.slug, scrubber) as ResourceReadResult["contents"] };
+        return { contents: scrubDeep(contents, { slug: g.slug, scrubber, wrap: (t) => wrapResourceText(t, `${g.slug}/resource`, nonce) }, true) as ResourceReadResult["contents"] };
       });
     },
   };

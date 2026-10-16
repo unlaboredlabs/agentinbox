@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRightIcon, CalendarIcon, GlobeIcon, HeartPulseIcon, NotebookIcon, PlusIcon } from "lucide-react";
+import { ArrowRightIcon, CalendarIcon, GlobeIcon, NotebookIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { ChoiceCards } from "@/components/choice-cards";
 import { openAddConnection } from "@/components/connections/add-connection";
@@ -13,7 +13,6 @@ import { StepCard, StepFooter } from "./wizard-shell";
 
 const ICONS: Record<FirstChoice, React.ComponentType<{ className?: string }>> = {
   notion: NotebookIcon,
-  whoop: HeartPulseIcon,
   custom: GlobeIcon,
   google: CalendarIcon,
 };

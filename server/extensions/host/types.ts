@@ -1,31 +1,13 @@
-// What the code-extension host needs from the rest of the extensions system (docs/EXTENSIONS.md).
-// InstalledExtension and ExtensionStore.verify are B1's (server/extensions/store.ts); until that lands they're
-// mirrored here, shape for shape. Switch these to `import type` from the store when it merges.
+// What the code-extension host needs from the rest of the extensions system (docs/EXTENSIONS.md): the store's
+// InstalledExtension and its integrity re-check (B1, server/extensions/store.ts).
 
 import type { IntegrationEvent, NativeSourceDeps } from "../../broker/types.ts";
+import type { ExtensionStore } from "../store.ts";
 
-/** One installed extension, as the store records it (B1). */
-export interface InstalledExtension {
-  name: string;
-  kind: "remote" | "code";
-  version: string;
-  source: string;
-  /** The resolved commit; null for a local path. */
-  commit: string | null;
-  /** `sha256-<base64>` over the canonical listing (server/extensions/integrity.ts). */
-  integrity: string;
-  official: boolean;
-  /** `<dataDir>/extensions/<name>/<integrity-hex-prefix>/`, read-only. */
-  installDir: string;
-  /** The parsed xaq-extension.json (validated by server/extensions/manifest.ts). */
-  manifest: unknown;
-  installedAt: string;
-}
+export type { InstalledExtension } from "../store.ts";
 
-/** The store's integrity re-check (B1): recomputes the install's integrity and compares it with the recorded one. */
-export interface ExtensionVerifier {
-  verify(name: string): boolean;
-}
+/** The store's integrity re-check: recomputes the install's integrity and compares it with the recorded one. */
+export type ExtensionVerifier = Pick<ExtensionStore, "verify">;
 
 /** What createCodeSource needs, beyond the native-source deps. */
 export interface CodeSourceDeps extends NativeSourceDeps {
@@ -40,6 +22,8 @@ export interface CodeSourceDeps extends NativeSourceDeps {
   limits?: Partial<HostLimits>;
   /** Tests: the Node binary (default process.execPath). */
   execPath?: string;
+  /** Tests: the Node version the floor is checked against (default process.versions.node, which runs the child). */
+  nodeVersion?: string;
 }
 
 export interface HostLimits {

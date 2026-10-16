@@ -11,6 +11,13 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const STATE = process.env.XAQ_EXT_STATE_DIR;
 let exitOnStdinEnd = true;
+/** Startup misbehaviour for the lifecycle tests: a `mode` file in the state dir (die-after-init, die-before-init, hang-init). */
+let MODE = "";
+try {
+  MODE = fs.readFileSync(path.join(STATE, "mode"), "utf8").trim();
+} catch {
+  // Normal.
+}
 
 // ───────────── JSON-RPC over stdio ─────────────
 
@@ -139,6 +146,26 @@ async function escape(p) {
   out.addon = attempt(() => process.dlopen({ exports: {} }, path.join(STATE, "x.node")));
   out.processBinding = attempt(() => process.binding("fs"));
   out.inspector = attempt(() => require("node:inspector").open(0));
+  // node:sqlite ignores the permission model: it must not be loadable at all.
+  out.sqliteImport = await attemptAsync(async () => typeof (await import("node:sqlite")).DatabaseSync);
+  out.sqliteBuiltin = attempt(() => {
+    const m = process.getBuiltinModule("node:sqlite");
+    if (!m) throw Object.assign(new Error("undefined"), { code: "UNDEFINED" });
+    return new m.DatabaseSync(p.db).prepare("select 1").get();
+  });
+  out.sqliteOpenDb = attempt(() => new (require("node:sqlite").DatabaseSync)(p.db).prepare("select count(*) from sqlite_master").get());
+  out.sqliteAttach = attempt(() => new (require("node:sqlite").DatabaseSync)(":memory:").exec(`attach '${p.db}' as x`));
+  out.sqliteCreateOutside = attempt(() => new (require("node:sqlite").DatabaseSync)(path.join(p.dataDir, "created.db")).exec("create table t(x)"));
+  // Signals aren't in the permission model: the preload pins every route to a thrower.
+  out.signalParentUsr1 = attempt(() => process.kill(process.ppid, "SIGUSR1"));
+  out.killParent = attempt(() => process.kill(process.ppid, 0));
+  out.underscoreKillParent = attempt(() => process._kill(process.ppid, 0));
+  out.debugProcessParent = attempt(() => process._debugProcess(process.ppid));
+  out.builtinProcessKill = attempt(() => process.getBuiltinModule("node:process").kill(process.ppid, 0));
+  out.unpinKill = attempt(() => {
+    Object.defineProperty(process, "kill", { value: () => "free" });
+    return process.kill(process.ppid, 0);
+  });
   out.envSecrets = attempt(() => {
     const leaked = Object.keys(process.env).filter((k) => !/^XAQ_EXT_(NAME|CONNECTION_ID|STATE_DIR|PROTOCOL)$/.test(k) && k !== "TZ" && k !== "LANG");
     if (leaked.length) return leaked.join(",");
@@ -171,6 +198,12 @@ async function handle(msg) {
   const { id, method, params = {} } = msg;
   switch (method) {
     case "initialize":
+      if (MODE === "die-before-init") process.exit(3);
+      if (MODE === "hang-init") return new Promise(() => {});
+      if (MODE === "die-after-init") {
+        send({ id, result: { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "echo", version: "1.0.0" } } });
+        process.exit(0);
+      }
       return {
         protocolVersion: params.protocolVersion,
         capabilities: { tools: {}, prompts: {}, resources: {} },
