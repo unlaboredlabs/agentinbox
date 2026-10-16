@@ -4,7 +4,7 @@
 import type { Db } from "../../db/index.ts";
 import type { SettingsStore } from "../../settings.ts";
 import type { BrokerPolicy, CallDecision, RegisteredTool } from "../types.ts";
-import { atPath } from "./canonical.ts";
+import { atPointer } from "./canonical.ts";
 import { reconnectMessage } from "./errors.ts";
 import { brokerLimits, connectionInfo, rulesAllow, rulesFor } from "./store.ts";
 
@@ -83,7 +83,7 @@ export function createBrokerPolicy(deps: { db: Db; settings: SettingsStore }): B
         const capped = capExceeded(agentId);
         if (capped) return deny("rate_limit", capped);
         if (tool.level === "full") return { kind: "allow" };
-        const rule = rulesAllow(rulesFor(db, agentId, tool.connectionId, tool.def.name), (path) => atPath(args, path));
+        const rule = rulesAllow(rulesFor(db, agentId, tool.connectionId, tool.def.name), (pointer) => atPointer(args, pointer));
         return rule ? { kind: "allow", ruleId: rule.id } : { kind: "ask" };
       }
       default:

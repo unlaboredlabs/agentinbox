@@ -1,4 +1,5 @@
-// Canonical argument bytes (RFC 8785 JCS) and argument-path helpers for mcp.call approvals and allow rules.
+// Canonical argument bytes (RFC 8785 JCS) and JSON Pointer (RFC 6901) helpers for mcp.call approvals and allow
+// rules. Target paths are always JSON Pointers: dot paths can't tell `{"a.b": x}` from `{a: {b: y}}`.
 
 /**
  * RFC 8785 canonical JSON: object keys sorted by UTF-16 code units, no whitespace, ES number and string
@@ -27,14 +28,17 @@ export function canonicalJson(value: unknown): string {
   }
 }
 
-/**
- * The value at a dot-separated argument path (ToolClass.targetPath, approval_rules.target_path), e.g.
- * `parent.page_id` or `page_ids`; numeric segments index arrays. undefined when the path doesn't exist.
- */
-export function atPath(doc: unknown, path: string): unknown {
-  if (!path) return undefined;
+/** A JSON Pointer naming a value inside the arguments: "/" followed by segments. The root ("") isn't a target. */
+export const isPointer = (p: unknown): p is string => typeof p === "string" && p.startsWith("/") && p.length <= 512 && !/~[^01]|~$/.test(p);
+
+const escapeSegment = (s: string) => s.replace(/~/g, "~0").replace(/\//g, "~1");
+
+/** The value at a JSON Pointer (RFC 6901), or undefined when the path doesn't exist. Own properties only. */
+export function atPointer(doc: unknown, pointer: string): unknown {
+  if (!isPointer(pointer)) return undefined;
   let cur: unknown = doc;
-  for (const seg of path.split(".")) {
+  for (const raw of pointer.slice(1).split("/")) {
+    const seg = raw.replace(/~1/g, "/").replace(/~0/g, "~");
     if (Array.isArray(cur)) {
       if (!/^(0|[1-9]\d*)$/.test(seg)) return undefined;
       cur = cur[Number(seg)];
@@ -47,7 +51,7 @@ export function atPath(doc: unknown, path: string): unknown {
   return cur;
 }
 
-/** Dot paths of every scalar leaf and array in the arguments, for "always allow for this argument". Capped. */
+/** Pointers to every scalar leaf and array in the arguments, for "always allow for this argument". Capped. */
 export function argumentPaths(args: unknown, max = 100): string[] {
   const out: string[] = [];
   const walk = (v: unknown, p: string) => {
@@ -57,7 +61,7 @@ export function argumentPaths(args: unknown, max = 100): string[] {
       return;
     }
     if (v && typeof v === "object") {
-      for (const k of Object.keys(v).sort()) if (k && !k.includes(".")) walk((v as Record<string, unknown>)[k], p ? `${p}.${k}` : k);
+      for (const k of Object.keys(v).sort()) walk((v as Record<string, unknown>)[k], `${p}/${escapeSegment(k)}`);
       return;
     }
     if (p) out.push(p);

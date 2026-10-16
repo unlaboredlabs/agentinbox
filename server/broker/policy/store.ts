@@ -62,10 +62,34 @@ const toRule = (r: RuleRow): ApprovalRule => ({
   createdAt: r.created_at,
 });
 
+/**
+ * The rules that may apply to a call. Defensive on top of the deletes on grant and tool removal
+ * (deleteRulesForGrant / deleteRulesForTool): a rule only counts when it is at least as new as the agent's
+ * current grant and the tool's current row, so a re-granted connection or a tool that comes back never
+ * inherits old "always allow" rules even if a delete was missed.
+ */
 export function rulesFor(db: Db, agentId: string, connectionId: string, tool: string): ApprovalRule[] {
   return db
-    .all<RuleRow>("SELECT * FROM approval_rules WHERE agent_id = ? AND connection_id = ? AND tool = ? ORDER BY created_at, rowid", agentId, connectionId, tool)
+    .all<RuleRow>(
+      `SELECT r.* FROM approval_rules r
+       JOIN connection_grants g ON g.agent_id = r.agent_id AND g.connection_id = r.connection_id AND r.created_at >= g.created_at
+       JOIN upstream_tools t ON t.connection_id = r.connection_id AND t.name = r.tool AND r.created_at >= t.first_seen_at
+       WHERE r.agent_id = ? AND r.connection_id = ? AND r.tool = ? ORDER BY r.created_at, r.rowid`,
+      agentId,
+      connectionId,
+      tool,
+    )
     .map(toRule);
+}
+
+/** The agent lost its grant on the connection: its rules there go with it. */
+export function deleteRulesForGrant(db: Db, agentId: string, connectionId: string): number {
+  return db.run("DELETE FROM approval_rules WHERE agent_id = ? AND connection_id = ?", agentId, connectionId).changes;
+}
+
+/** The tool was removed upstream: a tool that comes back under the name starts with no rules. */
+export function deleteRulesForTool(db: Db, connectionId: string, tool: string): number {
+  return db.run("DELETE FROM approval_rules WHERE connection_id = ? AND tool = ?", connectionId, tool).changes;
 }
 
 export function listRules(db: Db, q: { agentId?: string; connectionId?: string } = {}): ApprovalRule[] {
@@ -121,7 +145,7 @@ export function deleteRule(db: Db, id: string): boolean {
  * cover the call when the value at their path is covered. An array value (e.g. Notion's `page_ids`) is
  * covered only when every element has a rule of its own; an empty array or a missing value isn't covered.
  */
-export function rulesAllow(rules: ApprovalRule[], targetValue: (path: string) => unknown): ApprovalRule | null {
+export function rulesAllow(rules: ApprovalRule[], targetValue: (pointer: string) => unknown): ApprovalRule | null {
   const untargeted = rules.find((r) => r.targetPath === null);
   if (untargeted) return untargeted;
   const byPath = new Map<string, ApprovalRule[]>();

@@ -1002,9 +1002,9 @@ export interface McpCallApprovalView {
   /** Email addresses and URLs found anywhere in the arguments: shown first on the card. */
   recipients: string[];
   urls: string[];
-  /** The tool's target argument (ToolClass.targetPath, dot-separated) and its value in this call, if any. */
+  /** The tool's target argument (ToolClass.targetPath, a JSON Pointer) and its value in this call, if any. */
   target: { path: string; value: unknown } | null;
-  /** Dot paths a generic tool's "always allow for this argument" may pick from. */
+  /** JSON Pointers a generic tool's "always allow for this argument" may pick from. */
   argumentPaths: string[];
   /** sha256 of the stored bytes still matches the fingerprint taken when the call was queued. */
   argsIntact: boolean;

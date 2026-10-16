@@ -10,6 +10,7 @@ import type { ContentBlock, CredentialStore, ToolResult } from "../types.ts";
 
 // CSI / OSC / other escape sequences (the ansi-regex pattern), then stray C0/C1 controls except \t \n \r.
 const ANSI =
+  // oxlint-disable-next-line no-control-regex
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 // oxlint-disable-next-line no-control-regex
 const CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
