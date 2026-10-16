@@ -10,6 +10,6 @@ export function randomToken(length = 20): string {
   return out;
 }
 
-export type IdPrefix = "acc" | "agt" | "grt" | "evt" | "whk" | "dlv" | "apr" | "par";
+export type IdPrefix = "acc" | "agt" | "grt" | "evt" | "whk" | "dlv" | "apr" | "par" | "con" | "rul";
 
 export const newId = (prefix: IdPrefix): string => `${prefix}_${randomToken(20)}`;
