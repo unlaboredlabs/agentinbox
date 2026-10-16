@@ -42,7 +42,8 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
     "auth": {                       // OAuth is done by xaq core; the extension only ever gets access tokens
       "type": "user_app",           // or "none"
       "authorizeUrl": "…", "tokenUrl": "…", "scopes": ["…"],
-      "clientIdInput": "client_id", "clientSecretInput": "client_secret"
+      "clientIdInput": "client_id", "clientSecretInput": "client_secret",
+      "refreshScope": "offline"     // optional: sent as `scope` on a refresh
     },
     "network": ["api.prod.whoop.com"],   // declared hosts: shown at install and in the warning (not enforced, see Sandbox)
     "events": ["whoop.recovery_updated"] // the event types it may emit; anything else is dropped and logged
@@ -102,7 +103,9 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   table's answer is final for those exact names.
 - **`code`:** `entry` is a relative `.mjs` or `.js` path inside the extension. `events` are `<name>.<event>`, which
   limits a name with events to 24 characters. A `user_app` auth's `clientIdInput` and `clientSecretInput` must be
-  setup inputs (validator only).
+  setup inputs (validator only). Its optional `refreshScope` (OAuth scopes separated by single spaces) passes through
+  to the preset's `auth.refreshScope` and is sent as `scope` on a refresh; without it, a refresh sends no scope.
+  WHOOP sets `"offline"`.
 - **Names:** an extension can't use one of xaq's own event prefixes as its name (`message`, `calendar`,
   `connection`, `approval`, …).
 

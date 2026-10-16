@@ -255,6 +255,24 @@ describe("presetFromManifest", () => {
     await expect(source.listTools(AbortSignal.timeout(1000))).rejects.toThrow(/can't run in this build/);
   });
 
+  it("code.auth.refreshScope: optional, checked by both, passed through to the preset's auth", () => {
+    const ext = (m: Record<string, unknown>) => ({ ...fixtureExtension("notion"), name: "whoopish", kind: "code" as const, manifest: m });
+    const withScope = patch(code(), "code.auth.refreshScope", "offline");
+    expect(schemaValid(withScope), JSON.stringify(schemaValid.errors)).toBe(true);
+    expect(validateManifest(withScope).code!.auth).toMatchObject({ type: "user_app", refreshScope: "offline" });
+    expect(presetFromManifest(ext(withScope)).auth).toMatchObject({ type: "user_app", refreshScope: "offline" });
+    expect(presetFromManifest(ext(patch(code(), "code.auth.refreshScope", "offline read:recovery"))).auth).toMatchObject({ refreshScope: "offline read:recovery" });
+    // Absent: no key at all (the refresh sends no scope).
+    expect(presetFromManifest(ext(code())).auth).not.toHaveProperty("refreshScope");
+    for (const bad of ["", "offline  read", " offline", 'off"line', ["offline"]]) {
+      const m = patch(code(), "code.auth.refreshScope", bad);
+      expect(() => validateManifest(m), JSON.stringify(bad)).toThrow(/code.auth.refreshScope/);
+      expect(schemaValid(m), JSON.stringify(bad)).toBe(false);
+    }
+    // Only user_app takes it.
+    expect(() => validateManifest(patch(code(), "code.auth", { type: "none", refreshScope: "offline" }))).toThrow(/takes no other keys/);
+  });
+
   it("refuses a manifest that isn't the installed extension's", () => {
     expect(() => presetFromManifest({ ...fixtureExtension("notion"), name: "other" })).toThrow(/installed as "other"/);
     expect(() => presetFromManifest({ ...fixtureExtension("notion"), kind: "code" })).toThrow(/installed as "code"/);

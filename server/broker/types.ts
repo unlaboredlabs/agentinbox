@@ -152,6 +152,8 @@ export type PresetAuth =
       /** Setup inputs that hold the client id / secret. */
       clientIdInput: string;
       clientSecretInput: string;
+      /** Additive (extension manifests): sent as `scope` on a refresh (WHOOP: "offline"); omitted when absent. */
+      refreshScope?: string;
     };
 
 /** A pre-made integration. Remote presets are proxied MCP servers; native ones provide their own ToolSource. FROZEN. */

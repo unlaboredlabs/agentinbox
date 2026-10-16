@@ -34,7 +34,16 @@ export type RemoteAuth =
 
 export type CodeAuth =
   | { type: "none" }
-  | { type: "user_app"; authorizeUrl: string; tokenUrl: string; scopes: string[]; clientIdInput: string; clientSecretInput: string };
+  | {
+      type: "user_app";
+      authorizeUrl: string;
+      tokenUrl: string;
+      scopes: string[];
+      clientIdInput: string;
+      clientSecretInput: string;
+      /** Sent as `scope` on a refresh (WHOOP: "offline"); omitted when absent. */
+      refreshScope?: string;
+    };
 
 export interface ManifestSetupStep extends SetupStep {
   /** Shown only when this context is present: "webhookUrl" when the internet can reach the install's webhooks. */
@@ -85,6 +94,8 @@ const TOOL_NAME_RE = /^[A-Za-z0-9_.\-/]{1,128}$/;
 const POINTER_RE = /^(\/([^~/]|~[01])*)+$/;
 const HOST_RE = /^(?=.{1,253}$)(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const EVENT_NAME_RE = /^[a-z0-9_]{1,64}$/;
+/** A space-separated OAuth scope list (RFC 6749 scope-token: no space, quote or backslash). */
+const SCOPE_LIST_RE = /^[\x21\x23-\x5b\x5d-\x7e]+( [\x21\x23-\x5b\x5d-\x7e]+)*$/;
 const ENTRY_RE = /^(?!\/)(?!.*(^|\/)\.\.?(\/|$))[A-Za-z0-9_./-]{1,200}\.(mjs|js)$/;
 /** xaq's own event prefixes (shared/types.ts): an extension that names its events can't be called like one. */
 const RESERVED_NAMES = new Set(["message", "thread", "label", "account", "sync", "calendar", "connection", "approval", "xaq"]);
@@ -303,11 +314,11 @@ function validateCode(v: unknown, name: string): NonNullable<Manifest["code"]> {
     auth: { type: "none" },
   };
   if (o.node !== undefined) code.node = str(o.node, "code.node", { max: 64, re: /^[<>=^~ 0-9.x|*-]+$/, what: 'a semver range such as ">=22.13"' });
-  const a = obj(o.auth, "code.auth", ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"], ["type"]);
+  const a = obj(o.auth, "code.auth", ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput", "refreshScope"], ["type"]);
   if (a.type === "none") {
     if (Object.keys(a).length > 1) fail("code.auth", 'of type "none" takes no other keys');
   } else if (a.type === "user_app") {
-    obj(a, "code.auth", ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"], ["authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"]);
+    obj(a, "code.auth", ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput", "refreshScope"], ["authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"]);
     code.auth = {
       type: "user_app",
       authorizeUrl: httpsUrl(a.authorizeUrl, "code.auth.authorizeUrl"),
@@ -316,6 +327,7 @@ function validateCode(v: unknown, name: string): NonNullable<Manifest["code"]> {
       clientIdInput: str(a.clientIdInput, "code.auth.clientIdInput", { max: 64, re: INPUT_KEY_RE, what: "a setup input key" }),
       clientSecretInput: str(a.clientSecretInput, "code.auth.clientSecretInput", { max: 64, re: INPUT_KEY_RE, what: "a setup input key" }),
     };
+    if (a.refreshScope !== undefined) code.auth.refreshScope = str(a.refreshScope, "code.auth.refreshScope", { max: 1000, re: SCOPE_LIST_RE, what: "OAuth scopes separated by single spaces" });
     if (code.auth.clientIdInput === code.auth.clientSecretInput) fail("code.auth", "needs different inputs for the client id and secret");
   } else {
     fail("code.auth.type", 'must be "user_app" or "none"');
@@ -474,6 +486,7 @@ export const MANIFEST_JSON_SCHEMA = {
                 scopes: { type: "array", maxItems: 50, uniqueItems: true, items: scope$ },
                 clientIdInput: stringOf(64, { pattern: INPUT_KEY_RE.source }),
                 clientSecretInput: stringOf(64, { pattern: INPUT_KEY_RE.source }),
+                refreshScope: stringOf(1000, { pattern: SCOPE_LIST_RE.source }),
               },
             },
           ],
