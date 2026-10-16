@@ -1,5 +1,5 @@
 import type { HeldToolView, ToolDiffLine } from "@shared/types";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, CheckIcon, CircleCheckIcon, NetworkIcon, PauseIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { PageHeader, QueryError, TimeAgo, ToneBadge } from "@/components/common";
@@ -12,8 +12,8 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { useNow } from "@/hooks/use-now";
-import { api } from "@/lib/api";
-import { useApiMutation } from "@/lib/mutations";
+import { toast } from "sonner";
+import { api, ApiError, toastError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -117,11 +117,22 @@ function ConnectionPage() {
 }
 
 function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId: string; connectionName: string; tool: HeldToolView }) {
-  const accept = useApiMutation({
-    mutationFn: () => api<HeldToolView[]>(`/api/connections/${encodeURIComponent(connectionId)}/held/${encodeURIComponent(t.name)}/accept`, { body: {} }),
-    invalidate: [keys.connections, keys.overview],
-    success: `${t.name} is accepted`,
-    errorTitle: "Couldn't accept the change",
+  const qc = useQueryClient();
+  const accept = useMutation({
+    // The hash of the version shown here: a tool that changed again since is refused (409), never accepted blind.
+    mutationFn: () =>
+      api<HeldToolView[]>(`/api/connections/${encodeURIComponent(connectionId)}/held/${encodeURIComponent(t.name)}/accept`, {
+        body: { candidateHash: t.candidateHash },
+      }),
+    onSuccess: () => toast.success(`${t.name} is accepted`, { description: "Agents can call it again." }),
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        toast.warning(`${t.name} changed again`, { description: "Here's its newest version. Review it before accepting." });
+      } else toastError(err, "Couldn't accept the change");
+    },
+    onSettled: () => {
+      for (const k of [keys.connections, keys.overview]) void qc.invalidateQueries({ queryKey: k });
+    },
   });
   const hidden = hasHidden(t.candidate.description, t.candidate.title, JSON.stringify(t.candidate.inputSchema));
   return (

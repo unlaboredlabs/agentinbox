@@ -5,7 +5,7 @@ import { AlertTriangleIcon, BotIcon, CheckCheckIcon, CheckIcon, LinkIcon, MailIc
 import { useState } from "react";
 import { toast } from "sonner";
 import { QueryError, TimeAgo } from "@/components/common";
-import { HiddenCharsWarning, Visible } from "@/components/hidden-chars";
+import { HiddenCharsWarning } from "@/components/hidden-chars";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,10 +51,11 @@ export function useMcpDecision(view: McpCallApprovalView, onDecided?: (res: Appr
 }
 
 /** The call to decide on: tool and connection, recipients and URLs first, then the exact arguments. */
-export function McpCallBody({ view: v, showReason = true }: { view: McpCallApprovalView; showReason?: boolean }) {
+export function McpCallBody({ view: v, showReason = true, uncapped }: { view: McpCallApprovalView; showReason?: boolean; /** The one-tap page: the whole call, no inner scroll box (nothing hides below the sticky buttons). */ uncapped?: boolean }) {
   const a = v.approval;
   const warnings = a.status === "pending" ? cardWarnings(v) : [];
   const hidden = argsHaveInvisible(a.call.args) || (!!a.reason && hasInvisible(a.reason));
+  const lines = v.pretty.split("\n").length;
   return (
     <div className="space-y-4">
       {warnings.length > 0 && (
@@ -83,7 +84,7 @@ export function McpCallBody({ view: v, showReason = true }: { view: McpCallAppro
         <span className="font-mono font-medium break-all">{a.call.tool}</span>
         <span className="text-muted-foreground">on</span>
         <span className="font-medium">{v.connection?.name ?? "a removed connection"}</span>
-        {v.tool?.title && <span className="text-muted-foreground">({escapeInvisible(v.tool.title)})</span>}
+        {v.tool?.title && <span className="text-muted-foreground">({escapeInvisible(v.tool.title, true)})</span>}
       </div>
       {showReason && a.reason && (
         <div className="flex gap-2 rounded-lg border-l-2 border-chart-1 bg-chart-1/5 px-3 py-2 text-sm">
@@ -91,7 +92,7 @@ export function McpCallBody({ view: v, showReason = true }: { view: McpCallAppro
           <div className="min-w-0">
             <div className="text-xs font-medium text-muted-foreground">Agent's reason</div>
             <p className="break-words whitespace-pre-wrap">
-              <Visible text={a.reason} />
+              {escapeInvisible(a.reason)}
             </p>
           </div>
         </div>
@@ -106,7 +107,7 @@ export function McpCallBody({ view: v, showReason = true }: { view: McpCallAppro
               <dd className="mt-1 space-y-0.5">
                 {v.recipients.map((r) => (
                   <div key={r} className="font-mono text-[13px] break-all">
-                    {escapeInvisible(r)}
+                    {escapeInvisible(r, true)}
                   </div>
                 ))}
               </dd>
@@ -120,7 +121,7 @@ export function McpCallBody({ view: v, showReason = true }: { view: McpCallAppro
               <dd className="mt-1 space-y-0.5">
                 {v.urls.map((u) => (
                   <div key={u} className="font-mono text-[13px] break-all">
-                    {escapeInvisible(u)}
+                    {escapeInvisible(u, true)}
                   </div>
                 ))}
               </dd>
@@ -129,8 +130,10 @@ export function McpCallBody({ view: v, showReason = true }: { view: McpCallAppro
         </dl>
       )}
       <div className="space-y-1">
-        <div className="text-xs font-medium text-muted-foreground">Exact arguments</div>
-        <ArgsJson text={v.pretty} />
+        <div className="text-xs font-medium text-muted-foreground">
+          Exact arguments{!uncapped && lines > 20 ? ` (${lines} lines, scroll to see all)` : ""}
+        </div>
+        <ArgsJson text={v.pretty} uncapped={uncapped} />
         <div className="truncate font-mono text-[11px] text-muted-foreground" title={a.call.argsSha256}>
           sha256 {a.call.argsSha256}
         </div>
@@ -140,11 +143,11 @@ export function McpCallBody({ view: v, showReason = true }: { view: McpCallAppro
 }
 
 /** Pretty JSON, wrapped (never a horizontal scrollbar), with the \u escapes the server added for invisible characters highlighted. */
-function ArgsJson({ text }: { text: string }) {
+function ArgsJson({ text, uncapped }: { text: string; uncapped?: boolean }) {
   // Anything else the server escaped is still a \u sequence; escapeInvisible is a no-op safety net on top.
   const parts = escapeInvisible(text).split(/(\\u[0-9A-Fa-f]{4})/);
   return (
-    <pre className="max-h-[60svh] overflow-y-auto rounded-lg border bg-muted/30 p-3 font-mono text-[13px] leading-relaxed break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
+    <pre className={cn(!uncapped && "max-h-[60svh] overflow-y-auto", "rounded-lg border bg-muted/30 p-3 font-mono text-[13px] leading-relaxed break-words whitespace-pre-wrap [overflow-wrap:anywhere]")}>
       {parts.map((p, i) =>
         i % 2 ? (
           <mark key={i} title="Invisible or control character" className="rounded-sm bg-critical/15 px-0.5 text-critical">

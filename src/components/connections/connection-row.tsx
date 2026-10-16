@@ -19,8 +19,18 @@ import { connectConnection } from "./connection-auth";
 import { connectionStatusView, hostPort } from "./connection-flow";
 
 const path = (c: Pick<ConnectionView, "id">, rest = "") => `/api/connections/${encodeURIComponent(c.id)}${rest}`;
-const startConnect = (c: ConnectionView, body: { header?: { name: string; value: string } } = {}) =>
-  connectConnection({ name: c.name, run: async () => ({ connectionId: c.id, result: await api<StartConnectResult>(path(c, "/connect"), { body }) }) });
+/** POST /connect (Reconnect). A typed header goes out once: "Try again" retries without it. */
+export function startConnect(c: Pick<ConnectionView, "id" | "name">, body: { header?: { name: string; value: string } } = {}) {
+  let once: typeof body | null = body;
+  connectConnection({
+    name: c.name,
+    run: async () => {
+      const b = once ?? {};
+      once = null;
+      return { connectionId: c.id, result: await api<StartConnectResult>(path(c, "/connect"), { body: b }) };
+    },
+  });
+}
 
 /** Reconnect (POST /connect again): OAuth runs a fresh sign-in; a header connection asks for the new key; an open one just retries. */
 export function useReconnect() {
@@ -33,6 +43,11 @@ export function useReconnect() {
 function HeaderReconnectDialog({ connection: c, onClose }: { connection: ConnectionView | null; onClose: () => void }) {
   const [name, setName] = useState("Authorization");
   const [value, setValue] = useState("");
+  // The typed key never outlives the dialog.
+  const cancel = () => {
+    setValue("");
+    onClose();
+  };
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!c || !value.trim()) return;
@@ -43,7 +58,7 @@ function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connect
     startConnect(c, { header: { name: n, value: n.toLowerCase() === "authorization" && !/^\w+\s/.test(v) ? `Bearer ${v}` : v } });
   };
   return (
-    <Dialog open={!!c} onOpenChange={(o) => !o && onClose()}>
+    <Dialog open={!!c} onOpenChange={(o) => !o && cancel()}>
       <DialogContent className="sm:max-w-md">
         <form onSubmit={submit} className="space-y-4">
           <DialogHeader>
@@ -62,7 +77,7 @@ function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connect
             <FieldDescription className="sm:col-span-2">Stored encrypted; agents never see it.</FieldDescription>
           </div>
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={onClose}>
+            <Button type="button" variant="ghost" onClick={cancel}>
               Cancel
             </Button>
             <Button type="submit" disabled={!value.trim()}>

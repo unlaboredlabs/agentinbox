@@ -13,13 +13,24 @@ const INVISIBLE = /[\u0080-\u00A0\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180
 
 const esc = (unit: number) => `\\u${unit.toString(16).toUpperCase().padStart(4, "0")}`;
 
-/** Replaces every invisible character in `s` with its JSON escape (astral ones as a surrogate pair). */
-export function escapeInvisible(s: string): string {
-  return s.replace(new RegExp(INVISIBLE.source, "gu"), (ch) => {
+// C0 controls and DEL. Line breaks and tabs stay readable in multi-line text (the pretty JSON, a reason) unless
+// `oneLine` is set (recipients, URLs, targets, tool names: a newline there can fake a second line).
+// oxlint-disable-next-line no-control-regex
+const C0_MULTILINE = /[\u0000-\u0008\u000B-\u001F\u007F]/g;
+// oxlint-disable-next-line no-control-regex
+const C0_ALL = /[\u0000-\u001F\u007F]/g;
+
+/**
+ * Replaces every invisible or control character in `s` with its JSON escape (astral ones as a surrogate pair).
+ * `oneLine`: newlines and tabs too.
+ */
+export function escapeInvisible(s: string, oneLine = false): string {
+  const units = (ch: string) => {
     let out = "";
     for (let i = 0; i < ch.length; i++) out += esc(ch.charCodeAt(i));
     return out;
-  });
+  };
+  return s.replace(new RegExp(INVISIBLE.source, "gu"), units).replace(oneLine ? C0_ALL : C0_MULTILINE, units);
 }
 
 export function hasInvisible(s: string): boolean {
@@ -50,7 +61,7 @@ export function isCallView(x: McpCallApprovalView | Approval): x is McpCallAppro
 export function targetValueText(value: unknown): string {
   const s = typeof value === "string" ? value : JSON.stringify(value);
   const short = s.length > 80 ? `${s.slice(0, 77)}…` : s;
-  return escapeInvisible(short);
+  return escapeInvisible(short, true);
 }
 
 /**
@@ -65,7 +76,7 @@ export function targetLabel(t: NonNullable<McpCallApprovalView["target"]>): stri
 /** "/parent/page_id" → "page_id": the last segment of a JSON Pointer, unescaped. */
 export function targetName(pointer: string): string {
   const last = pointer.split("/").at(-1) ?? pointer;
-  return last.replace(/~1/g, "/").replace(/~0/g, "~") || pointer;
+  return escapeInvisible(last.replace(/~1/g, "/").replace(/~0/g, "~") || pointer, true);
 }
 
 /** The value at a JSON Pointer (RFC 6901) in parsed arguments, or undefined. */
@@ -95,7 +106,11 @@ export interface TargetChoice {
  * the call's arguments the server offers (argumentPaths), labelled with this call's value.
  */
 export function targetChoices(v: Pick<McpCallApprovalView, "target" | "argumentPaths"> & { approval: { call: { args: string } } }): TargetChoice[] {
-  if (v.target) return [{ path: v.target.path, label: targetLabel(v.target), own: true }];
+  if (v.target) {
+    // An empty array target has nothing to limit to: no "only for".
+    if (Array.isArray(v.target.value) && v.target.value.length === 0) return [];
+    return [{ path: v.target.path, label: targetLabel(v.target), own: true }];
+  }
   let args: unknown;
   try {
     args = JSON.parse(v.approval.call.args);

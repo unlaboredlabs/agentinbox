@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { PageHeader, QueryError } from "@/components/common";
 import { useEffect } from "react";
 import { StepChoose, StepFirstConnection } from "@/components/setup/broker-path";
-import { BROKER_STEP_IDS, type BrokerStepId } from "@/components/setup/first-run";
+import { BROKER_STEP_IDS, type BrokerStepId, shownWizard } from "@/components/setup/first-run";
 import { queries } from "@/lib/queries";
 import { STEP_IDS, type StepId, startsVerify, updateDraft, useSetupProgress, verifyDoneHeading, wizardStep } from "@/components/setup/progress";
 import { StepAccounts } from "@/components/setup/step-accounts";
@@ -39,9 +39,11 @@ export const Route = createFileRoute("/_app/get-started")({
 function GetStartedPage() {
   const settings = useQuery(queries.settings());
   const progress = useSetupProgress();
+  const { step } = Route.useSearch();
   if (settings.isPending || progress.query.isPending) return <WizardSkeleton />;
-  if (progress.view === "google") return <GetStarted />;
-  return <ShortPath view={progress.view} />;
+  const view = shownWizard(progress.view, step);
+  if (view === "google") return <GetStarted />;
+  return <ShortPath view={view} />;
 }
 
 function WizardSkeleton() {

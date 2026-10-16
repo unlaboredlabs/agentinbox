@@ -133,7 +133,7 @@ function DecideCall({ view }: { view: McpCallApprovalView }) {
         </Alert>
       )}
       <div className="rounded-xl border bg-card p-4">
-        <McpCallBody view={view} />
+        <McpCallBody view={view} uncapped />
       </div>
       <div className="sticky bottom-0 -mx-4 border-t bg-muted/90 px-4 py-4 backdrop-blur">
         <McpDecisionButtons view={view} d={d} large />

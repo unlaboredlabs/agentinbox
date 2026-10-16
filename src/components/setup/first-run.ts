@@ -47,6 +47,14 @@ export function firstRunView(brokerOn: boolean, state: Pick<SetupState, "googleC
   return googleStarted ? "google" : "choose";
 }
 
+/**
+ * What /get-started renders: a `?step=` link (Settings, setup warnings, "Add Gmail later") always opens that Google
+ * step, whatever was chosen on first run.
+ */
+export function shownWizard(view: "choose" | "google" | "broker", step: string | undefined): "choose" | "google" | "broker" {
+  return step ? "google" : view;
+}
+
 export function brokerStatuses(connections: number, agents: number): Record<BrokerStepId, "done" | "todo"> {
   return { connect: connections > 0 ? "done" : "todo", agent: agents > 0 ? "done" : "todo" };
 }

@@ -88,7 +88,8 @@ function ConnectionLevelRow({ agentId, c }: { agentId: string; c: AgentConnectio
       const grants = await api<ConnectionGrant[]>(base);
       return api<ConnectionGrant[]>(base, { method: "PUT", body: grantsWith(grants, agentId, level) });
     },
-    invalidate: [keys.agentConnections(agentId), keys.connections],
+    // No access deletes the agent's "always allow" rules on it (the policy does): refresh that list too.
+    invalidate: [keys.agentConnections(agentId), keys.connections, keys.approvalRules],
     success: (_, level) => `${c.name}: ${LEVEL_INFO[level].label.toLowerCase()}`,
     errorTitle: "Couldn't change the access",
   });
@@ -130,12 +131,12 @@ function RuleRow({ r, connectionName }: { r: ApprovalRule; connectionName: strin
     <li className="flex items-center gap-3 px-4 py-3">
       <div className="min-w-0 flex-1 text-sm">
         <div className="break-all">
-          <span className="font-mono font-medium">{r.tool}</span> <span className="text-muted-foreground">on {connectionName}</span>
+          <span className="font-mono font-medium">{escapeInvisible(r.tool, true)}</span> <span className="text-muted-foreground">on {connectionName}</span>
         </div>
         <div className="text-xs break-all text-muted-foreground">
           {r.targetPath ? (
             <>
-              Only for <span className="font-mono">{r.targetPath}</span> = <span className="font-mono text-foreground">{escapeInvisible(r.targetValue ?? "")}</span>
+              Only for <span className="font-mono">{escapeInvisible(r.targetPath, true)}</span> = <span className="font-mono text-foreground">{escapeInvisible(r.targetValue ?? "", true)}</span>
             </>
           ) : (
             "Any target"

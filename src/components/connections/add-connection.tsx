@@ -1,4 +1,4 @@
-import type { AccessLevel, Agent, ConnectionGrant, ConnectionProbe, ConnectionView, PresetView, SetupStepView, StartConnectResult } from "@shared/types";
+import type { AccessLevel, Agent, ConnectionGrant, ConnectionProbe, ConnectionView, PresetView, SetupStepView, StartConnectInput, StartConnectResult } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftIcon, ArrowRightIcon, GlobeIcon, NetworkIcon, PlugIcon, SearchIcon, ShieldCheckIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -95,25 +95,31 @@ export function AddConnectionHost() {
     };
   }, []);
 
-  /** Closing before Connect: the connection created for the allow has no sign-in yet, so it goes. */
+  /** Leaving before Connect: the connection created for the allow has no sign-in yet, so it goes. */
   const dropEarly = (c: ConnectionView | null) => {
     if (!c) return;
     void api(`/api/connections/${enc(c.id)}`, { method: "DELETE" })
       .catch(() => undefined)
       .finally(() => void qc.invalidateQueries({ queryKey: keys.connections }));
   };
+  const discardEarly = () => {
+    dropEarly(created);
+    setCreated(null);
+  };
+  /** Every close: drops the early connection and forgets what was typed (keys, client secrets). */
   const onOpenChange = (o: boolean) => {
     if (!o) {
-      dropEarly(created);
-      setCreated(null);
+      discardEarly();
+      setDraft(emptyDraft());
     }
     setOpen(o);
   };
 
   const choose = (p: PresetView | null) => {
+    discardEarly();
     // Gmail & Calendar is the native Google integration: its own connect flow (and setup, when Google isn't set up yet).
     if (p?.id === "google") {
-      setOpen(false);
+      onOpenChange(false);
       return connectAccount();
     }
     setDraft(emptyDraft(p));
@@ -129,23 +135,32 @@ export function AddConnectionHost() {
     const d = draft;
     const early = created;
     const done = onDone.current;
+    // The early connection is this one now: closing must not delete it. What was typed is forgotten here.
     setCreated(null);
+    setDraft(emptyDraft());
     setOpen(false);
+    const create = createInput(d);
+    // Secrets go out once: "Try again" doesn't keep the key or client secret (a header connection asks again on Reconnect).
+    let secrets: StartConnectInput | null = connectInput(d);
     // Kept across "Try again": a retry reuses the connection instead of creating a second one.
     let id = early?.id ?? null;
+    let finishEarly = !!early;
     connectConnection({
       name,
       onDone: done,
       run: async () => {
         if (!id) {
-          id = (await api<ConnectionView>("/api/connections", { body: createInput(d) })).id;
-        } else if (early) {
+          id = (await api<ConnectionView>("/api/connections", { body: create })).id;
+        } else if (finishEarly && early) {
           const agents = await qc.fetchQuery(queries.agents());
           const f = finishEarlyCreate(d, early, agents.map((a: Agent) => a.id));
           if (f.patch) await api<ConnectionView>(`/api/connections/${enc(id)}`, { method: "PATCH", body: f.patch });
           await api<ConnectionGrant[]>(`/api/connections/${enc(id)}/grants`, { method: "PUT", body: f.grants });
+          finishEarly = false;
         }
-        const result = await api<StartConnectResult>(`/api/connections/${enc(id)}/connect`, { body: connectInput(d) });
+        const body = secrets ?? {};
+        secrets = null;
+        const result = await api<StartConnectResult>(`/api/connections/${enc(id)}/connect`, { body });
         return { connectionId: id, result };
       },
     });
@@ -199,7 +214,14 @@ export function AddConnectionHost() {
 
         <DialogFooter className="gap-2">
           {page !== "pick" && (
-            <Button variant="ghost" onClick={() => setPage(page === "access" ? "setup" : "pick")} className="sm:mr-auto">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (page === "setup") discardEarly();
+                setPage(page === "access" ? "setup" : "pick");
+              }}
+              className="sm:mr-auto"
+            >
               <ArrowLeftIcon /> Back
             </Button>
           )}
@@ -377,7 +399,8 @@ function ProbeForm({
     setError(undefined);
     try {
       const slug = draft.slug || suggestSlug(draft.url) || "local";
-      const c = created ?? (await api<ConnectionView>("/api/connections", { body: createInput({ ...draft, slug }) }));
+      // No grants until the user picks access (Connect sets them): nothing can reach an allowed private host before.
+      const c = created ?? (await api<ConnectionView>("/api/connections", { body: { ...createInput({ ...draft, slug }), agentIds: [] } }));
       onCreated(await api<ConnectionView>(`/api/connections/${enc(c.id)}/private-target`, { method: "PUT", body: { allow: true } }));
       set({ createdId: c.id, privateAllowed: true, slug });
       setPending(false);

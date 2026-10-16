@@ -131,6 +131,20 @@ export function oauthMessageFor(data: unknown, connectionId: string | null): { o
   return { ok: m.ok !== false, error: typeof m.error === "string" ? m.error : null };
 }
 
+/** Checks a pasted landing address (paste mode) before POST /api/connections/finish; a problem in plain words, or null. */
+export function pastedProblem(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return "That isn't a full address. Copy everything in the address bar, starting with http.";
+  }
+  const err = url.searchParams.get("error");
+  if (err) return err === "access_denied" ? "This address says the sign-in was cancelled. Start again and approve it." : `The sign-in returned an error: ${err}`;
+  if (!url.searchParams.get("code")) return "This address has no authorization code. Copy it after approving the sign-in.";
+  return null;
+}
+
 // ───────────── Add connection ─────────────
 
 const SLUG_RE = /^[a-z0-9-]{1,24}$/;
