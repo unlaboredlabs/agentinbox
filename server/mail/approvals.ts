@@ -5,6 +5,7 @@ import {
   type CalendarApprovalDetail,
   type GoogleApproval,
   isCalendarApprovalKind,
+  MAIL_APPROVAL_KINDS,
   type McpCallApprovalDetail,
 } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
@@ -134,6 +135,8 @@ function isTransient(err: unknown): boolean {
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
   return err instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
 }
+
+const isMailApprovalKind = (k: string) => (MAIL_APPROVAL_KINDS as readonly string[]).includes(k);
 
 /** Prefix of the decision note on approvals cancelled automatically (status stays "rejected"). */
 export const CANCELLED_PREFIX = "cancelled: ";
@@ -273,7 +276,14 @@ export class Approvals {
       count++;
       const a = toApproval(r);
       await this.deleteDraft(a);
-      this.ctx.audit.record({ actorType: "system", action: "approval.expire", accountId: a.accountId, target: a.id, outcome: "ok" });
+      this.ctx.audit.record({
+        actorType: "system",
+        action: "approval.expire",
+        accountId: a.accountId,
+        target: a.id,
+        outcome: "ok",
+        ...(a.connectionId ? { detail: { connectionId: a.connectionId } } : {}),
+      });
       this.emit(r.id);
     }
     return count;
@@ -291,7 +301,9 @@ export class Approvals {
   recoverInterrupted(olderThanMs = STUCK_AFTER_MS): number {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
     const rows = this.ctx.db.all<{ id: string; kind: string }>(
-      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? ORDER BY rowid",
+      // Never mcp.call: an interrupted upstream call may have run, so it ends "failed" with an unknown outcome
+      // (the broker's recoverInterrupted) and must never go back to pending.
+      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? AND kind <> 'mcp.call' ORDER BY rowid",
       cutoff,
     );
     for (const { id, kind } of rows) {
@@ -317,7 +329,8 @@ export class Approvals {
       ? this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ? AND account_id = ?", agentId, accountId)
       : this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
     return this.cancel(
-      rows.filter((r) => !only || (only === "calendar") === isCalendarApprovalKind(r.kind)).map((r) => r.id),
+      // By kind, explicitly: mcp.call is neither mail nor calendar (the broker cancels those on grant changes).
+      rows.filter((r) => !only || (only === "calendar" ? isCalendarApprovalKind(r.kind) : isMailApprovalKind(r.kind))).map((r) => r.id),
       `${CANCELLED_PREFIX}${why}`,
     );
   }
@@ -328,7 +341,14 @@ export class Approvals {
       if (!this.transition(id, "pending", "rejected", note)) continue;
       const a = this.emit(id);
       drafts.push(a);
-      this.ctx.audit.record({ actorType: "system", action: "approval.cancel", accountId: a.accountId, target: id, outcome: "ok", detail: { note } });
+      this.ctx.audit.record({
+        actorType: "system",
+        action: "approval.cancel",
+        accountId: a.accountId,
+        target: id,
+        outcome: "ok",
+        detail: { note, ...(a.connectionId ? { connectionId: a.connectionId } : {}) },
+      });
     }
     if (drafts.length) void Promise.all(drafts.map((a) => this.deleteDraft(a)));
     return drafts.length;
@@ -412,7 +432,7 @@ export class Approvals {
       target: a.id,
       outcome,
       durationMs: Date.now() - started,
-      detail: { agentId: a.agentId, kind: a.kind, ...detail },
+      detail: { agentId: a.agentId, kind: a.kind, ...(a.connectionId ? { connectionId: a.connectionId } : {}), ...detail },
     });
   }
 

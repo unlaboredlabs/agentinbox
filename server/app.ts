@@ -15,6 +15,7 @@ import { agentsApi } from "./api/agents.ts";
 import { approvalsApi } from "./api/approvals.ts";
 import { auditApi } from "./api/audit.ts";
 import { authApi, authPublicApi } from "./api/auth.ts";
+import { brokerApprovalsApi } from "./api/broker-approvals.ts";
 import { eventsApi } from "./api/events.ts";
 import { googleApi } from "./api/google.ts";
 import { oauthRoutes } from "./api/oauth.ts";
@@ -138,7 +139,8 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
 
   // ── Admin console API ──
   app.use("/api/*", requireAdmin(ctx));
-  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
+  // brokerApprovalsApi before approvalsApi: it answers /approvals/:id for mcp.call and passes the rest on.
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
     app.route("/api", api(ctx));
   }
 
