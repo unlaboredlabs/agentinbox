@@ -27,13 +27,6 @@ export class BrokerOffError extends Error {
   }
 }
 
-/** What finishing a sign-in from a pasted address gave: the callback page's own result. */
-export interface CallbackOutcome {
-  ok: boolean;
-  error: string | null;
-  hint: string | null;
-}
-
 const enc = encodeURIComponent;
 
 export class ConnectionsApi {
@@ -89,32 +82,15 @@ export class ConnectionsApi {
     return this.channel.request("GET", "/api/agents");
   }
 
-  /**
-   * Paste mode: finishes a sign-in from the address the browser landed on, by handing its query (code, state,
-   * iss) to the daemon's own /oauth/connections/callback, exactly as the redirect would have. The daemon checks
-   * the state (single use, bound to the connection) and the issuer.
-   */
-  async finishFromPastedUrl(pasted: string): Promise<CallbackOutcome> {
-    let query: URLSearchParams;
+  /** Paste mode: the address the browser landed on after approving (the daemon checks state and issuer). */
+  async finish(url: string): Promise<StartConnectResult> {
     try {
-      query = new URL(pasted.trim()).searchParams;
-    } catch {
-      return { ok: false, error: "That isn't a full address.", hint: "Copy the whole address from the browser's address bar." };
+      return await this.call<StartConnectResult>("POST", "/api/connections/finish", { url });
+    } catch (err) {
+      // A refused sign-in is a 400 carrying a StartConnectResult, not the usual error envelope.
+      const body = err instanceof AdminApiError ? (err.body as StartConnectResult | null) : null;
+      if (body?.status === "error") return body;
+      throw err;
     }
-    const keep = new URLSearchParams();
-    for (const k of ["code", "state", "iss", "error", "error_description"]) {
-      const v = query.get(k);
-      if (v !== null) keep.set(k, v);
-    }
-    const { status, text } = await this.channel.raw("GET", `/oauth/connections/callback?${keep.toString()}`);
-    if (status === 404) throw new BrokerOffError();
-    const m = /<script type="application\/json" id="oauth-result">([\s\S]*?)<\/script>/.exec(text);
-    try {
-      const r = m ? (JSON.parse(m[1]!) as { ok?: boolean; error?: string | null; hint?: string | null }) : null;
-      if (r) return { ok: r.ok === true, error: r.error ?? null, hint: r.hint ?? null };
-    } catch {
-      // Reported below.
-    }
-    return { ok: status === 200, error: status === 200 ? null : `The sign-in failed (HTTP ${status}).`, hint: null };
   }
 }

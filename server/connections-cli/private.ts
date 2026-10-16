@@ -45,7 +45,11 @@ export function exactOrigin(url: URL): string {
   return `${url.protocol}//${url.hostname}:${port}`;
 }
 
-export type TargetCheck = { kind: "public" } | { kind: "private"; origin: string; addresses: string[] } | { kind: "never"; address: string };
+export type TargetCheck =
+  | { kind: "public" }
+  | { kind: "private"; origin: string; addresses: string[] }
+  /** link_local: link-local or cloud metadata; ipv6_literal: the allow takes hostnames and IPv4 only. */
+  | { kind: "never"; address: string; why: "link_local" | "ipv6_literal" };
 
 const defaultLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
@@ -64,7 +68,8 @@ export async function checkTarget(url: URL, lookup: LookupFn = defaultLookup): P
     }
   }
   const never = addresses.find((a) => classifyAddress(a) === "never");
-  if (never) return { kind: "never", address: never };
+  if (never) return { kind: "never", address: never, why: "link_local" };
   const priv = addresses.filter((a) => classifyAddress(a) === "private");
+  if (priv.length && isIP(host) === 6) return { kind: "never", address: host, why: "ipv6_literal" };
   return priv.length ? { kind: "private", origin: exactOrigin(url), addresses: priv } : { kind: "public" };
 }

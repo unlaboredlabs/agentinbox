@@ -16,6 +16,8 @@ export interface FakeUpstreams {
   /** Connect outcome by connection (default: connected). */
   connect: (conn: Connection, input: StartConnectInput) => ConnectOutcome;
   connects: { slug: string; input: StartConnectInput; privateTarget: string | null }[];
+  /** Paste mode: the URLs POSTed to /api/connections/finish. A `state=ok` one finishes the last sign-in started. */
+  finishes: string[];
   probes: { url: string; privateTarget: string | null }[];
 }
 
@@ -51,7 +53,9 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
     },
     connects: [],
     probes: [],
+    finishes: [],
   };
+  let lastAuthorize: string | null = null;
   const h = harness({
     broker: (ctx) =>
       createBrokerService(ctx, {
@@ -65,8 +69,20 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
             upstreams.connects.push({ slug: conn.slug, input, privateTarget: conn.privateTarget });
             const out = upstreams.connect(conn, input);
             // What a working connect does to the row (the credential store's markActive).
+            if (out.status === "authorize") lastAuthorize = conn.id;
             if (out.status === "connected") ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL WHERE id = ? AND status <> 'disabled'", conn.id);
             return out;
+          },
+          async finishFromUrl(raw) {
+            upstreams.finishes.push(raw);
+            if (new URL(raw).searchParams.get("state") !== "ok" || !lastAuthorize) {
+              return { status: "error" as const, message: "This sign-in link has expired or was already used.", connectionId: null };
+            }
+            const id = lastAuthorize;
+            const slug = ctx.db.get<{ slug: string }>("SELECT slug FROM connections WHERE id = ?", id)!.slug;
+            giveTools(slug);
+            ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL WHERE id = ?", id);
+            return { status: "connected" as const, connectionId: id };
           },
           createSource: stubParts().connector.createSource,
         },

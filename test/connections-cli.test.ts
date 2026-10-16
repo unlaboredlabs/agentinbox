@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exactOrigin as serverExactOrigin } from "../server/api/connections.ts";
 import type { IntegrationPreset } from "../server/broker/types.ts";
 import { SessionStore } from "../server/auth/sessions.ts";
@@ -127,10 +127,10 @@ describe("connections add", () => {
   it("OAuth over SSH: paste mode through the daemon's own callback, then the default access (ask) for all agents", async () => {
     const url = "https://mcp.example.com/mcp";
     d.upstreams.probe = () => ({ reachable: true, auth: "oauth", issuer: "https://auth.example.com", registration: "dcr", message: "OAuth" });
-    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://auth.example.com/authorize?state=abc&redirect_uri=http%3A%2F%2Flocalhost%3A8425%2Foauth%2Fconnections%2Fcallback" });
-    const raw = vi.spyOn(d.channel, "raw").mockResolvedValue({ status: 200, text: '<script type="application/json" id="oauth-result">{"ok":true}</script>' });
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://auth.example.com/authorize?state=ok&redirect_uri=http%3A%2F%2Flocalhost%3A8425%2Foauth%2Fconnections%2Fcallback" });
     const opened: string[] = [];
-    const p = new ScriptedPrompter(["", "", "y", "y", "not a url", "http://localhost:8425/oauth/connections/callback?code=c0de&state=abc&iss=https%3A%2F%2Fauth.example.com&junk=1"]);
+    const landed = "http://localhost:8425/oauth/connections/callback?code=c0de&state=ok&iss=https%3A%2F%2Fauth.example.com";
+    const p = new ScriptedPrompter(["", "", "y", "y", "not a url", landed]);
     const code = await addConnection(url, {}, { ...deps(p, { SSH_CONNECTION: "1 2 3 4" }), openBrowser: async (u: string) => opened.push(u) });
     expect(code).toBe(0);
     expect(row("example")).toMatchObject({ level_default: "ask" });
@@ -138,14 +138,14 @@ describe("connections add", () => {
     expect(p.text).toContain("registers itself automatically (dynamic client registration)");
     expect(p.text).toContain("an address starting with http://localhost:8425/oauth/connections/callback");
     expect(p.text).toContain("That isn't the address after signing in");
-    expect(raw).toHaveBeenCalledWith("GET", "/oauth/connections/callback?code=c0de&state=abc&iss=https%3A%2F%2Fauth.example.com");
+    expect(d.upstreams.finishes).toEqual([landed]);
+    expect(p.text).toContain('✔ Connected "example": 3 tools');
     expect(opened).toEqual([]);
   });
 
-  it("paste mode reports the callback page's error", async () => {
+  it("paste mode (the daemon says so) reports /finish's error", async () => {
     d.upstreams.probe = () => ({ reachable: true, auth: "oauth", message: "OAuth" });
-    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://auth.example.com/authorize?redirect_uri=https%3A%2F%2Flocalhost%2Foauth%2Fconnections%2Fcallback" });
-    // The real callback route: an unknown state is refused.
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://auth.example.com/authorize", callbackMode: "paste", redirectUri: "https://localhost/oauth/connections/callback" });
     const p = new ScriptedPrompter(["", "", "y", "y", "https://localhost/oauth/connections/callback?code=x&state=nope"]);
     expect(await addConnection("https://mcp.linear.app/mcp", {}, deps(p))).toBe(1);
     expect(p.text).toContain("isn't connected: This sign-in link has expired or was already used.");
@@ -212,12 +212,12 @@ describe("connections add", () => {
     expect(slugFromUrl(new URL("https://mcp.notion.com/mcp"))).toBe("notion");
     expect(slugFromUrl(new URL("http://127.0.0.1:8787/mcp"))).toBe("127-0-0-1-8787");
     expect(await checkTarget(new URL("http://localhost:3000/mcp"))).toEqual({ kind: "private", origin: "http://localhost:3000", addresses: ["127.0.0.1"] });
-    expect(await checkTarget(new URL("https://[fd7a:115c:a1e0::1]/mcp"))).toMatchObject({ kind: "private", origin: "https://[fd7a:115c:a1e0::1]:443" });
-    expect(await checkTarget(new URL("http://169.254.169.254/latest"))).toEqual({ kind: "never", address: "169.254.169.254" });
+    expect(await checkTarget(new URL("https://[fd7a:115c:a1e0::1]/mcp"))).toEqual({ kind: "never", address: "fd7a:115c:a1e0::1", why: "ipv6_literal" });
+    expect(await checkTarget(new URL("http://169.254.169.254/latest"))).toEqual({ kind: "never", address: "169.254.169.254", why: "link_local" });
     expect(await checkTarget(new URL("https://example.com/mcp"), publicLookup)).toEqual({ kind: "public" });
     expect(await checkTarget(new URL("https://nas.lan/mcp"), async () => [{ address: "192.168.1.9", family: 4 }])).toMatchObject({ kind: "private", origin: "https://nas.lan:443" });
     // The CLI's exact origin is the server's.
-    for (const u of ["http://127.0.0.1:8787/mcp", "https://nas.lan/mcp", "http://100.104.249.49:3773", "https://[fd7a:115c:a1e0::1]/x"]) expect(exactOrigin(new URL(u))).toBe(serverExactOrigin(u));
+    for (const u of ["http://127.0.0.1:8787/mcp", "https://nas.lan/mcp", "http://100.104.249.49:3773", "http://localhost:3000/mcp"]) expect(exactOrigin(new URL(u))).toBe(serverExactOrigin(u));
   });
 });
 

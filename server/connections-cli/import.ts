@@ -120,7 +120,14 @@ export async function planImport(config: ClientConfig, ctx: { existing?: Connect
     }
     const target = await checkTarget(url, ctx.lookup);
     if (target.kind === "never") {
-      items.push({ action: "skip", entry, reason: `it's on ${target.address}, a link-local or cloud metadata address, which is never allowed` });
+      items.push({
+        action: "skip",
+        entry,
+        reason:
+          target.why === "ipv6_literal"
+            ? `the private-network allow takes a hostname or an IPv4 address, not ${target.address}`
+            : `it's on ${target.address}, a link-local or cloud metadata address, which is never allowed`,
+      });
       continue;
     }
     if (target.kind === "public" && url.protocol === "http:") {

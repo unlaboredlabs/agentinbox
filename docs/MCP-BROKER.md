@@ -462,9 +462,8 @@ The bar: the CLI wizard and console guide every step end to end, with deep links
   `admin_sessions` row, of which only sha256(token) is stored. The row has a 15-minute hard limit: its `created_at` is
   set so that the sliding refresh can never extend it. The CLI sends that token as the session cookie, plus the CSRF
   header, to the daemon's own `/api` on loopback, and deletes the row when the command exits. Nothing new listens,
-  and no token file sits on disk. The daemon's `requireAdmin`, audit and rate limits apply unchanged. Paste mode hands
-  the pasted address's `code`/`state`/`iss` to the daemon's own `/oauth/connections/callback`, which is what the
-  redirect would have done.
+  and no token file sits on disk. The daemon's `requireAdmin`, audit and rate limits apply unchanged. Paste mode POSTs
+  the address the browser landed on to `/api/connections/finish`.
 - **Every failure names its fix in the UI:** `needs_reauth` → Reconnect, an expiring cap → a dated reminder, a 429 →
   retry-after, an SSRF block → "allow this host in Settings".
 

@@ -105,12 +105,24 @@ function redirectOf(authorizeUrl: string): URL | null {
  * redirect goes to localhost (the browser isn't on this machine), and always for an https://localhost redirect
  * (providers that refuse http, where nothing listens).
  */
-export async function authorize(conn: ConnectionView, authorizeUrl: string, deps: ManageDeps, flags: { paste?: boolean } = {}): Promise<ConnectionView> {
+export async function authorize(
+  conn: ConnectionView,
+  start: { authorizeUrl: string; callbackMode?: "direct" | "paste"; redirectUri?: string },
+  deps: ManageDeps,
+  flags: { paste?: boolean } = {},
+): Promise<ConnectionView> {
   const { api, prompter: p } = deps;
   const env = deps.env ?? process.env;
-  const redirect = redirectOf(authorizeUrl);
+  const authorizeUrl = start.authorizeUrl;
+  const redirect = (() => {
+    try {
+      return start.redirectUri ? new URL(start.redirectUri) : redirectOf(authorizeUrl);
+    } catch {
+      return redirectOf(authorizeUrl);
+    }
+  })();
   const loopback = !!redirect && isLoopbackHost(redirect.hostname);
-  const paste = !!flags.paste || (loopback && (overSsh(env) || redirect!.protocol === "https:"));
+  const paste = !!flags.paste || start.callbackMode === "paste" || (loopback && (overSsh(env) || redirect!.protocol === "https:"));
   const name = safeText(conn.name, 60);
   if (paste) {
     p.print(`Open this link in a browser where you can sign in to ${name}:`);
@@ -123,9 +135,9 @@ export async function authorize(conn: ConnectionView, authorizeUrl: string, deps
         p.print(pc.yellow(`  That isn't the address after signing in: it starts with ${start} and has ?code=… in it.`));
         continue;
       }
-      const r = await api.finishFromPastedUrl(pasted);
-      if (!r.ok) throw new Error(`${r.error ?? "The sign-in failed."}${r.hint ? ` ${r.hint}` : ""}`);
-      return api.get(conn.id);
+      const r = await api.finish(pasted.trim());
+      if (r.status === "connected") return r.connection;
+      throw new Error(r.status === "error" ? r.message : "The sign-in didn't finish.");
     }
   }
   const before = (await api.get(conn.id)).updatedAt;
@@ -152,7 +164,7 @@ export async function authorize(conn: ConnectionView, authorizeUrl: string, deps
 export async function connectNow(conn: ConnectionView, input: StartConnectInput, deps: ManageDeps, flags: { paste?: boolean } = {}): Promise<ConnectionView> {
   const r = await deps.api.connect(conn.id, input);
   if (r.status === "connected") return r.connection;
-  if (r.status === "authorize") return authorize(conn, r.authorizeUrl, deps, flags);
+  if (r.status === "authorize") return authorize(conn, r, deps, flags);
   throw new Error(r.message);
 }
 

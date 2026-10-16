@@ -31,6 +31,8 @@ export class AdminApiError extends Error {
     readonly code: string,
     message: string,
     readonly hint?: string,
+    /** The parsed response body (some routes answer an error with their own shape, e.g. /finish). */
+    readonly body?: unknown,
   ) {
     super(message);
     this.name = "AdminApiError";
@@ -41,8 +43,6 @@ export interface AdminChannel {
   /** The daemon's loopback origin, e.g. http://127.0.0.1:8425. */
   readonly baseUrl: string;
   request<T>(method: string, path: string, body?: unknown): Promise<T>;
-  /** A non-JSON request on the daemon (the OAuth callback page), without the session cookie. */
-  raw(method: string, path: string): Promise<{ status: number; text: string }>;
   /** Deletes the one-time session. Idempotent. */
   close(): void;
 }
@@ -148,18 +148,9 @@ export function openAdminChannel(opts: OpenAdminOptions): AdminChannel {
       }
       if (!res.ok) {
         const e = (data as { error?: { code?: string; message?: string; hint?: string } } | null)?.error;
-        throw new AdminApiError(res.status, e?.code ?? `http_${res.status}`, e?.message ?? `HTTP ${res.status} from ${path}`, e?.hint);
+        throw new AdminApiError(res.status, e?.code ?? `http_${res.status}`, e?.message ?? `HTTP ${res.status} from ${path}`, e?.hint, data);
       }
       return data as T;
-    },
-    async raw(method: string, path: string) {
-      let res: Response;
-      try {
-        res = await doFetch(`${baseUrl}${path}`, { method, signal: AbortSignal.timeout(60_000) });
-      } catch (err) {
-        throw new Error(`Couldn't reach agentinbox at ${baseUrl}: ${(err as Error).message}`);
-      }
-      return { status: res.status, text: await res.text() };
     },
     close() {
       process.removeListener("exit", onExit);
