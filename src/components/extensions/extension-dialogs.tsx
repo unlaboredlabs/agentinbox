@@ -95,7 +95,7 @@ export function AddExtensionDialog({ open, onOpenChange }: { open: boolean; onOp
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Add an extension</DialogTitle>
-          <DialogDescription>From a GitHub URL, another git URL, or a directory on xaq's machine. You see what it is before anything is installed.</DialogDescription>
+          <DialogDescription>From a GitHub URL, another https or ssh git URL, or the absolute path of a directory on xaq's machine. You see what it is before anything is installed.</DialogDescription>
         </DialogHeader>
         {!review ? (
           <form
@@ -109,7 +109,7 @@ export function AddExtensionDialog({ open, onOpenChange }: { open: boolean; onOp
               <FieldLabel htmlFor="ext-source">Source</FieldLabel>
               <Input id="ext-source" autoFocus autoComplete="off" placeholder="https://github.com/owner/repo/tree/main/extensions/name" value={source} onChange={(e) => setSource(e.target.value)} />
               <FieldDescription>
-                Other git URLs take <code className="font-mono">#ref</code> or <code className="font-mono">#ref:path</code>.
+                Other git URLs take <code className="font-mono">#ref</code> or <code className="font-mono">#ref:path</code>. No credentials in the URL.
               </FieldDescription>
             </Field>
             <DialogFooter>

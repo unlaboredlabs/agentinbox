@@ -113,12 +113,15 @@ xaq ext remove <name> [--force] [--yes] [--data …]
 ```
 
 - **Sources**: a registry name (`notion`); a GitHub URL (`https://github.com/<owner>/<repo>[/tree/<ref>/<path>]`,
-  fetched as the tarball of the resolved commit); any other git URL, through the `git` CLI (`#<ref>`,
-  `#<ref>:<path>`); or a directory on xaq's machine (`./dir`, for development). GitHub refs are resolved through its
+  fetched as the tarball of the resolved commit); any other `https://` or ssh git URL, through the `git` CLI (`#<ref>`,
+  `#<ref>:<path>`; `http://`, `git://` and URLs with credentials in them are refused); or a directory on xaq's
+  machine, for development (the CLI resolves `./dir` and `~/dir` where you run it; the console and the API take an
+  absolute path). git runs without your git config or environment, and without hooks. GitHub refs are resolved through its
   API without signing in (60 requests an hour per address; xaq says when that's used up).
 - **Third-party**: anything that isn't the official registry at the indexed commit. Before it's installed you see
   its source, its kind, its declared network hosts and, for a `code` one, that it runs on your machine with network
-  access; the CLI needs a yes (or `--yes`), the console a click on "I trust it: install".
+  access; the CLI needs a yes (or `--yes`), the console a click on "I trust it: install". A third-party extension
+  can't use an official extension's name (`notion`, `t3code`, `whoop`, `brightspace`, or any in the registry).
 - **Pinned and read-only**: files go to `<data>/extensions/<name>/<first 16 hex of the integrity>/` (fetched into a
   temp directory, checked, then renamed into place) and are made read-only. Integrity is sha256 over the sorted
   listing of `<path>\0<644|755>\0<sha256>\n` lines; symlinks, `..` paths and anything over 20 MB or 5,000 files are

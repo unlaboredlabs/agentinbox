@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Db } from "../server/db/index.ts";
 import { computeIntegrity, integrityDirName } from "../server/extensions/integrity.ts";
-import { parseSource } from "../server/extensions/sources.ts";
+import { gitEnv, parseSource } from "../server/extensions/sources.ts";
 import { ExtensionError, SqliteExtensionStore } from "../server/extensions/store.ts";
 import { entriesFromDir, type FakeGithub, fakeSha, manifest, startFakeGithub, type TarEntry, writeTree } from "./extension-fakes.ts";
 
@@ -41,8 +41,8 @@ afterEach(async () => {
   rmSync(work, { recursive: true, force: true });
 });
 
-const newStore = (limits = {}) => {
-  const s = new SqliteExtensionStore({ db, dataDir, urls: gh.urls, limits });
+const newStore = (limits = {}, extra: { allowFileGit?: boolean } = {}) => {
+  const s = new SqliteExtensionStore({ db, dataDir, urls: gh.urls, limits, ...extra });
   stores.push(s);
   return s;
 };
@@ -79,12 +79,41 @@ describe("sources", () => {
     expect(parseSource("https://github.com/a/b/tree/feat/x/extensions/y")).toEqual({ type: "github", owner: "a", repo: "b", tree: ["feat", "x", "extensions", "y"] });
     expect(parseSource("https://git.example.com/a/b.git#v1:ext/y")).toEqual({ type: "git", url: "https://git.example.com/a/b.git", ref: "v1", path: "ext/y" });
     expect(parseSource("git@example.com:a/b.git")).toEqual({ type: "git", url: "git@example.com:a/b.git", ref: null, path: "" });
-    expect(parseSource("./thing", "/base")).toEqual({ type: "local", path: "/base/thing" });
+    expect(parseSource("ssh://git@example.com/a/b.git")).toMatchObject({ type: "git", url: "ssh://git@example.com/a/b.git" });
+    expect(parseSource("./thing", { cwd: "/base" })).toEqual({ type: "local", path: "/base/thing" });
     expect(parseSource("/abs/thing")).toEqual({ type: "local", path: "/abs/thing" });
+    expect(() => parseSource("./thing", { absoluteOnly: true })).toThrow("Use an absolute path to a directory on xaq's machine.");
+    expect(() => parseSource("~/thing", { absoluteOnly: true })).toThrow("Use an absolute path to a directory on xaq's machine.");
     expect(() => parseSource("Not A Name")).toThrow(/write a directory as/);
     expect(() => parseSource("https://github.com/a/b/tree/main/../../x")).toThrow(/bad path/);
+    expect(() => parseSource("https://github.com/a/b/tree/main/%E0%A4%A")).toThrow(/badly encoded/);
+    expect(() => parseSource("https://github.com/../b")).toThrow(/isn't a GitHub repository URL/);
+    expect(() => parseSource("https://github.com/a/..")).toThrow(/isn't a GitHub repository URL/);
     expect(() => parseSource("ext::sh -c evil")).toThrow();
     expect(() => parseSource("https://git.example.com/a.git#--upload-pack=x")).toThrow(/ref/);
+  });
+
+  it("refuses insecure protocols, file:// (outside tests) and credentials in URLs", () => {
+    expect(() => parseSource("http://git.example.com/a.git")).toThrow(/http:\/\/ isn't allowed/);
+    expect(() => parseSource("git://git.example.com/a.git")).toThrow(/git:\/\/ isn't allowed/);
+    expect(() => parseSource("file:///tmp/repo")).toThrow(/file:\/\/ git URLs aren't allowed/);
+    expect(parseSource("file:///tmp/repo", { allowFileGit: true })).toMatchObject({ type: "git", url: "file:///tmp/repo" });
+    for (const s of ["https://user:tok@github.com/a/b", "https://tok@git.example.com/a.git", "ssh://git:pw@example.com/a.git"]) {
+      expect(() => parseSource(s), s).toThrow(/Don't put credentials in the URL/);
+    }
+  });
+
+  it("runs git with an environment built from scratch (no xaq secrets)", () => {
+    const before = process.env.XAQ_MASTER_KEY;
+    process.env.XAQ_MASTER_KEY = "secret";
+    try {
+      const env = gitEnv("/tmp/home");
+      expect(Object.keys(env).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_PAGER", "GIT_TERMINAL_PROMPT", "HOME", "LANG", "PATH"]);
+      expect(env).toMatchObject({ HOME: "/tmp/home", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" });
+    } finally {
+      if (before === undefined) delete process.env.XAQ_MASTER_KEY;
+      else process.env.XAQ_MASTER_KEY = before;
+    }
   });
 });
 
@@ -196,7 +225,9 @@ describe("the extension store", () => {
   it("installs from a local directory (no commit) and from a git URL (git CLI, ref and path)", async () => {
     const { dir, integrity } = extDir("localext", { "x.txt": "x" });
     writeTree(join(dir, ".git"), { HEAD: "ref: refs/heads/main" });
-    const store = newStore();
+    const store = newStore({}, { allowFileGit: true });
+    // Without the test-only switch, file:// is refused.
+    expect(code(await newStore().resolve(`file://${work}/x.git`).catch((e: unknown) => e))).toBe("bad_source");
     const local = await store.install(dir, { confirmThirdParty: true });
     expect(local).toMatchObject({ name: "localext", commit: null, source: dir, official: false, integrity });
 
@@ -278,10 +309,9 @@ describe("the extension store", () => {
   });
 
   it("refuses an install over a different installed version (that's an update)", async () => {
-    publishOfficial("demo");
     const store = newStore();
-    await store.install("demo", { confirmThirdParty: false });
-    const { dir } = extDir("demo", { "x.txt": "other" }, "other-demo");
+    await store.install(extDir("devx").dir, { confirmThirdParty: true });
+    const { dir } = extDir("devx", { "x.txt": "other" }, "other-devx");
     const err = await store.install(dir, { confirmThirdParty: true }).catch((e: unknown) => e);
     expect(code(err)).toBe("already_installed");
   });
@@ -292,23 +322,66 @@ describe("the extension store", () => {
     await store.install("demo", { confirmThirdParty: false });
     const removed: { force: boolean; usedBy: string[] }[] = [];
     store.setHooks({ usedBy: (n) => (n === "demo" ? ["notion-work", "notion-personal"] : []), onRemove: (_e, o) => removed.push(o) });
-    const err = (() => {
-      try {
-        store.remove("demo", { force: false });
-      } catch (e) {
-        return e;
-      }
-    })();
+    const err = await store.remove("demo", { force: false }).catch((e: unknown) => e);
     expect(code(err)).toBe("in_use");
     expect((err as ExtensionError).detail?.usedBy).toEqual(["notion-work", "notion-personal"]);
     expect(store.get("demo")).not.toBeNull();
     expect(removed).toEqual([]);
 
-    store.remove("demo", { force: true });
+    await store.remove("demo", { force: true });
     expect(removed).toEqual([{ force: true, usedBy: ["notion-work", "notion-personal"] }]);
     expect(store.get("demo")).toBeNull();
     expect(existsSync(join(dataDir, "extensions", "demo"))).toBe(false);
-    expect(() => store.remove("demo", { force: false })).toThrow(/isn't installed/);
+    await expect(store.remove("demo", { force: false })).rejects.toThrow(/isn't installed/);
+  });
+
+  it("remove waits for an install in flight (one queue)", async () => {
+    publishOfficial("demo");
+    const store = newStore();
+    const order: string[] = [];
+    const installing = store.install("demo", { confirmThirdParty: false }).then(() => order.push("installed"));
+    // Queued behind the install: it sees the installed extension, not "isn't installed".
+    const removing = store.remove("demo", { force: false }).then(() => order.push("removed"));
+    await Promise.all([installing, removing]);
+    expect(order).toEqual(["installed", "removed"]);
+    expect(store.get("demo")).toBeNull();
+  });
+
+  it("a third-party extension can't take an official name (core's or the registry's)", async () => {
+    publishOfficial("demo");
+    const store = newStore();
+    for (const name of ["notion", "demo"]) {
+      const { dir } = extDir(name, {}, `tp-${name}`);
+      const err = await store.resolve(dir).catch((e: unknown) => e);
+      expect(code(err), name).toBe("official_name");
+      expect((err as Error).message).toMatch(new RegExp(`"${name}" is the name of an official extension`));
+    }
+    // Even with the registry unreachable, core's names stay refused.
+    gh.index = null as never;
+    const { dir } = extDir("whoop", {}, "tp-whoop");
+    expect(code(await store.install(dir, { confirmThirdParty: true }).catch((e: unknown) => e))).toBe("official_name");
+    expect(store.list()).toEqual([]);
+    expect(readdirSync(join(dataDir, "extensions", ".tmp"))).toEqual([]);
+  });
+
+  it("refuses relative and ~ paths on the daemon's side (its cwd and HOME aren't the user's)", async () => {
+    const store = newStore();
+    for (const s of ["./thing", "../thing", "~/thing", "~"]) {
+      const err = await store.resolve(s).catch((e: unknown) => e);
+      expect(code(err), s).toBe("bad_source");
+      expect((err as Error).message).toBe("Use an absolute path to a directory on xaq's machine.");
+    }
+  });
+
+  it("refuses an archive whose paths conflict (a file and a directory of the same name)", async () => {
+    gh.commit("someone", "clash", "main", fakeSha("clash"), [
+      { name: "e/xaq-extension.json", data: manifest("clash") },
+      { name: "e/a", data: "file" },
+      { name: "e/a/b", data: "under a file" },
+    ]);
+    const err = await newStore().resolve("https://github.com/someone/clash/tree/main/e").catch((e: unknown) => e);
+    expect(code(err)).toBe("unsafe");
+    expect((err as Error).message).toMatch(/conflicting or invalid paths/);
   });
 
   it("clears temp directories left by a crash, and nothing else", () => {

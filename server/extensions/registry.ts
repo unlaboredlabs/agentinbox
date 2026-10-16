@@ -6,6 +6,11 @@ import { INTEGRITY_RE } from "./integrity.ts";
 
 export const OFFICIAL_OWNER = "wynn-dev";
 export const OFFICIAL_REPO = "xaq-extensions";
+/**
+ * The official extensions core knows of (the bootstrap pins, docs/EXTENSIONS.md "Migration"): a third-party extension
+ * can't take these names even when the registry can't be read. The registry index's names are refused too.
+ */
+export const OFFICIAL_NAMES: readonly string[] = ["notion", "t3code", "whoop", "brightspace"];
 
 /** Where sources are fetched from. Overridable (tests point them at a fake GitHub). */
 export interface ExtensionUrls {

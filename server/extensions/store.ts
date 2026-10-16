@@ -13,7 +13,7 @@ import type { AppContext } from "../context.ts";
 import { bool, type Db, json, now } from "../db/index.ts";
 import type { Logger } from "../util/log.ts";
 import { computeIntegrity, integrityDirName, IntegrityError } from "./integrity.ts";
-import { defaultExtensionUrls, EXTENSION_NAME_RE, type ExtensionUrls, fetchIndex, OFFICIAL_OWNER, OFFICIAL_REPO, type RegistryEntry, type RegistryIndex } from "./registry.ts";
+import { defaultExtensionUrls, EXTENSION_NAME_RE, type ExtensionUrls, fetchIndex, OFFICIAL_NAMES, OFFICIAL_OWNER, OFFICIAL_REPO, type RegistryEntry, type RegistryIndex } from "./registry.ts";
 import { type FetchDeps, fetchGit, fetchGithubTarball, fetchLocal, fetchOfficial, parseSource, resolveGithubTree, SourceError, type SourceSpec } from "./sources.ts";
 import { type ExtractLimits, UnsafeArchiveError } from "./tar.ts";
 
@@ -48,7 +48,7 @@ export interface ExtensionStore {
   installPinned(pin: ExtensionPin): Promise<InstalledExtension>; // official repo at that commit
   /** Without `confirm`, the would-be update ({from, to}) and nothing installed; with it, installed. null: up to date. */
   update(name: string, opts: { confirm: boolean; expectIntegrity?: string }): Promise<{ from: InstalledExtension; to: InstalledExtension } | null>;
-  remove(name: string, opts: { force: boolean }): void;
+  remove(name: string, opts: { force: boolean }): Promise<void>; // async (queued with install and update), per the #81 review
   verify(name: string): boolean; // re-check integrity of the installed files
 }
 
@@ -73,7 +73,8 @@ export type ExtensionErrorCode =
   | "bad_source"
   | "fetch_failed"
   | "rate_limited"
-  | "unsafe";
+  | "unsafe"
+  | "official_name";
 
 export class ExtensionError extends Error {
   constructor(
@@ -166,6 +167,8 @@ export interface ExtensionStoreOptions {
   git?: string;
   limits?: Partial<ExtractLimits>;
   timeoutMs?: number;
+  /** Tests only: allow file:// git URLs. */
+  allowFileGit?: boolean;
 }
 
 /** A fetched, verified extension in a temp directory, not yet installed. */
@@ -196,6 +199,7 @@ export class SqliteExtensionStore implements ExtensionStore {
       git: opts.git ?? "git",
       limits: opts.limits,
       timeoutMs: opts.timeoutMs,
+      allowFileGit: opts.allowFileGit,
     };
     try {
       this.cleanTemp();
@@ -310,18 +314,21 @@ export class SqliteExtensionStore implements ExtensionStore {
     return opts.confirm ? this.serial(go) : go();
   }
 
-  remove(name: string, opts: { force: boolean }): void {
-    const ext = this.get(name);
-    if (!ext) throw new ExtensionError("not_found", `${name} isn't installed.`);
-    const usedBy = this.hooks.usedBy(name);
-    if (usedBy.length && !opts.force) {
-      throw new ExtensionError("in_use", `${name} is used by ${usedBy.join(", ")}. Remove those connections first, or force it (which disables them).`, { usedBy });
-    }
-    this.hooks.onRemove?.(ext, { force: opts.force, usedBy });
-    this.opts.db.run("DELETE FROM extensions WHERE name = ?", name);
-    this.removeTree(join(this.root, name));
-    this.opts.log?.info("Extension removed", { name, forced: opts.force && usedBy.length > 0 });
-    this.hooks.onChange?.({ from: ext, to: null });
+  /** In the same queue as install and update, so a removal never races one. */
+  remove(name: string, opts: { force: boolean }): Promise<void> {
+    return this.serial(async () => {
+      const ext = this.get(name);
+      if (!ext) throw new ExtensionError("not_found", `${name} isn't installed.`);
+      const usedBy = this.hooks.usedBy(name);
+      if (usedBy.length && !opts.force) {
+        throw new ExtensionError("in_use", `${name} is used by ${usedBy.join(", ")}. Remove those connections first, or force it (which disables them).`, { usedBy });
+      }
+      this.hooks.onRemove?.(ext, { force: opts.force, usedBy });
+      this.opts.db.run("DELETE FROM extensions WHERE name = ?", name);
+      this.removeTree(join(this.root, name));
+      this.opts.log?.info("Extension removed", { name, forced: opts.force && usedBy.length > 0 });
+      this.hooks.onChange?.({ from: ext, to: null });
+    });
   }
 
   verify(name: string): boolean {
@@ -398,7 +405,39 @@ export class SqliteExtensionStore implements ExtensionStore {
    */
   private stage(source: string, current?: InstalledExtension): Promise<Staged> {
     return this.wrap(async () => {
-      const spec: SourceSpec = current?.official ? { type: "registry", name: current.name } : parseSource(source);
+      const staged = await this.stageSource(source, current);
+      if (!staged.candidate.official) {
+        try {
+          await this.refuseOfficialName(staged.candidate.name);
+        } catch (err) {
+          this.discard(staged.work);
+          throw err;
+        }
+      }
+      return staged;
+    });
+  }
+
+  /**
+   * A third-party extension can't take an official extension's name: connections made with that preset would be bound
+   * to it. The names: the core's official ones, plus the registry index's when it can be read.
+   */
+  private async refuseOfficialName(name: string): Promise<void> {
+    const index = await fetchIndex(this.deps.urls, this.deps.fetch).catch(() => null);
+    const official = new Set([...OFFICIAL_NAMES, ...(index?.extensions.map((e) => e.name) ?? [])]);
+    if (official.has(name)) {
+      throw new ExtensionError(
+        "official_name",
+        `"${name}" is the name of an official extension; a third-party extension can't use it. Install the official one with: xaq ext add ${name}`,
+      );
+    }
+  }
+
+  private stageSource(source: string, current?: InstalledExtension): Promise<Staged> {
+    return this.wrap(async () => {
+      const spec: SourceSpec = current?.official
+        ? { type: "registry", name: current.name }
+        : parseSource(source, { absoluteOnly: true, allowFileGit: this.deps.allowFileGit });
       switch (spec.type) {
         case "registry": {
           const index = await fetchIndex(this.deps.urls, this.deps.fetch);

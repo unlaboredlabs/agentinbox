@@ -26,26 +26,63 @@ export class SourceError extends Error {
 }
 
 const GITHUB_PART = /^[A-Za-z0-9._-]{1,100}$/;
+const validGithubPart = (p: string) => GITHUB_PART.test(p) && p !== "." && p !== "..";
 const GIT_REF = /^[A-Za-z0-9._/-]{1,200}$/;
-const GIT_URL = /^(?:(?:https?|ssh|git|file):\/\/\S+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:\S+)$/;
+const GIT_URL = /^(?:(?:https|ssh|file):\/\/\S+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:\S+)$/;
+
+export const ABSOLUTE_PATH_MESSAGE = "Use an absolute path to a directory on xaq's machine.";
+
+export interface ParseOptions {
+  /** Where a relative path is resolved (the CLI's cwd). */
+  cwd?: string;
+  /** The daemon's side: relative and `~` paths are refused (its cwd and HOME aren't the user's). */
+  absoluteOnly?: boolean;
+  /** Tests only: `file://` git URLs. */
+  allowFileGit?: boolean;
+}
+
+/** Credentials in a URL would end up in `source`, the console and the audit log: refused. */
+function refuseUserinfo(s: string): void {
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return;
+  }
+  // ssh://git@host/… names the ssh user, not a secret; anything with a password, or a user on https, is refused.
+  if (u.password || (u.username && u.protocol !== "ssh:")) {
+    throw new SourceError("Don't put credentials in the URL: xaq would store and show them. Use a URL without user:password@.", "bad_source");
+  }
+}
 
 /**
  * Parses what the user typed. A bare `[a-z0-9-]` word is a registry name; a path must look like one (`./x`, `../x`,
  * `/x`, `~/x`). Other git URLs take `#<ref>` and `#<ref>:<path>` (a colon can't appear in a git ref).
  */
-export function parseSource(source: string, cwd = process.cwd()): SourceSpec {
+export function parseSource(source: string, opts: ParseOptions = {}): SourceSpec {
   const s = source.trim();
   if (!s) throw new SourceError("Name an extension, a GitHub URL, a git URL or a directory.", "bad_source");
   if (EXTENSION_NAME_RE.test(s)) return { type: "registry", name: s };
   if (s === "." || s === ".." || s.startsWith("./") || s.startsWith("../") || s.startsWith("/") || s === "~" || s.startsWith("~/")) {
+    if (opts.absoluteOnly && !s.startsWith("/")) throw new SourceError(ABSOLUTE_PATH_MESSAGE, "bad_source");
     const expanded = s === "~" || s.startsWith("~/") ? join(homedir(), s.slice(1)) : s;
-    return { type: "local", path: isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded) };
+    return { type: "local", path: isAbsolute(expanded) ? resolve(expanded) : resolve(opts.cwd ?? process.cwd(), expanded) };
   }
+  refuseUserinfo(s.split("#")[0]!);
+  if (/^(?:http|git):\/\//i.test(s)) {
+    throw new SourceError(`${s.slice(0, s.indexOf(":"))}:// isn't allowed: it isn't encrypted or authenticated. Use an https:// or ssh URL.`, "bad_source");
+  }
+  if (/^file:\/\//i.test(s) && !opts.allowFileGit) throw new SourceError("file:// git URLs aren't allowed. For a directory on xaq's machine, give its absolute path.", "bad_source");
   const gh = /^https:\/\/github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?\/?(?:\/tree\/([^#?]+?))?\/?$/.exec(s);
   if (gh) {
     const [, owner, repo, tree] = gh;
-    if (!GITHUB_PART.test(owner!) || !GITHUB_PART.test(repo!)) throw new SourceError(`"${s}" isn't a GitHub repository URL.`, "bad_source");
-    const segs = tree ? tree.split("/").filter(Boolean).map(decodeURIComponent) : [];
+    if (!validGithubPart(owner!) || !validGithubPart(repo!)) throw new SourceError(`"${s}" isn't a GitHub repository URL.`, "bad_source");
+    let segs: string[];
+    try {
+      segs = tree ? tree.split("/").filter(Boolean).map(decodeURIComponent) : [];
+    } catch {
+      throw new SourceError(`"${s}" has a badly encoded path.`, "bad_source");
+    }
     if (segs.some((p) => p === ".." || p === "." || p.includes("\\"))) throw new SourceError(`"${s}" has a bad path.`, "bad_source");
     return { type: "github", owner: owner!, repo: repo!, tree: segs };
   }
@@ -77,6 +114,8 @@ export interface FetchDeps {
   limits?: Partial<ExtractLimits>;
   /** Network and git timeout, ms. */
   timeoutMs?: number;
+  /** Tests only: allow file:// git URLs. */
+  allowFileGit?: boolean;
 }
 
 export interface Fetched {
@@ -190,7 +229,23 @@ export function fetchOfficial(name: string, commit: string, dest: string, deps: 
   return fetchGithubTarball(OFFICIAL_OWNER, OFFICIAL_REPO, commit, `extensions/${name}`, dest, deps);
 }
 
-function run(file: string, args: string[], opts: { cwd?: string; timeoutMs: number; maxBuffer?: number }): Promise<Buffer> {
+/**
+ * git's environment, built from scratch: nothing of xaq's (XAQ_MASTER_KEY and the rest never reach git or its
+ * helpers), a throwaway HOME, no global or system config, no prompts (a private repo fails instead of hanging).
+ */
+export function gitEnv(home: string): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: home,
+    LANG: "C",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_PAGER: "cat",
+  };
+}
+
+function run(file: string, args: string[], opts: { cwd?: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxBuffer?: number }): Promise<Buffer> {
   return new Promise((ok, fail) => {
     execFile(
       file,
@@ -201,8 +256,7 @@ function run(file: string, args: string[], opts: { cwd?: string; timeoutMs: numb
         killSignal: "SIGKILL",
         maxBuffer: opts.maxBuffer ?? 1024 * 1024,
         encoding: "buffer",
-        // No prompts (a private repo fails instead of hanging), no pager, no system config.
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_CONFIG_NOSYSTEM: "1", GCM_INTERACTIVE: "never" },
+        env: opts.env,
         windowsHide: true,
       },
       (err, stdout, stderr) => {
@@ -222,14 +276,28 @@ function run(file: string, args: string[], opts: { cwd?: string; timeoutMs: numb
  */
 export async function fetchGit(spec: Extract<SourceSpec, { type: "git" }>, work: string, dest: string, deps: FetchDeps): Promise<Fetched> {
   const timeoutMs = deps.timeoutMs ?? 120_000;
+  if (/^file:/i.test(spec.url) && !deps.allowFileGit) throw new SourceError("file:// git URLs aren't allowed.", "bad_source");
   const repo = join(work, "repo.git");
-  const safe = ["-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", "-c", "core.fsmonitor=false", "-c", "init.templateDir="];
-  await run(deps.git, [...safe, "init", "-q", "--bare", repo], { timeoutMs });
-  await run(deps.git, [...safe, "-C", repo, "fetch", "-q", "--depth", "1", "--no-tags", "--", spec.url, spec.ref ?? "HEAD"], { timeoutMs });
-  const commit = (await run(deps.git, [...safe, "-C", repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}"], { timeoutMs })).toString("utf8").trim();
+  const home = join(work, "home");
+  mkdirSync(home, { mode: 0o700 });
+  const env = gitEnv(home);
+  const safe = [
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false",
+    "-c", "init.templateDir=",
+    // Only https and ssh (file:// for tests): no ext::, git://, http:// or anything a config could add.
+    "-c", "protocol.allow=never",
+    "-c", "protocol.https.allow=always",
+    "-c", "protocol.ssh.allow=always",
+    ...(deps.allowFileGit ? ["-c", "protocol.file.allow=always"] : []),
+  ];
+  await run(deps.git, [...safe, "init", "-q", "--bare", repo], { env, timeoutMs });
+  await run(deps.git, [...safe, "-C", repo, "fetch", "-q", "--depth", "1", "--no-tags", "--", spec.url, spec.ref ?? "HEAD"], { env, timeoutMs });
+  const commit = (await run(deps.git, [...safe, "-C", repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}"], { env, timeoutMs })).toString("utf8").trim();
   if (!COMMIT_RE.test(commit)) throw new SourceError("git didn't report a commit for the fetched ref.");
   const limits = { ...DEFAULT_LIMITS, ...deps.limits };
   const tar = await run(deps.git, [...safe, "-C", repo, "archive", "--format=tar", commit, ...(spec.path ? ["--", spec.path] : [])], {
+    env,
     timeoutMs,
     maxBuffer: limits.maxArchiveBytes,
   }).catch((err: Error) => {

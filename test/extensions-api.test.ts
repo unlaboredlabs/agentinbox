@@ -86,10 +86,15 @@ describe("/api/extensions", () => {
     expect(applied).toMatchObject({ installed: true, update: { to: { version: "2.0.0" } } });
     expect(await json(await req("/api/extensions/demo/verify", { method: "POST" }))).toEqual({ ok: true });
 
-    usedBy.demo = ["notion-work"];
+    // B2's usedBy returns connection ids; people see slugs.
+    const t = new Date().toISOString();
+    h.ctx.db.run("INSERT INTO connections (id, kind, preset, slug, name, url, created_at, updated_at) VALUES ('con_nw', 'remote_http', 'demo', 'notion-work', 'Work', 'https://x.example/mcp', ?, ?)", t, t);
+    usedBy.demo = ["con_nw"];
     const refused = await req("/api/extensions/demo", { method: "DELETE" });
     expect(refused.status).toBe(409);
-    expect(await json(refused)).toMatchObject({ error: { code: "in_use" }, usedBy: ["notion-work"] });
+    const refusedBody = await json(refused);
+    expect(refusedBody).toMatchObject({ error: { code: "in_use" }, usedBy: ["notion-work"] });
+    expect(refusedBody.error.message).toMatch(/used by notion-work\./);
     expect((await json(await req("/api/extensions")))[0].usedBy).toEqual(["notion-work"]);
     expect((await req("/api/extensions/demo?force=true", { method: "DELETE" })).status).toBe(204);
     expect(await json(await req("/api/extensions"))).toEqual([]);
@@ -110,6 +115,23 @@ describe("/api/extensions", () => {
     expect(ok.status).toBe(200);
     expect(await json(ok)).toMatchObject({ name: "tpx", official: false, network: ["api.tp.example"] });
     expect((await req("/api/extensions", { method: "POST", json: { source: "Bad Source" } })).status).toBe(400);
+  });
+
+  it("refuses relative and ~ paths: the daemon's cwd isn't the user's", async () => {
+    for (const source of ["./ext", "../ext", "~/ext"]) {
+      for (const path of ["/api/extensions/resolve", "/api/extensions"]) {
+        const res = await req(path, { method: "POST", json: { source } });
+        expect(res.status, `${path} ${source}`).toBe(400);
+        expect((await json(res)).error.message).toBe("Use an absolute path to a directory on xaq's machine.");
+      }
+    }
+  });
+
+  it("a third-party extension can't take an official name", async () => {
+    const dir = writeTree(join(work, "fake-notion"), { "xaq-extension.json": manifest("notion") });
+    const res = await req("/api/extensions/resolve", { method: "POST", json: { source: dir } });
+    expect(res.status).toBe(409);
+    expect((await json(res)).error.code).toBe("official_name");
   });
 });
 
@@ -191,6 +213,16 @@ describe("xaq ext (CLI)", () => {
     expect(sub.add).toContain("--yes");
     expect(sub.update).toContain("--yes");
     expect(sub.remove).toEqual(expect.arrayContaining(["--force", "--yes", "--data"]));
+  });
+
+  it("add ./dir resolves the path in the CLI's cwd, not the daemon's", async () => {
+    const cliCwd = join(work, "elsewhere");
+    writeTree(join(cliCwd, "mine"), { "xaq-extension.json": manifest("mine") });
+    expect(process.cwd()).not.toBe(cliCwd); // the "daemon" (this process) runs somewhere else
+    const { deps, prompter } = cli([], true);
+    expect(await addExtension("./mine", { ...deps, cwd: cliCwd })).toBe(0);
+    expect(prompter.text).toContain(`Fetching ${join(cliCwd, "mine")}`);
+    expect(extensionStore(h.ctx).get("mine")).toMatchObject({ source: join(cliCwd, "mine"), official: false });
   });
 
   it("update says when it's up to date; list says when there's nothing", async () => {

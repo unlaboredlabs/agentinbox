@@ -230,8 +230,17 @@ export async function readTar(chunks: AsyncIterable<Buffer>, opts: ExtractOption
 export function writeFiles(dest: string, files: PendingFile[]): void {
   for (const f of files) {
     const abs = join(dest, ...f.path.split("/"));
-    mkdirSync(dirname(abs), { recursive: true, mode: 0o755 });
-    writeFileSync(abs, f.data, { mode: f.exec ? 0o755 : 0o644, flag: "wx" });
+    try {
+      mkdirSync(dirname(abs), { recursive: true, mode: 0o755 });
+      writeFileSync(abs, f.data, { mode: f.exec ? 0o755 : 0o644, flag: "wx" });
+    } catch (err) {
+      // A file and a directory with the same path ("a" and "a/b"), or a name the file system can't take.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST" || code === "ENOTDIR" || code === "EISDIR" || code === "ENAMETOOLONG") {
+        throw new UnsafeArchiveError(`${f.path} can't be written (${code}): the archive has conflicting or invalid paths.`);
+      }
+      throw err;
+    }
     // Whatever the umask: the mode is part of the integrity.
     chmodSync(abs, f.exec ? 0o755 : 0o644);
   }

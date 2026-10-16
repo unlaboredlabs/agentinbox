@@ -28,6 +28,7 @@ const STATUS: Record<ExtensionErrorCode, number> = {
   bad_source: 400,
   fetch_failed: 502,
   rate_limited: 503,
+  official_name: 409,
 };
 
 const HINTS: Partial<Record<ExtensionErrorCode, string>> = {
@@ -36,6 +37,14 @@ const HINTS: Partial<Record<ExtensionErrorCode, string>> = {
   changed: "Review it again before confirming.",
   integrity_mismatch: "The files don't match the pinned integrity. Nothing was installed.",
 };
+
+/**
+ * usedBy for people: B2's hook returns connection ids; show each connection's slug (what the CLI and agents use).
+ * Anything that isn't a connection id is shown as it is.
+ */
+export function connectionLabels(ctx: Pick<AppContext, "db">, usedBy: string[]): string[] {
+  return usedBy.map((id) => ctx.db.get<{ slug: string }>("SELECT slug FROM connections WHERE id = ?", id)?.slug ?? id);
+}
 
 export function extensionView(ctx: AppContext, ext: InstalledExtension, usedBy?: string[]): ExtensionView {
   let displayName = ext.name;
@@ -59,7 +68,7 @@ export function extensionView(ctx: AppContext, ext: InstalledExtension, usedBy?:
     integrity: ext.integrity,
     official: ext.official,
     network,
-    usedBy: usedBy ?? extensionStore(ctx).usedBy(ext.name),
+    usedBy: connectionLabels(ctx, usedBy ?? extensionStore(ctx).usedBy(ext.name)),
     installedAt: ext.installedAt,
   };
 }
@@ -70,8 +79,14 @@ async function handled(c: Context<AppEnv>, ctx: AppContext, fn: () => Promise<Re
     return await fn();
   } catch (err) {
     if (!(err instanceof ExtensionError)) throw err;
-    const body: ExtensionErrorBody = { error: { code: err.code, message: err.message, ...(HINTS[err.code] ? { hint: HINTS[err.code] } : {}) } };
-    if (err.detail?.usedBy) body.usedBy = err.detail.usedBy;
+    let message = err.message;
+    let usedBy: string[] | undefined;
+    if (err.detail?.usedBy) {
+      usedBy = connectionLabels(ctx, err.detail.usedBy);
+      message = message.replace(err.detail.usedBy.join(", "), usedBy.join(", "));
+    }
+    const body: ExtensionErrorBody = { error: { code: err.code, message, ...(HINTS[err.code] ? { hint: HINTS[err.code] } : {}) } };
+    if (usedBy) body.usedBy = usedBy;
     if (err.detail?.warnings) body.warnings = err.detail.warnings;
     if (err.detail?.candidate) body.candidate = extensionView(ctx, err.detail.candidate, []);
     return c.json(body, STATUS[err.code] as 400);
@@ -163,8 +178,8 @@ export function extensionsApi(ctx: AppContext) {
     const force = c.req.query("force") === "true" || c.req.query("force") === "1";
     return handled(c, ctx, async () => {
       const usedBy = store().usedBy(name);
-      store().remove(name, { force });
-      audit("extension.remove", name, { force, usedBy });
+      await store().remove(name, { force });
+      audit("extension.remove", name, { force, usedBy: connectionLabels(ctx, usedBy) });
       return c.body(null, 204);
     });
   });

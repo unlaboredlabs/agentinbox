@@ -10,6 +10,7 @@ import { AdminApiError, type AdminChannel } from "../connections-cli/admin.ts";
 import type { Prompter } from "../connections-cli/prompt.ts";
 import { safeText } from "../listen/ui.ts";
 import { NPX } from "../listen/version.ts";
+import { parseSource } from "./sources.ts";
 
 const enc = encodeURIComponent;
 
@@ -36,6 +37,8 @@ export class ExtensionsApi {
 export interface ExtDeps {
   api: ExtensionsApi;
   prompter: Prompter;
+  /** Where a relative directory is resolved (default: this process's cwd). */
+  cwd?: string;
 }
 
 const shortCommit = (c: string | null) => (c ? c.slice(0, 12) : "(directory)");
@@ -59,8 +62,11 @@ function printWarnings(p: Prompter, warnings: string[]): void {
 /** An API error body (a 409 that carries usedBy / warnings), or null. */
 const errorBody = (err: unknown): ExtensionErrorBody | null => (err instanceof AdminApiError ? ((err.body as ExtensionErrorBody | null) ?? null) : null);
 
-export async function addExtension(source: string, deps: ExtDeps): Promise<number> {
+export async function addExtension(input: string, deps: ExtDeps): Promise<number> {
   const { api, prompter: p } = deps;
+  // A directory is resolved here, against this terminal's cwd (and ~), not the daemon's: it gets the absolute path.
+  const spec = parseSource(input, { cwd: deps.cwd ?? process.cwd() });
+  const source = spec.type === "local" ? spec.path : input.trim();
   p.print(`Fetching ${pc.cyan(safeText(source, 200))}…`);
   const { candidate, warnings, installed } = await api.resolve(source);
   describe(p, candidate);
