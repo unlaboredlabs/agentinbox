@@ -40,7 +40,11 @@ export interface ToolClass {
   /** Listed at the "read" level. */
   read: boolean;
   source: ClassSource;
-  /** Argument path (dot-separated) naming the target, offered for "always allow … for this target". */
+  /**
+   * JSON Pointer (RFC 6901) into the call's arguments naming the target, offered for "always allow … for this
+   * target" (e.g. `/page_ids`). Not dot paths: `{"a.b": x}` vs `{a: {b: y}}` must never be confused. The value may
+   * be an array of ids; a rule matches only when every element is covered.
+   */
   targetPath?: string;
 }
 
