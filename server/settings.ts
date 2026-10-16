@@ -91,8 +91,8 @@ export class SettingsStore {
       approvalTtlHours: 72,
       webhookAllowlist: ["localhost", "127.0.0.0/8", "::1"],
       pairingEnabled: true,
-      calendarPollSeconds: 60,
       brokerUpstreams: false,
+      calendarPollSeconds: 60,
     };
   }
 
@@ -165,8 +165,8 @@ function validate(s: Settings): Settings {
     approvalTtlHours: int(s.approvalTtlHours, "Approval expiry", 1, 24 * 30),
     webhookAllowlist: [...new Set(allowlist)],
     pairingEnabled: s.pairingEnabled !== false,
-    calendarPollSeconds: int(s.calendarPollSeconds, "Calendar poll interval", 15, 3600),
     brokerUpstreams: s.brokerUpstreams === true,
+    calendarPollSeconds: int(s.calendarPollSeconds, "Calendar poll interval", 15, 3600),
   };
 }
 
