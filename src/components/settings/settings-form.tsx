@@ -44,7 +44,7 @@ const toForm = (s: Settings): FormValues => ({
   pairingEnabled: s.pairingEnabled,
 });
 
-const fromForm = (v: FormValues): Settings => ({
+const fromForm = (v: FormValues): Omit<Settings, "brokerUpstreams"> => ({
   publicUrl: v.publicUrl.trim().replace(/\/+$/, ""),
   ingestMode: v.ingestMode,
   pollIntervalSeconds: Number(v.pollIntervalSeconds),

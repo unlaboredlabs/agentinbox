@@ -11,6 +11,7 @@ import { bearer } from "./agentapi/auth.ts";
 import { CALENDAR_PUSH_PATH } from "./calendar/push.ts";
 import { accountsApi } from "./api/accounts.ts";
 import { agentsApi } from "./api/agents.ts";
+import { connectionsApi } from "./api/connections.ts";
 import { approvalsApi } from "./api/approvals.ts";
 import { auditApi } from "./api/audit.ts";
 import { authApi, authPublicApi } from "./api/auth.ts";
@@ -132,7 +133,7 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
 
   // ── Admin console API ──
   app.use("/api/*", requireAdmin(ctx));
-  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi, connectionsApi]) {
     app.route("/api", api(ctx));
   }
 

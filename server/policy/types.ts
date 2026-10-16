@@ -42,9 +42,11 @@ export interface PolicyService extends Lifecycle {
    * on the account, and for message/label events the thread labels must intersect its label scope.
    * calendar.* events need `calendar.read` and the event's calendar in the grant's calendar scope.
    * Account-level events (account.auth_failed, sync.gap) need `read` or `calendar.read`.
+   * Connection events (isConnectionEventType: connection.*, approval.requested, `<preset>.*`) need a
+   * connection grant on ev.connectionId (any level) while the brokerUpstreams setting is on.
    */
   canSeeEvent(
     agentId: string,
-    ev: { accountId: string; type: EventType; threadLabelIds: string[]; calendarEvent?: { calendarId: string } | null },
+    ev: { accountId: string; type: EventType; threadLabelIds: string[]; calendarEvent?: { calendarId: string } | null; connectionId?: string | null },
   ): boolean;
 }

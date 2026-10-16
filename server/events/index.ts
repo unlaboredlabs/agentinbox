@@ -1,4 +1,4 @@
-import type { EventType, MailEvent, Page } from "../../shared/types.ts";
+import { type EventType, isConnectionEventType, type MailEvent, type Page } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { type Db, json, now, type Param } from "../db/index.ts";
 import { newId } from "../util/ids.ts";
@@ -17,6 +17,8 @@ export function createEventsService(ctx: AppContext): EventsService {
 
   function emit(e: NewEvent): MailEvent | null {
     if (inTransaction(ctx.db)) throw new Error("events.emit must not be called inside a transaction: it publishes after its own commit");
+    const owner = isConnectionEventType(e.type) ? e.connectionId : e.accountId;
+    if (!owner) throw new Error(`events.emit: ${e.type} needs ${isConnectionEventType(e.type) ? "connectionId" : "accountId"}`);
     const stored = ctx.db.tx((): StoredEvent | null => {
       const createdAt = now();
       const id = newId("evt");
@@ -30,7 +32,7 @@ export function createEventsService(ctx: AppContext): EventsService {
          ON CONFLICT(dedupe_key) DO NOTHING RETURNING seq`,
         id,
         e.type,
-        e.accountId,
+        owner,
         message?.id ?? null,
         message?.threadId ?? null,
         json.str(threadLabelIds),

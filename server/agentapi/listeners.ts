@@ -1,6 +1,7 @@
-import { EVENT_TYPES, type EventType, type ListenerInfo } from "../../shared/types.ts";
+import { type EventType, isEventType, type ListenerInfo } from "../../shared/types.ts";
 import { bool, type Db, json } from "../db/index.ts";
 import { mcpToolCallSql } from "../audit.ts";
+import { visibleConnectionIds } from "../broker/access.ts";
 import type { AppContext } from "../context.ts";
 import { EVENT_SELECT, type EventRow, toStoredEvent } from "../events/repo.ts";
 import { badRequest, HttpError } from "../util/errors.ts";
@@ -10,17 +11,22 @@ const CONSUMER_RE = /^[A-Za-z0-9._-]{1,100}$/;
 /** Capabilities that put events in an agent's feed: mail `read` for mail events, `calendar.read` for calendar ones. */
 export const readsEvents = (capabilities: readonly string[]): boolean => capabilities.includes("read") || capabilities.includes("calendar.read");
 
-/** Why a live stream must end, or null while the key, agent and a read grant (mail or calendar) are all still valid. */
 export type RevokeReason = "agent_deleted" | "agent_disabled" | "key_rotated" | "no_read_grant";
 
-export function accessProblem(db: Db, agentId: string, keyHash: string): RevokeReason | null {
+/**
+ * Why a live stream must end, or null while the key, agent and a read grant (mail or calendar) are all still valid.
+ * With the broker on (`brokerOn`, the brokerUpstreams setting), any connection grant counts as a read grant too:
+ * an agent with connections and no Gmail can listen for its connection events.
+ */
+export function accessProblem(db: Db, agentId: string, keyHash: string, brokerOn = false): RevokeReason | null {
   const a = db.get<{ key_hash: string; disabled: number }>("SELECT key_hash, disabled FROM agents WHERE id = ?", agentId);
   if (!a) return "agent_deleted";
   if (a.key_hash !== keyHash) return "key_rotated";
   if (bool(a.disabled)) return "agent_disabled";
   const grants = db.all<{ capabilities: string }>("SELECT capabilities FROM grants WHERE agent_id = ?", agentId);
-  if (!grants.some((g) => readsEvents(json.parse<string[]>(g.capabilities, [])))) return "no_read_grant";
-  return null;
+  if (grants.some((g) => readsEvents(json.parse<string[]>(g.capabilities, [])))) return null;
+  if (visibleConnectionIds(db, brokerOn, agentId).length) return null;
+  return "no_read_grant";
 }
 
 /** `ListenerInfo[]` for an agent, from listener_cursors. */
@@ -51,7 +57,7 @@ export function listenersOf(db: Db, agentId: string): ListenerInfo[] {
  */
 function listenerTypes(raw: unknown): EventType[] | null {
   if (!Array.isArray(raw)) return null;
-  const types = raw.filter((t): t is EventType => EVENT_TYPES.includes(t as EventType));
+  const types = raw.filter((t): t is EventType => typeof t === "string" && isEventType(t));
   return types.length ? types : null;
 }
 
@@ -95,6 +101,11 @@ export function newestGrantedSeq(ctx: AppContext, agentId: string): number {
     const r = ctx.db.get<{ m: number | null }>("SELECT MAX(seq) AS m FROM events WHERE account_id = ? AND seq > 0", g.accountId);
     max = Math.max(max, r?.m ?? 0);
   }
+  // Connection events keep the connection id in account_id (server/events/types.ts NewEvent.connectionId).
+  for (const id of visibleConnectionIds(ctx.db, ctx.settings.get().brokerUpstreams, agentId)) {
+    const r = ctx.db.get<{ m: number | null }>("SELECT MAX(seq) AS m FROM events WHERE account_id = ? AND seq > 0", id);
+    max = Math.max(max, r?.m ?? 0);
+  }
   return max;
 }
 
@@ -108,6 +119,7 @@ export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
     .grants(agentId)
     .filter((g) => readsEvents(g.capabilities))
     .map((g) => g.accountId);
+  accounts.push(...visibleConnectionIds(ctx.db, ctx.settings.get().brokerUpstreams, agentId));
   if (!accounts.length) return 0;
   const sql = `${EVENT_SELECT} WHERE e.seq > 0 AND e.seq < ? AND e.account_id IN (${accounts.map(() => "?").join(", ")}) ORDER BY e.seq DESC LIMIT 200`;
   let before = Number.MAX_SAFE_INTEGER;

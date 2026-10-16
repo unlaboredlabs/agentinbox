@@ -7,7 +7,13 @@ import type { Lifecycle } from "../context.ts";
 /** FROZEN. What ingest (and google, for account.auth_failed) hand to events.emit. */
 export interface NewEvent {
   type: EventType;
-  accountId: string;
+  /** Account events. Connection events (isConnectionEventType) pass connectionId instead. */
+  accountId?: string;
+  /**
+   * Connection events (`connection.*`, `approval.requested`, `<preset>.*`). Stored in events.account_id
+   * (connection ids are `con_…`, so they never collide with an account id) and read back as connectionId.
+   */
+  connectionId?: string;
   message?: MessageSummary | null;
   /**
    * Union of label ids across the message's whole thread at event time. Label-scoped grants see an

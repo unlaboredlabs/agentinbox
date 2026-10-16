@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { EVENT_TYPES, type EventType, type ListenerInfo, type MailEvent } from "../../shared/types.ts";
+import { BROKER_EVENT_TYPES, EVENT_TYPES, type EventType, isEventType, type ListenerInfo, type MailEvent } from "../../shared/types.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { json } from "../db/index.ts";
@@ -60,8 +60,8 @@ function parseSeq(raw: string | undefined, name: string, strict: boolean): numbe
 function parseTypes(raw: string | undefined): EventType[] | undefined {
   if (!raw) return undefined;
   const types = raw.split(",").map((t) => t.trim()).filter(Boolean);
-  const bad = types.filter((t) => !EVENT_TYPES.includes(t as EventType));
-  if (bad.length) throw badRequest(`Unknown event type ${bad.join(", ")}`, `Use any of ${EVENT_TYPES.join(", ")}`);
+  const bad = types.filter((t) => !isEventType(t));
+  if (bad.length) throw badRequest(`Unknown event type ${bad.join(", ")}`, `Use any of ${[...EVENT_TYPES, ...BROKER_EVENT_TYPES].join(", ")}, or <integration>.<event>`);
   return types.length ? (types as EventType[]) : undefined;
 }
 
@@ -69,7 +69,7 @@ const OPEN_REFUSALS: Record<RevokeReason, [string, string]> = {
   agent_deleted: ["This agent no longer exists", "Pair again with `npx agentinbox-cli connect`."],
   agent_disabled: ["This agent is disabled", "Enable it in the agentinbox console under Agents."],
   key_rotated: ["This API key was replaced", "Pair again with `npx agentinbox-cli connect`, or use the new key."],
-  no_read_grant: ["This agent has no read access to any account", "Grant it read or calendar.read on an account in the agentinbox console."],
+  no_read_grant: ["This agent has no read access to any account or connection", "Grant it read or calendar.read on an account (or access to a connection) in the agentinbox console."],
 };
 
 /** Destroys the underlying socket (a stalled client never drains, so a graceful end would hang). */
@@ -98,7 +98,8 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
   const start = c.req.query("start");
   if (start !== undefined && start !== "now" && start !== "beginning") throw badRequest("start must be now or beginning");
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
-  const problem = accessProblem(ctx.db, agentId, keyHash);
+  const brokerOn = () => ctx.settings.get().brokerUpstreams;
+  const problem = accessProblem(ctx.db, agentId, keyHash, brokerOn());
   if (problem) throw new HttpError(403, problem, ...OPEN_REFUSALS[problem]);
   const maxStreams = opts.maxStreams ?? 5;
   if ((opts.open.get(agentId) ?? 0) >= maxStreams) {
@@ -182,7 +183,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
       });
     };
     const checkAccess = () => {
-      const reason = accessProblem(db, agentId, keyHash);
+      const reason = accessProblem(db, agentId, keyHash, brokerOn());
       if (reason) revoke(reason);
       return !reason;
     };

@@ -1,4 +1,4 @@
-import type { CalendarEventSummary, EventType, MailEvent, MessageSummary } from "../../shared/types.ts";
+import { type CalendarEventSummary, type EventType, isConnectionEventType, type MailEvent, type MessageSummary } from "../../shared/types.ts";
 import { type Db, json } from "../db/index.ts";
 import { badRequest } from "../util/errors.ts";
 import type { StoredEvent } from "./types.ts";
@@ -14,6 +14,7 @@ export interface EventRow {
   seq: number;
   id: string;
   type: EventType;
+  /** The connection id on connection events. */
   account_id: string;
   account_email: string | null;
   label_ids: string;
@@ -34,12 +35,15 @@ export function toStoredEvent(r: EventRow): StoredEvent {
   const changed = json.parse<string[] | null>(r.changed_label_ids, null);
   const calendarEvent = json.parse<CalendarEventSummary | null>(r.calendar_event, null);
   const fallbackEmail = r.seq < 0 ? TEST_ACCOUNT_EMAIL : typeof detail?.email === "string" ? detail.email : "";
+  // Connection events keep their connection id in account_id (see NewEvent.connectionId).
+  const connection = isConnectionEventType(r.type);
   return {
     id: r.id,
     seq: r.seq,
     type: r.type,
-    accountId: r.account_id,
-    accountEmail: r.account_email ?? fallbackEmail,
+    accountId: connection ? "" : r.account_id,
+    accountEmail: connection ? "" : (r.account_email ?? fallbackEmail),
+    ...(connection ? { connectionId: r.account_id } : {}),
     message: json.parse<MessageSummary | null>(r.message, null),
     ...(calendarEvent ? { calendarEvent } : {}),
     ...(changed ? { labelIds: changed } : {}),

@@ -5,7 +5,9 @@ import {
   type CalendarApprovalDetail,
   type GoogleApproval,
   isCalendarApprovalKind,
+  type McpCallApproval,
   type McpCallApprovalDetail,
+  type McpCallResult,
 } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
@@ -59,6 +61,8 @@ const SELECT = `SELECT p.*, ag.name AS agent_name, ac.email AS account_email
 
 /** Approvals left "approved" without a sent message for this long were interrupted (e.g. a crash mid-send). */
 const STUCK_AFTER_MS = 10 * 60_000;
+/** An approved upstream call gets as long as a direct one (docs/MCP-BROKER.md "Transports": 60 s). */
+const CALL_TIMEOUT_MS = 60_000;
 
 function toApproval(r: ApprovalRow): Approval {
   const p = json.parse<Partial<ApprovalPayload>>(r.payload, {});
@@ -179,8 +183,7 @@ export class Approvals {
     await this.expireOverdue();
     const current = this.require(id);
     if (current.status !== "pending") throw this.notPending(current);
-    // mcp.call approvals are executed by the broker (a later PR); none can be queued before it lands.
-    if (current.kind === "mcp.call") throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
+    if (current.kind === "mcp.call") return this.approveCall(current, note, started);
 
     // The human approves a send by this agent under its current grant: both must still allow it.
     const blocked = this.sendBlockedReason(current);
@@ -226,6 +229,38 @@ export class Approvals {
         this.fail(id, message);
       }
       this.audit("approval.approve", current, "error", started, { error: message, transient: isTransient(err) });
+    }
+    return this.emit(id);
+  }
+
+  /**
+   * mcp.call: the broker runs the stored call (ctx.broker.runApprovedCall re-checks the agent, grant, pin and
+   * args hash, then forwards the exact bytes); "sent" = executed, with the result in tool_call.result for
+   * get_call_status. A failure is final: a call that may have reached the upstream is never retried.
+   */
+  private async approveCall(current: McpCallApproval, note: string | null | undefined, started: number): Promise<Approval> {
+    const id = current.id;
+    if (!this.ctx.broker.canRunApprovedCalls()) throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
+    if (!this.transition(id, "pending", "approved", note)) throw this.notPending(current);
+    this.emit(id);
+    const detail = { connectionId: current.connectionId, tool: current.call.exposedName };
+    try {
+      const result = await this.ctx.broker.runApprovedCall(current, AbortSignal.timeout(CALL_TIMEOUT_MS));
+      const stored: McpCallResult = {
+        content: result.content,
+        ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
+        ...(result.isError ? { isError: true } : {}),
+      };
+      this.ctx.db.run(
+        "UPDATE approvals SET status = 'sent', error = NULL, tool_call = json_set(tool_call, '$.result', json(?)) WHERE id = ?",
+        json.str(stored),
+        id,
+      );
+      this.audit("approval.approve", current, "ok", started, { ...detail, isError: !!result.isError });
+    } catch (err) {
+      const message = errorMessage(err);
+      this.fail(id, message);
+      this.audit("approval.approve", current, "error", started, { ...detail, error: message });
     }
     return this.emit(id);
   }
@@ -295,6 +330,16 @@ export class Approvals {
       cutoff,
     );
     for (const { id, kind } of rows) {
+      if (kind === "mcp.call") {
+        // The call may have reached the upstream: its outcome is unknown, and it's never retried automatically.
+        this.fail(
+          id,
+          "The tool call was interrupted before its result came back, so its outcome is unknown. It is not retried; check the integration, then ask the agent to call again if needed.",
+        );
+        this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: id, outcome: "error", reason: "outcome_unknown" });
+        this.emit(id);
+        continue;
+      }
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
         isCalendarApprovalKind(kind)
@@ -318,6 +363,17 @@ export class Approvals {
       : this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
     return this.cancel(
       rows.filter((r) => !only || (only === "calendar") === isCalendarApprovalKind(r.kind)).map((r) => r.id),
+      `${CANCELLED_PREFIX}${why}`,
+    );
+  }
+
+  /** Rejects pending mcp.call approvals on a connection (optionally one agent's) after it was disabled or access changed. */
+  cancelForConnection(connectionId: string, agentId: string | null, why: string): number {
+    const rows = agentId
+      ? this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND connection_id = ? AND agent_id = ?", connectionId, agentId)
+      : this.ctx.db.all<{ id: string }>("SELECT id FROM approvals WHERE status = 'pending' AND connection_id = ?", connectionId);
+    return this.cancel(
+      rows.map((r) => r.id),
       `${CANCELLED_PREFIX}${why}`,
     );
   }
