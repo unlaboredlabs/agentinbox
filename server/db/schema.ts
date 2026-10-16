@@ -297,4 +297,172 @@ export const MIGRATIONS: string[] = [
     SELECT 'calendar.setup', '{"enabled":false}'
     WHERE EXISTS (SELECT 1 FROM accounts);
   `,
+  /* 8: MCP broker (docs/MCP-BROKER.md, M1 PR 2). New tables, events.connection_id and the approvals rebuild; nothing reads them yet. */ `
+  -- One upstream with its credential. Gmail/Calendar stay in accounts (M1 doesn't move them).
+  CREATE TABLE connections (
+    id TEXT PRIMARY KEY,                       -- con_…
+    owner_id TEXT,                             -- NULL = the install's single owner (real multi-user is M4)
+    -- remote_http in M1. native_whoop (M2) and stdio (M4) are reserved, and native_google too (Gmail/Calendar
+    -- as a connection kind, docs "Code impact"): CHECKs can't be widened without rebuilding a table that
+    -- other tables reference.
+    kind TEXT NOT NULL CHECK (kind IN ('remote_http', 'native_whoop', 'stdio', 'native_google')),
+    -- The preset id (notion, whoop, …) or NULL for a custom server. Deliberately no CHECK: presets are validated
+    -- in code against the registry, so adding one never needs a rebuild of this table.
+    preset TEXT,
+    -- Operator-chosen; tools are exposed as <slug>__<tool>. No "_" in a slug, so the split is unambiguous.
+    slug TEXT NOT NULL UNIQUE CHECK (length(slug) BETWEEN 1 AND 24 AND slug NOT GLOB '*[^a-z0-9-]*'),
+    name TEXT NOT NULL,
+    url TEXT,                                  -- the MCP endpoint; required for remote_http
+    auth_type TEXT NOT NULL DEFAULT 'none' CHECK (auth_type IN ('none', 'header', 'oauth')),
+    -- What agents may do by default (Wynn's model): full | ask (risky tools wait for approval) | read.
+    level_default TEXT NOT NULL DEFAULT 'ask' CHECK (level_default IN ('full', 'ask', 'read')),
+    -- Admin-only private-target allow: the exact scheme://host:port the admin entered, or NULL (off).
+    -- Editing the URL clears it.
+    -- (No path, query, userinfo, blanks, backslash, percent-encoding, brackets or control characters; ends in
+    -- the port.) The code canonicalises it, and the guard itself validates host and ranges.
+    private_target TEXT CHECK (private_target IS NULL OR (
+      (private_target GLOB 'http://?*:[0-9]*' OR private_target GLOB 'https://?*:[0-9]*')
+      AND private_target NOT GLOB '*://*[/?#@ ]*' AND private_target NOT GLOB '*[^0-9]'
+      AND private_target NOT GLOB '*[\\%[]*'
+      AND private_target NOT GLOB '*[' || char(1) || '-' || char(31) || char(127) || ']*'
+    )),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'needs_reauth', 'error', 'disabled')),
+    status_reason TEXT,
+    -- When the credential stops working without a human (no refresh grant, or a hard cap such as Notion's
+    -- 180 days): drives the "expires in N days" warnings. NULL = not known to expire.
+    expires_at TEXT,
+    -- Negotiated protocol era and transport, cached (see the SDK ADR), and when it was last negotiated: the
+    -- cache expires from protocol_checked_at (the expiry is the code's).
+    protocol TEXT,
+    protocol_checked_at TEXT,
+    tools_cached_at TEXT,                      -- last successful tools/list
+    instructions_hash TEXT,                    -- sha256 of the server's instructions, pinned separately from tools
+    events_cursor TEXT,                        -- native presets: where the event poll resumes (e.g. WHOOP without a webhook URL)
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (kind <> 'remote_http' OR url IS NOT NULL)
+  );
+
+  -- The connection's secrets, one row per connection. *_enc columns are AES-GCM ciphertext (server/crypto.ts)
+  -- and are never logged or sent to the console or agents.
+  CREATE TABLE connection_credentials (
+    connection_id TEXT PRIMARY KEY REFERENCES connections(id) ON DELETE CASCADE,
+    -- auth_type 'header': the static header injected on every request (e.g. Authorization: Bearer …).
+    header_name_enc TEXT,
+    header_value_enc TEXT,
+    -- auth_type 'oauth'. The issuer is the authorization server's exact issuer (checked on every flow). The
+    -- client is the registration (pre-registered, metadata document or DCR): JSON {client_id, client_secret?, …}.
+    oauth_issuer_enc TEXT,
+    oauth_client_enc TEXT,
+    access_token_enc TEXT,
+    refresh_token_enc TEXT,                    -- rotated with a compare-and-swap, saved before it's used
+    expires_at TEXT,                           -- access token expiry
+    scope TEXT,                                -- granted scopes, space-separated (the union after insufficient_scope)
+    -- An authorization in flight (cleared when it completes): the PKCE verifier and the discovery result
+    -- (JSON: resource metadata, authorization server metadata, resource, redirect URI).
+    pkce_verifier_enc TEXT,
+    discovery_enc TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  -- Each upstream tool as pinned. Agents only ever see the pinned definition. A changed hash or a tool that
+  -- wasn't there at connect is held until the owner accepts the candidate.
+  CREATE TABLE upstream_tools (
+    connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,                        -- the upstream's own name
+    -- <slug>__<name> as listed to agents: [A-Za-z0-9_-], at most 64 (clients prepend mcp__<server>__).
+    exposed_name TEXT NOT NULL UNIQUE CHECK (length(exposed_name) BETWEEN 1 AND 64 AND exposed_name NOT GLOB '*[^A-Za-z0-9_-]*'),
+    -- JSON {title, description, inputSchema, outputSchema, annotations}; NULL only for a held new tool.
+    definition TEXT,
+    pin_hash TEXT,                             -- sha256(JCS({name, title, description, inputSchema, outputSchema, annotations}))
+    -- Risk classes (risky = irreversible; read = listed at the read-only level) and where they came from.
+    risky INTEGER NOT NULL DEFAULT 0 CHECK (risky IN (0, 1)),
+    read INTEGER NOT NULL DEFAULT 0 CHECK (read IN (0, 1)),
+    class_source TEXT NOT NULL CHECK (class_source IN ('preset', 'annotation', 'heuristic')),
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'held')),
+    held_reason TEXT CHECK (held_reason IS NULL OR held_reason IN ('changed', 'new')),
+    candidate_definition TEXT,                 -- JSON, same shape as definition: what accepting would pin
+    candidate_hash TEXT,
+    first_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (connection_id, name),
+    CHECK (risky = 0 OR read = 0),
+    CHECK ((definition IS NULL) = (pin_hash IS NULL)),
+    CHECK ((candidate_definition IS NULL) = (candidate_hash IS NULL)),
+    -- IS, not =: a NULL comparison would make the CHECK pass.
+    CHECK (
+      (state = 'active' AND held_reason IS NULL AND candidate_hash IS NULL AND pin_hash IS NOT NULL)
+      OR (state = 'held' AND held_reason IS 'changed' AND candidate_hash IS NOT NULL AND pin_hash IS NOT NULL)
+      OR (state = 'held' AND held_reason IS 'new' AND candidate_hash IS NOT NULL AND pin_hash IS NULL)
+    )
+  );
+
+  -- Per agent × connection access. No row = no access. There are no per-tool grant modes.
+  CREATE TABLE connection_grants (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    level TEXT NOT NULL CHECK (level IN ('full', 'ask', 'read')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, connection_id)
+  );
+  CREATE INDEX connection_grants_connection ON connection_grants(connection_id);
+
+  -- "Always allow this": a matching call by this agent never asks again. Optionally only for one target:
+  -- an argument (JSON Pointer into the arguments) and its canonical JSON value.
+  CREATE TABLE approval_rules (
+    id TEXT PRIMARY KEY,                       -- rul_…
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    tool TEXT NOT NULL,                        -- upstream tool name (upstream_tools.name), stable across slug edits
+    target_path TEXT,
+    target_value TEXT,
+    created_at TEXT NOT NULL,
+    CHECK ((target_path IS NULL) = (target_value IS NULL))
+  );
+  CREATE UNIQUE INDEX approval_rules_match ON approval_rules(agent_id, connection_id, tool, COALESCE(target_path, ''), COALESCE(target_value, ''));
+  CREATE INDEX approval_rules_connection ON approval_rules(connection_id);
+
+  -- Approvals, rebuilt: SQLite can't drop NOT NULL. account_id and draft_id become nullable (an mcp.call
+  -- has neither), connection_id and tool_call are added. Same ids, rowids (list order), indexes and
+  -- cascades; nothing references approvals, so dropping it cascades nowhere.
+  -- tool_call (mcp.call only): JSON {tool, exposedName, args (the exact canonical bytes, as a string),
+  -- argsSha256, pinHash, result (once executed)}.
+  CREATE TABLE approvals_new (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+    connection_id TEXT REFERENCES connections(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    draft_id TEXT,
+    payload TEXT NOT NULL,       -- JSON {to,cc,bcc,subject,body,threadId,attachments,reason,…}
+    tool_call TEXT,
+    decided_at TEXT,
+    decision_note TEXT,
+    sent_message_id TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    -- Mail and calendar kinds keep exactly the invariant they had (an account and a draft id, '' for
+    -- calendar); only mcp.call goes through a connection.
+    CHECK (
+      (kind = 'mcp.call' AND account_id IS NULL AND draft_id IS NULL AND connection_id IS NOT NULL AND tool_call IS NOT NULL)
+      OR (kind <> 'mcp.call' AND account_id IS NOT NULL AND draft_id IS NOT NULL AND connection_id IS NULL AND tool_call IS NULL)
+    )
+  );
+  INSERT INTO approvals_new (rowid, id, agent_id, account_id, kind, status, draft_id, payload, decided_at, decision_note, sent_message_id, error, created_at, expires_at)
+    SELECT rowid, id, agent_id, account_id, kind, status, draft_id, payload, decided_at, decision_note, sent_message_id, error, created_at, expires_at
+    FROM approvals ORDER BY rowid;
+  DROP TABLE approvals;
+  ALTER TABLE approvals_new RENAME TO approvals;
+  CREATE INDEX approvals_status ON approvals(status, created_at);
+  CREATE INDEX approvals_connection ON approvals(connection_id);
+
+  -- Events from connections (connection.auth_failed, connection.tool_changed, approval.requested, whoop.*) carry
+  -- their connection here. account_id stays NOT NULL: connection events store '' there. Additive, no rebuild.
+  ALTER TABLE events ADD COLUMN connection_id TEXT;
+  CREATE INDEX events_connection_seq ON events(connection_id, seq) WHERE connection_id IS NOT NULL;
+  `,
 ];
