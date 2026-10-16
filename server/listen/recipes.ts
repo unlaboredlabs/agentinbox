@@ -252,6 +252,6 @@ export function recipesHelp(): string {
   lines.push(`    ${NPX} listen --forward http://localhost:8787/agentinbox`);
   lines.push("");
   lines.push(`  Keep it running in the background:  ${NPX} listen service install --recipe claude-code`);
-  lines.push("  Guide: https://github.com/unlaboredlabs/agentinbox/blob/main/docs/listen.md");
+  lines.push("  Guide: https://github.com/wynn-dev/agentinbox/blob/main/docs/listen.md");
   return lines.join("\n");
 }

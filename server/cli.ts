@@ -82,7 +82,7 @@ Examples:
                                          on an agent's machine: wake Claude Code on new mail
 
 Run any command with --help for details. Install it with npm i -g agentinbox-cli to type agentinbox instead.
-Docs: https://github.com/unlaboredlabs/agentinbox/blob/main/docs/reference.md`,
+Docs: https://github.com/wynn-dev/agentinbox/blob/main/docs/reference.md`,
   )
   .showSuggestionAfterError();
 

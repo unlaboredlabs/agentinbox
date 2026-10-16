@@ -13,6 +13,7 @@ import { consoleUrls, loopbackUrl } from "./urls.ts";
 /** Installs agentinbox as a background service: systemd on Linux, launchd on macOS. */
 
 export const SERVICE_NAME = "agentinbox";
+// Keeps the original org name after the repo moved to wynn-dev/agentinbox: installed services are found by this label.
 export const LAUNCHD_LABEL = "com.unlaboredlabs.agentinbox";
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 /** Package root: one level above the running module (dist/cli.js or server/service.ts). */

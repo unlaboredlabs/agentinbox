@@ -19,7 +19,7 @@ Scope is Gmail only. It's open source (MIT), with no cloud service. Users bring 
 | Topic | Decision |
 |---|---|
 | Name | `agentinbox`, for both the npm package and the repo |
-| Repo | **Public** repo `unlaboredlabs/agentinbox`. The `wynn-dev` gh account is admin of the org. Not created yet. |
+| Repo | **Public** repo `wynn-dev/agentinbox` (transferred from `unlaboredlabs/agentinbox` on 2026-10-16; old URLs redirect). |
 | License | MIT (LICENSE file already written) |
 | Runtime | **Node 22.13+, pnpm.** Not Bun (the user dropped it). `npx agentinbox` must work with only Node installed. |
 | Distribution | Self-contained, modeled on **`/home/devuser/src/cliproxyapi-console`** (the user's own project). Study its structure, CLI, service install, first-run setup-token flow, health endpoint, lockout and update notice. `npx agentinbox` runs in the foreground. `npx agentinbox service install\|uninstall\|status` sets up systemd (user, or system when root) or launchd. |

@@ -1,6 +1,6 @@
 # agentinbox
 
-[![CI](https://github.com/unlaboredlabs/agentinbox/actions/workflows/ci.yml/badge.svg)](https://github.com/unlaboredlabs/agentinbox/actions/workflows/ci.yml)
+[![CI](https://github.com/wynn-dev/agentinbox/actions/workflows/ci.yml/badge.svg)](https://github.com/wynn-dev/agentinbox/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/agentinbox-cli)](https://www.npmjs.com/package/agentinbox-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 

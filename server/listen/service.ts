@@ -42,6 +42,7 @@ import { NPX } from "./version.ts";
  */
 
 export const unitName = (profile: string) => `agentinbox-listen-${profile}`;
+// The original org name, kept after the repo move: installed listener services are found by this label.
 export const launchdLabel = (profile: string) => `com.unlaboredlabs.agentinbox.listen.${profile}`;
 
 /**

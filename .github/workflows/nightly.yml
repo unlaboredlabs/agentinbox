@@ -4,7 +4,7 @@ name: Nightly
 # `latest` dist-tag, using npm trusted publishing (OIDC): no npm token is stored
 # anywhere, and npm attaches provenance automatically.
 #
-# The trusted publisher on npmjs.com is registered for unlaboredlabs/agentinbox,
+# The trusted publisher on npmjs.com is registered for wynn-dev/agentinbox,
 # workflow `nightly.yml`, no environment. npm matches this file by name: renaming it breaks publishing until the
 # trusted publisher on npmjs.com is recreated with the new filename.
 on:
