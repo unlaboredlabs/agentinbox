@@ -52,7 +52,10 @@ export interface ExtensionStore {
   verify(name: string): boolean; // re-check integrity of the installed files
 }
 
-/** Filled by the other writers (B2: connection binding; B3: the code host). */
+/**
+ * Filled by the other writers (B2: connection binding; B3: the code host). `usedBy` has one owner; `onChange` and
+ * `onRemove` are listener lists (setHooks adds, never replaces; SqliteExtensionStore.onChange/onRemove take an order).
+ */
 export interface ExtensionHooks {
   /** Names of the connections that use the extension (B2). Removal is refused while any do, unless forced. */
   usedBy(name: string): string[];
@@ -60,6 +63,24 @@ export interface ExtensionHooks {
   onRemove?(ext: InstalledExtension, opts: { force: boolean; usedBy: string[] }): void;
   /** After an install, update or removal (B3 stops or restarts children). */
   onChange?(change: { from: InstalledExtension | null; to: InstalledExtension | null }): void;
+}
+
+/** Listener orders for onChange/onRemove (lower runs first). */
+export const LISTENER_ORDER = { presets: 0, restart: 100 } as const;
+
+interface Listener<F> {
+  fn: F;
+  order: number;
+  seq: number;
+}
+
+function addListener<F>(list: Listener<F>[], l: Listener<F>): () => void {
+  list.push(l);
+  list.sort((a, b) => a.order - b.order || a.seq - b.seq);
+  return () => {
+    const i = list.indexOf(l);
+    if (i >= 0) list.splice(i, 1);
+  };
 }
 
 export type ExtensionErrorCode =
@@ -186,7 +207,11 @@ export class SqliteExtensionStore implements ExtensionStore {
   readonly root: string;
   private readonly tmpRoot: string;
   private readonly deps: FetchDeps;
-  private hooks: ExtensionHooks = { usedBy: () => [] };
+  private usedByHook: ExtensionHooks["usedBy"] = () => [];
+  /** Listeners, called in `order` (then registration order); several writers subscribe (B2 presets, B3 restarts). */
+  private readonly changeListeners: Listener<NonNullable<ExtensionHooks["onChange"]>>[] = [];
+  private readonly removeListeners: Listener<NonNullable<ExtensionHooks["onRemove"]>>[] = [];
+  private listenerSeq = 0;
   /** One install, update or removal at a time. */
   private chain: Promise<unknown> = Promise.resolve();
 
@@ -208,12 +233,42 @@ export class SqliteExtensionStore implements ExtensionStore {
     }
   }
 
+  /**
+   * `usedBy` replaces the previous one (there's one owner: B2). `onChange` and `onRemove` are ADDED as listeners at
+   * order 0, never replacing another writer's; use onChange()/onRemove() for an explicit order or to unsubscribe.
+   */
   setHooks(hooks: Partial<ExtensionHooks>): void {
-    this.hooks = { ...this.hooks, ...hooks };
+    if (hooks.usedBy) this.usedByHook = hooks.usedBy;
+    if (hooks.onChange) this.onChange(hooks.onChange);
+    if (hooks.onRemove) this.onRemove(hooks.onRemove);
+  }
+
+  /**
+   * Subscribes to installs, updates and removals. Lower `order` runs first: B2's preset reload uses the default (0);
+   * the code host restarts children at LISTENER_ORDER.restart, after it, so restarts see the new preset. A throwing
+   * listener is logged and the others still run. Returns the unsubscribe.
+   */
+  onChange(listener: NonNullable<ExtensionHooks["onChange"]>, opts: { order?: number } = {}): () => void {
+    return addListener(this.changeListeners, { fn: listener, order: opts.order ?? 0, seq: this.listenerSeq++ });
+  }
+
+  /** Before a removal (B2 disables the connections when forced). Same ordering and unsubscribe as onChange. */
+  onRemove(listener: NonNullable<ExtensionHooks["onRemove"]>, opts: { order?: number } = {}): () => void {
+    return addListener(this.removeListeners, { fn: listener, order: opts.order ?? 0, seq: this.listenerSeq++ });
+  }
+
+  private emitChange(change: Parameters<NonNullable<ExtensionHooks["onChange"]>>[0]): void {
+    for (const l of [...this.changeListeners]) {
+      try {
+        l.fn(change);
+      } catch (err) {
+        this.opts.log?.warn("An extension change listener failed", { error: (err as Error).message });
+      }
+    }
   }
 
   usedBy(name: string): string[] {
-    return this.hooks.usedBy(name);
+    return this.usedByHook(name);
   }
 
   /** The registry index (the console's browse list). */
@@ -255,7 +310,7 @@ export class SqliteExtensionStore implements ExtensionStore {
         }
         const installed = this.commit(staged, null);
         this.opts.log?.info("Extension installed", { name: installed.name, version: installed.version, commit: installed.commit, official: installed.official });
-        this.hooks.onChange?.({ from: null, to: installed });
+        this.emitChange({ from: null, to: installed });
         return installed;
       } finally {
         this.discard(staged.work);
@@ -281,7 +336,7 @@ export class SqliteExtensionStore implements ExtensionStore {
         }
         const installed = this.commit(staged, null);
         this.opts.log?.info("Extension installed from its pin", { name: installed.name, commit: installed.commit });
-        this.hooks.onChange?.({ from: null, to: installed });
+        this.emitChange({ from: null, to: installed });
         return installed;
       } finally {
         this.discard(staged.work);
@@ -304,7 +359,7 @@ export class SqliteExtensionStore implements ExtensionStore {
         }
         const installed = this.commit(staged, from);
         this.opts.log?.info("Extension updated", { name, from: from.commit ?? from.integrity, to: installed.commit ?? installed.integrity });
-        this.hooks.onChange?.({ from, to: installed });
+        this.emitChange({ from, to: installed });
         return { from, to: installed };
       } finally {
         this.discard(staged.work);
@@ -319,15 +374,15 @@ export class SqliteExtensionStore implements ExtensionStore {
     return this.serial(async () => {
       const ext = this.get(name);
       if (!ext) throw new ExtensionError("not_found", `${name} isn't installed.`);
-      const usedBy = this.hooks.usedBy(name);
+      const usedBy = this.usedByHook(name);
       if (usedBy.length && !opts.force) {
         throw new ExtensionError("in_use", `${name} is used by ${usedBy.join(", ")}. Remove those connections first, or force it (which disables them).`, { usedBy });
       }
-      this.hooks.onRemove?.(ext, { force: opts.force, usedBy });
+      for (const l of [...this.removeListeners]) l.fn(ext, { force: opts.force, usedBy });
       this.opts.db.run("DELETE FROM extensions WHERE name = ?", name);
       this.removeTree(join(this.root, name));
       this.opts.log?.info("Extension removed", { name, forced: opts.force && usedBy.length > 0 });
-      this.hooks.onChange?.({ from: ext, to: null });
+      this.emitChange({ from: ext, to: null });
     });
   }
 

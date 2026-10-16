@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Db } from "../server/db/index.ts";
 import { computeIntegrity, integrityDirName } from "../server/extensions/integrity.ts";
 import { gitEnv, parseSource } from "../server/extensions/sources.ts";
-import { ExtensionError, SqliteExtensionStore } from "../server/extensions/store.ts";
+import { ExtensionError, LISTENER_ORDER, SqliteExtensionStore } from "../server/extensions/store.ts";
 import { entriesFromDir, type FakeGithub, fakeSha, manifest, startFakeGithub, type TarEntry, writeTree } from "./extension-fakes.ts";
 
 let gh: FakeGithub;
@@ -306,6 +306,30 @@ describe("the extension store", () => {
     writeFileSync(join(dir, "new.txt"), "n");
     expect((await store.update("devext", { confirm: false }))?.to.integrity).toBe(computeIntegrity(dir));
     await expect(store.update("missing", { confirm: false })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("onChange and onRemove keep every writer's listener, in order (B2's preset reload before B3's restart), whatever the registration order", async () => {
+    const store = newStore();
+    const calls: string[] = [];
+    // B3 subscribes first (its service may start before B2's), at the restart order...
+    const unsubRestart = store.onChange(({ to, from }) => calls.push(`restart:${(to ?? from)?.name}`), { order: LISTENER_ORDER.restart });
+    // ...B2 later, through setHooks (order 0): it still runs first, and replaces nothing.
+    store.setHooks({ usedBy: () => [], onChange: ({ to, from }) => calls.push(`presets:${(to ?? from)?.name}`) });
+    store.setHooks({ onRemove: (ext) => calls.push(`b2-remove:${ext.name}`) });
+    store.onRemove((ext) => calls.push(`b3-remove:${ext.name}`), { order: LISTENER_ORDER.restart });
+    // A throwing listener is logged; the others still run and the install stands.
+    store.onChange(() => {
+      throw new Error("boom");
+    }, { order: 50 });
+
+    await store.install(extDir("ordered").dir, { confirmThirdParty: true });
+    expect(calls).toEqual(["presets:ordered", "restart:ordered"]);
+
+    calls.length = 0;
+    unsubRestart();
+    await store.remove("ordered", { force: false });
+    expect(calls).toEqual(["b2-remove:ordered", "b3-remove:ordered", "presets:ordered"]);
+    expect(store.get("ordered")).toBeNull();
   });
 
   it("refuses an install over a different installed version (that's an update)", async () => {

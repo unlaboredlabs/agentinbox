@@ -28,7 +28,7 @@ import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
 import { removeConnectionState } from "../extensions/host/spawn.ts";
-import { extensionStore } from "../extensions/store.ts";
+import { extensionStore, LISTENER_ORDER } from "../extensions/store.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -471,6 +471,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return emitted;
   }
   let pollTimer: NodeJS.Timeout | null = null;
+  let unwatchExtensions: (() => void) | null = null;
 
   const service: BrokerService = {
     enabled,
@@ -578,12 +579,15 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       // Extension installs, updates and removals (server/extensions/store.ts) restart the connections that use the
       // extension: the old child stops, and the next use starts the new code (after its integrity check).
       try {
-        extensionStore(ctx).setHooks({
-          onChange: ({ from, to }) => {
+        // After the preset reload (B2, LISTENER_ORDER.presets), so a restart sees the new preset.
+        unwatchExtensions?.();
+        unwatchExtensions = extensionStore(ctx).onChange(
+          ({ from, to }) => {
             const name = (to ?? from)?.name;
             if (name) void reloadExtension(name);
           },
-        });
+          { order: LISTENER_ORDER.restart },
+        );
       } catch (err) {
         log.error("Couldn't watch extension changes", { error: errorMessage(err) });
       }
@@ -610,6 +614,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
 
     async stop() {
+      unwatchExtensions?.();
+      unwatchExtensions = null;
       catalog.close();
       ctx.bus.off("settings", onSettings);
       if (pollTimer) clearInterval(pollTimer);
