@@ -17,6 +17,7 @@ import { Route as AppAccountsRouteImport } from './routes/_app/accounts'
 import { Route as AppApprovalsRouteImport } from './routes/_app/approvals'
 import { Route as AppAuditRouteImport } from './routes/_app/audit'
 import { Route as AppEventsRouteImport } from './routes/_app/events'
+import { Route as AppExtensionsRouteImport } from './routes/_app/extensions'
 import { Route as AppGetStartedRouteImport } from './routes/_app/get-started'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as ApproveIdRouteImport } from './routes/approve.$id'
@@ -64,6 +65,11 @@ const AppAuditRoute = AppAuditRouteImport.update({
 const AppEventsRoute = AppEventsRouteImport.update({
   id: '/events',
   path: '/events',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppExtensionsRoute = AppExtensionsRouteImport.update({
+  id: '/extensions',
+  path: '/extensions',
   getParentRoute: () => AppRoute,
 } as any)
 const AppGetStartedRoute = AppGetStartedRouteImport.update({
@@ -121,6 +127,7 @@ export interface FileRoutesByFullPath {
   '/approvals': typeof AppApprovalsRoute
   '/audit': typeof AppAuditRoute
   '/events': typeof AppEventsRoute
+  '/extensions': typeof AppExtensionsRoute
   '/get-started': typeof AppGetStartedRoute
   '/settings': typeof AppSettingsRoute
   '/approve/$id': typeof ApproveIdRoute
@@ -138,6 +145,7 @@ export interface FileRoutesByTo {
   '/approvals': typeof AppApprovalsRoute
   '/audit': typeof AppAuditRoute
   '/events': typeof AppEventsRoute
+  '/extensions': typeof AppExtensionsRoute
   '/get-started': typeof AppGetStartedRoute
   '/settings': typeof AppSettingsRoute
   '/approve/$id': typeof ApproveIdRoute
@@ -158,6 +166,7 @@ export interface FileRoutesById {
   '/_app/approvals': typeof AppApprovalsRoute
   '/_app/audit': typeof AppAuditRoute
   '/_app/events': typeof AppEventsRoute
+  '/_app/extensions': typeof AppExtensionsRoute
   '/_app/get-started': typeof AppGetStartedRoute
   '/_app/settings': typeof AppSettingsRoute
   '/approve/$id': typeof ApproveIdRoute
@@ -179,6 +188,7 @@ export interface FileRouteTypes {
     | '/approvals'
     | '/audit'
     | '/events'
+    | '/extensions'
     | '/get-started'
     | '/settings'
     | '/approve/$id'
@@ -196,6 +206,7 @@ export interface FileRouteTypes {
     | '/approvals'
     | '/audit'
     | '/events'
+    | '/extensions'
     | '/get-started'
     | '/settings'
     | '/approve/$id'
@@ -215,6 +226,7 @@ export interface FileRouteTypes {
     | '/_app/approvals'
     | '/_app/audit'
     | '/_app/events'
+    | '/_app/extensions'
     | '/_app/get-started'
     | '/_app/settings'
     | '/approve/$id'
@@ -292,6 +304,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppEventsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/extensions': {
+      id: '/_app/extensions'
+      path: '/extensions'
+      fullPath: '/extensions'
+      preLoaderRoute: typeof AppExtensionsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/get-started': {
       id: '/_app/get-started'
       path: '/get-started'
@@ -363,6 +382,7 @@ interface AppRouteChildren {
   AppApprovalsRoute: typeof AppApprovalsRoute
   AppAuditRoute: typeof AppAuditRoute
   AppEventsRoute: typeof AppEventsRoute
+  AppExtensionsRoute: typeof AppExtensionsRoute
   AppGetStartedRoute: typeof AppGetStartedRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -379,6 +399,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppApprovalsRoute: AppApprovalsRoute,
   AppAuditRoute: AppAuditRoute,
   AppEventsRoute: AppEventsRoute,
+  AppExtensionsRoute: AppExtensionsRoute,
   AppGetStartedRoute: AppGetStartedRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,

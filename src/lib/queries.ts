@@ -29,6 +29,7 @@ import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { apiGet } from "./api";
 import type { ApprovalRule, ConnectionGrant, ConnectionView, McpCallApprovalView, PresetView } from "@shared/types";
 import { agentConnections } from "../components/connections/connection-flow";
+import type { ExtensionRegistryEntryView, ExtensionView } from "@shared/extensions";
 
 export type * from "./broker-dto";
 
@@ -62,6 +63,9 @@ export const keys = {
   presets: ["connection-presets"] as const,
   agentConnections: (agentId: string) => ["agent-connections", agentId] as const,
   approvalRules: ["approval-rules"] as const,
+  // Extensions (docs/EXTENSIONS.md).
+  extensions: ["extensions"] as const,
+  extensionRegistry: ["extension-registry"] as const,
 };
 
 export interface EventFilters {
@@ -190,6 +194,11 @@ export const queries = {
       queryFn: () => apiGet<McpCallApprovalView | Approval>(`/api/approvals/${encodeURIComponent(id)}`),
       retry: false,
     }),
+  /** Installed extensions, with the connections using each. */
+  extensions: () => queryOptions({ queryKey: keys.extensions, queryFn: () => apiGet<ExtensionView[]>("/api/extensions") }),
+  /** The official registry (index.json), fetched by the daemon. */
+  extensionRegistry: () =>
+    queryOptions({ queryKey: keys.extensionRegistry, queryFn: () => apiGet<ExtensionRegistryEntryView[]>("/api/extensions/registry"), staleTime: 5 * 60_000, retry: false }),
   /** First audit page only, for an agent's detail page. */
   recentAudit: (agentId: string) =>
     queryOptions({

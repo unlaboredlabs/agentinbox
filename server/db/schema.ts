@@ -478,4 +478,22 @@ export const MIGRATIONS: string[] = [
   -- NULL: only the agents picked (connection_grants). Per-agent levels still live in connection_grants.
   ALTER TABLE connections ADD COLUMN all_agents INTEGER CHECK (all_agents IS NULL OR all_agents = 1);
   `,
+  /* 11: extensions (docs/EXTENSIONS.md). Additive: a new table. */ `
+  -- One row per installed extension: what it was installed from and exactly what was installed. Its files are in
+  -- <dataDir>/extensions/<name>/<first 16 hex of the integrity digest>/, read-only (server/extensions/store.ts).
+  -- source: a registry name, a GitHub or other repository URL, or an absolute directory. commit_sha: the resolved
+  -- commit (NULL for a directory). integrity: sha256-<base64> over the canonical listing (server/extensions/integrity.ts).
+  -- manifest: xaq-extension.json as installed. official: from wynn-dev/xaq-extensions at the indexed or pinned commit.
+  CREATE TABLE extensions (
+    name TEXT PRIMARY KEY CHECK (length(name) BETWEEN 1 AND 32),
+    kind TEXT NOT NULL CHECK (kind IN ('remote', 'code')),
+    version TEXT NOT NULL,
+    source TEXT NOT NULL,
+    commit_sha TEXT CHECK (commit_sha IS NULL OR length(commit_sha) = 40),
+    integrity TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    official INTEGER NOT NULL CHECK (official IN (0, 1)),
+    installed_at TEXT NOT NULL
+  );
+  `,
 ];
