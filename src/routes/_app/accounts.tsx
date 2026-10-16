@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { AccountsList, ConnectAccountButton } from "@/components/accounts/accounts-list";
 import { PageHeader } from "@/components/common";
+import { CalendarNotice } from "@/components/google/calendar-notice";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { loopbackTwin } from "@/lib/public-url";
 import { keys, queries } from "@/lib/queries";
@@ -36,10 +37,11 @@ function AccountsPage() {
     <>
       <PageHeader
         title="Gmail accounts"
-        description="Mailboxes agentinbox syncs. Credentials stay here; agents get access per account through grants."
+        description="Mailboxes (and their Google Calendars, once added) agentinbox syncs. Credentials stay here; agents get access per account through grants."
         actions={<ConnectAccountButton />}
       />
       <LoopbackTwinHint />
+      <CalendarNotice />
       <AccountsList />
     </>
   );

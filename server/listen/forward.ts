@@ -71,7 +71,7 @@ export async function forwardEvent(url: string, secret: string, payload: Webhook
         "webhook-id": id,
         "webhook-timestamp": String(timestamp),
         "webhook-signature": sign(secret, id, timestamp, body),
-        // Subjects, senders, snippets and bodies in this payload are untrusted email content.
+        // Subjects, senders, snippets, bodies and calendar event text in this payload are untrusted content.
         "x-agentinbox-untrusted": "1",
       },
       body,

@@ -281,11 +281,11 @@ async function wizardFlow() {
   await shoot(page, "wizard-4-oauth-client", { fullPage: true });
   await continueBtn().click();
 
-  // 5. Gmail accounts: the real popup, consented by the fake Google
-  await stepTitle("Connect Gmail accounts");
+  // 5. Google accounts (Gmail and Calendar in one consent): the real popup, consented by the fake Google
+  await stepTitle("Connect Google accounts");
   await settle(page);
   const popup = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Connect a Gmail account" }).click();
+  await page.getByRole("button", { name: "Connect a Google account" }).click();
   await (await popup).waitForEvent("close", { timeout: 20_000 }).catch(() => {});
   await page.getByText("ops@acme.dev").first().waitFor({ timeout: 20_000 });
   await page.keyboard.press("Escape"); // the connect dialog, if it's still open

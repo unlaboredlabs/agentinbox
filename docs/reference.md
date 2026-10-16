@@ -24,8 +24,9 @@ running agentinbox in production, scripting it, and understanding what it does.
 - **Real-time delivery.** New mail, replies to threads you sent into, and label changes arrive within seconds through
   Gmail push via a Pub/Sub *pull* subscription (no public URL needed), or within the poll interval (30 seconds by
   default) by polling with zero extra setup.
-  [`agentinbox listen`](listen.md) wakes agents on a laptop behind NAT.
-- **Webhooks.** Filter by account, label, sender, recipient, subject or attachments. Payloads are signed per
+  [`agentinbox listen`](listen.md) wakes agents on a laptop behind NAT. Google Calendar invitations and changes arrive
+  the same way (polled every 60 seconds by default) for agents with `calendar.read`.
+- **Webhooks.** Filter by account, label, sender, recipient, subject, attachments or calendar. Payloads are signed per
   [Standard Webhooks](https://www.standardwebhooks.com), retried with backoff, logged, and replayable.
 - **Guardrails that don't degrade content.** Per agent and mailbox: capabilities, label scope, send mode (direct,
   draft-only or human approval), recipient allowlists, reply-only and send caps. Email content is cleaned, not censored.
@@ -83,7 +84,8 @@ never passes through anyone else's app. The parts that most often go wrong:
 - **OAuth client** must be of type *Web application*, with the redirect URI the console shows
   (`<public URL>/oauth/callback`). Google won't redirect to plain HTTP on a non-localhost address; the console then uses
   a `localhost` redirect URI and asks you to paste the URL you land on.
-- **Scopes.** Each connected account grants `gmail.modify` plus `openid email profile`, nothing more.
+- **Scopes.** Each connected account grants `gmail.modify` plus `openid email profile`, and with Google Calendar on
+  `calendar.events`, `calendar.calendarlist.readonly` and `calendar.events.freebusy`, nothing more.
 - **Real-time delivery (Pub/Sub) setup** asks one connected account for the extra `pubsub` scope, and that account needs
   **Owner** or **Pub/Sub Admin** on the project (Editor can't change topic permissions). A Workspace organization policy
   (domain-restricted sharing) can block granting Gmail's push service
@@ -129,6 +131,15 @@ Event types: `message.received`, `message.sent`, `thread.reply_received` (a repl
 labels their grants let them read. `thread.reply_received` is a subset of `message.received` (a reply produces both),
 so subscribe to one or the other, not both.
 
+**Calendar events:** `calendar.invitation_received` (someone invited the account), `calendar.event_created`,
+`calendar.event_updated` (`detail.changes` lists what changed, or is `null` when the previous version wasn't seen) and
+`calendar.event_cancelled`. They come from the calendars the account owns or can edit, and only reach agents with
+`calendar.read` on that account, for the calendars their grant covers; mail `read` alone doesn't see them, and
+`calendar.read` alone doesn't see mail. They use the same envelope with `message: null` and `calendarEvent` set:
+calendar and event id, title, start and end, location, organizer, attendees and their responses, the account's own
+response and https links. No description is stored; a webhook with "include body" fetches it when it delivers and puts
+the cleaned text in `content` (not on cancellations).
+
 - **Agents without an HTTP endpoint** use the MCP tools `wait_for_events` (long poll), `list_events` and `ack_events`
   while a session runs; the server keeps each agent's position. To start an agent when mail arrives, use
   [`agentinbox listen`](listen.md), e.g. `npx agentinbox-cli listen --recipe claude-code` (new mail only by default;
@@ -136,9 +147,13 @@ so subscribe to one or the other, not both.
   (`--all-categories`), takes `--not-from` / `--not-label` exclusions, and `--batch 60s` runs a burst as one command.
   With Hermes, `--recipe hermes` forwards each event to the Hermes gateway (`listen hermes --deliver <platform> --run`
   creates the route), which triages it and messages you; `--recipe hermes-oneshot` runs Hermes once per email.
-- **Agents with an endpoint** get webhooks (**Webhooks** in the console), optionally with the cleaned message body. A
-  delivery succeeds on a `2xx` within 10 seconds (redirects aren't followed); failures are retried 8 times with growing
-  delays (30 s up to 12 h, about a day in total) before they're marked dead, and any delivery can be replayed.
+- **Agents with an endpoint** get webhooks (**Webhooks** in the console), optionally with the cleaned message body.
+  Webhooks list their event types, so existing ones never start receiving calendar events. For calendar events the
+  filter's `calendarIds` keeps only those calendars (the primary calendar's id is the account's email address; mail
+  events ignore it), and `from`, `to` and `subject` match the organizer, any attendee and the event title; label and
+  attachment criteria apply to mail only. A delivery succeeds on a `2xx` within 10 seconds (redirects aren't
+  followed); failures are retried 8 times with growing delays (30 s up to 12 h, about a day in total) before they're
+  marked dead, and any delivery can be replayed.
 
 **Verifying webhooks.** Each request carries `webhook-id`, `webhook-timestamp` and `webhook-signature` headers (`v1,` +
 base64 HMAC-SHA256 of `{webhook-id}.{webhook-timestamp}.{body}`). Verify them with any
@@ -249,6 +264,11 @@ informational; nothing is withheld because of them. Very long bodies are cut at 
 | Allowed recipients | Exact addresses or globs such as `*@example.com` |
 | Reply only | No new messages or forwards; replies only, inside threads the agent can see, to people already in the conversation. The reply goes to the message's Reply-To or From, which the sender chooses: use Allowed recipients to limit who can be written to. |
 | Send caps | Per rolling hour and 24 hours, counting sends that became drafts or approvals too |
+
+**A send whose outcome is unknown counts as sent.** When Gmail answers a send with a 5xx, times out or resets the
+connection, the message may have gone out: the tool fails with `send_uncertain`, the attempt counts toward the send
+caps, and the agent is told to look in `in:sent` (or `in:drafts`) before retrying. A request that never reached Google,
+a rate limit and any other error Google answers with (a 4xx) are clean failures, safe to retry.
 
 **Everything is audited.** Every tool call and every console change is recorded with its outcome, and denials name the
 guardrail that blocked them.

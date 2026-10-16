@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ActivityIcon, BotIcon, MailIcon, ShieldAlertIcon, StampIcon, WebhookIcon, WrenchIcon } from "lucide-react";
 import { PageHeader, QueryError, StatCard } from "@/components/common";
+import { CalendarNotice } from "@/components/google/calendar-notice";
 import { ActivityChart } from "@/components/overview/activity-chart";
 import { AccountsAttention, ApprovalsCallout, PairingCallout } from "@/components/overview/attention";
 import { RecentEvents } from "@/components/overview/recent-events";
@@ -45,6 +46,7 @@ function Overview() {
       <PageHeader title="Overview" description="What your agents and mailboxes have been up to in the last 24 hours." />
       <SetupChecklist />
       <AccountsAttention accounts={accounts.data ?? []} />
+      <CalendarNotice />
       <PairingCallout pairings={pairings.data ?? []} />
       <ApprovalsCallout approvals={pending.data ?? []} />
 

@@ -25,6 +25,7 @@ import type {
   AgentWithKey,
   ApiError,
   ConnectAccountResponse,
+  ExtraScopeName,
   GrantInput,
   MailEvent,
   Page,
@@ -175,6 +176,8 @@ export interface BootstrapOptions {
   /** Provision Pub/Sub via the API after connecting the first account (real-time ingest). */
   pubsub?: boolean;
   settings?: Partial<Settings>;
+  /** false: connect mail-only, as installs from before Google Calendar did (PATCH /api/google/calendar first). */
+  calendar?: boolean;
 }
 
 export class Stack {
@@ -267,6 +270,7 @@ export class Stack {
     // Pin the public URL to the loopback IP: deterministic direct callbacks without relying on how
     // "localhost" resolves on this machine.
     await this.admin.patch("/api/settings", { publicUrl: this.url, pollIntervalSeconds: 5, ...opts.settings });
+    if (opts.calendar === false) await this.admin.patch("/api/google/calendar", { enabled: false });
     const accounts: Account[] = [];
     for (const a of opts.accounts ?? []) {
       const spec = typeof a === "string" ? { email: a } : a;
@@ -302,7 +306,7 @@ export class Stack {
    * /api/accounts/connect → the fake consent screen → redirect to /oauth/callback (direct mode), or
    * POST /api/accounts/connect/complete with the landed-on URL (paste mode).
    */
-  async connectAccount(email: string, opts: { name?: string; reauthAccountId?: string; scopes?: "pubsub"[] } = {}): Promise<Account> {
+  async connectAccount(email: string, opts: { name?: string; reauthAccountId?: string; scopes?: ExtraScopeName[] } = {}): Promise<Account> {
     this.fake.addAccount(email, { name: opts.name });
     const start = await this.admin.post<ConnectAccountResponse>("/api/accounts/connect", {
       ...(opts.reauthAccountId ? { reauthAccountId: opts.reauthAccountId } : {}),
@@ -336,6 +340,11 @@ export class Stack {
     this.ctx.ingest.kick(accountId);
   }
 
+  /** Polls Google Calendar now instead of waiting for calendarPollSeconds (15 s at least). */
+  kickCalendar(accountId?: string): void {
+    this.ctx.calendar.kick(accountId);
+  }
+
   async events(query: { accountId?: string; type?: string } = {}): Promise<MailEvent[]> {
     const qs = new URLSearchParams(Object.entries(query).filter((e): e is [string, string] => !!e[1]));
     return (await this.admin.get<Page<MailEvent>>(`/api/events?${qs}`)).items;
@@ -343,17 +352,19 @@ export class Stack {
 
   /**
    * Waits until GET /api/events lists an event matching `pred`. In poll mode it kicks ingest every
-   * half second (pass `kick: false` to rely on the real poll loop).
+   * half second (pass `kick: false` to rely on the real poll loop); with `calendar`, it kicks the
+   * calendar sync instead (calendar.* events).
    */
-  async waitForEvent(pred: (e: MailEvent) => boolean, opts: { accountId?: string; timeout?: number; kick?: boolean; what?: string } = {}): Promise<MailEvent> {
+  async waitForEvent(pred: (e: MailEvent) => boolean, opts: { accountId?: string; timeout?: number; kick?: boolean; calendar?: boolean; what?: string } = {}): Promise<MailEvent> {
     let lastKick = 0;
     return waitFor(
       async () => {
         const pubsub = this.ctx.ingest.status().mode === "pubsub";
-        if (opts.kick ?? !pubsub) {
+        if (opts.kick ?? (opts.calendar || !pubsub)) {
           if (Date.now() - lastKick > 500) {
             lastKick = Date.now();
-            this.kick(opts.accountId);
+            if (opts.calendar) this.kickCalendar(opts.accountId);
+            else this.kick(opts.accountId);
           }
         }
         return (await this.events({ accountId: opts.accountId })).find(pred);

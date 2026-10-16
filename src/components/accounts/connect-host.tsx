@@ -1,10 +1,10 @@
-import type { Account, ConnectAccountResponse, ConnectAttempt, OAuthCallbackMessage } from "@shared/types";
+import type { Account, ConnectAccountResponse, ConnectAttempt, ExtraScopeName, OAuthCallbackMessage } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { CheckCircle2Icon, ExternalLinkIcon, InfoIcon, RotateCwIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { CopyField, ErrorAlert } from "@/components/common";
-import { Disclosure } from "@/components/setup/wizard-shell";
+import { Disclosure, Path } from "@/components/setup/wizard-shell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -12,7 +12,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api, ApiError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { useStreamListener } from "@/lib/stream";
-import { answerApplies, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
+import { answerApplies, handsBack, offersMailOnly, type AttemptStatus, CHECK_NOTES, type CheckNote, checkAgainStep, listMatch, streamUpdateConcerns } from "./connect-attempt";
 import { PasteCallback } from "./paste-callback";
 import { GoogleErrorHelp } from "./google-error-help";
 
@@ -20,14 +20,23 @@ interface ConnectRequest {
   /** Reconnect an existing account (needs_reauth) instead of adding a new one. */
   reauthAccountId?: string;
   email?: string;
-  /** Extra Google access to request incrementally, e.g. ["pubsub"] for provisioning. */
-  scopes?: string[];
-  /** Called once the account is connected (e.g. to retry what needed the extra access). */
+  /** Extra Google access to request incrementally: ["pubsub"] for provisioning, ["calendar"] for "Add Google Calendar". */
+  scopes?: ExtraScopeName[];
   /**
+   * Called once the account is connected (e.g. to retry what needed the extra access).
    * `confirmed`: Google's callback (or the pasted address) reported success. False when the user only
    * clicked "I'm done, check again", so the caller re-checks without assuming anything was granted.
    */
   onDone?: (confirmed: boolean) => void;
+  /** Ask Google for mail only (no Calendar), e.g. when a Workspace admin blocks Calendar for this app. */
+  mailOnly?: boolean;
+  /** The caller shows the outcome itself ("Add Google Calendar"): close as soon as Google reports back, instead of a "connected" screen. */
+  handBack?: boolean;
+  /**
+   * The dialog closed before the sign-in finished (given up on, or a failure). With handBack, a cancel or
+   * unticked Calendar (handsBack) closes it at once and arrives here as `error`.
+   */
+  onCancel?: (error?: ApiError) => void;
 }
 
 type Phase =
@@ -67,6 +76,8 @@ function openPopup(): Window | null {
 export function ConnectAccountHost() {
   const qc = useQueryClient();
   const client = useQuery(queries.googleClient());
+  // Calendar is part of this install (new installs): a new connection asks for it too.
+  const calendarOn = useQuery({ ...queries.calendarSetup(), retry: false }).data?.enabled ?? false;
   const [phase, setPhase] = useState<Phase | null>(null);
   const phaseRef = useRef<Phase | null>(null);
   const [checkNote, setCheckNote] = useState<CheckNote | null>(null);
@@ -80,23 +91,35 @@ export function ConnectAccountHost() {
   /** Reconnecting an account that was in needs_reauth: only then does "active again" prove the new sign-in landed. */
   const reauthFromBroken = useRef(false);
   const finish = (email: string, confirmed = true) => {
-    const done = reqRef.current.onDone;
-    reqRef.current = { ...reqRef.current, onDone: undefined };
+    const { onDone: done, handBack } = reqRef.current;
+    reqRef.current = { ...reqRef.current, onDone: undefined, onCancel: undefined };
     if (done) setTimeout(() => done(confirmed), 0);
     setPhase((p) => {
       if (p?.kind === "waiting") p.popup?.close();
-      return { kind: "done", email };
+      return handBack ? null : { kind: "done", email };
     });
     void qc.invalidateQueries({ queryKey: keys.accounts });
     void qc.invalidateQueries({ queryKey: keys.setupState });
     void qc.invalidateQueries({ queryKey: keys.overview });
   };
   const finishRef = useRef(finish);
+  const fail = (error: ApiError) => {
+    const { handBack, onCancel } = reqRef.current;
+    if (!handBack || !handsBack(error.code)) return setPhase({ kind: "error", error });
+    reqRef.current = { ...reqRef.current, onDone: undefined, onCancel: undefined };
+    if (onCancel) setTimeout(() => onCancel(error), 0);
+    setPhase((p) => {
+      if (p?.kind === "waiting") p.popup?.close();
+      return null;
+    });
+  };
+  const failRef = useRef(fail);
   // Only react to OAuth results while a connect flow is running in this tab.
   const activeRef = useRef(false);
   const redirectOrigin = useRef<string | null>(null);
   useEffect(() => {
     finishRef.current = finish;
+    failRef.current = fail;
     phaseRef.current = phase;
     activeRef.current = phase?.kind === "starting" || phase?.kind === "waiting";
     try {
@@ -127,7 +150,11 @@ export function ConnectAccountHost() {
     reauthFromBroken.current = !!r.reauthAccountId && accounts.some((a) => a.id === r.reauthAccountId && a.status === "needs_reauth");
     try {
       const res = await api<ConnectAccountResponse>("/api/accounts/connect", {
-        body: { ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}), ...(r.scopes?.length ? { scopes: r.scopes } : {}) },
+        body: {
+          ...(r.reauthAccountId ? { reauthAccountId: r.reauthAccountId } : {}),
+          ...(r.scopes?.length ? { scopes: r.scopes } : {}),
+          ...(r.mailOnly ? { mailOnly: true } : {}),
+        },
       });
       if (popup && res.callbackMode === "direct") popup.location.href = res.authUrl;
       else popup?.close();
@@ -156,11 +183,7 @@ export function ConnectAccountHost() {
       // window.postMessage carries an origin (BroadcastChannel is same-origin by construction).
       if (e.origin && e.origin !== window.location.origin && e.origin !== redirectOrigin.current) return;
       if (e.data.ok) finishRef.current(e.data.email ?? "Your account");
-      else
-        setPhase({
-          kind: "error",
-          error: new ApiError(400, e.data.code ?? "oauth_error", e.data.error ?? "Google sign-in failed", e.data.hint ?? undefined),
-        });
+      else failRef.current(new ApiError(400, e.data.code ?? "oauth_error", e.data.error ?? "Google sign-in failed", e.data.hint ?? undefined));
     };
     window.addEventListener("message", onMessage);
     const channel = "BroadcastChannel" in window ? new BroadcastChannel("agentinbox-oauth") : undefined;
@@ -202,7 +225,7 @@ export function ConnectAccountHost() {
       // Ignore an answer for an attempt this dialog has since left (closed, retried, finished).
       if (!answerApplies(phaseRef.current, state)) return r.status;
       if (r.status === "connected") finishRef.current(r.email);
-      else if (r.status === "failed") setPhase({ kind: "error", error: new ApiError(400, r.code, r.error, r.hint ?? undefined) });
+      else if (r.status === "failed") failRef.current(new ApiError(400, r.code, r.error, r.hint ?? undefined));
       return r.status;
     })();
     inflight.current = { state, answer };
@@ -274,13 +297,20 @@ export function ConnectAccountHost() {
 
   const close = () => {
     if (phase?.kind === "waiting") phase.popup?.close();
+    const cancelled = reqRef.current.onCancel;
+    reqRef.current = { ...reqRef.current, onDone: undefined, onCancel: undefined };
+    if (cancelled) setTimeout(cancelled, 0);
     setPhase(null);
   };
 
   const retry = () => void start(req);
+  // A Workspace admin may block Calendar for unconfigured apps: Google then refuses the whole sign-in.
+  // This one sign-in asks for mail only; Calendar stays on for the install (Settings can turn it off).
+  const mailOnly = () => void start({ ...req, mailOnly: true });
   const reauthEmail = req.email;
 
   const pubsub = !!req.scopes?.includes("pubsub");
+  const calendar = !!req.scopes?.includes("calendar");
   const continueSetup = () => {
     close();
     void navigate({ to: "/get-started", search: { step: "pubsub" } });
@@ -293,6 +323,7 @@ export function ConnectAccountHost() {
   }, [kind]);
 
   const code = phase?.kind === "error" && phase.error instanceof ApiError ? phase.error.code : undefined;
+  const calendarBlocked = offersMailOnly(code, req, calendarOn);
   const clientProblem = code === "oauth_invalid_client" || code === "oauth_unauthorized_client" || code === "oauth_redirect_uri_mismatch" || code === "google_client_missing";
 
   return (
@@ -300,16 +331,26 @@ export function ConnectAccountHost() {
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {pubsub ? `Grant Pub/Sub access${req.email ? ` for ${req.email}` : ""}` : reauthEmail ? `Reconnect ${reauthEmail}` : "Connect a Gmail account"}
+            {pubsub
+              ? `Grant Pub/Sub access${req.email ? ` for ${req.email}` : ""}`
+              : calendar
+                ? `Add Google Calendar${req.email ? ` to ${req.email}` : ""}`
+                : reauthEmail
+                  ? `Reconnect ${reauthEmail}`
+                  : "Connect a Google account"}
           </DialogTitle>
           <DialogDescription>
             {phase?.kind === "waiting" && phase.res.callbackMode === "paste"
               ? "Sign in with Google in a new tab, then paste back the address you land on."
               : pubsub
                 ? `Sign in as ${req.email ?? "the account agentinbox sets up Pub/Sub with"} (another account won't work) and tick the Pub/Sub box. agentinbox only uses it for its own topic and subscription in ${client.data?.projectId ?? "your project"}.`
-                : reauthEmail
+                : calendar
+                  ? `Sign in as ${req.email ?? "the account"} (another account won't work). Gmail stays connected and keeps working while you do this.`
+                  : reauthEmail
                   ? `Sign in as ${reauthEmail} and allow access again.`
-                  : "Sign in with Google and allow agentinbox to manage the mailbox."}
+                  : calendarOn
+                    ? "Sign in with Google and allow agentinbox to manage the mailbox and calendar."
+                    : "Sign in with Google and allow agentinbox to manage the mailbox."}
           </DialogDescription>
         </DialogHeader>
 
@@ -338,9 +379,16 @@ export function ConnectAccountHost() {
                   ? "Sign-in was cancelled"
                   : code === "oauth_wrong_account"
                     ? "Signed in with a different Google account"
-                    : "Couldn't connect the account"
+                    : calendar
+                      ? "Couldn't add Google Calendar"
+                      : "Couldn't connect the account"
               }
             />
+            {calendarBlocked && (
+              <p className="text-sm text-muted-foreground">
+                If the admin blocks only Google Calendar, connect with mail only now and add Calendar once it's allowed.
+              </p>
+            )}
             {code === "oauth_redirect_uri_mismatch" && client.data && (
               <div className="space-y-1.5 text-sm">
                 <p>Add this exact redirect URI to the OAuth client, save, wait a few minutes, then try again:</p>
@@ -366,6 +414,8 @@ export function ConnectAccountHost() {
             )}
           </div>
         )}
+
+        {phase?.kind === "waiting" && calendar && <CalendarConsentSteps email={req.email} external={client.data?.appType !== "internal"} />}
 
         {phase?.kind === "waiting" && phase.res.callbackMode === "direct" && (
           <div className="space-y-4">
@@ -415,6 +465,11 @@ export function ConnectAccountHost() {
                   </Link>
                 </Button>
               )}
+              {calendarBlocked && (
+                <Button variant="outline" onClick={mailOnly}>
+                  Connect with mail only
+                </Button>
+              )}
               <Button onClick={retry} ref={primaryRef}>
                 <RotateCwIcon /> Try again
               </Button>
@@ -460,5 +515,24 @@ export function ConnectAccountHost() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** What Google's screen shows for the incremental Calendar consent (granular consent: a checkbox per permission). */
+function CalendarConsentSteps({ email, external }: { email?: string; external: boolean }) {
+  return (
+    <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+      <li>Choose {email ?? "the account"}.</li>
+      {external && (
+        <li>
+          “Google hasn't verified this app”: expected for your own app. Click <Path items={["Advanced", "Go to agentinbox (unsafe)"]} />.
+        </li>
+      )}
+      <li>
+        Google lists only the new Calendar permissions (events, calendar list, free/busy), each with a checkbox. Tick all three, or{" "}
+        <strong className="text-foreground">Select all</strong>, then <strong className="text-foreground">Continue</strong>.
+      </li>
+      <li>The window closes and this dialog shows the result. Unticking or cancelling changes nothing: mail keeps working.</li>
+    </ol>
   );
 }

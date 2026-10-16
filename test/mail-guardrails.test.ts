@@ -67,6 +67,8 @@ describe("send caps under concurrency", () => {
   it.each([
     ["a Gmail 5xx", new GoogleApiError(503, "backend error")],
     ["a network failure", new TypeError("fetch failed")],
+    ["a timeout", new GoogleApiError(0, "Google (gmail.googleapis.com) didn't respond within 30s", "timeout")],
+    ["a reset connection", new GoogleApiError(0, "Could not reach Google (gmail.googleapis.com): ECONNRESET", "network", { reasons: ["ECONNRESET"] })],
   ])("counts a send that may have gone through (%s) against the cap", async (_name, err) => {
     const s = await setup({ sendMode: "direct", maxSendsPerHour: 1 });
     s.gmail.send = async () => {
@@ -76,6 +78,19 @@ describe("send caps under concurrency", () => {
     expect(r.text).toMatch(/may or may not have been sent\. Check .*in:sent/);
     expect(s.audits("send_message")[0]).toMatchObject({ outcome: "error", reason: "send_uncertain", detail: expect.objectContaining({ maybeSent: true }) });
     expect((await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" })).text).toMatch(/Send limit reached/);
+  });
+
+  it("treats a connection that never reached Gmail as not sent", async () => {
+    const s = await setup({ sendMode: "direct", maxSendsPerHour: 1 });
+    const send = s.gmail.send;
+    s.gmail.send = async () => {
+      throw new GoogleApiError(0, "Could not reach Google (gmail.googleapis.com): ECONNREFUSED", "network", { reasons: ["ECONNREFUSED"] });
+    };
+    const r = await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" });
+    expect(r.text).not.toMatch(/may or may not/);
+    expect(s.audits("send_message")[0]!.detail).not.toHaveProperty("maybeSent");
+    s.gmail.send = send;
+    expect((await s.call("send_message", { to: "a@client.com", subject: "s", body: "b" })).isError).toBe(false);
   });
 });
 
