@@ -208,7 +208,10 @@ export const KIND_LABEL = {
 } as const satisfies Record<ApprovalKind, string>;
 
 /** Approval status in its kind's words: a calendar approval that went through was applied, not sent. */
-export function approvalStatusInfo(status: ApprovalStatus, kind: ApprovalKind): { label: string; tone: Tone } {
+export function approvalStatusInfo(status: ApprovalStatus, kind: ApprovalKind | "mcp.call"): { label: string; tone: Tone } {
+  // A broker tool call (mcp.call) that went through ran; it wasn't sent.
+  if (kind === "mcp.call" && status === "sent") return { label: "Ran", tone: "good" };
+  if (kind === "mcp.call" && status === "failed") return { label: "Call failed", tone: "bad" };
   if (isCalendarApprovalKind(kind) && status === "sent") return { label: "Applied", tone: "good" };
   if (isCalendarApprovalKind(kind) && status === "failed") return { label: "Couldn't apply", tone: "bad" };
   return APPROVAL_STATUS[status];

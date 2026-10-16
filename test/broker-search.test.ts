@@ -121,6 +121,8 @@ describe("search mode: when it applies", () => {
 
   it("changes nothing while brokerUpstreams is off, even with ?mode=search and 100 broker tools", async () => {
     const { ctx, connect } = setup();
+    // The broker is on by default (console PR #65): this case is about the setting being off.
+    enableBroker(ctx, false);
     fakeBroker(ctx, registered(100));
     const c = await connect({ mode: "search" });
     expect(await c.names()).toEqual(READER_TOOLS);

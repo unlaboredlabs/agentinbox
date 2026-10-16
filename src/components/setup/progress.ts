@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useSyncExternalStore } from "react";
+import { useBrokerEnabled } from "@/hooks/use-broker";
 import { queries } from "@/lib/queries";
+import { BROKER_STEP_IDS, brokerStatuses, firstRunView } from "./first-run";
 import { allStepsDone, type SetupDraft, STEP_IDS, stepStatuses } from "./steps";
 
 // Per instance: the same browser may set up several agentinbox daemons.
@@ -65,8 +67,17 @@ export function useSetupProgress() {
     if (configured) clearServerOwnedDraft();
   }, [configured]);
   const statuses = stepStatuses(query.data, draft);
-  const finished = STEP_IDS.filter((id) => statuses[id] !== "todo").length;
   const firstTodo = STEP_IDS.find((id) => statuses[id] === "todo");
+  // First run with Google optional: Notion, WHOOP or a custom server take the short path (first-run.ts).
+  const view = firstRunView(useBrokerEnabled(), query.data, draft);
+  const connections = useQuery({ ...queries.connections(), enabled: view === "broker" });
+  const broker = brokerStatuses(connections.data?.length ?? 0, query.data?.agentsCreated ?? 0);
+  if (view === "broker") {
+    const finished = BROKER_STEP_IDS.filter((id) => broker[id] === "done").length;
+    const brokerTodo = BROKER_STEP_IDS.find((id) => broker[id] === "todo");
+    return { query, state: query.data, draft, statuses, finished, total: BROKER_STEP_IDS.length, firstTodo, allDone: !brokerTodo, view, broker, brokerTodo };
+  }
+  const finished = STEP_IDS.filter((id) => statuses[id] !== "todo").length;
   const allDone = allStepsDone(statuses);
-  return { query, state: query.data, draft, statuses, finished, total: STEP_IDS.length, firstTodo, allDone };
+  return { query, state: query.data, draft, statuses, finished, total: STEP_IDS.length, firstTodo, allDone, view, broker, brokerTodo: undefined };
 }
