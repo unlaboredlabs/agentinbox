@@ -1,0 +1,266 @@
+// Contracts for the MCP broker (docs/MCP-BROKER.md). Parallel workstreams build against these:
+// - the upstream manager (server/broker/upstream/*) implements ToolSource for remote MCP servers;
+// - native integrations (server/integrations/<id>/*) implement IntegrationPreset (+ ToolSource when native);
+// - the catalog (server/broker/catalog/*) implements ToolRegistry and pinning;
+// - policy and approvals (server/broker/policy/*) implement BrokerPolicy and BrokerCalls;
+// - the credential store (server/broker/credentials/*) implements CredentialStore and TokenRefresher;
+// - /mcp and search mode only consume ToolRegistry and BrokerCalls.
+// Members marked FROZEN are relied on across workstreams: change them only with the lead's agreement.
+
+/** One choice per connection (and per agent × connection): Wynn's model. FROZEN. */
+export type AccessLevel = "full" | "ask" | "read";
+
+/** Where a tool's risk classification came from. FROZEN. */
+export type ClassSource = "preset" | "annotation" | "heuristic";
+
+/** Upstream tool annotations (MCP spec). Untrusted hints: they can mark a tool risky or read-only, never safe by name. */
+export interface ToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/** A tool definition as the source reports it (upstream or native), before cleaning and pinning. FROZEN. */
+export interface ToolDef {
+  /** The source's own name (exposed to agents as `<slug>__<name>`). */
+  name: string;
+  title?: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: ToolAnnotations;
+}
+
+/** Classification used by levels and approvals. FROZEN. */
+export interface ToolClass {
+  /** Irreversible: delete, send, publish/share externally, payments. Asks at the "ask" level. */
+  risky: boolean;
+  /** Listed at the "read" level. */
+  read: boolean;
+  source: ClassSource;
+  /** Argument path (dot-separated) naming the target, offered for "always allow … for this target". */
+  targetPath?: string;
+}
+
+/** A content block of a tool result (MCP CallToolResult content; kept SDK-agnostic). */
+export type ContentBlock = { type: string; [key: string]: unknown };
+
+/** A tool call's result as returned to the agent. FROZEN. */
+export interface ToolResult {
+  content: ContentBlock[];
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
+/** Context for one call into a source. */
+export interface ToolCallContext {
+  agentId: string;
+  connectionId: string;
+  signal: AbortSignal;
+  /** Non-sensitive audit detail the source may add (never arguments or secrets). */
+  auditDetail: Record<string, unknown>;
+}
+
+/** The live tool list of a source (input to pinning). */
+export interface ToolListing {
+  tools: ToolDef[];
+  /** Server instructions, if any (hashed and cleaned like descriptions). */
+  instructions?: string;
+  /** How long the listing may be cached (2026-07-28 `ttlMs`), if the source says. */
+  ttlMs?: number;
+}
+
+/**
+ * Tools of one connection: an upstream MCP server (proxied) or a native integration (e.g. WHOOP).
+ * Errors: throw `SourceError` (below) for auth/availability problems; a tool-level failure is a ToolResult with
+ * `isError: true`. FROZEN.
+ */
+export interface ToolSource {
+  readonly connectionId: string;
+  listTools(signal: AbortSignal): Promise<ToolListing>;
+  callTool(name: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolResult>;
+  /** Releases sessions/processes. Idempotent. */
+  close(): Promise<void>;
+}
+
+/** Why a source couldn't serve a call. `needs_reauth` also flips the connection's status (CredentialStore). FROZEN. */
+export type SourceErrorCode = "needs_reauth" | "unavailable" | "timeout" | "blocked_target" | "rate_limited" | "protocol";
+
+export class SourceError extends Error {
+  constructor(
+    readonly code: SourceErrorCode,
+    message: string,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "SourceError";
+  }
+}
+
+/** One step of a guided setup, rendered by both the console and the CLI wizard. */
+export interface SetupStep {
+  id: string;
+  title: string;
+  /** Plain words; no markdown beyond `code`. */
+  body: string;
+  link?: { label: string; url: string };
+  /** A value to copy into another site (e.g. the redirect URI). */
+  copy?: { label: string; value: string };
+  /** A value the user pastes back (e.g. a client ID/secret). Secrets are stored encrypted, never echoed. */
+  input?: { key: string; label: string; secret?: boolean; pattern?: string; placeholder?: string };
+}
+
+/** What a preset needs to know about the install to describe its setup. */
+export interface SetupContext {
+  publicUrl: string;
+  /** Redirect URI for upstream OAuth (/oauth/connections/callback on this install). */
+  redirectUri: string;
+  /** Inbound webhook URL for this connection, or null without a public https URL (then the preset polls). */
+  webhookUrl: string | null;
+}
+
+/** OAuth facts for a preset whose provider needs the user's own app (WHOOP) or a known DCR server (Notion). */
+export type PresetAuth =
+  | { type: "none" }
+  | { type: "header"; headerName: string; prefix?: string }
+  /** Remote MCP OAuth discovered from the server; registration by DCR or a metadata document (Notion). */
+  | { type: "mcp_oauth" }
+  /** Provider OAuth with the user's own app (WHOOP): fixed endpoints, client secret, no PKCE. */
+  | {
+      type: "user_app";
+      authorizeUrl: string;
+      tokenUrl: string;
+      scopes: string[];
+      /** Setup inputs that hold the client id / secret. */
+      clientIdInput: string;
+      clientSecretInput: string;
+    };
+
+/** A pre-made integration. Remote presets are proxied MCP servers; native ones provide their own ToolSource. FROZEN. */
+export interface IntegrationPreset {
+  id: string;
+  displayName: string;
+  /** Default connection slug (`[a-z0-9-]{1,24}`). */
+  slug: string;
+  kind: "remote_http" | "native";
+  /** Remote presets: the MCP URL. */
+  url?: string;
+  auth: PresetAuth;
+  /** The preset's own classification for a tool; null falls back to annotations + the generic heuristic. */
+  classify(tool: ToolDef): ToolClass | null;
+  setupSteps(ctx: SetupContext): SetupStep[];
+  /** Native presets: build the tool source. `tokens` yields a fresh access token (refresh handled by the store). */
+  createSource?(deps: NativeSourceDeps): ToolSource;
+  /** Native presets with inbound events. */
+  events?: NativeEvents;
+  /** Shown as dated warnings (e.g. Notion: 180-day cap, 30-day idle). */
+  reconnectPolicy?: { maxLifetimeDays?: number; idleDays?: number };
+}
+
+export interface NativeSourceDeps {
+  connectionId: string;
+  accessToken(signal: AbortSignal): Promise<string>;
+  fetch: typeof fetch;
+  log: { info(msg: string, meta?: Record<string, unknown>): void; warn(msg: string, meta?: Record<string, unknown>): void };
+}
+
+/** An event a native integration emits (e.g. `whoop.recovery_updated`), delivered through the events outbox. */
+export interface IntegrationEvent {
+  /** `<preset>.<name>`, e.g. `whoop.recovery_updated`. */
+  type: string;
+  connectionId: string;
+  /** Dedupe key unique per occurrence (e.g. WHOOP trace_id). */
+  dedupeKey: string;
+  /** Small, non-secret data; content an agent fetches with tools. */
+  data: Record<string, unknown>;
+}
+
+export interface NativeEvents {
+  /** Event types this preset may emit. */
+  types: string[];
+  /** Verifies and parses an inbound webhook; null when the signature is bad (respond 401, emit nothing). */
+  handleWebhook?(req: { headers: Record<string, string>; rawBody: Buffer }, deps: NativeSourceDeps & { clientSecret: string }): Promise<IntegrationEvent[] | null>;
+  /** Polling fallback without a public URL; returns new events since `cursor` and the next cursor. */
+  poll?(cursor: string | null, deps: NativeSourceDeps): Promise<{ events: IntegrationEvent[]; cursor: string | null }>;
+  pollIntervalMs?: number;
+}
+
+/** A tool as an agent sees it: pinned, cleaned, classified, with the agent's level applied. FROZEN. */
+export interface RegisteredTool {
+  /** `<slug>__<name>`. */
+  exposedName: string;
+  connectionId: string;
+  slug: string;
+  /** The pinned, cleaned definition. */
+  def: ToolDef;
+  cls: ToolClass;
+  /** This agent's level for the connection. */
+  level: AccessLevel;
+  pinHash: string;
+}
+
+/** Per-agent view of every broker tool. Native Gmail/Calendar tools stay in server/mcp and are not in here. FROZEN. */
+export interface ToolRegistry {
+  /** Tools the agent may see now: granted connections, level applied (read level lists read tools only), held tools excluded. */
+  forAgent(agentId: string): RegisteredTool[];
+  /** Same filter as forAgent, for one exposed name; null when not visible to this agent. */
+  resolve(agentId: string, exposedName: string): RegisteredTool | null;
+}
+
+/** The policy's verdict on one call. FROZEN. */
+export type CallDecision = { kind: "allow" } | { kind: "ask" } | { kind: "deny"; reason: string; message: string };
+
+export interface BrokerPolicy {
+  /** Level + risk + "always allow" rules + caps. Never runs the call. */
+  decide(agentId: string, tool: RegisteredTool, args: Record<string, unknown>): CallDecision;
+}
+
+/**
+ * The single entry point for running a broker tool, used by /mcp and search mode: resolve, decide, then run
+ * (with output wrapping, token scrubbing, audit) or queue an approval and return `pending_approval` at once. FROZEN.
+ */
+export interface BrokerCalls {
+  call(agentId: string, exposedName: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolResult>;
+}
+
+/** OAuth tokens as stored (encrypted at rest). */
+export interface StoredTokens {
+  accessToken: string;
+  refreshToken: string | null;
+  /** Epoch ms; null when the provider didn't say. */
+  expiresAt: number | null;
+  scope: string | null;
+  issuer: string | null;
+}
+
+/** Encrypted per-connection credentials. FROZEN. */
+export interface CredentialStore {
+  header(connectionId: string): { name: string; value: string } | null;
+  setHeader(connectionId: string, name: string, value: string): void;
+  tokens(connectionId: string): StoredTokens | null;
+  /** Compare-and-swap on the refresh token: false when another refresh already rotated it. */
+  saveTokens(connectionId: string, tokens: StoredTokens, expectedRefreshToken?: string | null): boolean;
+  /** OAuth client registration / user app (client id, secret, registration response), per issuer. */
+  client(connectionId: string): Record<string, unknown> | null;
+  setClient(connectionId: string, client: Record<string, unknown>): void;
+  /** Sets status `needs_reauth` (with reason), emits `connection.auth_failed` once, audits. */
+  markNeedsReauth(connectionId: string, reason: string): void;
+  /** Deletes every credential of the connection (kill switch, disconnect). */
+  clear(connectionId: string): void;
+}
+
+/**
+ * Single-flight access tokens with proactive refresh (expiresAt − max(60 s, 10 % of lifetime)) and a background sweep.
+ * The provider-specific exchange is passed in, so MCP OAuth and native user-app OAuth (WHOOP) share it. FROZEN.
+ */
+export interface TokenRefresher {
+  accessToken(connectionId: string, refresh: RefreshFn, signal: AbortSignal): Promise<string>;
+  /** Registers a connection for the background sweep (keeps rotating refresh tokens alive while idle). */
+  track(connectionId: string, refresh: RefreshFn): void;
+  untrack(connectionId: string): void;
+}
+
+/** Exchanges the current tokens for new ones; throws `SourceError("needs_reauth")` on invalid_grant/invalid_client. */
+export type RefreshFn = (current: StoredTokens, signal: AbortSignal) => Promise<StoredTokens>;
