@@ -234,6 +234,10 @@ describe.runIf(HAS_AGENTS)("MCP attachments", () => {
     }
     for (const r of results) expect([413, "UND_ERR_SOCKET"]).toContain(r);
     expect(results).toContain(413);
+    // The refusal closes the connection, so the next request doesn't go out on a socket that is about to close.
+    const small = await fetch(`${s.url}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "x".repeat(4 * 1024 * 1024 + 1) });
+    expect(small.status).toBe(413);
+    expect(small.headers.get("connection")).toBe("close");
     const ok = await post(`Bearer ${key}`);
     expect(ok.status).toBe(200);
     expect(await ok.text()).toContain("list_accounts");

@@ -93,7 +93,12 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   });
 
   // ── Public ──
-  const tooLarge = (c: Context) => apiError(c, 413, "payload_too_large", "Request body is too large");
+  // The rest of the body is never read, so the connection can't be reused: say so, or a keep-alive client
+  // sends its next request on a socket that is about to close.
+  const tooLarge = (c: Context) => {
+    c.header("Connection", "close");
+    return apiError(c, 413, "payload_too_large", "Request body is too large");
+  };
   const limit = (maxSize: number) => bodyLimit({ maxSize, onError: tooLarge });
   for (const path of AUTH_PATHS) app.use(path, limit(AUTH_BODY_LIMIT));
   app.use("/api/*", limit(API_BODY_LIMIT));
