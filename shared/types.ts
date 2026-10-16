@@ -978,6 +978,47 @@ export interface McpCallApprovalDetail {
   pinHash: string;
   /** The upstream's result once the approved call ran (what get_call_status returns). */
   result?: McpCallResult | null;
+  /** When the approved call was last forwarded upstream (set right before it is). */
+  attemptedAt?: string | null;
+  /**
+   * The approved call was interrupted (crash, timeout, lost answer): it may or may not have run upstream.
+   * Status is "failed"; it is never retried automatically.
+   */
+  outcomeUnknown?: boolean;
+}
+
+/**
+ * GET /api/approvals/:id for an mcp.call: the card. `approval.call.args` holds the exact bytes that run on approve.
+ * `tool` is the tool as the agent can reach it now (null when it no longer can: access removed, on hold).
+ */
+export interface McpCallApprovalView {
+  approval: McpCallApproval;
+  connection: { id: string; slug: string; name: string; status: ConnectionStatus } | null;
+  tool: { exposedName: string; name: string; title: string | null; risky: boolean; read: boolean; targetPath: string | null; level: AccessLevel; pinMatches: boolean } | null;
+  /** The exact argument bytes with invisible and control characters shown as \u escapes. */
+  argsDisplay: string;
+  /** The same arguments indented (escaped the same way). */
+  pretty: string;
+  /** Email addresses and URLs found anywhere in the arguments: shown first on the card. */
+  recipients: string[];
+  urls: string[];
+  /** The tool's target argument (ToolClass.targetPath, a JSON Pointer) and its value in this call, if any. */
+  target: { path: string; value: unknown } | null;
+  /** JSON Pointers a generic tool's "always allow for this argument" may pick from. */
+  argumentPaths: string[];
+  /** sha256 of the stored bytes still matches the fingerprint taken when the call was queued. */
+  argsIntact: boolean;
+}
+
+/** POST /api/approvals/:id/approve for an mcp.call. */
+export interface McpCallApproveInput {
+  note?: string | null;
+  /**
+   * "Always allow this": a rule for this agent and tool, created when the call is approved. `target` limits it
+   * to this call's target value (one rule per id when the target is an array); `targetPath` picks the argument
+   * for generic tools (defaults to the tool's own targetPath).
+   */
+  alwaysAllow?: { target?: boolean; targetPath?: string };
 }
 
 /** An upstream CallToolResult as stored for get_call_status. */
