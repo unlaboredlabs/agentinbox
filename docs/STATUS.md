@@ -57,25 +57,25 @@ anything earlier in that doc.
 - #50: attachments on `create_draft`, `reply` and `send_message` (25 MB per message, at most 10 files, Gmail-blocked
   types refused, filenames cleaned and decoded, shown on approval cards, audited). Published as `nightly.48`.
 
-## Current: MCP broker (M1–M3 code merged, 2026-10-16)
+## Current: xaq (renamed 2026-10-16) — MCP broker M1–M3 code shipped
 
-Plan: [docs/MCP-BROKER.md](MCP-BROKER.md). Everything is decided, including Wynn's approval model. Built in parallel
-(up to 20 agents), with tier-L reviews (2 reviewers plus a security reviewer) per area, and merged in one serial train:
-- #52/#56 contracts (`server/broker/types.ts`);
-- #53 schema (migration 8);
-- #55 SDK ADR plus fake upstreams;
-- #54 Notion preset; #57 WHOOP native;
-- #59 catalog/pinning; #61 policy/approvals; #62 upstream OAuth/credentials; #63 endpoint/events/API wiring;
-- #58 search mode; #65 console; #66 CLI connections/import; #64/#67/#68 docs and tests.
+- **Renamed:** repo `wynn-dev/xaq` (was `wynn-dev/agentinbox`), package `xaq-cli`, bin `xaq`, #60.
+  - The first xaq-cli nightly is `0.1.0-nightly.71` (main 54b04b0), published via OIDC with provenance.
+  - The last agentinbox-cli nightly is `0.1.0-nightly.69`.
+- **Broker:** everything in [docs/MCP-BROKER.md](MCP-BROKER.md) M1–M3 is merged (#52–#72). Nits are in FOLLOWUPS.md.
 
-Open:
-- **Rename** to xaq: PR #60, a draft. It needs the GitHub repo rename by Adri first (see its runbook).
-- **New-user E2E walk:** running.
-- **Real-world checks that need Wynn:**
-  - Notion connect (M1 #2);
-  - Hermes migration (M1 #3). Open decision: one entry or two; the rec is two, keeping a mail-only `agentinbox` entry for confined routes;
-  - WHOOP with his own developer app (M2).
-- Nits from every review are in FOLLOWUPS.md under "MCP broker build".
+Open, in order:
+1. **Wynn's Mac upgrade** per #60's runbook: `plutil` checks, then `npx -y agentinbox-cli@latest service install`
+   and `listen service install`, then `npx -y xaq-cli@latest service install` and `listen service install`. Hermes
+   needs no change.
+2. **Wynn repoints `agentinbox-cli`'s npm trusted publisher** to `wynn-dev/xaq` + `shim.yml`. Then: run `shim.yml`,
+   `npm deprecate agentinbox-cli …`, and `npm deprecate xaq-cli@0.0.0-stage …`. Don't run `shim.yml` before that.
+3. **Real-world checks that need Wynn:**
+   - Notion connect (M1 #2);
+   - the Hermes import (M1 #3). Open decision: one entry or two; the rec is two, keeping a mail-only `agentinbox`
+     entry for routes confined with `mcp-agentinbox`;
+   - WHOOP with his own developer app (M2);
+   - Hermes in search mode (M3) after the import.
 
 ## Rules (Wynn / Adri)
 
