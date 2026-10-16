@@ -3,6 +3,13 @@ import { router } from "../api/util.ts";
 import type { AppContext } from "../context.ts";
 import { buildMcpServer } from "./server.ts";
 
+/**
+ * Largest /mcp body from a valid agent key: room for Gmail's 25 MB of attachments, base64-encoded in the
+ * tool call (25 MB × 4/3 ≈ 33.4 MB), plus the message. server/app.ts keeps everyone else at 4 MB, checking
+ * the key from the header before any body is read.
+ */
+export const MCP_AGENT_BODY_LIMIT = 36 * 1024 * 1024;
+
 const bearer = (header: string | undefined): string | null => {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? "");
   return m ? m[1]! : null;
@@ -38,7 +45,12 @@ export function mcpRoutes(ctx: AppContext) {
     }
 
     const server = buildMcpServer(ctx, principal, { signal: c.req.raw.signal });
-    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+      // The SDK's own cap (4 MiB by default); the app's body limit has already applied the smaller one to unauthenticated callers.
+      maxRequestBodySize: MCP_AGENT_BODY_LIMIT,
+    });
     await server.connect(transport);
     try {
       return await transport.handleRequest(c.req.raw);

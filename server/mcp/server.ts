@@ -7,6 +7,7 @@ import type { AppContext } from "../context.ts";
 import { classifyCalendarError } from "../google/calendar.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import { AgentMail, MAX_ATTACHMENT_BYTES, ToolError, type ToolTrace } from "../mail/agent.ts";
+import { MAX_ATTACHMENTS } from "../mail/attachments.ts";
 import { cleanLine, formatSize, labelNames, MAX_HTML_CHARS, truncateText, wrapUntrusted } from "../mail/content.ts";
 import { contentPool } from "../mail/pool.ts";
 import type { AgentPrincipal } from "../policy/types.ts";
@@ -57,6 +58,18 @@ const recipients = (what: string) =>
 const reason = z.string().max(500).optional().describe("Why you are sending this; shown to the human if the send needs approval.");
 const threadId = z.string().min(1).describe("Thread id (from search_threads, get_message or events).");
 const messageId = z.string().min(1).describe("Message id (from get_thread, get_message or events).");
+const attachments = z
+  .array(
+    z.object({
+      filename: z.string().describe('File name shown to the recipient, with its extension, e.g. "tenant-form.pdf".'),
+      mime_type: z.string().optional().describe("type/subtype, e.g. application/pdf. Default: from the extension, else application/octet-stream."),
+      content_base64: z.string().describe("The file's bytes, base64-encoded (standard or url-safe)."),
+    }),
+  )
+  .optional()
+  .describe(
+    `Files to attach (at most ${MAX_ATTACHMENTS}). The file content goes in this call, base64-encoded. Gmail's limit is 25 MB per message, body included; it refuses executables and similar types (.exe, .js, .bat, …).`,
+  );
 const eventTypes = z.array(z.enum(EVENT_TYPES)).optional().describe("Only these event types.");
 const eventAccount = z.string().optional().describe("Only events from this account (email or id).");
 
@@ -530,7 +543,8 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
       "create_draft",
       {
         title: "Create draft",
-        description: "Create a Gmail draft; nothing is sent. A human can review and send it from Gmail. Pass thread_id to draft a reply inside that thread.",
+        description:
+          "Create a Gmail draft; nothing is sent. A human can review and send it from Gmail. Pass thread_id to draft a reply inside that thread, and attachments to attach files.",
         input: {
           account,
           to: recipients("Recipients"),
@@ -539,6 +553,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
           subject: z.string().max(998),
           body: z.string().describe("Plain text (markdown is fine)."),
           thread_id: threadId.optional(),
+          attachments,
         },
         annotations: WRITE,
       },
@@ -568,6 +583,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
             bcc: recipients("Bcc recipients").optional(),
             subject: z.string().max(998),
             body: z.string().describe("Plain text (markdown is fine)."),
+            attachments,
             reason,
           },
           annotations: SEND,
@@ -613,12 +629,21 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
           message_id: messageId,
           body: z.string().describe("Your reply, plain text (markdown is fine). The original is not quoted automatically."),
           reply_all: z.boolean().optional().describe("Reply to everyone on the original (default false)."),
+          attachments,
           reason,
         },
         annotations: SEND,
       },
       async (args, mail) =>
-        formatSendOutcome(await mail.reply(args.account, { messageId: args.message_id, body: args.body, replyAll: args.reply_all, reason: args.reason })),
+        formatSendOutcome(
+          await mail.reply(args.account, {
+            messageId: args.message_id,
+            body: args.body,
+            replyAll: args.reply_all,
+            reason: args.reason,
+            attachments: args.attachments,
+          }),
+        ),
     );
   }
 

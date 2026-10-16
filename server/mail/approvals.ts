@@ -14,7 +14,8 @@ export interface ApprovalPayload {
   subject: string;
   body: string;
   threadId: string | null;
-  attachments: { filename: string; size: number }[];
+  /** Files on the message: name, MIME type and decoded size (never the content). */
+  attachments: { filename: string; size: number; mimeType?: string }[];
   reason: string | null;
   /** Fingerprint of the Gmail draft when it was queued; a mismatch at approval means it was edited in Gmail. */
   fingerprint?: string;

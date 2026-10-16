@@ -82,6 +82,9 @@
  * after:, before:, rfc822msgid:, quoted phrases, free text, -negation, OR, AND, (…) and {…}.
  * messages.send / drafts.create parse the raw RFC 5322 (headers, encoded-words, multipart, base64/QP, attachments)
  * and thread by threadId or In-Reply-To/References. Mail sent to another fake account is delivered to it too.
+ * Their JSON bodies are capped at 1 MiB (400 "Request payload size exceeds the limit"); larger messages go to
+ * /upload/gmail/v1/users/me/{messages/send,drafts} with uploadType=media (message/*) or multipart (multipart/related:
+ * JSON metadata such as {threadId} or {message:{threadId}}, then the message), up to 35 MB. `uploads` logs them.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -161,6 +164,8 @@ export interface FakeGoogle {
   abortedPulls: number;
   revoked: string[];
   requests: { method: string; path: string }[];
+  /** Media uploads to messages.send / drafts.create: path, uploadType, the JSON metadata part and the message size. */
+  uploads: { path: string; uploadType: string; metadata: Record<string, unknown>; size: number }[];
   /** Google Calendar (routes under /calendar/v3). See the header comment. */
   calendar: FakeCalendar;
 }
@@ -470,6 +475,28 @@ const apiError = (status: number, message: string, reason?: string, extra: { sta
       ...(extra.details ? { details: extra.details } : {}),
     },
   });
+
+/** Parts of a multipart/related body (Google's multipart upload): each part's Content-Type and bytes. */
+function multipartRelated(body: Buffer, contentType: string): { contentType: string; body: Buffer }[] {
+  const boundary = /boundary="?([^";]+)"?/i.exec(contentType)?.[1];
+  if (!/^multipart\/related/i.test(contentType) || !boundary) throw apiError(400, "Multipart upload needs Content-Type multipart/related with a boundary", "badContent");
+  const delimiter = Buffer.from(`--${boundary}`);
+  const parts: { contentType: string; body: Buffer }[] = [];
+  let at = body.indexOf(delimiter);
+  while (at >= 0) {
+    let start = at + delimiter.length;
+    if (body.subarray(start, start + 2).toString() === "--") break;
+    if (body.subarray(start, start + 2).toString() === "\r\n") start += 2;
+    const next = body.indexOf(Buffer.concat([Buffer.from("\r\n"), delimiter]), start);
+    if (next < 0) throw apiError(400, "Multipart body is missing its closing boundary", "badContent");
+    const part = body.subarray(start, next);
+    const split = part.indexOf("\r\n\r\n");
+    const head = split < 0 ? part.toString("utf8") : part.subarray(0, split).toString("utf8");
+    parts.push({ contentType: /^content-type:\s*(.+)$/im.exec(head)?.[1]?.trim() ?? "", body: split < 0 ? Buffer.alloc(0) : part.subarray(split + 4) });
+    at = next + 2;
+  }
+  return parts;
+}
 
 const SERVICES = {
   gmail: { name: "Gmail API", host: "gmail.googleapis.com" },
@@ -1035,8 +1062,55 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     return format(msg, "minimal");
   });
 
+  /**
+   * JSON bodies of messages.send / drafts.create: Gmail documents no limit for `raw` there, but has answered
+   * "Request payload size exceeds the limit: 1048576 bytes"; larger messages must go through /upload/.
+   */
+  const JSON_WRITE_LIMIT = 1_048_576;
+  /** maxSize of the /upload/ endpoints of messages.send and drafts.create (Gmail's discovery document). */
+  const UPLOAD_MAX = 36_700_160;
+  const jsonWrite = (body: Buffer) => {
+    if (body.length > JSON_WRITE_LIMIT) throw apiError(400, `Request payload size exceeds the limit: ${JSON_WRITE_LIMIT} bytes.`, "badRequest");
+    return json(body);
+  };
+  const createDraft = (mb: Mailbox, raw: Buffer, threadId: string | null) => {
+    const msg = makeMessage(mb, raw, ["DRAFT"], threadId);
+    insert(mb, msg);
+    const id = `r${(seq++).toString().padStart(19, "0")}`;
+    mb.drafts.set(id, msg.id);
+    return { id, message: format(msg, "minimal") };
+  };
+
+  // Media uploads: uploadType=media (the message alone, Content-Type message/*) or multipart (multipart/related:
+  // JSON metadata, then the message). Resumable uploads aren't supported.
+  on("POST", /^\/upload\/gmail\/v1\/users\/me\/(messages\/send|drafts)$/, (req, url, body, m) => {
+    const mb = box(bearer(req, GMAIL_SCOPE, "gmail").email);
+    const uploadType = url.searchParams.get("uploadType");
+    const contentType = req.headers["content-type"] ?? "";
+    let metadata: { threadId?: string; message?: { threadId?: string } } = {};
+    let raw: Buffer;
+    if (uploadType === "media") {
+      if (!/^message\//i.test(contentType)) throw apiError(400, `Media type '${contentType}' is not supported. Valid media types: [message/*]`, "badContent");
+      raw = body;
+    } else if (uploadType === "multipart") {
+      const parts = multipartRelated(body, contentType);
+      if (parts.length !== 2 || !/^application\/json/i.test(parts[0]!.contentType) || !/^message\//i.test(parts[1]!.contentType)) {
+        throw apiError(400, "Multipart upload needs a JSON metadata part, then a message/* part", "badContent");
+      }
+      metadata = JSON.parse(parts[0]!.body.toString("utf8") || "{}");
+      raw = parts[1]!.body;
+    } else {
+      throw apiError(400, `Invalid upload type: ${uploadType}`, "invalidArgument");
+    }
+    if (raw.length > UPLOAD_MAX) throw apiError(413, "Request Too Large", "uploadTooLarge");
+    if (!raw.length) throw apiError(400, "Media upload has no message", "invalidArgument");
+    fake.uploads.push({ path: url.pathname, uploadType, metadata, size: raw.length });
+    if (m[1] === "drafts") return createDraft(mb, raw, metadata.message?.threadId ?? null);
+    return format(sendRaw(mb, raw, metadata.threadId ?? null), "minimal");
+  });
+
   gmailRoute("POST", "/messages/send", (mb, _u, body) => {
-    const b = json(body) as { raw?: string; threadId?: string };
+    const b = jsonWrite(body) as { raw?: string; threadId?: string };
     if (!b.raw) throw apiError(400, "Invalid value for ByteString: raw is required", "invalidArgument");
     return format(sendRaw(mb, Buffer.from(b.raw, "base64url"), b.threadId ?? null), "minimal");
   });
@@ -1097,13 +1171,9 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
   };
 
   gmailRoute("POST", "/drafts", (mb, _u, body) => {
-    const b = json(body) as { message?: { raw?: string; threadId?: string } };
+    const b = jsonWrite(body) as { message?: { raw?: string; threadId?: string } };
     if (!b.message?.raw) throw apiError(400, "Missing draft message", "invalidArgument");
-    const msg = makeMessage(mb, Buffer.from(b.message.raw, "base64url"), ["DRAFT"], b.message.threadId ?? null);
-    insert(mb, msg);
-    const id = `r${(seq++).toString().padStart(19, "0")}`;
-    mb.drafts.set(id, msg.id);
-    return { id, message: format(msg, "minimal") };
+    return createDraft(mb, Buffer.from(b.message.raw, "base64url"), b.message.threadId ?? null);
   });
 
   gmailRoute("GET", "/drafts/([^/]+)", (mb, url, _b, m) => ({
@@ -1972,6 +2042,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
     abortedPulls: 0,
     revoked: [],
     requests: [],
+    uploads: [],
     async close() {
       for (const c of closers) c();
       server.closeAllConnections();

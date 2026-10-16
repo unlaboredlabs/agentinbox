@@ -21,7 +21,10 @@ import { GoogleApiError } from "./types.ts";
 export interface RequestOptions {
   method?: string;
   query?: Query;
+  /** JSON body. */
   body?: unknown;
+  /** Non-JSON body (media uploads), sent as is; mutually exclusive with `body`. */
+  rawBody?: { contentType: string; data: Uint8Array };
   /** Gmail quota units charged to the account's token bucket (0 = not throttled, e.g. Pub/Sub). */
   cost?: number;
   signal?: AbortSignal;
@@ -80,8 +83,9 @@ export class GoogleRuntime {
             accept: "application/json",
             ...opts.headers,
             ...(opts.body !== undefined ? { "content-type": "application/json" } : {}),
+            ...(opts.rawBody ? { "content-type": opts.rawBody.contentType } : {}),
           },
-          body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+          body: opts.rawBody ? opts.rawBody.data : opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
           signal: attemptSignal(opts.signal, timeoutMs),
         });
         if (res.ok) {

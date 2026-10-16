@@ -7,6 +7,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ApiError } from "../shared/types.ts";
 import { agentApiRoutes } from "./agentapi/index.ts";
+import { bearer } from "./agentapi/auth.ts";
 import { CALENDAR_PUSH_PATH } from "./calendar/push.ts";
 import { accountsApi } from "./api/accounts.ts";
 import { agentsApi } from "./api/agents.ts";
@@ -26,7 +27,7 @@ import { webhooksApi } from "./api/webhooks.ts";
 import { csrfGuard, currentSetupToken, requireAdmin } from "./auth/index.ts";
 import type { AppContext } from "./context.ts";
 import { contentSecurityPolicy, inlineScriptHashes } from "./csp.ts";
-import { mcpRoutes } from "./mcp/index.ts";
+import { MCP_AGENT_BODY_LIMIT, mcpRoutes } from "./mcp/index.ts";
 import { renderSkill } from "./skill/index.ts";
 import { HttpError, PolicyDenied } from "./util/errors.ts";
 
@@ -44,6 +45,7 @@ export const DEFAULT_WEB_DIR = resolve(import.meta.dirname, "..", "dist", "web")
 const API_BODY_LIMIT = 1024 * 1024;
 const AUTH_BODY_LIMIT = 16 * 1024;
 const AUTH_PATHS = ["/api/setup/claim", "/api/setup/verify-token", "/api/auth/login", "/api/auth/password"];
+/** /mcp without a valid agent key; with one, MCP_AGENT_BODY_LIMIT (server/mcp/index.ts). */
 const MCP_BODY_LIMIT = 4 * 1024 * 1024;
 const AGENT_BODY_LIMIT = 64 * 1024;
 /** Calendar push notifications have no body. */
@@ -95,8 +97,14 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   const limit = (maxSize: number) => bodyLimit({ maxSize, onError: tooLarge });
   for (const path of AUTH_PATHS) app.use(path, limit(AUTH_BODY_LIMIT));
   app.use("/api/*", limit(API_BODY_LIMIT));
-  app.use("/mcp", limit(MCP_BODY_LIMIT));
-  app.use("/mcp/*", limit(MCP_BODY_LIMIT));
+  // Large bodies only for a valid agent key: anyone else is cut off at 4 MB before more is buffered.
+  const mcpLimit = limit(MCP_BODY_LIMIT);
+  const mcpAgentLimit = limit(MCP_AGENT_BODY_LIMIT);
+  // ("/mcp/*" also matches /mcp itself.)
+  app.use("/mcp/*", (c, next) => {
+    const key = c.req.path === "/mcp" ? bearer(c.req.header("authorization")) : null;
+    return (key && ctx.policy.authenticate(key) ? mcpAgentLimit : mcpLimit)(c, next);
+  });
   app.use("/agent/*", limit(AGENT_BODY_LIMIT));
   app.use(CALENDAR_PUSH_PATH, limit(PUSH_BODY_LIMIT));
   app.use("/api/*", csrfGuard());
