@@ -354,7 +354,6 @@ export async function listConnections(deps: ManageDeps): Promise<number> {
     if (c.privateTarget) notes.push("private network");
     const d = c.expiresInDays;
     if (d !== null && d <= 7) notes.push(d <= 0 ? "expires today: Reconnect" : `expires in ${d} day${d === 1 ? "" : "s"}`);
-    if (c.tools.held) notes.push(`${c.tools.held} held`);
     if (c.status === "needs_reauth") notes.push("Reconnect");
     p.print(
       `${c.slug.padEnd(w)}  ${status}  ${accessLabel(c.levelDefault).padEnd(24)}  ${String(c.tools.total).padEnd(5)}  ${safeText(c.url ?? c.kind, 80)}${notes.length ? pc.yellow(`  (${notes.join(", ")})`) : ""}`,

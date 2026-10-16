@@ -1,6 +1,6 @@
 // Console decisions for broker connections (docs/MCP-BROKER.md) as pure functions, so they can be tested directly:
 // a connection's status in plain words, the Add connection draft and the request sequence it turns into, what a
-// probe found, access levels and held-tool notices. Built on the /api/connections DTOs in shared/types.ts.
+// probe found and access levels. Built on the /api/connections DTOs in shared/types.ts.
 // No React and relative imports only: vitest and the server typecheck load this module too.
 
 import type {
@@ -130,13 +130,6 @@ export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "pre
   if (scopes.includes("orchestration:operate")) return { scopes, note: "Agents can read, start, message and stop T3 threads." };
   if (scopes.includes("orchestration:read")) return { scopes, note: "Read only in T3: agents can read projects and threads, nothing more." };
   return { scopes, note: null };
-}
-
-/** "Notion changed 1 tool", per connection with held tools. */
-export function heldNotices(connections: readonly Pick<ConnectionView, "id" | "name" | "tools" | "status">[]): { id: string; text: string }[] {
-  return connections
-    .filter((c) => c.tools.held > 0 && c.status !== "disabled")
-    .map((c) => ({ id: c.id, text: `${c.name} changed ${c.tools.held} tool${c.tools.held === 1 ? "" : "s"}` }));
 }
 
 // ───────────── Agent access (adapter over per-connection grants) ─────────────

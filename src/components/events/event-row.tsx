@@ -39,7 +39,6 @@ const ICON: Record<EventType, typeof MailIcon> = {
   "calendar.event_cancelled": CalendarXIcon,
   "calendar.invitation_received": CalendarPlusIcon,
   "connection.auth_failed": KeyRoundIcon,
-  "connection.tool_changed": AlertTriangleIcon,
   "connection.expiring": KeyRoundIcon,
   "approval.requested": SendIcon,
 };

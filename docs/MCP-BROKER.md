@@ -175,7 +175,7 @@ environment keys, untruncated.
 **Upstream client capabilities in v1:** none. Elicitation, sampling and roots are not declared, so upstreams can't
 ask for them. Resources and prompts aren't proxied in v1.
 
-### Tools: namespacing, catalog, pinning
+### Tools: namespacing, catalog, tool changes
 
 - **Names.**
   - Upstream tools are exposed as `<slug>__<tool>`, using only `[A-Za-z0-9_-]`.
@@ -188,19 +188,25 @@ ask for them. Resources and prompts aren't proxied in v1.
 - **Catalog.** `tools/list` is fetched with pagination when the connection is made, again when the TTL the server
   gives (`ttlMs`) expires, on a timer, and on `list_changed` for 2025-era sessions. It's cached per
   (connection, credential).
-- **Pinning (rug-pull defence).** Each tool's hash is `sha256(JCS({name, title, description, inputSchema,
+- **Definition hashes and tool changes.** Each tool's hash is `sha256(JCS({name, title, description, inputSchema,
   outputSchema, annotations}))`, and the server's `instructions` are hashed separately.
-  - **No review gate at setup.** Every tool is pinned on connect and is available at once, subject to the
+  - **No review gate at setup.** Every tool is stored on connect and is available at once, subject to the
     connection's access level.
-  - **Hold on change.** Later, a changed hash, or a tool that wasn't there at connect, puts **that tool** on hold.
-    Calls to it fail with `tool_on_hold` ("its definition changed; the owner must accept the change"), and the
-    owner gets a ping: the `connection.tool_changed` event, a console notice, and webhooks and the listener (so
-    Hermes can tell Wynn). The accept page shows a diff, and one tap re-pins the tool. Other tools on the
-    connection keep working.
-  - Agents always receive the **pinned snapshot**, never the live definition. Arguments are validated against the
-    pinned `inputSchema` (ajv) before they're forwarded.
-  - Precedents: [mcp-context-protector](https://github.com/trailofbits/mcp-context-protector),
-    [Invariant on rug pulls](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks).
+  - **No hold on change (changed by the owner on 2026-10-16).** The plan was to pin on connect, then hold a changed or
+    new tool and ping the owner until they accepted it. The owner removed that for every integration and generic MCP
+    upstream alike. When a tool's description or input schema changes, or a new tool appears, the new definition is
+    simply used and the tool keeps working under its name: nothing goes on hold, nobody is pinged, and there's no
+    accept or review step. The only trace is one silent audit entry per tool (`connection.tool_changed` with the old
+    and new hash and the fields that differ, `connection.tool_added` for a new tool,
+    `connection.instructions_changed` for the instructions), visible in the console's audit log. No event, webhook,
+    listener message, notice or badge.
+  - A changed tool is re-classified from its new definition, so access levels, approvals for risky tools and
+    "always allow" rules (keyed by the tool's name) apply exactly as for any tool. A schema change that makes a read
+    tool risky follows the normal risky rules; that's not a hold. A pending approval queued before the change can't
+    run after it (the hash it was asked with no longer matches): reject it and the agent asks again.
+  - Arguments are validated against the current `inputSchema` (ajv) before they're forwarded.
+  - On upgrade, tools an older version left on hold are released at startup: the definition that was waiting is
+    used, with the same audit entry. The hold columns of `upstream_tools` stay in the schema, unused.
 - **Descriptions shown to agents** are cleaned and capped: ANSI escapes, tag characters, zero-width and bidi
   characters are stripped, about 1 KB per tool and 256 characters per parameter. The connection page lists suspicious
   signs as information, never as a gate: `<IMPORTANT>`, "don't tell the user", file paths, other servers' tool names,
@@ -602,7 +608,8 @@ sparfenyuk mcp-proxy. mcp-router reached end of life on 2026-09-18.
 - signed webhooks for tool calls and approval decisions;
 - relaying upstream domain events to agents through the listener;
 - argument-level grants without an external policy server;
-- tool-definition pinning with re-review on drift.
+- tool-definition pinning with re-review on drift (no longer a goal: the owner removed the hold on 2026-10-16; a
+  change is only audited, see "Tools: namespacing, catalog, tool changes").
 
 That last one isn't documented by any project reviewed (the teardown's code search was cut short by a rate limit, so
 treat it as "not documented" rather than proven absent).
@@ -646,7 +653,7 @@ controls are enforced in code, on the action side, as agentinbox already does fo
 |---|---|---|---|
 | Injection flowing across tools (untrusted output driving a write elsewhere) | GitHub MCP toxic flow ([Invariant](https://invariantlabs.ai/blog/mcp-github-vulnerability)); WhatsApp JSON breakout | Nonce-wrapped untrusted output; provenance flags; trifecta banner; writes and egress to approval by default | v1 |
 | | | Session taint: after untrusted output, egress calls escalate to approval for N minutes (CaMeL-style; [arXiv 2503.18813](https://arxiv.org/abs/2503.18813), [design patterns](https://arxiv.org/abs/2506.08837)) | later |
-| Tool poisoning and rug pulls | `<IMPORTANT>` `add` tool reading `~/.ssh` ([Invariant](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)); [line jumping](https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/); postmark-mcp 1.0.16 BCC'ing all mail ([BleepingComputer](https://www.bleepingcomputer.com/news/security/unofficial-postmark-mcp-npm-silently-stole-users-emails/)) | Hash pinning on connect, hold and ping on any change or new tool, serving the pinned snapshot, cleaned descriptions, informational signals, pinned stdio versions | v1 |
+| Tool poisoning and rug pulls | `<IMPORTANT>` `add` tool reading `~/.ssh` ([Invariant](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)); [line jumping](https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/); postmark-mcp 1.0.16 BCC'ing all mail ([BleepingComputer](https://www.bleepingcomputer.com/news/security/unofficial-postmark-mcp-npm-silently-stole-users-emails/)) | Definition hashes audited on every change (no hold, owner's decision of 2026-10-16), cleaned descriptions, informational signals, pinned stdio versions | v1 |
 | Cross-server shadowing | A description rewriting another server's `send_email` | Operator-chosen slugs, collision checks, flagging descriptions that name other servers' tools, per-agent grants | v1 |
 | Token exfiltration and confused deputy | Token passthrough and SSRF ([MCP security](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)); CVE-2025-6514 | No passthrough; encrypted per-connection credentials; scrubbing of exact token strings and `Bearer …` from results and errors; one pinned, guarded fetch; https only for authorization URLs, except on a connection's own admin-allowed private host | v1 |
 | stdio as a code-execution surface | Spec "local MCP server compromise" | Admin-only; full command shown; pinned versions; `shell: false`; minimal env; no `process.env` inheritance | v1 |
@@ -718,7 +725,7 @@ grants or migrations. It ships as a nightly and is done when every item under "D
 - remote HTTP upstreams (Streamable HTTP in both generations, plus SSE) with auth none, static header or OAuth
   (pre-registered, DCR, or a metadata document), proactive refresh and `needs_reauth`;
 - the pinned SSRF-guarded fetch;
-- catalog and pinning, with hold-and-ping on a changed or new tool;
+- the catalog with definition hashes (a changed or new tool is used at once and audited; the hold was removed on 2026-10-16);
 - `<slug>__<tool>` namespacing;
 - connection grants with the three levels and risk classification;
 - `mcp.call` approvals: pending returned at once, `get_call_status`, exact arguments, "always allow" rules, the
@@ -728,7 +735,7 @@ grants or migrations. It ships as a nightly and is done when every item under "D
 - the one-click kill;
 - `connection.auth_failed` events and a listener stream for agents without Gmail;
 - console: Connections, Add connection (custom URL plus the **Notion preset**) with the one access choice, the
-  approval card with "always allow", the one-tap approve page, the allow-rule list, the accept-change page, and
+  approval card with "always allow", the one-tap approve page, the allow-rule list, and
   first run with Google optional;
 - CLI: `connections add|list|reconnect|disable` and `import --from hermes|claude-code|cursor|codex`;
 - docs and SKILL.md.
@@ -742,7 +749,7 @@ four of Hermes's six upstreams are on loopback or Tailscale.
    - a 401 refresh followed by `needs_reauth`;
    - a bearer server;
    - a 2025 session server and a 2026 stateless server;
-   - a changed or new tool going on hold, with the ping, then accepted;
+   - a changed or new tool that keeps working, with one audit entry and no ping (was: held, pinged, accepted);
    - the three levels, risk classification and an approval forwarding the exact bytes;
    - "always allow" not asking twice;
    - pending returned at once;
@@ -764,10 +771,10 @@ until PR 8, so existing users see nothing half-built:
 | 2 | Schema (migration 8): `connections`, `connection_credentials`, `upstream_tools` (pins), `connection_grants`, `approval_rules`; rebuild `approvals` with nullable `account_id`/`draft_id` and a generic payload; `owner_id` columns. Existing data is untouched, and there's an upgrade test from main's DB | L |
 | 3 | Upstream runtime: the pinned, guarded fetch with the private-target allow, the client pool (both protocol generations plus SSE), timeouts and cancellation, strict discovery, static-header auth | L |
 | 4 | OAuth to upstreams: an SQLite `OAuthClientProvider` (pre-registered, DCR, client ID metadata document), PKCE, `state` and `iss` checks, `resource`, proactive and reactive refresh, `needs_reauth` and expiry warnings, `connection.auth_failed`, the `/oauth/connections/callback` route | L, plus a security review |
-| 5 | Catalog and pinning: list with TTL, hashing, hold on change or new tool, `connection.tool_changed`, accept, cleaned descriptions, informational signals, namespacing and collision checks | L |
+| 5 | Catalog and pinning: list with TTL, hashing, an audit entry on a changed or new tool (the hold, `connection.tool_changed` event and accept step were removed on 2026-10-16), cleaned descriptions, informational signals, namespacing and collision checks | L |
 | 6 | Policy and approvals: the levels, risk classification (presets, annotations, the word list), `decideTool`, caps, `mcp.call` with pending at once and exact bytes, `get_call_status`, `approval_rules` (always allow), output wrapping, token scrubbing, the audit fields, the kill switch | L, plus a security review |
 | 7 | MCP endpoint aggregation: upstream tools on `/mcp` next to the unchanged native ones, the instructions, a listener stream without Gmail, the events | L |
-| 8 | Console: Connections, Add connection (custom URL plus the Notion preset) with the one access choice, agent access levels, the approval card with "always allow", the one-tap `/approve/<id>` page, the allow-rule list, accepting a held tool, the private-target allow UX, first run with Google optional. The feature flag is removed here | L (approvals) |
+| 8 | Console: Connections, Add connection (custom URL plus the Notion preset) with the one access choice, agent access levels, the approval card with "always allow", the one-tap `/approve/<id>` page, the allow-rule list, the private-target allow UX, first run with Google optional. The feature flag is removed here | L (approvals) |
 | 9 | CLI: `connections add/list/reconnect/disable` and `import --from hermes/claude-code/cursor/codex`, with a dry run | M |
 | 10 | E2E (done-when #1), docs, SKILL.md; then the Notion check and the Hermes migration on Wynn's install; then the persona walk | M |
 
@@ -846,7 +853,8 @@ All questions are decided. Building proceeds M0 → M1 → M2 → M3.
    - risky means irreversible only;
    - "always allow" on every card;
    - a one-tap approve page;
-   - no review gate at setup: pin on connect, hold and ping on a change;
+   - no review gate at setup, and no hold on a change: a changed tool keeps working and is only audited (changed by
+     the owner on 2026-10-16; the plan said "pin on connect; hold and ping on a tool change");
    - pending returned at once.
 6. **Approvals on the phone:** a link to the one-tap approve page goes out in `approval.requested`. Chat replies can't
    approve.

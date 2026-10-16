@@ -78,8 +78,10 @@ key; the broker holds every upstream credential and lists only the tools the age
 - **Approvals**: a risky call returns `pending_approval` at once with a link to a one-tap approve page; the agent
   checks back with `get_call_status`. "Always allow this" (for that agent and tool, optionally only that target)
   means it never asks twice; the rules are listed on the agent's page.
-- **Tool changes**: every tool's definition is pinned when you connect. If a server later changes or adds a tool,
-  that tool is held until you accept the change (Connections shows a diff).
+- **Tool changes**: if a server later changes or adds a tool, agents simply use the new definition under the same
+  name: nothing is held and nothing asks you. Access levels, approvals and "always allow" rules apply as usual (a
+  change that makes a tool risky makes it ask). The audit log records each change (`connection.tool_changed`, with
+  the old and new definition hash).
 - **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`.
 - **Search mode**: the tool list shows only `search_tools`, `call_read_tool`, `call_write_tool` and `get_call_status`;
   the agent finds the rest by searching. Calling a tool by its name still works, with the same access, approvals and

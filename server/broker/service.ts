@@ -28,10 +28,9 @@ import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
 import { loopbackUrl } from "../urls.ts";
-import { conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
-import { randomToken } from "../util/ids.ts";
+import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
-import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
+import { brokerConnections, Catalog, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
@@ -88,8 +87,6 @@ export interface BrokerParts {
   connector: Connector;
   /** Native presets' source dependencies (credential store + token refresher). */
   nativeDeps?(connection: Connection): NativeSourceDeps;
-  /** Accepts a held tool (re-pin + re-classify), only if its candidate still has this hash. Default: the catalog. */
-  acceptTool?(connectionId: string, name: string, candidateHash: string): void;
   /**
    * Drops cached per-agent tool views after connections, slugs, grants or pins changed. Default: the catalog
    * registry's invalidate (whole cache, or one agent's view).
@@ -119,7 +116,7 @@ export interface BrokerOptions {
 export interface AgentBrokerView {
   /** The agent's connection grants (any level), by slug. */
   connections: ConnectionGrantRef[];
-  /** Tools from ToolRegistry.forAgent: levels applied, held tools excluded. */
+  /** Tools from ToolRegistry.forAgent: levels applied. */
   tools: RegisteredTool[];
 }
 
@@ -148,10 +145,8 @@ export interface BrokerService extends Lifecycle {
   kill(connectionId: string, reason: string): Promise<void>;
   /** The kill switch, then the row (grants, pins, rules and approvals cascade). Audited. */
   remove(connectionId: string): Promise<void>;
-  /** Accepts a held tool; 409 when the candidate changed since `candidateHash` was shown, 404 when nothing is held. */
-  acceptTool(connectionId: string, name: string, candidateHash: string): void;
   invalidate(scope: InvalidateScope): void;
-  /** The pinned catalog (W5). */
+  /** The tool catalog (W5). */
   catalog: Catalog;
   /** (Re)starts the catalog's tool listing for a connection (create, connect, URL change); no-op while off or disabled. */
   attach(connectionId: string): void;
@@ -221,7 +216,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   registerNativeFlows(up);
   const credentials = given.credentials ?? up.store;
 
-  // The catalog (W5): pins, holds and the per-agent registry over upstream_tools.
+  // The catalog (W5): stored definitions and the per-agent registry over upstream_tools. A changed upstream tool is
+  // used at once; the catalog only audits it (no event, no hold).
   const store = new SqliteCatalogStore(ctx.db);
   const catalog = new Catalog({
     store,
@@ -231,10 +227,6 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
     connections: () => brokerConnections(ctx.db).map((c) => ({ id: c.id, slug: c.slug })),
     audit: (input) => ctx.audit.record(input),
-    emit: (ev) => {
-      const { type, connectionId, ...detail } = ev;
-      ctx.events.emit({ type, connectionId, dedupeKey: `${connectionId}:${type}:${randomToken(12)}`, detail });
-    },
     log,
     enabled,
   });
@@ -255,9 +247,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       return off.size ? all.filter((t) => !off.has(t.connectionId)) : all;
     },
     resolve: (agentId, name) => catalogRegistry.resolve(agentId, name),
-    // The catalog registry's additive lookups (tool_on_hold) pass through.
-    held: (agentId: string, name: string) => catalogRegistry.held(agentId, name),
-  } as ToolRegistry;
+  };
   const base = { registry: visibleRegistry, connector: upstreamConnector(ctx, up, presetFor), ...given };
   const invalidate = (scope: InvalidateScope) => {
     if (given.invalidate) return given.invalidate(scope);
@@ -518,20 +508,6 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       for (const { agent_id } of agents) notifyAgent(ctx, agent_id);
     },
 
-    acceptTool(connectionId, name, candidateHash) {
-      try {
-        if (parts.acceptTool) parts.acceptTool(connectionId, name, candidateHash);
-        // The catalog re-classifies the candidate: the old risky/read class never carries over.
-        else catalog.acceptHeldTool(connectionId, name, { candidateHash });
-      } catch (err) {
-        if (err instanceof CatalogError && err.code === "stale") throw conflict(err.message, "Reload the page to see the latest change.");
-        if (err instanceof CatalogError && err.code === "not_held") throw new HttpError(404, "not_found", err.message);
-        throw err;
-      } finally {
-        invalidate({ connectionId });
-      }
-    },
-
     invalidate,
     catalog,
     attach,
@@ -552,6 +528,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         if (pinned) ctx.log.child("broker").info("Kept the full tool list for existing agents", { agents: pinned });
       } catch (err) {
         ctx.log.error("Couldn't keep the full tool list for existing agents", { error: errorMessage(err) });
+      }
+      // Tools an older version left on hold (the hold was removed on 2026-10-16) become usable now.
+      try {
+        const released = catalog.releaseLegacyHolds();
+        if (released) log.info("Released tools held for a change by an older version", { tools: released });
+      } catch (err) {
+        log.error("Couldn't release tools held by an older version", { error: errorMessage(err) });
       }
       policy.start();
       ctx.bus.on("settings", onSettings);
@@ -640,18 +623,14 @@ export function listConnections(ctx: Pick<AppContext, "db">): Connection[] {
 
 const DAY_MS = 86_400_000;
 
-/** The list/get shape: tool counts, held count, agents and days to expiry. */
+/** The list/get shape: tool count, agents and days to expiry. */
 export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = Date.now()): ConnectionView {
-  const t = ctx.db.get<{ total: number; held: number | null }>(
-    "SELECT COUNT(*) AS total, SUM(state = 'held') AS held FROM upstream_tools WHERE connection_id = ?",
-    c.id,
-  )!;
+  const total = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM upstream_tools WHERE connection_id = ?", c.id)!.n;
   const agents = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM connection_grants WHERE connection_id = ?", c.id)!.n;
-  const held = t.held ?? 0;
   const expiresInDays = c.expiresAt ? Math.max(0, Math.floor((Date.parse(c.expiresAt) - at) / DAY_MS)) : null;
   // Scopes aren't secret (the token is): the plaintext column, as granted by the last sign-in.
   const scope = c.authType === "oauth" ? ctx.db.get<{ scope: string | null }>("SELECT scope FROM connection_credentials WHERE connection_id = ? AND access_token_enc IS NOT NULL", c.id)?.scope : null;
   const grantedScopes = typeof scope === "string" ? scope.split(/\s+/).filter(Boolean) : null;
   const expired = c.status !== "disabled" && isExpired(c, at);
-  return { ...c, tools: { total: t.total, active: t.total - held, held }, expiresInDays, expired, grantedScopes, agents };
+  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, agents };
 }

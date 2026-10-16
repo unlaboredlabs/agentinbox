@@ -13,12 +13,8 @@ import {
   type ConnectionGrant,
   type ConnectionKind,
   type ConnectionView,
-  type HeldToolView,
   type PresetView,
   type StartConnectResult,
-  type ToolDiffLine,
-  type ToolHeldReason,
-  type UpstreamToolDefinition,
 } from "../../shared/types.ts";
 import { exposedName } from "../broker/catalog/index.ts";
 import { connectionView, getConnection, listConnections, notifyAgent } from "../broker/service.ts";
@@ -28,7 +24,7 @@ import type { WebhookReachability } from "../broker/reachability.ts";
 import { presetServerSlug, presetServerUrl } from "../integrations/user-server.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
-import { json, now } from "../db/index.ts";
+import { now } from "../db/index.ts";
 import { canonicalPrivateTarget, originKey, PrivateTargetError, validateUpstreamUrl } from "../broker/upstream/fetch.ts";
 import { badRequest, conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
@@ -66,7 +62,6 @@ const patchSchema = z
   .strict();
 const grantsSchema = z.object({ grants: z.array(z.object({ agentId: z.string().min(1), level })).max(1000) }).strict();
 const privateTargetSchema = z.object({ allow: z.boolean() }).strict();
-const acceptSchema = z.object({ candidateHash: z.string().min(1).max(128) }).strict();
 const probeSchema = z.object({ url: httpUrl, connectionId: z.string().optional() }).strict();
 const finishSchema = z.object({ url: z.string().trim().min(1).max(8192) }).strict();
 const connectSchema = z
@@ -108,31 +103,6 @@ function freeSlug(ctx: AppContext, base: string): string {
   for (let i = 2; ; i++) if (!taken(`${root}-${i}`)) return `${root}-${i}`;
 }
 
-/** Line diff of two pretty-printed definitions (LCS; small inputs). */
-export function definitionDiff(before: UpstreamToolDefinition | null, after: UpstreamToolDefinition): ToolDiffLine[] {
-  const a = before ? JSON.stringify(before, null, 2).split("\n") : [];
-  const b = JSON.stringify(after, null, 2).split("\n");
-  if (a.length * b.length > 4_000_000) return [...a.map((text) => ({ op: "-" as const, text })), ...b.map((text) => ({ op: "+" as const, text }))];
-  const lcs = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
-  for (let i = a.length - 1; i >= 0; i--) {
-    for (let j = b.length - 1; j >= 0; j--) lcs[i]![j] = a[i] === b[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
-  }
-  const out: ToolDiffLine[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) {
-      out.push({ op: " ", text: a[i]! });
-      i++;
-      j++;
-    } else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) out.push({ op: "-", text: a[i++]! });
-    else out.push({ op: "+", text: b[j++]! });
-  }
-  while (i < a.length) out.push({ op: "-", text: a[i++]! });
-  while (j < b.length) out.push({ op: "+", text: b[j++]! });
-  return out;
-}
-
 export function connectionsApi(ctx: AppContext) {
   const app = router();
   const approvals = new Approvals(ctx);
@@ -164,27 +134,6 @@ export function connectionsApi(ctx: AppContext) {
     const missing = ids.filter((id) => !ctx.db.get("SELECT 1 FROM agents WHERE id = ?", id));
     if (missing.length) throw badRequest(`Unknown agent ${missing.join(", ")}`);
   };
-  const heldOf = (connectionId: string): HeldToolView[] =>
-    ctx.db
-      .all<{ name: string; exposed_name: string; held_reason: ToolHeldReason; definition: string | null; candidate_definition: string; candidate_hash: string; updated_at: string }>(
-        "SELECT name, exposed_name, held_reason, definition, candidate_definition, candidate_hash, updated_at FROM upstream_tools WHERE connection_id = ? AND state = 'held' ORDER BY name",
-        connectionId,
-      )
-      .map((r) => {
-        const pinned = json.parse<UpstreamToolDefinition | null>(r.definition, null);
-        const candidate = json.parse<UpstreamToolDefinition>(r.candidate_definition, { inputSchema: {} });
-        return {
-          name: r.name,
-          exposedName: r.exposed_name,
-          heldReason: r.held_reason,
-          pinned,
-          candidate,
-          candidateHash: r.candidate_hash,
-          diff: definitionDiff(pinned, candidate),
-          updatedAt: r.updated_at,
-        };
-      });
-
   const presetView = (p: IntegrationPreset, reach: WebhookReachability): PresetView => {
     const publicUrl = ctx.settings.publicUrl();
     const steps = p.setupSteps({
@@ -464,7 +413,7 @@ export function connectionsApi(ctx: AppContext) {
     return c.json<ConnectionView>(view(id));
   });
 
-  // "Refresh tools": list the upstream's tools again now (changes are held as usual).
+  // "Refresh tools": list the upstream's tools again now (a changed tool is used at once and audited).
   app.post("/connections/:id/refresh", async (c) => {
     const id = c.req.param("id");
     const conn = requireConnection(id);
@@ -476,24 +425,8 @@ export function connectionsApi(ctx: AppContext) {
       r = await ctx.broker.catalog.refresh(id);
     }
     ctx.broker.invalidate({ connectionId: id });
-    audit("connection.refresh", id, { ok: r.ok, held: r.held.length, removed: r.removed.length });
+    audit("connection.refresh", id, { ok: r.ok, added: r.added.length, changed: r.changed.length, removed: r.removed.length });
     return c.json({ ok: r.ok, error: r.error ?? null, connection: view(id) });
-  });
-
-  app.get("/connections/:id/held", (c) => {
-    const id = c.req.param("id");
-    requireConnection(id);
-    return c.json<HeldToolView[]>(heldOf(id));
-  });
-
-  app.post("/connections/:id/held/:name/accept", async (c) => {
-    const id = c.req.param("id");
-    requireConnection(id);
-    const toolName = c.req.param("name");
-    // The hash of the candidate the owner saw: a tool that changed again since is refused (409), never accepted blind.
-    const { candidateHash } = await readBody(c, acceptSchema);
-    ctx.broker.acceptTool(id, toolName, candidateHash);
-    return c.json<HeldToolView[]>(heldOf(id));
   });
 
   return app;

@@ -1,6 +1,7 @@
-// The catalog: fetches each connection's tool list, cleans, classifies and pins it, and holds changed or new tools
-// (docs/MCP-BROKER.md "Catalog" and "Pinning"). Not wired into the app yet. Behind the `brokerUpstreams` setting:
-// pass `enabled` and attach() is a no-op while it's off.
+// The catalog: fetches each connection's tool list, cleans, classifies, hashes and stores it (docs/MCP-BROKER.md
+// "Catalog" and "Tool changes"). A changed or new tool is simply used: the only trace is one audit entry with the old
+// and new definition hash (the owner removed the hold on 2026-10-16). Behind the `brokerUpstreams` setting: pass
+// `enabled` and attach() is a no-op while it's off.
 
 import type { AuditInput } from "../../audit.ts";
 import type { IntegrationPreset, ToolClass, ToolDef, ToolListing, ToolSource } from "../types.ts";
@@ -9,25 +10,12 @@ import { type CleanStats, cleanInstructions, cleanToolDef, ToolRefused } from ".
 import { canonicalize, sha256Hex } from "./jcs.ts";
 import { candidateKey, exposedName, fold, type NameRefusal, nativeNames } from "./names.ts";
 import { type ToolSignal, toolSignals } from "./signals.ts";
-import type { CatalogState, CatalogStore, HeldReason, PinnedTool } from "./store.ts";
+import type { CatalogState, CatalogStore, PinnedTool } from "./store.ts";
 
 /** `sha256(JCS(cleaned {name, title, description, inputSchema, outputSchema, annotations}))`, hex. */
 export function pinHash(def: ToolDef): string {
   const { name, title, description, inputSchema, outputSchema, annotations } = def;
   return sha256Hex(canonicalize({ name, title, description, inputSchema, outputSchema, annotations }));
-}
-
-/**
- * The `connection.tool_changed` event (no definitions in it). `tool` is the exposed name, null for the server
- * instructions (reason "instructions"). The wiring PR hands it to the events outbox (webhooks, listener).
- */
-export interface ToolChangedEvent {
-  type: "connection.tool_changed";
-  connectionId: string;
-  tool: string | null;
-  /** The upstream's own name; null for the instructions. */
-  upstreamName: string | null;
-  reason: HeldReason | "instructions";
 }
 
 /** A tool that disappeared from the upstream: policy fails its pending approvals closed and drops its allow rules. */
@@ -50,8 +38,6 @@ export interface CatalogDeps {
   /** Every broker connection (for cross-reference signals). */
   connections(): { id: string; slug: string }[];
   audit(input: AuditInput): void;
-  /** Called outside any transaction. */
-  emit(event: ToolChangedEvent): void;
   log?: { warn(msg: string, meta?: Record<string, unknown>): void };
   now?: () => Date;
   /** Refresh period without a server TTL, and the cap on one (default 10 min). */
@@ -69,26 +55,18 @@ export interface CatalogDeps {
 export interface RefreshOutcome {
   ok: boolean;
   first: boolean;
+  /** Tools stored by the first listing. */
   pinned: string[];
-  held: { name: string; reason: HeldReason }[];
+  /** Tools that appeared after the first listing: usable at once. */
+  added: string[];
+  /** Tools whose definition hash changed: the new definition is used at once. */
+  changed: string[];
   removed: string[];
   /** Tools not stored: a name that can't be exposed, or one already taken (native or another connection). */
   refused: NameRefusal[];
-  instructionsHeld: boolean;
+  /** The server instructions changed (the new text is served at once). */
+  instructionsChanged: boolean;
   error?: string;
-}
-
-/** What the console's accept page shows. */
-export interface ToolDiff {
-  connectionId: string;
-  name: string;
-  reason: HeldReason;
-  pinned: ToolDef | null;
-  candidate: ToolDef;
-  pinHash: string | null;
-  candidateHash: string;
-  /** Top-level fields that differ (name, title, description, inputSchema, outputSchema, annotations). */
-  fields: (keyof ToolDef)[];
 }
 
 interface Entry {
@@ -123,7 +101,7 @@ export class Catalog {
 
   /**
    * Policy hook: a tool left the upstream (or the connection's pins were forgotten). Policy fails the tool's pending
-   * approvals closed and deletes its approval_rules, so a tool that comes back (held as new) inherits nothing.
+   * approvals closed and deletes its approval_rules, so a tool that comes back inherits nothing.
    * Called after the commit, once per tool.
    */
   onToolRemoved(fn: (e: ToolRemovedEvent) => void): void {
@@ -260,8 +238,9 @@ export class Catalog {
   }
 
   /**
-   * Pins a listing (synchronous; exposed for tests and for sources that push their list). First listing of a
-   * connection: every tool pinned and active. Later: a changed hash or a new tool puts that tool on hold.
+   * Stores a listing (synchronous; exposed for tests and for sources that push their list). Every listed tool is
+   * active. A changed definition hash, or a tool that wasn't there before, is used as is: one audit entry records
+   * it (old and new hash), with no event, notification or accept step.
    */
   applyListing(connectionId: string, listing: ToolListing): RefreshOutcome {
     const conn = this.deps.connection(connectionId);
@@ -272,7 +251,7 @@ export class Catalog {
       return failed("invalid_listing");
     }
     const now = (this.deps.now?.() ?? new Date()).toISOString();
-    const out: RefreshOutcome = { ok: true, first: false, pinned: [], held: [], removed: [], refused: [], instructionsHeld: false };
+    const out: RefreshOutcome = { ok: true, first: false, pinned: [], added: [], changed: [], removed: [], refused: [], instructionsChanged: false };
     const signals = new Map<string, ToolSignal[]>();
 
     // Valid, unique names only (the first of duplicates wins), cleaned and hashed. A definition that can't be served
@@ -309,7 +288,7 @@ export class Catalog {
     const otherRows = store.allTools().filter((t) => t.connectionId !== connectionId);
     const otherToolNames = [...nativeNames(), ...otherRows.flatMap((t) => [t.name, t.exposedName])];
 
-    const events: ToolChangedEvent[] = [];
+    const audits: { action: string; target: string | null; detail: Record<string, unknown> }[] = [];
     const removed: ToolRemovedEvent[] = [];
     let changed = false;
 
@@ -352,67 +331,50 @@ export class Catalog {
 
         if (!row) {
           changed = true;
-          const base = { connectionId, name, exposedName: exposed, cls: storedClass(def, conn.preset), firstSeenAt: now, updatedAt: now };
-          if (first) {
-            store.upsert({ ...base, def, pinHash: hash, heldReason: null, candidateDef: null, candidateHash: null });
-            out.pinned.push(name);
-          } else {
-            store.upsert({ ...base, def: null, pinHash: null, heldReason: "new", candidateDef: def, candidateHash: hash });
-            out.held.push({ name, reason: "new" });
-            events.push({ type: "connection.tool_changed", connectionId, tool: exposed, upstreamName: name, reason: "new" });
+          store.upsert({ connectionId, name, exposedName: exposed, def, pinHash: hash, cls: storedClass(def, conn.preset), firstSeenAt: now, updatedAt: now });
+          if (first) out.pinned.push(name);
+          else {
+            out.added.push(name);
+            audits.push({ action: "connection.tool_added", target: exposed, detail: { tool: name, hash } });
           }
           continue;
         }
 
-        if (row.pinHash === hash) {
-          // Unchanged, or reverted to the pinned definition (the hold is released). Derived columns refreshed.
-          const next: PinnedTool = { ...row, exposedName: exposed, cls: storedClass(row.def!, conn.preset), heldReason: null, candidateDef: null, candidateHash: null };
+        if (row.pinHash === hash && row.def) {
+          // Unchanged. Derived columns (exposed name, classification) refreshed.
+          const next: PinnedTool = { ...row, exposedName: exposed, cls: storedClass(row.def, conn.preset) };
           if (JSON.stringify(next) !== JSON.stringify(row)) {
             changed = true;
             store.upsert({ ...next, updatedAt: now });
           }
           continue;
         }
-        if (row.candidateHash === hash) {
-          if (row.exposedName !== exposed) {
-            changed = true;
-            store.upsert({ ...row, exposedName: exposed, updatedAt: now });
-          }
-          continue; // already on hold with this exact candidate
-        }
 
-        const reason: HeldReason = row.pinHash ? "changed" : "new";
+        // Changed (or a row without a definition, left by a version that held new tools): the new definition is
+        // used under the same name, re-classified, so the normal risky and read rules apply to what it is now.
         changed = true;
-        store.upsert({
-          ...row,
-          exposedName: exposed,
-          heldReason: reason,
-          candidateDef: def,
-          candidateHash: hash,
-          ...(row.def ? {} : { cls: storedClass(def, conn.preset) }),
-          updatedAt: now,
-        });
-        out.held.push({ name, reason });
-        events.push({ type: "connection.tool_changed", connectionId, tool: exposed, upstreamName: name, reason });
+        store.upsert({ ...row, exposedName: exposed, def, pinHash: hash, cls: storedClass(def, conn.preset), updatedAt: now });
+        out.changed.push(name);
+        audits.push({ action: "connection.tool_changed", target: exposed, detail: { tool: name, previousHash: row.pinHash, hash, fields: changedFields(row.def, def) } });
       }
 
-      // Server instructions: pinned on the first listing; a later change is held (the pinned text keeps being served).
+      // Server instructions: stored on the first listing; a later change is used at once and audited.
       const instr = cleanInstructions(listing.instructions);
       const iHash = instr === null ? null : sha256Hex(instr);
-      const nextState: CatalogState = { ...state, refreshedAt: now, lastError: null, ttlMs: typeof listing.ttlMs === "number" && Number.isFinite(listing.ttlMs) ? listing.ttlMs : null };
-      if (first) {
-        Object.assign(nextState, { instructions: instr, instructionsHash: iHash, instructionsHeld: false, candidateInstructions: null, candidateInstructionsHash: null });
-      } else if (iHash === state.instructionsHash) {
-        if (state.instructionsHeld) changed = true;
-        // Also restores the text after a restart (only the hash is persisted).
-        Object.assign(nextState, { instructions: instr, instructionsHeld: false, candidateInstructions: null, candidateInstructionsHash: null });
-      } else if (!state.instructionsHeld || iHash !== state.candidateInstructionsHash) {
-        Object.assign(nextState, { instructionsHeld: true, candidateInstructions: instr, candidateInstructionsHash: iHash });
-        out.instructionsHeld = true;
-        events.push({ type: "connection.tool_changed", connectionId, tool: null, upstreamName: null, reason: "instructions" });
+      const nextState: CatalogState = {
+        ...state,
+        instructions: instr,
+        instructionsHash: iHash,
+        refreshedAt: now,
+        lastError: null,
+        ttlMs: typeof listing.ttlMs === "number" && Number.isFinite(listing.ttlMs) ? listing.ttlMs : null,
+      };
+      if (!first && iHash !== state.instructionsHash) {
+        out.instructionsChanged = true;
+        audits.push({ action: "connection.instructions_changed", target: null, detail: { previousHash: state.instructionsHash, hash: iHash } });
       }
-      // A first listing with nothing to pin (an empty server, or every tool refused) doesn't use up the first
-      // connect: the tools it lists later are pinned too, not held as new.
+      // A first listing with nothing to store (an empty server, or every tool refused) doesn't use up the first
+      // connect: the tools it lists later count as the first ones, not as added.
       if (first && out.pinned.length === 0) nextState.refreshedAt = null;
       store.setState(nextState);
     });
@@ -421,10 +383,7 @@ export class Catalog {
     if (out.first && out.pinned.length) {
       this.audit("connection.tools_pinned", connectionId, null, { connectionId, count: out.pinned.length });
     }
-    for (const ev of events) {
-      this.audit("connection.tool_held", connectionId, ev.tool, { connectionId, tool: ev.upstreamName, reason: ev.reason });
-      this.safe(() => this.deps.emit(ev));
-    }
+    for (const a of audits) this.audit(a.action, connectionId, a.target, a.detail);
     for (const r of removed) {
       this.audit("connection.tool_removed", connectionId, r.exposedName, { connectionId, tool: r.name });
       for (const fn of this.removedListeners) this.safe(() => fn(r));
@@ -432,7 +391,7 @@ export class Catalog {
     const prefix = `${connectionId}\u0000`;
     for (const k of [...this.signalsByTool.keys()]) if (k.startsWith(prefix)) this.signalsByTool.delete(k);
     for (const [name, sig] of signals) this.signalsByTool.set(candidateKey(connectionId, name), sig);
-    if (changed || out.instructionsHeld) this.changed(connectionId);
+    if (changed || out.instructionsChanged) this.changed(connectionId);
     return out;
   }
 
@@ -444,89 +403,40 @@ export class Catalog {
     return out;
   }
 
-  /** Held tools of a connection, for the console. */
-  held(connectionId: string): PinnedTool[] {
-    return this.deps.store.tools(connectionId).filter((t) => t.heldReason !== null);
-  }
-
-  /** The accept page's diff; null when the tool isn't on hold. */
-  diff(connectionId: string, name: string): ToolDiff | null {
-    const row = this.deps.store.get(connectionId, name);
-    if (!row?.heldReason || !row.candidateDef || !row.candidateHash) return null;
-    const a = (row.def ?? {}) as Record<string, unknown>;
-    const b = row.candidateDef as unknown as Record<string, unknown>;
-    const fields = DEF_FIELDS.filter((f) => canonicalize(a[f] ?? null) !== canonicalize(b[f] ?? null));
-    return {
-      connectionId,
-      name,
-      reason: row.heldReason,
-      pinned: row.def,
-      candidate: row.candidateDef,
-      pinHash: row.pinHash,
-      candidateHash: row.candidateHash,
-      fields,
-    };
-  }
-
-  /**
-   * Re-pins a held tool's candidate (admin action). Pass the `candidateHash` the console showed, so a definition
-   * that changed again after the diff was rendered isn't accepted blind. Throws when nothing matching is on hold.
-   */
-  acceptHeldTool(connectionId: string, name: string, opts: { candidateHash?: string; actorId?: string | null } = {}): PinnedTool {
-    const conn = this.deps.connection(connectionId);
-    const row = this.deps.store.get(connectionId, name);
-    if (!conn || !row?.heldReason || !row.candidateDef || !row.candidateHash) throw new CatalogError("not_held", "This tool has no change waiting");
-    if (opts.candidateHash && opts.candidateHash !== row.candidateHash) {
-      throw new CatalogError("stale", "The tool changed again since this page was loaded; reload to see the new change");
-    }
-    const now = (this.deps.now?.() ?? new Date()).toISOString();
-    const next: PinnedTool = {
-      ...row,
-      def: row.candidateDef,
-      pinHash: row.candidateHash,
-      cls: storedClass(row.candidateDef, conn.preset),
-      heldReason: null,
-      candidateDef: null,
-      candidateHash: null,
-      updatedAt: now,
-    };
-    this.deps.store.upsert(next);
-    this.deps.audit({
-      actorType: "admin",
-      actorId: opts.actorId ?? null,
-      action: "connection.tool_accepted",
-      target: next.exposedName,
-      outcome: "ok",
-      detail: { connectionId, tool: name, reason: row.heldReason, pinHash: next.pinHash, previousPinHash: row.pinHash },
-    });
-    this.changed(connectionId);
-    return next;
-  }
-
-  /** Pinned (served) instructions of a connection. */
+  /** The server instructions served for a connection (from the last listing). */
   instructions(connectionId: string): string | null {
     return this.deps.store.state(connectionId)?.instructions ?? null;
   }
 
-  /** Accepts changed server instructions (admin action). */
-  acceptInstructions(connectionId: string, opts: { candidateHash?: string | null; actorId?: string | null } = {}): void {
-    const s = this.deps.store.state(connectionId);
-    if (!s?.instructionsHeld) {
-      throw new CatalogError("not_held", "No instruction change is waiting");
-    }
-    if (opts.candidateHash !== undefined && opts.candidateHash !== s.candidateInstructionsHash) {
-      throw new CatalogError("stale", "The instructions changed again since this page was loaded; reload to see the new change");
-    }
-    this.deps.store.setState({
-      ...s,
-      instructions: s.candidateInstructions,
-      instructionsHash: s.candidateInstructionsHash,
-      instructionsHeld: false,
-      candidateInstructions: null,
-      candidateInstructionsHash: null,
+  /**
+   * Upgrade from a version with the tool-change hold: every tool still held is released, its waiting definition
+   * (if any) becomes the one used, re-classified, with one audit entry per tool. Idempotent; returns how many.
+   */
+  releaseLegacyHolds(): number {
+    const held = this.deps.store.legacyHeld();
+    if (!held.length) return 0;
+    const released: { tool: PinnedTool; previousHash: string | null; fields: string[] }[] = [];
+    const now = (this.deps.now?.() ?? new Date()).toISOString();
+    this.deps.store.tx(() => {
+      for (const h of held) {
+        const def = h.candidateDef ?? h.tool.def;
+        const hash = h.candidateDef ? h.candidateHash : h.tool.pinHash;
+        if (!def || !hash) {
+          // Nothing usable stored: drop the row; the next listing adds the tool again.
+          this.deps.store.remove(h.tool.connectionId, h.tool.name);
+          continue;
+        }
+        const conn = this.deps.connection(h.tool.connectionId);
+        const tool: PinnedTool = { ...h.tool, def, pinHash: hash, cls: storedClass(def, conn?.preset ?? null), updatedAt: now };
+        this.deps.store.upsert(tool);
+        released.push({ tool, previousHash: h.tool.pinHash, fields: changedFields(h.tool.def, def) });
+      }
     });
-    this.deps.audit({ actorType: "admin", actorId: opts.actorId ?? null, action: "connection.instructions_accepted", target: null, outcome: "ok", detail: { connectionId } });
-    this.changed(connectionId);
+    for (const { tool, previousHash, fields } of released) {
+      this.audit("connection.tool_changed", tool.connectionId, tool.exposedName, { tool: tool.name, previousHash, hash: tool.pinHash, fields, releasedHold: true });
+    }
+    for (const id of new Set(held.map((h) => h.tool.connectionId))) this.changed(id);
+    return held.length;
   }
 
   /** Drops a connection's pins and state (its URL changed or it was deleted): the next listing is a first connect. */
@@ -558,16 +468,6 @@ export class Catalog {
   }
 }
 
-export class CatalogError extends Error {
-  constructor(
-    readonly code: "not_held" | "stale",
-    message: string,
-  ) {
-    super(message);
-    this.name = "CatalogError";
-  }
-}
-
 interface Prepared {
   def: ToolDef;
   stats: CleanStats;
@@ -581,7 +481,14 @@ function storedClass(def: ToolDef, preset: CatalogConnection["preset"]): ToolCla
 }
 
 function failed(error: string): RefreshOutcome {
-  return { ok: false, first: false, pinned: [], held: [], removed: [], refused: [], instructionsHeld: false, error };
+  return { ok: false, first: false, pinned: [], added: [], changed: [], removed: [], refused: [], instructionsChanged: false, error };
+}
+
+/** Top-level definition fields that differ (all of them for a tool with no previous definition). */
+function changedFields(before: ToolDef | null, after: ToolDef): string[] {
+  const a = (before ?? {}) as Record<string, unknown>;
+  const b = after as unknown as Record<string, unknown>;
+  return DEF_FIELDS.filter((f) => canonicalize(a[f] ?? null) !== canonicalize(b[f] ?? null));
 }
 
 function emptyState(connectionId: string): CatalogState {
@@ -589,9 +496,6 @@ function emptyState(connectionId: string): CatalogState {
     connectionId,
     instructions: null,
     instructionsHash: null,
-    instructionsHeld: false,
-    candidateInstructions: null,
-    candidateInstructionsHash: null,
     refreshedAt: null,
     lastError: null,
     ttlMs: null,

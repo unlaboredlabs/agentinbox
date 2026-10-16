@@ -171,7 +171,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     const tool = this.deps.registry.resolve(agentId, exposedName);
     if (!tool) {
       this.ctx.audit.record({ actorType: "agent", actorId: agentId, action: "unknown_tool", outcome: "error", reason: "unknown_tool", detail: { broker: true, tool: cleanLine(exposedName).slice(0, 64) } });
-      return text(`${cleanLine(exposedName).slice(0, 64)} isn't a tool you can use. List your tools again: it may have been removed, put on hold after a change, or your access changed.`, true);
+      return text(`${cleanLine(exposedName).slice(0, 64)} isn't a tool you can use. List your tools again: it may have been removed, or your access changed.`, true);
     }
     const conn = connectionInfo(this.ctx.db, tool.connectionId);
     const scrubber = this.scrubberFor(tool.connectionId);
@@ -343,7 +343,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     if (!conn) return "the connection was removed";
     if (conn.status === "disabled") return `${conn.name} is turned off`;
     const tool = this.currentTool(row.agent_id, row.connection_id, call.tool);
-    if (!tool) return `the agent can no longer use ${call.tool} on ${conn.name} (its access changed, or the tool was removed or put on hold)`;
+    if (!tool) return `the agent can no longer use ${call.tool} on ${conn.name} (its access changed, or the tool was removed)`;
     if (tool.level === "read") return `the agent now has read-only access to ${conn.name}`;
     if (tool.pinHash !== call.pinHash) return `${call.tool}'s definition changed after the agent asked`;
     if (sha256(call.args) !== call.argsSha256) return "the stored arguments don't match the fingerprint taken when the agent asked";

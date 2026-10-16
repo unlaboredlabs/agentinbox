@@ -227,7 +227,7 @@ export interface RegisteredTool {
 
 /** Per-agent view of every broker tool. Native Gmail/Calendar tools stay in server/mcp and are not in here. FROZEN. */
 export interface ToolRegistry {
-  /** Tools the agent may see now: granted connections, level applied (read level lists read tools only), held tools excluded. */
+  /** Tools the agent may see now: granted connections, level applied (read level lists read tools only). */
   forAgent(agentId: string): RegisteredTool[];
   /** Same filter as forAgent, for one exposed name; null when not visible to this agent. */
   resolve(agentId: string, exposedName: string): RegisteredTool | null;
