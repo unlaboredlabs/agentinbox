@@ -6,9 +6,9 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/unlaboredlabs/agentinbox.git"
+    "url": "git+https://github.com/wynn-dev/agentinbox.git"
   },
-  "homepage": "https://github.com/unlaboredlabs/agentinbox#readme",
+  "homepage": "https://github.com/wynn-dev/agentinbox#readme",
   "keywords": [
     "mcp",
     "gmail",
