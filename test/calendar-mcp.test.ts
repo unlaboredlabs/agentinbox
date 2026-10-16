@@ -12,7 +12,7 @@ import type { CalendarEventRaw } from "../server/google/calendar.ts";
 import { GoogleApiError } from "../server/google/types.ts";
 import { ToolError } from "../server/mail/agent.ts";
 import { Approvals } from "../server/mail/approvals.ts";
-import { formatAccounts, formatWhen } from "../server/mcp/format.ts";
+import { formatAccounts, formatCalendarEvent, formatCalendarEvents, formatWhen } from "../server/mcp/format.ts";
 import { CALENDAR_TOOL_NAMES, INSTRUCTIONS, TOOL_NAMES } from "../server/mcp/server.ts";
 import { PolicyDenied } from "../server/util/errors.ts";
 import { calendarTestContext } from "./calendar-fakes.ts";
@@ -467,6 +467,44 @@ describe("formatWhen", () => {
     expect(w("2026-10-20T23:00:00+02:00", "2026-10-21T01:00:00+02:00", false, "Europe/Paris")).toBe(
       "Tue 2026-10-20T23:00:00+02:00 → Wed 2026-10-21T01:00:00+02:00 (Europe/Paris)",
     );
+  });
+
+  it("labels the time zone only when it matches the offset shown (imported events say UTC with the calendar's offset)", () => {
+    const w = (start: string, timeZone: string | null) => formatWhen({ start, end: "", allDay: false, timeZone });
+    expect(w("2026-10-19T10:45:00+02:00", "UTC")).toBe("Mon 2026-10-19T10:45:00+02:00");
+    expect(w("2026-10-19T08:45:00Z", "UTC")).toBe("Mon 2026-10-19T08:45:00Z (UTC)");
+    expect(w("2026-10-19T08:45:00+00:00", "UTC")).toBe("Mon 2026-10-19T08:45:00+00:00 (UTC)");
+    expect(w("2026-10-19T10:45:00+02:00", "Europe/Amsterdam")).toBe("Mon 2026-10-19T10:45:00+02:00 (Europe/Amsterdam)");
+    // After the DST change Amsterdam is +01:00: a +02:00 time there isn't labelled with it.
+    expect(w("2026-11-02T10:45:00+02:00", "Europe/Amsterdam")).toBe("Mon 2026-11-02T10:45:00+02:00");
+    expect(w("2026-10-19T10:45:00+02:00", "Not/AZone")).toBe("Mon 2026-10-19T10:45:00+02:00");
+  });
+});
+
+describe("imported (subscribed ICS) calendars", () => {
+  const IMPORT = "abc123@import.calendar.google.com";
+  const account = { email: ME } as never;
+  const imported = summarizeEvent(
+    raw({ start: { dateTime: "2026-10-19T10:45:00+02:00", timeZone: "UTC" }, end: { dateTime: "2026-10-19T11:45:00+02:00", timeZone: "UTC" }, organizer: { email: IMPORT, self: true } }),
+    IMPORT,
+  );
+
+  it("lists say it's an imported calendar, not that the user organizes it, and drop the false (UTC) label", () => {
+    const out = formatCalendarEvents(account, { calendarId: IMPORT, events: [imported], nextPageToken: null, timeZone: "Europe/Amsterdam" }, { timeMin: "2026-10-19T00:00:00Z", timeMax: "2026-10-20T00:00:00Z" });
+    expect(out).toContain("imported calendar");
+    expect(out).not.toContain("You organize it");
+    expect(out).not.toContain("(UTC)");
+  });
+
+  it("the event detail doesn't call the user its organizer", () => {
+    const out = formatCalendarEvent(account, imported, null, 0);
+    expect(out).toContain("an imported calendar");
+    expect(out).not.toMatch(/Organizer: .*\(you\)/);
+  });
+
+  it("the user's own events still say so", () => {
+    const out = formatCalendarEvents(account, { calendarId: ME, events: [event()], nextPageToken: null, timeZone: null }, { timeMin: "2026-10-20T00:00:00Z", timeMax: "2026-10-21T00:00:00Z" });
+    expect(out).toContain("You organize it");
   });
 });
 

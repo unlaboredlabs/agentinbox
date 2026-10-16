@@ -207,9 +207,43 @@ function dayBefore(date: string): string {
   return Number.isNaN(t) ? date : new Date(t - 86_400_000).toISOString().slice(0, 10);
 }
 
+/** "+02:00" as is; every spelling of a zero offset ("", "Z", "+00:00", "-00:00") as "Z". */
+const normalOffset = (o: string) => (/^(z|[+-]00:00)?$/i.test(o) ? "Z" : o);
+
+/** The UTC offset of `zone` at the instant `dateTime` ("+02:00", "Z" for UTC), or null when unknown. */
+function zoneOffsetAt(zone: string, dateTime: string): string | null {
+  const t = Date.parse(dateTime);
+  if (Number.isNaN(t)) return null;
+  try {
+    const name = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" }).formatToParts(t).find((p) => p.type === "timeZoneName")?.value;
+    return name ? normalOffset(name.replace(/^GMT/, "")) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The event's time zone as a label for the shown time, only when it matches the offset Google gave: imported
+ * (ICS) events often say UTC while their times carry the calendar's offset, and "(UTC)" next to +02:00 misleads.
+ */
+function zoneLabel(e: Pick<CalendarEventSummary, "start" | "timeZone">): string {
+  if (!e.timeZone) return "";
+  const shown = /(Z|[+-]\d{2}:\d{2})$/i.exec(e.start)?.[1]?.toUpperCase();
+  if (shown) {
+    const offset = zoneOffsetAt(e.timeZone, e.start);
+    if (offset === null || offset !== normalOffset(shown)) return "";
+  }
+  return ` (${clip(e.timeZone, 64)})`;
+}
+
+/** Events of a subscribed (imported ICS) calendar: Google reports the importing user as their organizer. */
+const isImported = (e: Pick<CalendarEventSummary, "calendarId" | "organizer">) =>
+  [e.calendarId, e.organizer?.email ?? ""].some((id) => /@import\.calendar\.google\.com$/i.test(id));
+
 /**
  * When an event happens, as agents need it: weekday spelled out (agents are bad at computing it), all-day
- * ranges inclusive, timed events with their UTC offsets as Google gave them, plus the event's time zone.
+ * ranges inclusive, timed events with their UTC offsets as Google gave them, plus the event's time zone when
+ * it agrees with those offsets.
  */
 export function formatWhen(e: Pick<CalendarEventSummary, "start" | "end" | "allDay" | "timeZone">): string {
   if (!e.start) return "(no time)";
@@ -219,7 +253,7 @@ export function formatWhen(e: Pick<CalendarEventSummary, "start" | "end" | "allD
   }
   const sameDay = e.end.slice(0, 10) === e.start.slice(0, 10);
   const end = e.end ? ` → ${sameDay ? "" : `${weekday(e.end)} `}${e.end}` : "";
-  return `${weekday(e.start)} ${e.start}${end}${e.timeZone ? ` (${clip(e.timeZone, 64)})` : ""}`;
+  return `${weekday(e.start)} ${e.start}${end}${zoneLabel(e)}`;
 }
 
 function formatAttendee(a: CalendarAttendee): string {
@@ -257,7 +291,7 @@ function eventLines(e: CalendarEventSummary, accountEmail: string, indent: strin
   const lines = [`${indent}${formatWhen(e)} · event_id: ${clip(e.id, 1024)}`];
   const meta = [
     e.location ? `Where: ${clip(e.location, 160)}` : null,
-    e.organizer && !e.organizerSelf ? `Organizer: ${formatAddress(e.organizer)}` : e.organizerSelf ? "You organize it" : null,
+    isImported(e) ? "imported calendar" : e.organizer && !e.organizerSelf ? `Organizer: ${formatAddress(e.organizer)}` : e.organizerSelf ? "You organize it" : null,
     e.attendeeCount ? `${e.attendeeCount} attendee${e.attendeeCount === 1 ? "" : "s"}` : null,
     e.selfResponse ? `your response: ${RESPONSE_HELP[e.selfResponse]}` : null,
     e.conferenceUrl ? "video call" : null,
@@ -298,7 +332,8 @@ export function formatCalendarEvent(account: Account, e: CalendarEventSummary, c
   else if (e.recurringEventId) lines.push(`Repeats: one occurrence of the series ${clip(e.recurringEventId, 1024)}`);
   if (e.location) lines.push(`Where: ${clip(e.location, 300)}`);
   if (e.conferenceUrl) lines.push(`Video call: ${clip(e.conferenceUrl, 300)}`);
-  if (e.organizer) lines.push(`Organizer: ${formatAddress(e.organizer)}${e.organizerSelf ? " (you)" : ""}`);
+  if (isImported(e)) lines.push("Organizer: none shown (an imported calendar: Google lists the subscriber as organizer)");
+  else if (e.organizer) lines.push(`Organizer: ${formatAddress(e.organizer)}${e.organizerSelf ? " (you)" : ""}`);
   if (e.attendeeCount) {
     const extra = e.attendeeCount - e.attendees.length;
     lines.push(`Attendees (${e.attendeeCount}): ${e.attendees.map(formatAttendee).join("; ")}${extra > 0 ? `; and ${extra} more` : ""}`);
