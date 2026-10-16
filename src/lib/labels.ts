@@ -194,6 +194,7 @@ export const KIND_LABEL = {
   "calendar.update": "Calendar event change",
   "calendar.delete": "Calendar event deletion",
   "calendar.rsvp": "Invitation answer",
+  "mcp.call": "Tool call",
 } as const satisfies Record<ApprovalKind, string>;
 
 /** Approval status in its kind's words: a calendar approval that went through was applied, not sent. */

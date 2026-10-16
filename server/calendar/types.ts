@@ -2,10 +2,10 @@
 // Members marked FROZEN are used across workstreams: do not rename or change them. Adding members is fine.
 
 import type {
-  Approval,
   CalendarInfo,
   CalendarSetupInput,
   CalendarSetupState,
+  GoogleApproval,
   MessageContent,
 } from "../../shared/types.ts";
 import type { Lifecycle } from "../context.ts";
@@ -53,12 +53,12 @@ export interface CalendarService extends Lifecycle {
 
   // ───── Approvals (B: server/calendar/approvals.ts) ─────
   /** FROZEN. Why this calendar approval can no longer be applied under the agent's current grant, or null. */
-  approvalBlockedReason(approval: Approval): string | null;
+  approvalBlockedReason(approval: GoogleApproval): string | null;
   /**
    * FROZEN. Applies an approved calendar.* change to Google (called by server/mail/approvals.ts after it
    * claimed the approval). Throws GoogleApiError/AccountNeedsReauthError like a send would.
    */
-  applyApproval(approval: Approval): Promise<AppliedChange>;
+  applyApproval(approval: GoogleApproval): Promise<AppliedChange>;
 
   // ───── Content (C: server/calendar/content.ts) ─────
   /**
