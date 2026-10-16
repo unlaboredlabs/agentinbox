@@ -123,7 +123,7 @@ export interface SetupContext {
   redirectUri: string;
   /**
    * Inbound webhook URL, or null when nothing public reaches this install (server/broker/reachability.ts). Presets
-   * poll either way until a verified delivery proves the webhooks arrive, so a webhook step is always optional.
+   * poll either way (with webhooks it's the reconciliation poll), so a webhook step is always optional.
    */
   webhookUrl: string | null;
   /**

@@ -107,12 +107,6 @@ export interface BrokerParts {
 /** What changed: one agent's grants, one connection (slug, URL, pins, kill), or everything. */
 export type InvalidateScope = { agentId: string } | { connectionId: string } | "all";
 
-/**
- * How long a verified webhook delivery pauses a connection's poll. WHOOP sends sleep and recovery updates daily for a
- * worn strap, so a day without any means the strap is off or the webhooks stopped: the poll resumes either way.
- */
-export const WEBHOOK_TRUST_MS = 24 * 3_600_000;
-
 export interface BrokerOptions {
   /** How often the native-preset event poll checks which connections are due (each polls every pollIntervalMs). Default 60 s. */
   pollTickMs?: number;
@@ -172,8 +166,9 @@ export interface BrokerService extends Lifecycle {
   /** Whether providers can reach the webhook URL, and the optional Tailscale Funnel step (cached, bounded). */
   webhookReachability(): Promise<WebhookReachability>;
   /**
-   * Polls every due native connection once, unless its webhooks are proven to arrive (a verified delivery within
-   * WEBHOOK_TRUST_MS, while the webhook URL is still public); returns the number of events emitted.
+   * Polls every due native connection once, webhooks or not (the reconciliation poll: a delivery that failed while
+   * this install was offline is found here; presets drop what their webhooks already announced). Returns the number
+   * of events emitted.
    */
   pollEvents(at?: number): Promise<number>;
 }
@@ -369,12 +364,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     localOrigin: () => loopbackUrl(ctx.config.host, ctx.config.port),
     deps: parts.reachability,
   });
-  /** Last verified webhook delivery per connection (memory only: after a restart the poll runs until the next one). */
+  /** Last verified webhook delivery for the connection's member (memory only), for the console's status. */
   const lastDelivery = new Map<string, number>();
-  const webhooksProven = (connectionId: string): boolean => {
-    const at = lastDelivery.get(connectionId);
-    return at !== undefined && Date.now() - at < WEBHOOK_TRUST_MS && webhookUrl(connectionId) !== null;
-  };
 
   const hooks: ConnectionHookHost = {
     webhookTarget(connectionId) {
@@ -392,12 +383,10 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         .filter((c) => c.preset === presetId)
         .flatMap((c) => hooks.webhookTarget(c.id) ?? []);
     },
+    // Status only: the poll keeps running regardless (the preset drops what webhooks already announced), so a
+    // delivery that fails while this install is offline is still found by the next poll.
     delivered(connectionId) {
-      // Strictly increasing, so a poll can tell a delivery happened while it ran.
-      lastDelivery.set(connectionId, Math.max(Date.now(), (lastDelivery.get(connectionId) ?? 0) + 1));
-      // The poll pauses now; when it resumes it starts from a fresh baseline, so nothing webhooks already
-      // delivered is announced a second time.
-      ctx.db.run("UPDATE connections SET events_cursor = NULL WHERE id = ?", connectionId);
+      lastDelivery.set(connectionId, Date.now());
     },
     emit(events) {
       const byConnection = new Map<string, IntegrationEvent[]>();
@@ -433,17 +422,14 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
           checked = true;
           await reach.check();
         }
-        if (webhooksProven(c.id)) continue;
         const interval = preset.events?.pollIntervalMs ?? 15 * 60_000;
         if (at - (lastPoll.get(c.id) ?? 0) < interval) continue;
         lastPoll.set(c.id, at);
         try {
-          const before = lastDelivery.get(c.id);
           const cursor = ctx.db.get<{ events_cursor: string | null }>("SELECT events_cursor FROM connections WHERE id = ?", c.id)?.events_cursor ?? null;
           const r = await poll(cursor, parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
           emitted += emitIntegrationEvents(c, preset, r.events);
-          // A webhook verified meanwhile reset the cursor (delivered above): keep it reset.
-          if (lastDelivery.get(c.id) === before) ctx.db.run("UPDATE connections SET events_cursor = ? WHERE id = ?", r.cursor, c.id);
+          ctx.db.run("UPDATE connections SET events_cursor = ? WHERE id = ?", r.cursor, c.id);
         } catch (err) {
           log.warn("Integration event poll failed", { connection: c.id, error: errorMessage(err) });
         }

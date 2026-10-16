@@ -411,6 +411,4 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `server/listen/lock.ts`: a non-empty unreadable lock now throws instead of being taken over; a lock truncated by a crash must be deleted by hand.
 
 ### WHOOP without webhooks (blocker round)
-- The "last webhook delivery" mark is in memory: after a restart, polling runs until the next webhook (the first poll can repeat an event a webhook already sent).
-- If webhooks stop silently while the URL still looks public, polling resumes after 24 h from a fresh baseline, so those events are missed.
 - The Funnel command was checked against Tailscale's docs and source, not on a real tailnet.

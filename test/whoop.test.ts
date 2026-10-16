@@ -422,6 +422,32 @@ describe("WHOOP poll", () => {
     expect(fake.requests.filter((r) => r.startsWith("GET")).length).toBe(4 * 3);
   });
 
+  it("reconciliation: the poll announces what a missed webhook would have, not what webhooks already did", async () => {
+    const c = clock();
+    const fake = new FakeWhoop({ now: c.now });
+    const { deps } = await connected(fake);
+    const hookDeps = { ...deps, clientSecret: FAKE_WHOOP_CLIENT.clientSecret, client: { ...CLIENT_RECORD, whoop_user_id: fake.profile.user_id } } as WhoopWebhookDeps;
+    const events = createWhoopEvents({ now: c.now });
+    const first = await events.poll!(null, deps);
+
+    // Webhooks work: the morning's sleep and recovery arrive by push. Then the host sleeps, and the afternoon run's
+    // webhook fails through WHOOP's hour of retries.
+    c.advance(24 * 3_600_000);
+    fake.seed(10);
+    const sleepId = fake.sleeps[0]!.id;
+    for (const type of ["sleep.updated", "recovery.updated"]) {
+      expect(await events.handleWebhook!(fake.webhook({ type, id: sleepId, trace_id: `t-${type}` }), hookDeps)).toHaveLength(1);
+    }
+    const next = await events.poll!(first.cursor, deps);
+    expect(next.events.map((e) => [e.type, e.data])).toEqual([["whoop.workout_updated", { workoutId: "000030c0-0000-4000-8000-000000000009" }]]);
+    expect(JSON.parse(next.cursor!).since).toBe("2026-10-17T06:30:00.000Z"); // the cursor still moves past the pushed ones
+
+    // WHOOP re-scores the sleep later: that's news again, and the poll says so.
+    c.advance(3_600_000);
+    fake.sleeps[0] = { ...fake.sleeps[0]!, updated_at: new Date(c.now()).toISOString() };
+    expect((await events.poll!(next.cursor, deps)).events.map((e) => e.type)).toEqual(["whoop.sleep_updated"]);
+  });
+
   it("a garbage cursor is a fresh baseline; 429 propagates as rate_limited", async () => {
     const fake = new FakeWhoop();
     const { deps } = await connected(fake);

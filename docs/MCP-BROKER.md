@@ -459,10 +459,11 @@ They come from a poll every 15 minutes, which needs nothing but the OAuth connec
 - **Cost:** about 290 requests a day, under 3% of WHOOP's 10,000.
 - **Timeliness:** WHOOP scores a sleep or workout minutes after it ends.
 
-Optional WHOOP webhooks, deduped on `trace_id`, bring events within seconds:
-- **When the poll pauses:** a verified delivery pauses the connection's poll for 24 h. After that, the poll resumes
-  from a fresh baseline, so nothing is announced twice.
-- **When the URL stops being public:** the poll resumes at once.
+Optional WHOOP webhooks bring events within seconds, with dedupe on `trace_id` and a reconciliation poll:
+- **The poll never stops.** A webhook that fails while the install is offline (past WHOOP's hour of retries) is
+  found by the next poll.
+- **No double announcements.** The poll skips a record a webhook already announced, unless WHOOP updated it after
+  the push. That memory isn't persisted, so after a restart the worst case is a few duplicates, never a lost event.
 
 This gives a "morning recovery is in" trigger for Hermes.
 

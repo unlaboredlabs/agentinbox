@@ -85,9 +85,13 @@ describe("POST /hooks/connections/:id", () => {
 
   it("another WHOOP member of the same app: acknowledged (204) but nothing emitted", async () => {
     const app = createApp(ctx, { connectionHooks: host });
+    const delivered: string[] = [];
+    const app2 = createApp(ctx, { connectionHooks: { ...host, delivered: (id) => void delivered.push(id) } });
     const stranger = fake.webhook({ type: "workout.updated", id: "their-workout", trace_id: "t-other", user_id: 777 });
     expect((await post(app, "/hooks/connections/conn1", stranger)).status).toBe(204);
+    expect((await post(app2, "/hooks/connections/conn1", stranger)).status).toBe(204);
     expect(emitted).toEqual([]);
+    expect(delivered).toEqual([]); // says nothing about this connection's own webhooks
   });
 
   it("401 on a bad signature or a timestamp outside 2 h; nothing emitted", async () => {
@@ -142,6 +146,9 @@ describe("POST /hooks/connections/:id", () => {
     const msg = fake.webhook({ type: "sleep.updated", id: "f", trace_id: "trace-f" });
     expect((await post(app, "/hooks/connections/conn1", { ...msg, headers: { ...msg.headers, ...funnel } })).status).toBe(204);
     // The owner funnelled the console itself (the public URL's host): not fenced.
+    expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net" } })).status).toBe(401);
+    expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "BOX.tail1234.ts.net:443" } })).status).toBe(401); // default port
+    ctx.settings.update({ publicUrl: "https://box.tail1234.ts.net:443" });
     expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net" } })).status).toBe(401);
   });
 

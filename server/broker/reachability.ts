@@ -1,8 +1,8 @@
 // Can a provider (WHOOP) reach this install's webhook URL from the internet? An https public URL isn't enough: most
 // self-hosted installs sit behind Tailscale `serve` on an https *.ts.net name that only the tailnet can reach. This
 // classifies the URL as public, private or unknown from the host, its DNS answers and, for *.ts.net, the local
-// Tailscale serve config; it never calls a third-party prober. Native presets poll unless webhooks are proven
-// to arrive (broker service), so a wrong answer here only hides or shows an optional setup step.
+// Tailscale serve config; it never calls a third-party prober. Native presets poll whether or not webhooks
+// arrive (broker service), so a wrong answer here only hides or shows an optional setup step.
 //
 // Tailscale Funnel (https://tailscale.com/kb/1311/tailscale-funnel, https://tailscale.com/kb/1242/tailscale-serve):
 // `tailscale funnel [--bg] [--https=<port>] [--set-path=<path>] <target>`, ports 443, 8443 or 10000 only, and

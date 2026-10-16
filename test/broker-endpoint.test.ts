@@ -435,21 +435,21 @@ describe("broker service", () => {
     expect(ctx.broker.hooks.presetWebhookTargets!("whoop").map((x) => x.deps.connectionId)).toEqual(["con_w"]);
     expect(ctx.broker.hooks.presetWebhookTargets!("notion")).toEqual([]);
 
-    // A public https URL offers webhooks, but the poll keeps running until a delivery proves they arrive.
+    // A public https URL offers webhooks, and the reconciliation poll keeps running: a delivery never resets the cursor.
     ctx.settings.update({ publicUrl: "https://inbox.example.com" });
     await ctx.broker.webhookReachability();
     expect(ctx.broker.webhookUrl("con_w")).toBe("https://inbox.example.com/hooks/connections/con_w");
     expect(await ctx.broker.pollEvents(99_000)).toBe(1);
     ctx.broker.hooks.delivered!("con_w");
-    expect(ctx.db.get<{ events_cursor: string | null }>("SELECT events_cursor FROM connections WHERE id = 'con_w'")!.events_cursor).toBeNull();
-    expect(await ctx.broker.pollEvents(200_000)).toBe(0); // paused while webhooks arrive
+    expect(ctx.db.get<{ events_cursor: string }>("SELECT events_cursor FROM connections WHERE id = 'con_w'")!.events_cursor).toBe("3");
+    expect(await ctx.broker.pollEvents(200_000)).toBe(1);
+    expect(ctx.db.get<{ events_cursor: string }>("SELECT events_cursor FROM connections WHERE id = 'con_w'")!.events_cursor).toBe("4");
 
-    // The URL stops being public (here: tailnet-only): polling resumes, from a fresh baseline.
+    // The URL stops being public (here: tailnet-only): no webhook URL, and still polling.
     ctx.settings.update({ publicUrl: TAILNET });
     await ctx.broker.webhookReachability();
     expect(ctx.broker.webhookUrl("con_w")).toBeNull();
-    await ctx.broker.pollEvents(300_000); // (the fake's first event again: deduped by the outbox)
-    expect(ctx.db.get<{ events_cursor: string }>("SELECT events_cursor FROM connections WHERE id = 'con_w'")!.events_cursor).toBe("1");
+    expect(await ctx.broker.pollEvents(300_000)).toBe(1);
   });
 
   it("a tailnet-only https URL (Tailscale serve, no Funnel): no webhook URL, and the connection polls", async () => {

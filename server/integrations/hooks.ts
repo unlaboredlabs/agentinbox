@@ -109,8 +109,11 @@ export function connectionHookRoutes(opts: { enabled: () => boolean; host: () =>
       }
       if (events === null) continue;
       verified = true;
-      host.delivered?.(connectionId);
-      fresh.push(...events.filter((e) => e.connectionId === connectionId && !seen.has(connectionId, e.dedupeKey)));
+      const mine = events.filter((e) => e.connectionId === connectionId);
+      // Only a delivery for this connection's own member (another member of the same app verifies too, but says
+      // nothing about this connection).
+      if (mine.length) host.delivered?.(connectionId);
+      fresh.push(...mine.filter((e) => !seen.has(connectionId, e.dedupeKey)));
     }
     if (!verified) {
       opts.log.warn("connection webhook: bad signature", { connectionId: id });

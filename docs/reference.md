@@ -45,8 +45,9 @@ key; the broker holds every upstream credential and lists only the tools the age
   on the daemon's machine. Presets: Notion (its hosted MCP, two clicks) and WHOOP (your own WHOOP developer app; the
   console walks you through it). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
   WHOOP every 15 minutes for new recoveries, sleeps and workouts (`whoop.*` events).
-  - **Optional webhooks:** they bring those events within seconds instead. The setup offers them only when the
-    internet can reach this install.
+  - **Optional webhooks:** they bring those events within seconds, and the 15-minute check keeps running as a
+    reconciliation poll, so a webhook missed while the machine was asleep or offline still arrives. The setup offers
+    webhooks only when the internet can reach this install.
   - **Tailnet-only installs** (Tailscale `serve` on a `*.ts.net` name): the setup offers an optional Tailscale Funnel
     command that exposes only the webhook path, on its own port.
 
