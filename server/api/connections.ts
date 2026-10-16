@@ -295,12 +295,17 @@ export function connectionsApi(ctx: AppContext) {
           t,
           id,
         );
-        credentialsCleared = ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", id).changes > 0;
+        credentialsCleared = !!ctx.db.get("SELECT 1 AS x FROM connection_credentials WHERE connection_id = ?", id);
+        // Sign-ins started for the old server can't complete (finishConnect also checks the origin).
+        ctx.db.run("DELETE FROM oauth_states WHERE connection_id = ?", id);
         cancelled = approvals.cancelForConnection(id, null, `${before.name}'s URL changed`);
         changed.push("url");
       }
     });
     if (changed.includes("url")) {
+      // The runtime's disconnect: closes the session, stops the refresher and deletes every credential.
+      if (ctx.broker.connector.disconnect) await ctx.broker.connector.disconnect(id);
+      else ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", id);
       ctx.broker.catalog.detach(id);
       await ctx.broker.reload(id);
       if (before.privateTarget) audit("connection.private_target.revoke", id, { target: before.privateTarget, why: "url_changed" });

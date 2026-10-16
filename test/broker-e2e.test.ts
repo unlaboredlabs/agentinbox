@@ -102,6 +102,28 @@ describe("broker end to end (fake upstream, OAuth + DCR)", () => {
     expect(deleted).toEqual(["p2"]);
     expect(text(await client.callTool({ name: "get_call_status", arguments: { approval_id: approvalId } }))).toContain("Deleted p2");
 
+    // Reconnect while the agent keeps working: the sign-in replaces the pooled session, and calls after it still
+    // work (nothing holds on to the closed one).
+    const again = await json(await api(`/connections/${con.id}/connect`, { method: "POST", json: {} }));
+    expect(again).toMatchObject({ status: "authorize" });
+    expect(text(await client.callTool({ name: "fake__get_page", arguments: { id: "mid" } }))).toContain("Page mid: hello");
+    const cb2 = await up.oauth!.followAuthorize(again.authorizeUrl);
+    expect((await h.request(`${cb2.pathname}${cb2.search}`)).status).toBe(200);
+    const afterReconnect = await client.callTool({ name: "fake__get_page", arguments: { id: "post" } });
+    expect(afterReconnect.isError).toBeFalsy();
+    expect(text(afterReconnect)).toContain("Page post: hello");
+    await ctx.broker.catalog.refresh(con.id);
+    expect((await json(await api(`/connections/${con.id}`))).tools).toMatchObject({ active: 2 });
+
+    // A sign-in started before a URL edit can't complete afterwards (it was for the old server).
+    const stale = await json(await api(`/connections/${con.id}/connect`, { method: "POST", json: {} }));
+    const cb3 = await up.oauth!.followAuthorize(stale.authorizeUrl);
+    const moved = up.url.replace("127.0.0.1", "localhost");
+    expect(await json(await api(`/connections/${con.id}`, { method: "PATCH", json: { url: moved } }))).toMatchObject({ status: "needs_reauth", url: moved });
+    expect((await h.request(`${cb3.pathname}${cb3.search}`)).status).toBe(400);
+    expect(upstreams(ctx).store.tokens(con.id)).toBeNull();
+    expect(await json(await api(`/connections/${con.id}`))).toMatchObject({ status: "needs_reauth" });
+
     // Kill switch: disabled, credentials gone, and the agent can't call the tools any more.
     expect((await api(`/connections/${con.id}/kill`, { method: "POST" })).status).toBe(204);
     expect(upstreams(ctx).store.tokens(con.id)).toBeNull();

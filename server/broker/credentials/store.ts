@@ -56,6 +56,8 @@ export interface PendingAuth {
   issParameter: boolean;
   /** A preset reconnect cap in days (Notion: 180), applied when the sign-in completes. */
   capDays?: number;
+  /** The connection URL's origin when the sign-in started: refused at finish if the URL changed since. */
+  origin?: string;
 }
 
 /** One authorization in flight (store.addFlow). */
@@ -65,7 +67,10 @@ export interface PkceFlow {
   redirectUri: string;
   /** The discovery result this flow started with. */
   pending: PendingAuth;
-  /** The candidate client registration (MCP OAuth): stored as the connection's client only once the consent completes. */
+  /**
+   * The candidate client (MCP OAuth registration, or a native preset's pasted app): stored as the connection's client
+   * only once the consent completes.
+   */
   client?: Record<string, unknown> | null;
   createdAt: number;
 }
