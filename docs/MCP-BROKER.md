@@ -21,9 +21,10 @@ approvals.
 
 ### DECIDED (Wynn, 2026-10-16)
 
-1. **Rename: yes, now.** The name is pending; the candidates are patchbay, tooldock, gatehouse and agentvault. Plan
-   the rename (the npm package and bin, the repo, console branding, and a migration path for existing
-   `agentinbox-cli` installs). Execute it only once the name is final. See [Rename](#rename).
+1. **Rename: yes, now. The name is `xaq`** (Wynn owns xaq.sh). The npm names `xaq` and `@xaq` are taken: `xaq` is an
+   empty 0.0.0 from 2021. So the package is **`xaq-cli` with the bin `xaq`** (`npx xaq-cli`, then `xaq …`), unless Wynn
+   disputes the squatted name. The repo becomes `wynn-dev/xaq`; Adri renames it on GitHub when the code is ready. See
+   [Rename](#rename).
 2. **A public product for anyone from day one,** not just Wynn and Hermes. Multi-user setup, the integrations' own
    OAuth apps and self-serve setup through the CLI and console are milestone-1 concerns.
 3. **WHOOP is a native integration on the WHOOP API.** Anyone connects their own account. It does not go through
@@ -244,6 +245,10 @@ banner naming the tools behind each, with two fixes: "set egress tools to approv
 actor".
 
 ### Approvals for risky tools
+
+> **On hold (Wynn, 2026-10-16).** Wynn finds the approval system too complicated and not user-friendly, and Adri is
+> proposing a simpler model. Everything in this section, the approval rows of the defaults table above, and
+> questions 5 and 6 wait for that answer. The design below is the pre-redesign draft, kept for reference only.
 
 A new approval kind, `mcp.call`:
 - **When the call is queued:** validate it, canonicalise the arguments, and store their bytes with their sha256, the
@@ -688,7 +693,8 @@ until PR 8, so existing users see nothing half-built:
 
 ## Rename
 
-Planned now and executed when the name is final. `<new>` stands for the chosen name.
+Planned now and executed when the name is final. `<new>` is `xaq`: the package `xaq-cli`, the bin `xaq`, the repo `wynn-dev/xaq`, and the data directory
+`~/.xaq` for new installs.
 
 - **npm:** publish `<new>` (or `<new>-cli` if the bare name is taken; check it first) with a `bin` of `<new>`. Keep
   the `agentinbox` bin as an alias for a release cycle.
