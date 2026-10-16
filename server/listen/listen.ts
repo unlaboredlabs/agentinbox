@@ -13,7 +13,7 @@ import { forwardEvent } from "./forward.ts";
 import { createListenLogger, type ListenLogger } from "./logfile.ts";
 import { categoryNote, describeFilter, type EffectiveConfig, type ListenFlags, MAX_BATCH, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
-import { describeGrants, grantsKey } from "./grants.ts";
+import { describeGrants, grantsKey, hasAccess } from "./grants.ts";
 import { gatewayWarning, routeWarning } from "./hermes.ts";
 import { hermesChangeNote, isHermesRoute, recipeOf, recipeToolFor, shellQuote, SILENT_MARKER, TOOL_LABELS } from "./recipes.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
@@ -273,11 +273,11 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
       grantsBusy = true;
       try {
         const self = await getSelf(profile.url, profile.apiKey, 8000);
-        const key = grantsKey(self.grants);
+        const key = grantsKey(self.grants, self.connections);
         if (key === grantsSeen) return;
         const first = grantsSeen === null;
         grantsSeen = key;
-        const lines = describeGrants(self.grants).map((l) => `  ${self.grants.length ? l : pc.yellow(l)}`);
+        const lines = describeGrants(self.grants, self.connections).map((l) => `  ${hasAccess(self) ? l : pc.yellow(l)}`);
         log.info(`${first ? `Signed in as agent "${safeText(self.name)}". Access` : "Access changed in the console. Now"}:\n${lines.join("\n")}`);
       } catch (err) {
         if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return; // The stream reports it.

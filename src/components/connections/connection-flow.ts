@@ -340,7 +340,7 @@ export function draftProblems(d: ConnectionDraft, taken: readonly string[]): str
   return out;
 }
 
-/** POST /api/connections for the draft. "All agents" omits agentIds (the server grants every agent). */
+/** POST /api/connections for the draft. "All agents" omits agentIds: the server grants every agent, and agents added later. */
 export function createInput(d: ConnectionDraft): CreateConnectionInput {
   const body: CreateConnectionInput = { slug: d.slug, levelDefault: d.level };
   if (d.preset) body.preset = d.preset.id;
@@ -370,11 +370,13 @@ export function finishEarlyCreate(
   d: ConnectionDraft,
   created: Pick<ConnectionView, "name" | "slug" | "levelDefault">,
   allAgents: readonly string[],
-): { patch: { name?: string; slug?: string; levelDefault?: AccessLevel } | null; grants: { grants: { agentId: string; level: AccessLevel }[] } } {
-  const patch: { name?: string; slug?: string; levelDefault?: AccessLevel } = {};
+): { patch: { name?: string; slug?: string; levelDefault?: AccessLevel; allAgents?: boolean } | null; grants: { grants: { agentId: string; level: AccessLevel }[] } } {
+  const patch: { name?: string; slug?: string; levelDefault?: AccessLevel; allAgents?: boolean } = {};
   if (d.name.trim() && d.name.trim() !== created.name) patch.name = d.name.trim();
   if (d.slug !== created.slug) patch.slug = d.slug;
   if (d.level !== created.levelDefault) patch.levelDefault = d.level;
+  // Created early without grants: "All agents" also covers agents added later.
+  if (d.agents === "all") patch.allAgents = true;
   const ids = d.agents === "all" ? allAgents : d.agents;
   return { patch: Object.keys(patch).length ? patch : null, grants: { grants: ids.map((agentId) => ({ agentId, level: d.level })) } };
 }

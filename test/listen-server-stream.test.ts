@@ -311,6 +311,7 @@ describe("agent API auth", () => {
         },
       ],
       consumers: [],
+      connections: [], // the broker is on by default: no connection grants here
       mcpUrl: `${base}/mcp`,
       skillUrl: `${base}/skill.md`,
       headSeq: 0,

@@ -104,6 +104,11 @@ export interface AgentSelf {
    * replays); null when unknown (created before the daemon recorded it).
    */
   consumers?: { consumer: string; startSeq: number | null; ackedSeq: number; connected: boolean }[];
+  /**
+   * MCP broker connections this agent may use (absent from older daemons and while the broker is off): the
+   * connection's name, its tool prefix (`<slug>__`) and this agent's level. Nothing else about the connection.
+   */
+  connections?: { name: string; slug: string; level: "full" | "ask" | "read" }[];
   mcpUrl: string;
   skillUrl: string;
   /** Newest event seq this agent can see: where a new consumer starts ("from now on"). */

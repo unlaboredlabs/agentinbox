@@ -76,7 +76,12 @@ export const approveSchema = z.object({
   /** The code shown in the agent's terminal, typed by the human: proves they approve that request. */
   userCode: z.string().min(1, "Type the code shown in the agent's terminal").max(20),
   name: z.string().transform(cleanText).pipe(z.string().min(1).max(80)).optional(),
-  grants: z.array(grantInputSchema).min(1, "Grant access to at least one account").max(100),
+  // May be empty: an install with only connections (Notion, WHOOP…) pairs agents without Gmail.
+  grants: z.array(grantInputSchema).max(100),
+  connections: z
+    .array(z.object({ connectionId: z.string().min(1).max(64), level: z.enum(["full", "ask", "read", "none"]) }))
+    .max(100)
+    .optional(),
 }) satisfies z.ZodType<ApprovePairingInput>;
 
 export const denySchema = z.object({ note: text(500, "Note").nullable().optional() });
@@ -361,6 +366,10 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
           "Type the code shown in the agent's terminal. If it shows a different code, deny this request: someone else may have started it.",
         );
       }
+      // Something to grant: a mailbox, or a connection at read or more (the card's choices are all there is).
+      if (!input.grants.length && !(input.connections ?? []).some((c) => c.level !== "none")) {
+        throw badRequest("Choose something for this agent: a mailbox or a connection", "Give it access to a Gmail account or to a connection on the approval card.");
+      }
       const seen = new Set<string>();
       for (const g of input.grants) {
         if (seen.has(g.accountId)) throw badRequest(`Only one grant per account (duplicate ${g.accountId})`);
@@ -369,8 +378,9 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
       const t = clock();
       const agentId = db.tx(() => {
         const { agent, apiKey } = ctx.policy.createAgent(
-          { name: input.name ?? r.name, description: r.description, grants: input.grants },
-          { origin: "paired" },
+          { name: input.name ?? r.name, description: r.description, grants: input.grants, connections: input.connections },
+          // Only what the approver saw and chose: no "All agents" inheritance behind the card.
+          { origin: "paired", inheritAllAgents: false },
         );
         const changes = db.run(
           `UPDATE pairings SET status = 'approved', agent_id = ?, api_key_enc = ?, decided_at = ?, expires_at = ?
@@ -397,6 +407,7 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
             // As stored: omitted calendar fields take the new-grant defaults (approval mode, every calendar).
             ...(g.capabilities.includes("calendar.write") ? { calendarWriteMode: g.calendarWriteMode ?? CALENDAR_GRANT_DEFAULTS.calendarWriteMode } : {}),
           })),
+          connections: (input.connections ?? []).filter((c) => c.level !== "none").map((c) => ({ connectionId: c.connectionId, level: c.level })),
         },
       });
       publish(id);

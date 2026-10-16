@@ -35,6 +35,32 @@ running xaq in production, scripting it, and understanding what it does.
   live events, delivery logs and the audit trail.
 - **A ready-made agent skill.** `SKILL.md` teaches agents to use the tools well and to treat email as data.
 
+## Connections (MCP broker)
+
+Besides Gmail and Calendar, xaq brokers other MCP servers. Each agent still has one endpoint (`/mcp`) and one
+key; the broker holds every upstream credential and lists only the tools the agent is allowed. Design and decisions:
+[MCP-BROKER.md](MCP-BROKER.md).
+
+- **Add one**: in the console, Connections → Add connection; or `npx xaq-cli connections add notion|whoop|<url>`
+  on the daemon's machine. Presets: Notion (its hosted MCP, two clicks) and WHOOP (your own WHOOP developer app; the
+  console walks you through it). Any other server: paste its URL; xaq finds out whether it needs an OAuth
+  sign-in or an API key. Servers on this machine or your private network (loopback, Tailscale) need an explicit
+  "allow this host" for that exact address.
+- **One choice per connection**: Full access, Ask before risky actions (default), or Read only, for all agents or
+  chosen ones; each agent's page can change it. Risky means irreversible: deleting, sending, publishing or sharing
+  outside, payments. Everything else goes straight through.
+- **Approvals**: a risky call returns `pending_approval` at once with a link to a one-tap approve page; the agent
+  checks back with `get_call_status`. "Always allow this" (for that agent and tool, optionally only that target)
+  means it never asks twice; the rules are listed on the agent's page.
+- **Tool changes**: every tool's definition is pinned when you connect. If a server later changes or adds a tool,
+  that tool is held until you accept the change (Connections shows a diff).
+- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`. Agents with more than about 30 tools get
+  search mode (`search_tools`, `call_read_tool`, `call_write_tool`), or any agent with `/mcp?mode=search`.
+- **Import**: `npx xaq-cli import --from hermes|claude-code|cursor|codex [--dry-run]` moves a client's remote
+  MCP servers into connections and replaces them with the single xaq entry, after a backup. Entries that don't
+  work yet (an OAuth sign-in to finish, a rejected key) stay in the client until they do.
+- **Turn it off**: Settings → Connections (MCP broker).
+
 ## Commands and configuration
 
 The npm package is `xaq-cli`; the command it provides is `xaq`. Use `npx xaq-cli …` for one-off

@@ -579,7 +579,10 @@ export interface ApprovePairingInput {
   /** Typed by the human from the agent's terminal (not pre-filled); case and dashes are ignored. 409 on mismatch. */
   userCode: string;
   name?: string;
+  /** Mailbox grants; may be empty (an install with only connections). */
   grants: (GrantInput & { accountId: string })[];
+  /** MCP broker connections: the level per connection ("none" = no access, also for "All agents" ones). */
+  connections?: { connectionId: string; level: AccessLevel | "none" }[];
 }
 
 export interface Grant {
@@ -620,6 +623,8 @@ export interface CreateAgentInput {
   name: string;
   description?: string | null;
   grants?: GrantInput[];
+  /** MCP broker connections (pairing approve): the level per connection; "none" opts out of an "All agents" one. */
+  connections?: { connectionId: string; level: AccessLevel | "none" }[];
 }
 
 /** POST /api/agents/:id/test: runs MCP initialize + tools/list as the agent, in-process. */
@@ -1169,6 +1174,8 @@ export interface Connection {
   authType: ConnectionAuthType;
   /** The level new grants get. */
   levelDefault: AccessLevel;
+  /** "All agents": agents created later get it too, at levelDefault. */
+  allAgents: boolean;
   /** Admin-only private-target allow: the exact `scheme://host:port`, or null when off. */
   privateTarget: string | null;
   status: ConnectionStatus;
@@ -1279,7 +1286,7 @@ export interface CreateConnectionInput {
   /** Default: the preset's slug, else derived from the host. */
   slug?: string;
   levelDefault?: AccessLevel;
-  /** Agents that get the connection at levelDefault. Default: every agent. */
+  /** Agents that get the connection at levelDefault. Default: every agent, including ones created later (allAgents). */
   agentIds?: string[];
 }
 
@@ -1288,6 +1295,8 @@ export interface CreateConnectionInput {
  * private-target allow, cancels pending calls and sets status needs_reauth: reconnect afterwards.
  */
 export interface UpdateConnectionInput {
+  /** true: every agent without access gets it at levelDefault now, and agents created later too. */
+  allAgents?: boolean;
   name?: string;
   slug?: string;
   url?: string;
@@ -1529,6 +1538,7 @@ export interface ApiError {
 //   GET    /api/connections/:id/grants                → ConnectionGrant[]
 //   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
 //   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView
+//   POST   /api/connections/:id/refresh               → { ok, error, connection: ConnectionView } (list the tools again now)
 //   GET    /api/connections/:id/held                  → HeldToolView[]
 //   POST   /api/connections/:id/held/:name/accept {candidateHash} → HeldToolView[] (the rest still held; 409 if it changed again)
 //   GET    /api/approvals?status                      → Approval[]

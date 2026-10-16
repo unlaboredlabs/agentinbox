@@ -202,3 +202,201 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - Look-alike dots (U+FF0E) in filenames pass the blocklist (Gmail's own content check is the backstop).
 - `draftFingerprint` doesn't hash attachment bytes, so a same-size swap made in the Gmail UI wouldn't be caught (pre-existing; no agent tool can do it).
 - Attachment filenames: only strictly valid encoded-words are refused; a client tolerating spaces inside one (`=?UTF-8?Q?evil .exe?=`) might show `evil .exe`. Refusing any name with `=?` … `?=` would close it.
+
+## MCP broker build (Oct 2026)
+
+### Notion preset (#54)
+- Enable the proxy smoke test once the fake upstream is on main, and check the real delete-tool argument names against a live `tools/list`.
+- Notion's tool page has no read/write labels; only the two delete tools carry `destructiveHint`. The table follows the descriptions.
+- `notion-update-data-source` (drops omitted options) and `notion-update-folder remove_files` count as edits, not risky; confirm with Wynn.
+- `notion-spawn-session` / `notion-send-message-to-session` (Notion's own agents) count as edits.
+- `notion-ai-search` is unlisted but callable by name upstream; the broker only exposes listed tools.
+
+### Schema (#53)
+- `AccessLevel` and `ToolAnnotations` are defined in both `shared/types.ts` and `server/broker/types.ts` (the shared copy adds an index signature); keep one source of truth and re-export it.
+- `UpstreamToolDefinition.description` is optional while `ToolDef.description` is required; `McpCallResult.content` is `unknown[]` vs `ToolResult.content: ContentBlock[]`. Align them.
+- A connection mid-OAuth has no status of its own (it uses `needs_reauth` plus a reason).
+- `CredentialStore.clear()` wipes the client registration too, so a reconnect re-registers via DCR (Notion warns that this orphans earlier grants).
+- `owner_id` exists only on `connections`; add it to agents and the other tables before multi-user (M4).
+- Schema: the `?? ""` and empty-object fallbacks for `connection_id`/`tool_call` in `mail/approvals.ts:93` hide corrupt rows; throw instead.
+- Connection URLs are stored plaintext and shown in the DTO; capability URLs with tokens in path or query need care.
+
+### Notion (#54 review)
+- `notion-update-data-source` silently drops omitted select/status options; it's an edit under the rule, but document it.
+- The `targetPath` candidate names are guesses; check them against the live `inputSchema`.
+- The console path in the setup text ("Settings, Notion MCP, Manage workspace clients") is unconfirmed.
+- Connections owned by a workspace admin expose only 24 tools (no delete, restore, sidebar or Skill tools).
+- The plan says Notion labels tools read/write; it doesn't. The classes come from our own reading of each tool.
+
+### Search mode (#58)
+- Delete orphaned `broker.search:<agentId>` settings rows when an agent is deleted.
+- Console control for the per-agent search mode and hot list, plus the plan's automatic suggestion above about 30 tools.
+- The plan's "10K tokens" trigger isn't implemented; only the tool count is.
+- The done-when "at least as often as listing every tool" needs a model-in-the-loop eval; the offline eval measures retrieval only.
+- `INSTRUCTIONS` says "Start with list_accounts", which is hidden in search mode (reachable through search).
+- `search_tools` returns a JSON text block; add `structuredContent`.
+- The eval's top-5 is 92.9 %, one task above the bar; misses are a Notion database insert, "open GitHub issue 123" and "file a bug".
+
+### WHOOP (#57)
+- With webhooks live, the poll and the webhook use different dedupe keys, so one change can produce two events.
+- Confirm the ±5 min signature tolerance against WHOOP's real retries.
+- Check with a real account whether WHOOP accepts an `http://localhost` redirect.
+- One webhook URL per WHOOP app: connections sharing an app would cross-deliver; check the WHOOP user id per connection.
+- Date-only arguments are read as UTC days; use the user's local day.
+- Call `DELETE /v2/user/access` on disconnect.
+- A WHOOP 403 is a tool error with a reconnect hint, not `needs_reauth`.
+- `private_target` rejects `[`, so IPv6 literals (e.g. `https://[::1]:3000`) can't be private targets; allow canonical bracketed IPv6 later.
+
+### SDK spike (#55)
+- The fake answers 2026 notifications with 202 before checking headers; it doesn't enforce `token_endpoint_auth_method` or `scope` on refresh; it doesn't check `x-mcp-header` parameter headers.
+- ADR 0001: reword the claims about -32022 retry, `x-mcp-header` mirroring and MRTR (untested), and the v1 column (from an uncommitted harness).
+- `docs/MCP-BROKER.md` M1 row 4 still says "SQLite `OAuthClientProvider`"; the ADR uses a broker-owned `AuthProvider` with its own token requests.
+
+### Catalog (#59)
+- Signals, instruction text and the last error are in memory only (schema has columns for `tools_cached_at` and `instructions_hash` only).
+- Changes past the 1 KB description cap aren't detected (the hash covers the cleaned text).
+- A connection restored from the DB is re-pinned only when something re-attaches it.
+
+### Policy (#61, UX review)
+- Requeue error text is owner-facing but shown to the agent in `get_call_status`; split the wording.
+- A call that provably never left goes back to pending without a new event and keeps its original expiry; retry after `retryAfter` or extend the expiry.
+- The outcome-unknown text after a timeout repeats itself and says "interrupted".
+- The cancelled text (e.g. after a pin change) doesn't say whether to call again; the cap denial doesn't say when the window frees up.
+- Rules filter on `created_at` vs the grant and `first_seen_at`; grant writers must preserve `created_at` on level changes, timestamps must be ISO, and `listRules` can show ignored rules.
+- With `brokerUpstreams` off, approving an `mcp.call` says "Update agentinbox"; it should say upstream connections are off.
+- Target values are matched exactly, so the same Notion page id with or without dashes, or as a URL, asks again.
+- Classifier: adjectival participles in descriptions ("paid workspaces", "were deleted", "removed") cause false positives (~30 % on unannotated Notion); consider sentence-initial verbs only.
+- Classifier: `reply` in names makes GitHub inconsistent (`add_reply_to_pull_request_comment` asks; `add_issue_comment` doesn't).
+- Filesystem `edit_file` / `move_file` ask because the server annotates them destructive (follows the plan, UX cost).
+- Public publishing judgment calls go through: `create_gist public:true`, `create_repository private:false`. Decide whether these count as "publish externally".
+- Stripe `finalize_invoice` (can charge) and Twilio-style `CreateMessage` (sends SMS) aren't caught; candidates for presets.
+
+### Rename (#60)
+- Detect an old job that is loaded but has no plist (via `launchctl print`) and give a clear error.
+- Listener rollback: stop the new listener before `swap.restore()`.
+- `scripts/rename-xaq.mjs`: list new `process.env.AGENTINBOX_*` uses in non-hand-written files for review, instead of renaming them without a fallback.
+- `server/api/system.ts:154` comment says "~/.xaq" where it means `~/.agentinbox`; add `rename-xaq: keep` markers to lines like it.
+- `server/listen/recipes.ts` texts say "xaq tools" for old profiles still named `agentinbox` (cosmetic).
+
+### Policy (#61, security review)
+- Scrubbing doesn't cover URL-encoded, JSON-escaped (`\/`) or base64 tokens, tokens split across blocks, or image/blob data.
+- `output.ts`: `mimeType` and `uri` are cleaned but not delimiter-escaped.
+- `stripInvisible` keeps U+034F, so `<͏/email_content>` passes unescaped (predates the PR; affects mail too).
+- `structuredContent` strings are escaped but not nonce-wrapped.
+- 2019-09 schemas compile with Ajv2020; draft-04 schemas fail closed (those tools are unusable). Document it.
+- "Exact bytes" means the exact JSON value: `JSON.parse` reorders integer-like keys before re-serialising.
+- `blockedReason` doesn't check that `brokerUpstreams` is still on.
+
+### Console (#65)
+- No `connection` stream message: the Connections page polls every 60 s.
+- The agent step's text still talks about mail on the Notion/WHOOP/custom path.
+- No link back to the "what to connect" choice once Gmail & Calendar is picked.
+
+### Upstream (#62, correctness review)
+- `startConnect` stores a new registration (or pasted pre-registered client) before consent; an abandoned Reconnect can break refresh. Store it in `finishConnect`.
+- Discovery treats the MCP origin as the authorization server when there's no protected-resource document; the draft spec says abort or use pre-configured values. A failing `resource_metadata` URL still falls back to well-known.
+- A cached 2026 verdict isn't passed back as `prior`; the verdict expiry uses `Date.now()`, not the injected clock.
+- Pooled clients aren't re-checked for `disabled`/`needs_reauth` (relies on `invalidate()`); after `invalid_grant` each call retries the dead refresh token.
+- Two calls seeing a lost session can race and close each other's fresh session.
+- Notion's 30-day `idleDays` isn't implemented; the `connection.expiring` dedupe lives in `audit_log` (pruning re-sends warnings).
+- A pasted pre-registered client is used even when the issuer changed; `probe` leaves an unclosed session on 2025 no-auth servers.
+
+### Endpoint (#63, agent-facing review)
+- `get_call_status` is listed for any connection grant, even full/read only; it disappears once the last grant is removed while results are still stored.
+- A client with a cached tool list calling a held tool gets "Tool X not found"; route every `__` name to BrokerCalls for the clearer on-hold message.
+- `connectionGrantsOf` doesn't filter disabled connections (they appear in instructions); `visibleConnectionIds` doesn't filter disabled agents.
+- `brokerInstructions` says tools are "prefixed with its name"; the prefix is the slug.
+- Catalog: a risky verb straight after a read prefix is exempt (`fetch_delete_messages` is a read); unlikely from honest servers.
+- Catalog: `cleanSchema` tests the raw key against `description`, so a zero-width-split `description` key skips the 256 cap (still stripped, under 32 KB).
+- Catalog: when every pinned tool comes back refused, the old pins keep being served with no hold or ping; a refused tool should be held as changed.
+- The doc says bare `pay` isn't matched in descriptions; the code includes it (stricter). Fix the doc.
+- The `readOnlyHint` residual risk is undocumented; the description check is skipped when only `readOnlyHint: false` is set; names are classified raw, not cleaned.
+- Upstream: the 16 MiB body cap counts across a whole long-lived SSE stream (legacy HTTP+SSE carries every result on one GET).
+- Upstream: `source.ts:237,240` puts the SDK's error message into `SourceError` unscrubbed (BrokerCalls scrubs errors; keep it that way).
+- Upstream: `canonicalPrivateTarget` accepts trailing-dot hosts (`localhost.:80`), cosmetic.
+- Upstream: `insufficientScope` is shared across concurrent calls (a race can blame the wrong call); the undici Agent pool evicts its oldest at 16 (can close a live SSE stream).
+- Plan doc says the DNS-pinned IP must still match after every resolution; the code accepts any allowed-range IP for the allowed host. Align them.
+- `slack_complete_file_upload` gets through if Slack annotates it (the description check is skipped); needs a Slack preset that marks it risky when a channel is set.
+- Unannotated Notion descriptions trigger on base verbs used otherwise ("share that parent", "Send the raw archive bytes"); the Notion preset decides by name, so the impact is low.
+- `slack_get_file_upload_url` is listed at the read level when unannotated (harmless alone); `slack_update_canvas` asks because of "wipes" in a warning sentence.
+- `probe` on a bare origin (e.g. forge's T3 without `/mcp`) answers `{auth:"none"}` because `POST /` is a 404; report a non-MCP 404 instead. The plan's Hermes table lists T3 URLs without `/mcp`.
+
+### Endpoint (#63, correctness/security reviews)
+- `EventType` collapses to `${string}.${string}`: `Record<EventType,…>` no longer forces labels for native types and typos compile; use `Record<NativeEventType | BrokerEventType, …>`.
+- `filter-builder.tsx:22`: toggling a type in the console drops non-native types already on a webhook; `listen --types all` means native only; `list_events`/`wait_for_events` enums are native-only; `/api/events` error lists native types only.
+- PUT private-target on an IPv6 URL returns 500 (the CHECK forbids `[`); return a clear 400.
+- PUT private-target reads `conn.url` before `await readBody` (a concurrent PATCH can pin the old origin).
+- `approval.requested` via webhook ignores the webhook agent's disabled flag at delivery; it's visible to any enabled agent's webhook (requester name, tool, approve link).
+- `emitIntegrationEvents` doesn't check `preset.events.types.includes(e.type)`.
+- Creating from a native preset with a `url` stores the unused URL.
+- The approvals path has no `brokerUpstreams` check (fails later because `source()` is null).
+- A slug PATCH doesn't call `notifyAgent`.
+- Upstream: every Connect on a never-signed-in connection registers a new DCR client; concurrent Connects leave an unused client behind (harmless).
+- Upstream: `setPending`/`pending()` in `store.ts` and the `discovery_enc` column have no callers left.
+- Upstream: add a test for the full step-up sequence (401 scope → 403 insufficient_scope → reconnect with the union), with and without `scope` in the token response.
+- Console: grants are a read-modify-write per connection; concurrent edits can lose an update (add a per-agent PATCH or a version check).
+- Console: `GetStartedPage` shows the chooser instead of the error when the setup-state query fails.
+- Console: `McpCallCard` shows "changed kind; reload" if `brokerUpstreams` is turned off while an `mcp.call` is pending.
+- Console: on mobile the sha256 line is truncated; after a 409 the done screen can say "Approved, and always allowed" when no rule was made.
+- Console: the private-network allow shows the hostname, not the resolved IP; for a public name resolving to a private address, show both.
+- `/mcp` advertises `readOnlyHint: cls.read`, so unannotated get/list/find tools are advertised read-only (clients may auto-approve them); they're non-risky anyway. Document it, or set true only for preset- or annotation-sourced reads.
+- After a kill, the connection's tools stay listed and the instructions still say "full access"; add "(turned off)".
+- No test for the handler-install fallback (hide `_requestHandlers`, check native tools still list).
+- A URL edit runs `cancelForConnection` inside `db.tx`, so bus emits and audit writes happen inside the transaction (fragile).
+- After an interrupted call, the text says "may or may not have run" even when the source was closed locally and the call never left.
+- A header or OAuth connect re-activates a killed connection (Reconnect undoes Kill); document it.
+- Header or no-auth connect re-activates a killed connection while `runtime.startConnect` refuses disabled ones; make it consistent (Reconnect deliberately re-enables; document it).
+- Event `detail` sent to agents isn't delimiter-escaped (`format.ts:427`) beyond `cleanLine`; `approval.requested` deliveries to a now-disabled agent's webhook still go out (`access.ts:53`).
+- Console UX: for a generic share/send tool, "Always allow" defaults to "Any call"; defaulting to the recipients is safer. "Only for these 2 items" doesn't list them.
+- Console UX: on a phone the pinned button area covers about half the screen; the sidebar shows "Get started 0/8" before a path is chosen; closing the OAuth pop-up leaves "Waiting for Notion…" spinning; the expiry badge rounds up; the sidebar tagline still says "Gmail for your agents".
+- Confirm that a held tool sends its outbound ping/event (seen in the console only).
+
+### CLI (#66)
+- Add a session kind or max-expiry column to `admin_sessions` so the CLI's one-time row doesn't rely on a `created_at` trick.
+- `/kill` deletes credentials and there's no enable route; turning a connection back on is console-only.
+- OAuth servers needing a pasted client ID: the connect input has no field, so the CLI points to the console.
+- The preset view doesn't expose a header preset's header name or prefix (the CLI defaults to `Authorization` or takes `--header`).
+- Claude Code removals run one `claude mcp remove` per entry after the add (not atomic; a failure leaves a duplicate, never a gap).
+- Import leaves old secrets in `~/.hermes/.env` and prints which can go.
+- `test/webhooks-delivery.test.ts` "caps in-flight requests per webhook" flakes under full-suite load.
+- API: a new or unfinished OAuth connection is `active` until consent; add a real "not signed in"/pending status (the console infers it today from "never listed tools").
+- Console: with `opener` null, the callback page can't close itself; on a console origin different from `publicUrl` the BroadcastChannel can't reach it either, so the pop-up stays open until focus/close.
+- Console: `finishPasted` doesn't check the returned connection is the one being signed in (pasting another sign-in's address shows "connected" for the other).
+- Console: after a network failure on `/connect`, "Try again" retries without the typed key (start over with Reconnect).
+- Search: `brokerSearchable` skips the `listableTools`/`nameOk` filter, so a tool with an invalid schema is hidden in direct mode but searchable/callable in search mode (policy still applies).
+- Search: an agent with connections, no visible tools and 5 hot tools gets 6 direct tools (`get_call_status` always added).
+- Import: a retired server that still answers (t3code-worldstream) gets a pending connection forever and its Hermes entry is never removed; add `--skip <name>` or a per-entry choice.
+- Import: re-running right after a reconnect can still show 0 tools (entry removed only on a later run).
+- Import: every new connection logs "listing tools failed … private address" because the catalog lists before the allow is set; set the allow at create time.
+- `upsertYamlServer` still ends the block at a column-0 comment, so a `setup-mcp --tool hermes` re-run refuses (safely) when the old agentinbox entry contains a column-0 comment; use `mcpServersBlock` for `end`.
+- `cutEntries` drops comment lines at the very end of the block when the last entry is removed (comment loss only).
+- Static `platforms.webhook.extra.routes` detection, and t3code-worldstream: the import still creates a pending connection for a retired server that answers; add a per-entry skip.
+- CLI: when the browser fails to open (e.g. `open` uses its bundled `xdg-open`), nothing says so; the command just waits after printing the link.
+
+### Rename (#60, delta review)
+- `serviceInstallInput` carries `PORT`/`HOST` over only from the old agentinbox unit; a later plain `npx xaq-cli service install` resets to `0.0.0.0:8425` (pre-existing behaviour). Carry them from the installed xaq unit too.
+- The script renamed "Wynn's config" fixtures to xaq names; keep one fixture with the old names (`agentinbox` entry, `${AGENTINBOX_API_KEY}`, `mcp-agentinbox`) via `rename-xaq: keep`.
+- `import.ts` `SELF_NAME` skips any third-party server named `xaq-*` or `agentinbox-*` as if it were ours.
+- The listener's user-agent is now `xaq-cli/<v>`; an unmigrated daemon shows its version as unknown.
+- The connections CLI targets `~/.xaq` if it appears, instead of `~/.agentinbox` (fails clearly with "No xaq data").
+
+### New-user broker walk (Oct 2026)
+- Gmail wording remains for non-Gmail users: the "Gmail for your agents" tagline, "Gmail accounts" in the sidebar, the password page, "the AI tool that will read your mail", an Overview full of mail counts; the agent's tool list includes Gmail tools with no Gmail account connected.
+- The Notion dialog example says `notion__search`; the real name is `notion__notion-search`.
+- The CLI's default name for a loopback server is `127-0-0-1-38081`; the console's rule gives `local-38081`. After naming a connection, the console can still show its host as the name.
+- The CLI header prompt repeats itself and doesn't say whether to type "Bearer ".
+- Aborting `connections add` at the header prompt leaves a keyless connection listed as active with 0 tools.
+- The approve page says "This action can't be undone" for `notion-delete-pages` (moves pages to Trash).
+- A held tool returns "Tool … not found" instead of the documented `tool_on_hold`.
+- "The next step checks that it works" after creating the agent, but Finish setup goes straight to Overview; an abandoned pairing request stays as a banner until it expires.
+- Disable deletes the stored bearer key; the CLI help ("turn it back on in the console") doesn't say so.
+
+### Walk fixes (#71) and re-walk
+- Approve page says "This action cannot be undone" for tools that move to Trash (notion-delete-pages); make the copy depend on the tool, or say "may not be reversible".
+- The console create-agent form doesn't list the "All agents" connections the new agent will inherit; no console control to see or turn off "All agents" on a connection (API only).
+- The refresh route calls `attach()` (aborting an in-progress listing) then `refresh()`; `refresh()` alone suffices when attached.
+- The `/approve/<id>` pending text has a stray space before the period.
+- A direct `/mcp` call to a killed connection's tool says "No tool named…" (dynamic dispatch only holds listed tools), not the "turned off" message; `service.ts:233` comments say otherwise. Same in search mode.
+- `/mcp` instructions still list a disabled connection (from grants).
+- Upstream `notifications/tools/list_changed` → `requestRefresh` isn't wired (the remote source has no notification hook); tool changes surface on the 10-minute timer or the Refresh tools button.
+- `/me` lists grants on turned-off connections with no status (`listen status` shows them as usable).

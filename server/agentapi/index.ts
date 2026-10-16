@@ -6,6 +6,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AgentSelf } from "../../shared/agent-api.ts";
+import { connectionGrantsOf } from "../broker/access.ts";
 import { readBody } from "../api/util.ts";
 import { clientIp, lockedOut } from "../auth/index.ts";
 import { clientKey, LoginLimiter } from "../auth/lockout.ts";
@@ -198,6 +199,8 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
           agent.id,
         )
         .map((r) => ({ consumer: r.consumer, startSeq: r.start_seq, ackedSeq: r.acked_seq, connected: r.connected > 0 })),
+      // Only with the broker on: /me stays exactly as before for everyone else.
+      ...(ctx.settings.get().brokerUpstreams ? { connections: connectionGrantsOf(ctx.db, agent.id).map((g) => ({ name: g.name, slug: g.slug, level: g.level })) } : {}),
       mcpUrl: `${base}/mcp`,
       skillUrl: `${base}/skill.md`,
       headSeq: newestVisibleSeq(ctx, agent.id),

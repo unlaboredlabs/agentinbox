@@ -67,6 +67,11 @@ describe("grants in plain words", () => {
       "ops@acme.dev: read, send; sends go out directly to allowed recipients; only to *@acme.dev; replies in existing threads only; at most 5/hour",
     );
     expect(describeGrants([])[0]).toMatch(/no mailbox or calendar access yet/);
+    expect(describeGrants([], [{ name: "WHOOP", slug: "whoop", level: "read" }])).toEqual(["WHOOP (whoop__… tools): read only"]);
+    expect(describeGrants([g(["read"], "draft_only")], [{ name: "Notion", slug: "notion", level: "full" }])).toEqual([
+      "ops@acme.dev: read only (can't draft or send)",
+      "Notion (notion__… tools): full access",
+    ]);
     expect(describeGrant(g(["calendar.read"], "draft_only"))).toBe("ops@acme.dev: calendar.read");
     expect(describeGrant(g(["read", "calendar.read"], "draft_only"))).toBe("ops@acme.dev: read, calendar.read; mail read only (can't draft or send)");
     expect(describeGrant({ ...g(["read", "calendar.read", "calendar.write"], "draft_only"), calendarScope: ["team@group.calendar.google.com"] })).toBe(
@@ -92,6 +97,19 @@ describe("connect", () => {
     api.pollScript = [approved()];
     await runConnect(api.url, {}, { pollIntervalMs: 10 });
     expect(plain()).toContain("no mailbox or calendar access yet");
+  });
+
+  it("lists connection access, and drops the mail-only next steps without a mailbox", async () => {
+    api.grants = [];
+    api.connections = [{ name: "Notion", slug: "notion", level: "ask" }];
+    api.pollScript = [approved()];
+    expect(await runConnect(api.url, { tool: "hermes" }, { pollIntervalMs: 10 })).toBe(CONNECT_EXIT.approved);
+    const text = plain();
+    expect(text).toContain("Notion (notion__… tools): ask before risky actions");
+    expect(text).not.toContain("no mailbox or calendar access yet");
+    expect(text).not.toContain("sends a test email");
+    expect(text).not.toContain("when mail arrives");
+    expect(text).toContain("--types approval.requested,connection.auth_failed,connection.expiring");
   });
 
   it("uses the address the CLI connected to for the approve link when the public URL differs", async () => {

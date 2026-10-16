@@ -62,7 +62,7 @@ describe("startup banner", () => {
     withHarness((h) => {
       const out = text(bannerLines(h.ctx, { mcp: true }, desktop));
       expect(out).toContain("xaq is running.");
-      expect(out).toContain("Open this link to finish setup (the console walks you through Google and your first agent):");
+      expect(out).toContain("Open this link to finish setup (the console walks you through what to connect and your first agent):");
       expect(out).toContain(`http://127.0.0.1:8425/setup?token=${h.setupToken()}`);
       expect(out).toContain("Keep this terminal open; Ctrl-C stops it.");
       expect(out).toMatch(new RegExp(`service install --data \\S*${h.ctx.config.dataDir.split("/").pop()} --host 127\\.0\\.0\\.1$`, "m"));

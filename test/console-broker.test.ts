@@ -52,6 +52,7 @@ const ch = (cp: number) => String.fromCodePoint(cp);
 const conn = (over: Partial<Shared.ConnectionView> = {}): Shared.ConnectionView => ({
   id: "con_1",
   ownerId: null,
+  allAgents: false,
   kind: "remote_http",
   preset: "notion",
   slug: "notion",
@@ -258,7 +259,7 @@ describe("Add connection", () => {
     const created = conn({ name: "127.0.0.1", slug: "local-8787", levelDefault: "ask" });
     const d = { ...emptyDraft(), name: "Brightspace", slug: "brightspace", level: "full" as const, agents: "all" as const };
     expect(finishEarlyCreate(d, created, ["agt_1", "agt_2"])).toEqual({
-      patch: { name: "Brightspace", slug: "brightspace", levelDefault: "full" },
+      patch: { name: "Brightspace", slug: "brightspace", levelDefault: "full", allAgents: true },
       grants: { grants: [{ agentId: "agt_1", level: "full" }, { agentId: "agt_2", level: "full" }] },
     });
     const same = { ...emptyDraft(), name: "127.0.0.1", slug: "local-8787", agents: ["agt_2"] };

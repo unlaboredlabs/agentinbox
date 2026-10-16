@@ -1,7 +1,7 @@
 import type { HeldToolView, ToolDiffLine } from "@shared/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftIcon, CheckIcon, CircleCheckIcon, NetworkIcon, PauseIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { ArrowLeftIcon, CheckIcon, CircleCheckIcon, NetworkIcon, PauseIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { PageHeader, QueryError, TimeAgo, ToneBadge } from "@/components/common";
 import { connectionStatusView, hostPort } from "@/components/connections/connection-flow";
 import { useConnectionActions, useReconnect } from "@/components/connections/connection-row";
@@ -29,6 +29,18 @@ function ConnectionPage() {
   const now = useNow(60_000);
   const { askDisable, askRemove } = useConnectionActions();
   const { reconnect, dialog } = useReconnect();
+  const qc = useQueryClient();
+  // "Refresh tools": list the server's tools again now (a changed or new tool is held for you, as usual).
+  const refresh = useMutation({
+    mutationFn: () => api<{ ok: boolean; error: string | null }>(`/api/connections/${encodeURIComponent(connectionId)}/refresh`, { method: "POST" }),
+    onSuccess: (r) => {
+      if (r.ok) toast.success("Tools refreshed");
+      else toast.error("Couldn't list the tools", { description: r.error ?? undefined });
+      void qc.invalidateQueries({ queryKey: keys.connection(connectionId) });
+      void qc.invalidateQueries({ queryKey: keys.connections });
+    },
+    onError: (err) => toastError(err, "Couldn't refresh the tools"),
+  });
 
   if (conn.isPending) return <Skeleton className="h-64 rounded-xl" />;
   if (conn.isError) return <QueryError error={conn.error} onRetry={() => void conn.refetch()} />;
@@ -59,6 +71,11 @@ function ConnectionPage() {
             <Button variant={view.action === "reconnect" ? "default" : "outline"} onClick={() => reconnect(c)}>
               <UnplugIcon /> Reconnect
             </Button>
+            {c.status !== "disabled" && (
+              <Button variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+                {refresh.isPending ? <Spinner /> : <RefreshCwIcon />} Refresh tools
+              </Button>
+            )}
             {c.status !== "disabled" && (
               <Button variant="outline" onClick={() => askDisable(c)}>
                 <PauseIcon /> Disable

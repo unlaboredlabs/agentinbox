@@ -267,7 +267,7 @@ export function bannerLines(ctx: AppContext, info: { mcp: boolean }, e: BannerEn
     );
   } else if (token) {
     const link = (url: string) => `${url}/setup?token=${token}`;
-    out.push(`  Open this link to finish setup (the console walks you through Google and your first agent):`, "");
+    out.push(`  Open this link to finish setup (the console walks you through what to connect and your first agent):`, "");
     out.push(`    ${pc.cyan(link(urls[0]!))}`, "");
     if (urls.length > 1) {
       out.push(`  ${pc.dim("Or, from another machine:")}`);
