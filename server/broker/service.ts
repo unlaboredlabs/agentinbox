@@ -27,11 +27,13 @@ import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
+import { removeConnectionState } from "../extensions/host/spawn.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
 import { brokerConnections, Catalog, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
+import { type BrokerPassthrough, createPassthrough } from "./passthrough.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
 import { isExpired } from "./policy/store.ts";
@@ -167,6 +169,8 @@ export interface BrokerService extends Lifecycle {
    * of events emitted.
    */
   pollEvents(at?: number): Promise<number>;
+  /** Upstream prompts and resources for /mcp (server/broker/passthrough.ts), every connection kind. */
+  passthrough: BrokerPassthrough;
 }
 
 const UNAVAILABLE = "Integrations aren't available in this build of xaq yet.";
@@ -213,7 +217,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       }
     },
   });
-  registerNativeFlows(up);
+  registerNativeFlows(up, presetFor);
   const credentials = given.credentials ?? up.store;
 
   // The catalog (W5): stored definitions and the per-agent registry over upstream_tools. A changed upstream tool is
@@ -299,7 +303,26 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return preset.createSource(parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
   }
 
-  const defaultNativeDeps = (c: Connection): NativeSourceDeps => nativeDepsFor(ctx, up, c);
+  /**
+   * The runtime's deps plus what code extensions use (server/extensions/host): the outbox (the preset's own `<id>.*`
+   * types for this connection only), the data directory, and the connection's `error` status.
+   */
+  const defaultNativeDeps = (c: Connection): NativeSourceDeps => ({
+    ...nativeDepsFor(ctx, up, c),
+    dataDir: ctx.config.dataDir,
+    emit: (e) => {
+      const conn = getConnection(ctx, c.id);
+      const preset = conn ? presetOf(conn) : null;
+      if (conn && preset) emitIntegrationEvents(conn, preset, [e]);
+    },
+    setError: (reason) => {
+      if (reason === null) {
+        ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL, updated_at = ? WHERE id = ? AND status = 'error'", now(), c.id);
+        return;
+      }
+      ctx.db.run("UPDATE connections SET status = 'error', status_reason = ?, updated_at = ? WHERE id = ? AND status IN ('active', 'error')", reason.slice(0, 1000), now(), c.id);
+    },
+  });
 
   /**
    * Catalog listing per connection. The catalog gets a proxy that resolves the live source on every listing, so a
@@ -503,6 +526,12 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       const agents = ctx.db.all<{ agent_id: string }>("SELECT agent_id FROM connection_grants WHERE connection_id = ?", connectionId);
       await this.kill(connectionId, "deleted");
       ctx.db.run("DELETE FROM connections WHERE id = ?", connectionId);
+      // A code extension's per-connection state goes with the connection (its source is closed by now).
+      try {
+        removeConnectionState(ctx.config.dataDir, connectionId);
+      } catch (err) {
+        log.warn("Deleting a connection's extension state failed", { connection: connectionId, error: errorMessage(err) });
+      }
       invalidate("all");
       ctx.audit.record({ actorType: "admin", actorId: null, action: "connection.delete", target: connectionId, outcome: "ok", detail: { slug: c.slug } });
       for (const { agent_id } of agents) notifyAgent(ctx, agent_id);
@@ -520,6 +549,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     webhookUrl,
     webhookReachability: () => reach.check(),
     pollEvents,
+    passthrough: createPassthrough({
+      db: ctx.db,
+      source: (id) => service.source(id),
+      credentials,
+      audit: (input) => ctx.audit.record(input),
+      log: ctx.log.child("mcp"),
+    }),
 
     start() {
       // Agents from before search mode keep their full tool list (once per install; docs/MCP-BROKER.md).

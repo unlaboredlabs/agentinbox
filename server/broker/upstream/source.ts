@@ -15,7 +15,21 @@ import { errorMessage } from "../../util/errors.ts";
 import type { Logger } from "../../util/log.ts";
 import { type Refresher, untilAborted } from "../credentials/refresher.ts";
 import type { SqliteCredentialStore } from "../credentials/store.ts";
-import { type RefreshFn, SourceError, type ToolCallContext, type ToolDef, type ToolListing, type ToolResult, type ToolSource } from "../types.ts";
+import {
+  type PromptDef,
+  type PromptResult,
+  type PromptSource,
+  type RefreshFn,
+  type ResourceDef,
+  type ResourceReadResult,
+  type ResourceTemplateDef,
+  SourceError,
+  type ToolCallContext,
+  type ToolDef,
+  type ToolListing,
+  type ToolResult,
+  type ToolSource,
+} from "../types.ts";
 import { type ConnectionRow, formatVerdict, parseVerdict, type ProtocolVerdict } from "./connection.ts";
 import { parseWwwAuthenticate } from "./discovery.ts";
 import { originKey } from "./fetch.ts";
@@ -279,9 +293,27 @@ export class RemoteToolSource implements ToolSource {
     this.closed = true;
     await this.drop();
   }
+
+  /** Prompts and resources (docs/EXTENSIONS.md "Prompts and resources"): empty when the server doesn't declare them. */
+  readonly prompts: PromptSource = {
+    listPrompts: (signal) =>
+      this.run(signal, async (c) => (c.getServerCapabilities()?.prompts ? ((await c.listPrompts(undefined, { signal, timeout: this.timeout, cacheMode: "refresh" })).prompts as PromptDef[]) : [])),
+    getPrompt: (name, args, signal) => this.run(signal, async (c) => (await c.getPrompt({ name, arguments: args }, { signal, timeout: this.timeout })) as PromptResult),
+    listResources: (signal) =>
+      this.run(signal, async (c) =>
+        c.getServerCapabilities()?.resources ? ((await c.listResources(undefined, { signal, timeout: this.timeout, cacheMode: "refresh" })).resources as ResourceDef[]) : [],
+      ),
+    listResourceTemplates: (signal) =>
+      this.run(signal, async (c) =>
+        c.getServerCapabilities()?.resources
+          ? ((await c.listResourceTemplates(undefined, { signal, timeout: this.timeout, cacheMode: "refresh" })).resourceTemplates as ResourceTemplateDef[])
+          : [],
+      ),
+    readResource: (uri, signal) => this.run(signal, async (c) => (await c.readResource({ uri }, { signal, timeout: this.timeout, cacheMode: "refresh" })) as ResourceReadResult),
+  };
 }
 
-function toDef(t: Tool): ToolDef {
+export function toDef(t: Tool): ToolDef {
   return {
     name: t.name,
     ...(t.title ? { title: t.title } : {}),
@@ -292,7 +324,7 @@ function toDef(t: Tool): ToolDef {
   };
 }
 
-function toResult(r: CallToolResult): ToolResult {
+export function toResult(r: CallToolResult): ToolResult {
   if ((r as { resultType?: string }).resultType === "input_required") {
     return { content: [{ type: "text", text: "The upstream asked for more input, which the broker doesn't support." }], isError: true };
   }

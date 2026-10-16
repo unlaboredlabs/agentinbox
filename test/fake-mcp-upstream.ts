@@ -217,6 +217,12 @@ export interface FakeUpstreamOptions {
    * `up.fetch` (or their own fetch that maps `origin` to `listenOrigin`), like the broker's pinned fetch.
    */
   advertisedOrigin?: string;
+  /** Prompts (with them, the server declares the prompts capability). `get` answers prompts/get. */
+  prompts?: { name: string; description?: string; arguments?: { name: string; required?: boolean }[]; get: (args: Record<string, string>, ctx: FakeToolContext) => Json }[];
+  /** Resources and templates (with either, the server declares the resources capability); `read` answers resources/read. */
+  resources?: { uri: string; name: string; mimeType?: string }[];
+  resourceTemplates?: { uriTemplate: string; name: string }[];
+  read?: (uri: string, ctx: FakeToolContext) => Json;
 }
 
 export interface LoggedRequest {
@@ -604,6 +610,14 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     return out;
   }
 
+  function caps(): Json {
+    return {
+      tools: { listChanged: true },
+      ...(opts.prompts ? { prompts: {} } : {}),
+      ...(opts.resources || opts.resourceTemplates ? { resources: {} } : {}),
+    };
+  }
+
   async function dispatch(method: string, params: Json, ctx: FakeToolContext): Promise<Json> {
     if (up.hang.includes(method) || (method === "tools/call" && up.hang.includes(`tools/call:${String(params.name)}`))) {
       await sleep(Number.POSITIVE_INFINITY, ctx.signal);
@@ -636,9 +650,27 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
           return { content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }], isError: true };
         }
       }
+      case "prompts/list":
+        if (!opts.prompts) break;
+        return { prompts: opts.prompts.map(({ get: _get, ...p }) => p) } as unknown as Json;
+      case "prompts/get": {
+        const p = opts.prompts?.find((x) => x.name === params.name);
+        if (!p) throw new RpcError(-32602, `Unknown prompt: ${String(params.name)}`);
+        return p.get((params.arguments ?? {}) as Record<string, string>, ctx);
+      }
+      case "resources/list":
+        if (!opts.resources && !opts.resourceTemplates) break;
+        return { resources: opts.resources ?? [] } as unknown as Json;
+      case "resources/templates/list":
+        if (!opts.resources && !opts.resourceTemplates) break;
+        return { resourceTemplates: opts.resourceTemplates ?? [] } as unknown as Json;
+      case "resources/read":
+        if (!opts.read) break;
+        return opts.read(String(params.uri), ctx);
       default:
-        throw new RpcError(-32601, `Method not found: ${method}`, 404);
+        break;
     }
+    throw new RpcError(-32601, `Method not found: ${method}`, 404);
   }
 
   /** Runs `dispatch` for one request whose answer goes on `res` (JSON or a per-request SSE stream). */
@@ -746,7 +778,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
         res,
         id ?? 0,
         method,
-        async () => ({ protocolVersion: version, capabilities: { tools: { listChanged: true } }, serverInfo, ...(opts.instructions ? { instructions: opts.instructions } : {}) }),
+        async () => ({ protocolVersion: version, capabilities: caps(), serverInfo, ...(opts.instructions ? { instructions: opts.instructions } : {}) }),
         { "mcp-session-id": s.id },
       );
     }
@@ -838,7 +870,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
         return {
           resultType: "complete",
           supportedVersions: protocol === "dual" ? [...supported2026, ...LEGACY_VERSIONS] : supported2026,
-          capabilities: { tools: { listChanged: true } },
+          capabilities: caps(),
           _meta: resultMeta,
           ...(opts.instructions ? { instructions: opts.instructions } : {}),
           ttlMs: up.ttlMs,
@@ -888,7 +920,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
       if (up.latencyMs > 0) await sleep(up.latencyMs, closing.signal);
       const result =
         method === "initialize"
-          ? { protocolVersion: "2024-11-05", capabilities: { tools: { listChanged: true } }, serverInfo }
+          ? { protocolVersion: "2024-11-05", capabilities: caps(), serverInfo }
           : await dispatch(method, params, { signal: closing.signal, credential, era: "2024" });
       body = { jsonrpc: "2.0", id, result };
     } catch (e) {

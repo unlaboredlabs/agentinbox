@@ -1,31 +1,67 @@
+// The generic inbound-webhook route for native presets (server/integrations/hooks.ts). WHOOP, its only user, left
+// core (a code extension now, with no webhooks), so it's exercised here with a small signed test preset.
+
+import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../server/app.ts";
-import type { IntegrationEvent } from "../server/broker/types.ts";
+import type { IntegrationEvent, IntegrationPreset } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
 import { type ConnectionHookHost, HOOK_DEDUPE_TTL_MS, connectionHookRoutes, connectionHookUrl } from "../server/integrations/hooks.ts";
-import { whoopPreset } from "../server/integrations/whoop/index.ts";
 import { createLogger } from "../server/util/log.ts";
-import { FAKE_WHOOP_CLIENT, FakeWhoop } from "./fake-whoop.ts";
 import { testContext } from "./helpers.ts";
 
 const silent = { info() {}, warn() {} };
+const SECRET = "acme-client-secret";
+const TOLERANCE_MS = 2 * 3_600_000;
 
 type Msg = { headers: Record<string, string>; rawBody: Buffer };
 const post = (app: { request: (path: string, init: RequestInit) => Response | Promise<Response> }, path: string, msg: Msg) =>
   app.request(path, { method: "POST", headers: msg.headers, body: new Uint8Array(msg.rawBody) });
 
-/** A host serving one WHOOP connection, `conn1`, connected as the fake's member. */
-function whoopHost(fake: FakeWhoop, emitted: IntegrationEvent[]): ConnectionHookHost & { failEmits: number } {
-  const preset = whoopPreset({ now: fake.now });
+/** A signed delivery: HMAC-SHA256 over timestamp + body with the app's client secret. */
+function webhook(body: { id: string; trace: string; member?: number }, o: { secret?: string; timestamp?: number } = {}): Msg {
+  const rawBody = Buffer.from(JSON.stringify({ member: 1, ...body }));
+  const ts = String(o.timestamp ?? Date.now());
+  const sig = createHmac("sha256", o.secret ?? SECRET).update(ts).update(rawBody).digest("base64");
+  return { headers: { "content-type": "application/json", "x-acme-signature": sig, "x-acme-timestamp": ts }, rawBody };
+}
+
+function acmePreset(now: () => number): IntegrationPreset {
+  return {
+    id: "acme",
+    displayName: "Acme",
+    slug: "acme",
+    kind: "native",
+    auth: { type: "user_app", authorizeUrl: "https://acme.example/auth", tokenUrl: "https://acme.example/token", scopes: [], clientIdInput: "client_id", clientSecretInput: "client_secret" },
+    classify: () => null,
+    setupSteps: () => [],
+    events: {
+      types: ["acme.thing_updated"],
+      async handleWebhook(req, deps) {
+        const ts = req.headers["x-acme-timestamp"] ?? "";
+        const want = createHmac("sha256", deps.clientSecret).update(ts).update(req.rawBody).digest("base64");
+        if (req.headers["x-acme-signature"] !== want || Math.abs(now() - Number(ts)) > TOLERANCE_MS) return null;
+        const body = JSON.parse(req.rawBody.toString("utf8")) as { id: string; trace: string; member: number };
+        // Another member of the same app: verified, but nothing for this connection.
+        if (body.member !== (deps as { client?: { member?: number } | null }).client?.member) return [];
+        return [{ type: "acme.thing_updated", connectionId: deps.connectionId, dedupeKey: `acme:${body.trace}`, data: { id: body.id } }];
+      },
+    },
+  };
+}
+
+/** A host serving one connection, `conn1`, of member 1. */
+function acmeHost(emitted: IntegrationEvent[], now: () => number = Date.now): ConnectionHookHost & { failEmits: number } {
+  const preset = acmePreset(now);
   const host = {
     failEmits: 0,
     webhookTarget: (id: string) =>
       id === "conn1"
         ? {
             preset,
-            clientSecret: FAKE_WHOOP_CLIENT.clientSecret,
-            client: { client_id: FAKE_WHOOP_CLIENT.clientId, client_secret: FAKE_WHOOP_CLIENT.clientSecret, whoop_user_id: fake.profile.user_id },
-            deps: { connectionId: id, fetch: fake.fetch, log: silent, accessToken: async () => "unused" },
+            clientSecret: SECRET,
+            client: { client_id: "acme-id", client_secret: SECRET, member: 1 },
+            deps: { connectionId: id, fetch: globalThis.fetch, log: silent, accessToken: async () => "unused" },
           }
         : null,
     emit: (events: IntegrationEvent[]) => {
@@ -42,19 +78,17 @@ function whoopHost(fake: FakeWhoop, emitted: IntegrationEvent[]): ConnectionHook
 describe("POST /hooks/connections/:id", () => {
   let ctx: AppContext;
   let dispose: () => Promise<void>;
-  let fake: FakeWhoop;
   let emitted: IntegrationEvent[];
-  let host: ReturnType<typeof whoopHost>;
+  let host: ReturnType<typeof acmeHost>;
   let flag: boolean;
 
   beforeEach(() => {
     ({ ctx, dispose } = testContext());
-    fake = new FakeWhoop({ now: () => Date.now() });
     emitted = [];
     flag = true;
     const realGet = ctx.settings.get.bind(ctx.settings);
     vi.spyOn(ctx.settings, "get").mockImplementation(() => ({ ...realGet(), brokerUpstreams: flag }));
-    host = whoopHost(fake, emitted);
+    host = acmeHost(emitted);
   });
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -63,48 +97,40 @@ describe("POST /hooks/connections/:id", () => {
 
   it("verifies, emits and answers 204, outside admin auth and CSRF; a retry isn't emitted twice", async () => {
     const app = createApp(ctx, { connectionHooks: host });
-    const msg = fake.webhook({ type: "recovery.updated", id: "sleep-uuid", trace_id: "trace-1" });
-    const res = await post(app, "/hooks/connections/conn1", msg);
-    expect(res.status).toBe(204);
-    expect(emitted).toEqual([
-      { type: "whoop.recovery_updated", connectionId: "conn1", dedupeKey: "whoop:trace-1", data: { sleepId: "sleep-uuid", traceId: "trace-1" } },
-    ]);
+    const msg = webhook({ id: "thing-1", trace: "trace-1" });
+    expect((await post(app, "/hooks/connections/conn1", msg)).status).toBe(204);
+    expect(emitted).toEqual([{ type: "acme.thing_updated", connectionId: "conn1", dedupeKey: "acme:trace-1", data: { id: "thing-1" } }]);
     expect((await post(app, "/hooks/connections/conn1", msg)).status).toBe(204);
     expect(emitted).toHaveLength(1);
   });
 
-  it("a failed emit answers 500 and doesn't mark the trace_id, so WHOOP's retry is delivered", async () => {
+  it("a failed emit answers 500 and doesn't mark the delivery, so the provider's retry is delivered", async () => {
     const app = createApp(ctx, { connectionHooks: host });
-    const msg = fake.webhook({ type: "sleep.updated", id: "s", trace_id: "trace-retry" });
+    const msg = webhook({ id: "s", trace: "trace-retry" });
     host.failEmits = 1;
     expect((await post(app, "/hooks/connections/conn1", msg)).status).toBe(500);
     expect(emitted).toEqual([]);
     expect((await post(app, "/hooks/connections/conn1", msg)).status).toBe(204);
-    expect(emitted.map((e) => e.dedupeKey)).toEqual(["whoop:trace-retry"]);
+    expect(emitted.map((e) => e.dedupeKey)).toEqual(["acme:trace-retry"]);
   });
 
-  it("another WHOOP member of the same app: acknowledged (204) but nothing emitted", async () => {
-    const app = createApp(ctx, { connectionHooks: host });
+  it("another member of the same app: acknowledged (204) but nothing emitted or marked delivered", async () => {
     const delivered: string[] = [];
-    const app2 = createApp(ctx, { connectionHooks: { ...host, delivered: (id) => void delivered.push(id) } });
-    const stranger = fake.webhook({ type: "workout.updated", id: "their-workout", trace_id: "t-other", user_id: 777 });
-    expect((await post(app, "/hooks/connections/conn1", stranger)).status).toBe(204);
-    expect((await post(app2, "/hooks/connections/conn1", stranger)).status).toBe(204);
+    const app = createApp(ctx, { connectionHooks: { ...host, delivered: (id) => void delivered.push(id) } });
+    expect((await post(app, "/hooks/connections/conn1", webhook({ id: "theirs", trace: "t-other", member: 777 }))).status).toBe(204);
     expect(emitted).toEqual([]);
-    expect(delivered).toEqual([]); // says nothing about this connection's own webhooks
+    expect(delivered).toEqual([]);
   });
 
-  it("401 on a bad signature or a timestamp outside 2 h; nothing emitted", async () => {
+  it("401 on a bad signature or a stale timestamp; nothing emitted", async () => {
     const app = createApp(ctx, { connectionHooks: host });
-    const forged = fake.webhook({ type: "sleep.updated", id: "a", trace_id: "t" }, { secret: "forged" });
-    expect((await post(app, "/hooks/connections/conn1", forged)).status).toBe(401);
-    const stale = fake.webhook({ type: "sleep.updated", id: "a", trace_id: "t" }, { timestamp: Date.now() - 3 * 3_600_000 });
-    expect((await post(app, "/hooks/connections/conn1", stale)).status).toBe(401);
+    expect((await post(app, "/hooks/connections/conn1", webhook({ id: "a", trace: "t" }, { secret: "forged" }))).status).toBe(401);
+    expect((await post(app, "/hooks/connections/conn1", webhook({ id: "a", trace: "t" }, { timestamp: Date.now() - 3 * 3_600_000 }))).status).toBe(401);
     expect(emitted).toEqual([]);
   });
 
   it("404 for an unknown connection, without a host, or with brokerUpstreams off", async () => {
-    const msg = fake.webhook({ type: "sleep.updated", id: "a", trace_id: "t" });
+    const msg = webhook({ id: "a", trace: "t" });
     expect((await post(createApp(ctx, { connectionHooks: host }), "/hooks/connections/other", msg)).status).toBe(404);
     expect((await post(createApp(ctx), "/hooks/connections/conn1", msg)).status).toBe(404);
     flag = false;
@@ -119,18 +145,18 @@ describe("POST /hooks/connections/:id", () => {
     expect(emitted).toEqual([]);
   });
 
-  it("/hooks/connections/whoop (the URL the setup shows): the signature picks the connection, and marks it delivered", async () => {
+  it("/hooks/connections/<preset id>: the signature picks the connection, and marks it delivered", async () => {
     const delivered: string[] = [];
     const conn1 = host.webhookTarget("conn1")!;
     const conn2 = { ...conn1, clientSecret: "another-apps-secret", deps: { ...conn1.deps, connectionId: "conn2" } };
     const app = createApp(ctx, {
-      connectionHooks: { ...host, presetWebhookTargets: (id) => (id === "whoop" ? [conn2, conn1] : []), delivered: (id) => void delivered.push(id) },
+      connectionHooks: { ...host, presetWebhookTargets: (id) => (id === "acme" ? [conn2, conn1] : []), delivered: (id) => void delivered.push(id) },
     });
-    const msg = fake.webhook({ type: "recovery.updated", id: "sleep-uuid", trace_id: "trace-p" });
-    expect((await post(app, "/hooks/connections/whoop", msg)).status).toBe(204);
-    expect(emitted).toEqual([expect.objectContaining({ connectionId: "conn1", dedupeKey: "whoop:trace-p" })]);
+    const msg = webhook({ id: "thing", trace: "trace-p" });
+    expect((await post(app, "/hooks/connections/acme", msg)).status).toBe(204);
+    expect(emitted).toEqual([expect.objectContaining({ connectionId: "conn1", dedupeKey: "acme:trace-p" })]);
     expect(delivered).toEqual(["conn1"]);
-    expect((await post(app, "/hooks/connections/whoop", fake.webhook({ type: "sleep.updated", id: "a", trace_id: "t" }, { secret: "forged" }))).status).toBe(401);
+    expect((await post(app, "/hooks/connections/acme", webhook({ id: "a", trace: "t" }, { secret: "forged" }))).status).toBe(401);
     expect((await post(app, "/hooks/connections/notion", msg)).status).toBe(404);
     expect(delivered).toEqual(["conn1"]);
   });
@@ -143,7 +169,7 @@ describe("POST /hooks/connections/:id", () => {
       const res = await app.request(path, { headers: funnel });
       expect(res.status, path).toBe(404);
     }
-    const msg = fake.webhook({ type: "sleep.updated", id: "f", trace_id: "trace-f" });
+    const msg = webhook({ id: "f", trace: "trace-f" });
     expect((await post(app, "/hooks/connections/conn1", { ...msg, headers: { ...msg.headers, ...funnel } })).status).toBe(204);
     // The owner funnelled the console itself (the public URL's host): not fenced.
     expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net" } })).status).toBe(401);
@@ -158,21 +184,20 @@ describe("POST /hooks/connections/:id", () => {
 });
 
 describe("hook route dedupe memory", () => {
-  it("is per connection and expires after its TTL (longer than the 2 h signature window)", async () => {
+  it("is per connection and expires after its TTL (longer than a 2 h signature window)", async () => {
     let t = Date.parse("2026-10-16T12:00:00Z");
     const now = () => t;
-    const fake = new FakeWhoop({ now });
     const emitted: IntegrationEvent[] = [];
-    const host = whoopHost(fake, emitted);
+    const host = acmeHost(emitted, now);
     const routes = connectionHookRoutes({ enabled: () => true, host: () => host, log: createLogger("test"), now });
-    expect(HOOK_DEDUPE_TTL_MS).toBeGreaterThan(2 * 3_600_000);
+    expect(HOOK_DEDUPE_TTL_MS).toBeGreaterThan(TOLERANCE_MS);
 
-    expect((await post(routes, "/hooks/connections/conn1", fake.webhook({ type: "sleep.updated", id: "a", trace_id: "z" }))).status).toBe(204);
+    expect((await post(routes, "/hooks/connections/conn1", webhook({ id: "a", trace: "z" }, { timestamp: t }))).status).toBe(204);
     t += 90 * 60_000; // a late retry, still inside the signature window
-    expect((await post(routes, "/hooks/connections/conn1", fake.webhook({ type: "sleep.updated", id: "a", trace_id: "z" }))).status).toBe(204);
+    expect((await post(routes, "/hooks/connections/conn1", webhook({ id: "a", trace: "z" }, { timestamp: t }))).status).toBe(204);
     expect(emitted).toHaveLength(1);
     t += HOOK_DEDUPE_TTL_MS;
-    expect((await post(routes, "/hooks/connections/conn1", fake.webhook({ type: "sleep.updated", id: "a", trace_id: "z" }))).status).toBe(204);
+    expect((await post(routes, "/hooks/connections/conn1", webhook({ id: "a", trace: "z" }, { timestamp: t }))).status).toBe(204);
     expect(emitted).toHaveLength(2);
   });
 });

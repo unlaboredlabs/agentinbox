@@ -13,7 +13,6 @@ import { type BrokerParts, createBrokerService } from "../server/broker/service.
 import type { AccessLevel, IntegrationPreset, RegisteredTool, ToolClass, ToolDef, ToolResult } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
 import { exposedName } from "../server/broker/catalog/index.ts";
-import { whoopPreset } from "../server/integrations/whoop/index.ts";
 import { loopbackUrl } from "../server/urls.ts";
 import { upstreams } from "../server/broker/upstream/runtime.ts";
 import { Approvals } from "../server/mail/approvals.ts";
@@ -477,12 +476,28 @@ describe("broker service", () => {
     expect(ctx.events.feed(agent.id).events.map((e) => e.type)).toEqual(["whoop.recovery_updated", "whoop.recovery_updated"]);
   });
 
-  it("GET /api/connections/presets: WHOOP's webhook step only for a public URL, the Funnel offer only on *.ts.net with Tailscale", async () => {
+  it("GET /api/connections/presets: a preset's webhook step only for a public URL, the Funnel offer only on *.ts.net with Tailscale", async () => {
     let serve: unknown = null;
+    // The setup context as a preset sees it (WHOOP's steps used it; WHOOP is a code extension now).
+    const hookPreset = (): IntegrationPreset => ({
+      ...pollPreset(),
+      setupSteps: (sc) => [
+        { id: "app", title: "Create an app", body: "…", copy: { label: "Redirect URI", value: sc.redirectUri } },
+        ...(sc.webhookUrl
+          ? [{ id: "webhook", title: "Optional: turn on webhooks", body: "…", copy: { label: "Webhook URL", value: sc.webhookUrl } }]
+          : sc.funnel
+            ? [
+                { id: "funnel", title: "Optional: Funnel", body: "Warning: it's reachable from the whole internet.", copy: { label: "Command", value: sc.funnel.command } },
+                { id: "funnel-webhook", title: "Optional: paste the Funnel webhook URL", body: "…", copy: { label: "Webhook URL", value: sc.funnel.webhookUrl } },
+              ]
+            : []),
+        { id: "connect", title: "Connect", body: "…" },
+      ],
+    });
     const h = harness({
       broker: (ctx) =>
         createBrokerService(ctx, {
-          presets: () => [whoopPreset()],
+          presets: () => [hookPreset()],
           reachability: fakeReach({ "box.tail1234.ts.net": ["100.101.102.103"], "inbox.example.com": ["93.184.216.34"] }, () => serve),
         }),
     });
@@ -492,32 +507,30 @@ describe("broker service", () => {
     ctx.settings.update({ brokerUpstreams: true });
     const steps = async () => {
       // Each case re-checks: the cache keeps one entry, for the current public URL.
-      const [whoop] = (await json(await h.request("/api/connections/presets", { cookie, headers: CSRF }))) as { setupSteps: { id: string; title: string; body: string; copy?: { value: string } }[] }[];
-      return whoop!.setupSteps;
+      const [p] = (await json(await h.request("/api/connections/presets", { cookie, headers: CSRF }))) as { setupSteps: { id: string; title: string; body: string; copy?: { value: string } }[] }[];
+      return p!.setupSteps;
     };
     const text = (s: Awaited<ReturnType<typeof steps>>) => JSON.stringify(s);
 
-    // Tailnet-only, no Tailscale CLI: no webhook anywhere; the steps say xaq checks every 15 minutes.
+    // Tailnet-only, no Tailscale CLI: no webhook anywhere.
     ctx.settings.update({ publicUrl: TAILNET });
     let s = await steps();
-    expect(s.map((x) => x.id)).toEqual(["dashboard", "team", "app", "client-id", "client-secret", "connect"]);
+    expect(s.map((x) => x.id)).toEqual(["app", "connect"]);
     expect(text(s)).not.toContain("/hooks/");
-    expect(s.find((x) => x.id === "connect")!.body).toContain("every 15 minutes");
 
     // Public: the optional webhook step, with the preset's URL (no connection id needed).
     ctx.settings.update({ publicUrl: "https://inbox.example.com" });
     s = await steps();
-    expect(s.map((x) => x.id)).toEqual(["dashboard", "team", "app", "webhook", "client-id", "client-secret", "connect"]);
-    expect(s.find((x) => x.id === "webhook")).toMatchObject({ title: expect.stringMatching(/^Optional/), copy: { value: "https://inbox.example.com/hooks/connections/whoop" } });
+    expect(s.map((x) => x.id)).toEqual(["app", "webhook", "connect"]);
+    expect(s.find((x) => x.id === "webhook")).toMatchObject({ copy: { value: "https://inbox.example.com/hooks/connections/whoop" } });
 
     // Tailnet-only with the Tailscale CLI (console served on 443): the Funnel offer on its own port, hooks path only.
     serve = { TCP: { "443": { HTTPS: true } }, Web: { "box.tail1234.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:8425" } } } } };
     ctx.settings.update({ publicUrl: TAILNET });
     s = await steps();
-    expect(s.map((x) => x.id)).toEqual(["dashboard", "team", "app", "funnel", "funnel-webhook", "client-id", "client-secret", "connect"]);
+    expect(s.map((x) => x.id)).toEqual(["app", "funnel", "funnel-webhook", "connect"]);
     const origin = loopbackUrl(ctx.config.host, ctx.config.port);
     expect(s.find((x) => x.id === "funnel")!.copy!.value).toBe(`tailscale funnel --bg --https=8443 --set-path=/hooks/connections ${origin}/hooks/connections`);
-    expect(s.find((x) => x.id === "funnel")!.body).toMatch(/Warning: .*reachable from the whole internet/);
     expect(s.find((x) => x.id === "funnel-webhook")!.copy!.value).toBe("https://box.tail1234.ts.net:8443/hooks/connections/whoop");
   });
 
@@ -720,8 +733,24 @@ describe("/api/connections", () => {
     expect((await json(await req("/connections"))).map((c: { slug: string }) => c.slug)).toEqual(["notion"]);
   });
 
-  it("a WHOOP reconnect keeps the pasted client as a candidate until the consent completes", async () => {
-    const h = harness();
+  it("a user_app reconnect (WHOOP's, now from the extension's manifest) keeps the pasted client as a candidate until the consent completes", async () => {
+    const userApp: IntegrationPreset = {
+      id: "whoop",
+      displayName: "WHOOP",
+      slug: "whoop",
+      kind: "native",
+      auth: {
+        type: "user_app",
+        authorizeUrl: "https://api.prod.whoop.com/oauth/oauth2/auth",
+        tokenUrl: "https://api.prod.whoop.com/oauth/oauth2/token",
+        scopes: ["offline", "read:recovery"],
+        clientIdInput: "client_id",
+        clientSecretInput: "client_secret",
+      },
+      classify: () => null,
+      setupSteps: () => [],
+    };
+    const h = harness({ broker: (ctx) => createBrokerService(ctx, { presets: () => [userApp] }) });
     disposers.push(h.dispose);
     const cookie = await h.claim();
     const { ctx } = h;
@@ -736,7 +765,11 @@ describe("/api/connections", () => {
     const res = await h.request("/api/connections/con_w/connect", { method: "POST", cookie, headers: CSRF, json: { inputs: { client_id: "typo-id", client_secret: "typo-secret-123" } } });
     const r = await json(res);
     expect(r).toMatchObject({ status: "authorize" });
-    expect(new URL(r.authorizeUrl).searchParams.get("client_id")).toBe("typo-id");
+    const u = new URL(r.authorizeUrl);
+    expect(u.origin + u.pathname).toBe("https://api.prod.whoop.com/oauth/oauth2/auth");
+    expect(u.searchParams.get("client_id")).toBe("typo-id");
+    expect(u.searchParams.get("scope")).toBe("offline read:recovery");
+    expect(u.searchParams.get("state")!.length).toBeGreaterThanOrEqual(8);
     // The working client is untouched until WHOOP's consent comes back.
     expect(upstreams(ctx).store.client("con_w")).toEqual({ client_id: "good-id", client_secret: "good-secret-123" });
   });

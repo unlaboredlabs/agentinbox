@@ -44,8 +44,8 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
       "authorizeUrl": "…", "tokenUrl": "…", "scopes": ["…"],
       "clientIdInput": "client_id", "clientSecretInput": "client_secret"
     },
-    "network": ["api.prod.whoop.com"],   // declared hosts: shown at install and in the warning (not enforced, see Sandbox)
-    "events": ["whoop.recovery_updated"] // the event types it may emit; anything else is dropped and logged
+    "network": ["api.example.com"],      // declared hosts: shown at install and in the warning (not enforced, see Sandbox)
+    "events": ["example.item_updated"]   // the event types it may emit (`<name>.<event>`); anything else is dropped and logged
   },
 
   "reconnectPolicy": { "maxLifetimeDays": 180, "idleDays": 30, "tokenLifetimeCapDays": 30 },
@@ -98,9 +98,14 @@ that talks to the child.
 
 ## The code-extension host
 
-- **One child per connection:** `process.execPath --permission --allow-fs-read=<installDir>,<stateDir> --allow-fs-write=<stateDir> <installDir>/<entry>`.
-  - No `--allow-child-process`, `--allow-worker`, `--allow-addons` or `--allow-wasi`.
-  - `cwd` is `<stateDir>`, stdio is pipes only, and no other fds are passed.
+- **One child per connection:** `process.execPath --permission --allow-fs-read=<installDir> --allow-fs-read=<stateDir> --allow-fs-write=<stateDir> <installDir>/<entry>`.
+  - *Clarified (B3):* one flag per path. Node 22.13.0 and 24.22 both read the comma form
+    (`--allow-fs-read=a,b`) as one literal path: on 22.13 the child can't even load its entry. A test pins the argv.
+  - No `--allow-child-process`, `--allow-worker`, `--allow-addons` or `--allow-wasi`. Without them, both versions
+    refuse `child_process`, `worker_threads`, WASI, `process.dlopen`, `process.binding` and the inspector, and
+    symlinks, hard links and `..` out of the allowed paths.
+  - `cwd` is `<stateDir>`, stdio is pipes only, `detached: false`, and no other fds are passed (a test checks that
+    no regular file xaq holds open, such as the DB, reaches the child).
 - **Environment, minimal:** only `XAQ_EXT_NAME`, `XAQ_EXT_CONNECTION_ID`, `XAQ_EXT_STATE_DIR`, `XAQ_EXT_PROTOCOL=1`,
   `TZ`, `LANG`, and `NODE_OPTIONS` unset. Nothing else is inherited, so no `XAQ_*`/`AGENTINBOX_*` secrets, no HOME,
   and no T3 or other variables.
@@ -116,12 +121,35 @@ that talks to the child.
   - notification `xaq/events/emit`: `{ type, dedupeKey, data }`. The type must be in the manifest's `events`. Events
     go through the outbox like native events today.
   - notification `xaq/log`: `{ level, msg, meta }`, rate-limited and redacted.
+  - *Clarified (B3), as built in `server/extensions/host`:*
+    - Framing is newline-delimited JSON-RPC 2.0 on stdin/stdout (the MCP stdio transport). stdout carries only
+      JSON-RPC; anything else is dropped and logged. Use stderr or `xaq/log` for logs.
+    - xaq opens with the 2025-era `initialize` handshake (no `server/discover` probe), offering the SDK's latest
+      2025 version, with no client capabilities: no sampling, elicitation or roots. The server should declare
+      `tools`, and `prompts` and `resources` if it has them; xaq asks only for what's declared.
+    - `xaq/credentials/get`: params must be `{}` (or carry only `_meta`). Anything else, such as a connection id, is
+      refused with -32602. `expiresAt` is epoch milliseconds, or null when unknown. A refusal is error -32010 with
+      `data.reason: "needs_reauth"`. The client secret and the refresh token are never sent.
+    - `xaq/events/emit`: `type` matches `<name>.<event>` and is listed in `code.events`; `dedupeKey` is 1 to 200
+      printable ASCII characters (unique per occurrence); `data` is a JSON object of at most 8 KB. It's rate-limited
+      to a burst of 30, then 1 per second. Anything else is dropped with a log line.
+    - `xaq/log`: `level` is `debug`, `info`, `warn` or `error`. `msg` is capped at 500 characters and `meta` at
+      1 KB of JSON. Both are redacted, including the access token xaq handed out. It's rate-limited to a burst of 20,
+      then 1 per second.
+    - Limits per connection: 8 requests in flight (more are refused at once as `rate_limited`), one stdout message
+      up to 8 MB (a larger one kills the child, counted as a crash), 15 s to start and finish `initialize`, 30 s per
+      list and 60 s per call.
+    - The extension must exit when stdin closes (xaq may be gone), and should exit on SIGTERM.
 - **Lifecycle:**
   - The child starts when its connection is active and stops (SIGTERM, then SIGKILL after 5 s) on disable, remove,
     update or shutdown.
   - A crash restarts it with backoff; repeated crashes mark the connection `error` with the last stderr lines,
     redacted.
-  - Scheduled work, such as WHOOP's polling sync, is the extension's own timer while it runs.
+  - *Clarified (B3):* the backoff is 1 s, doubling, up to 60 s. Five crashes in a row (a child that ran for 60 s
+    resets the count) mark the connection `error`, and it isn't restarted until the connection is reloaded or xaq
+    restarts. A failed integrity check also marks it `error`, with the reason, and never spawns. A good start clears
+    an `error` the host set.
+  - Scheduled work, such as a polling sync, is the extension's own timer while it runs.
 
 ## Prompts and resources
 
@@ -130,11 +158,27 @@ that talks to the child.
 - **Resources** are `xaq://<slug>/<encodeURIComponent(original uri)>`, with names prefixed `<slug>__`.
 - **Templates:** resource templates are passed through the same way.
 - **Access:** both are "read" class. An agent sees them when it has any grant on the connection.
+- *Clarified (B3):*
+  - In a resource template, the literal parts are `encodeURIComponent`-encoded and the `{…}` expressions are kept, so
+    a client expands it as usual and the URI decodes back to the upstream's own URI. A variable's value reaches the
+    upstream percent-decoded.
+  - `prompts/get` and `resources/read` are routed by slug and audited like a read tool call (actions `prompts/get` and
+    `resources/read`, target the connection). The lists aren't audited, like `tools/list`. The connection's secrets
+    are scrubbed from the results. `uri`s inside them, such as an embedded resource, are rewritten to the `xaq://`
+    form, and binaries over 5 MB are left out.
+  - The `/mcp` server declares `prompts` and `resources` only for an agent with at least one connection grant. Each
+    list asks every granted connection in parallel; one that fails or takes longer than 10 s is left out of that
+    answer.
 
 ## Migration from core presets (no re-auth)
 
 - **Core:** the Notion, T3 Code and WHOOP presets leave core. Core keeps the generic machinery: remote MCP OAuth,
   `user_app` OAuth with refresh, private-target allow, expiry, events and outbox.
+  - *Clarified (B3):* `user_app` OAuth is `server/broker/upstream/user-app.ts`, driven by the preset's auth (a code
+    manifest's `code.auth`): authorization code with the client secret in the body, no PKCE, https endpoints only.
+    The refresh request sends no `scope`, so the originally granted scope applies (RFC 6749 §6). The native WHOOP
+    code sent `scope=offline`. There's no user-id lookup: it only routed webhooks. The generic
+    `/hooks/connections/:id` route stays mounted but answers 404, because no preset in core handles webhooks.
 - **Pins:** core carries `server/extensions/bootstrap.json`, the pins (name, commit, integrity) of the official notion,
   t3code, whoop and brightspace extensions at release time. It holds pins only, no code.
 - **Upgrade, at startup:**

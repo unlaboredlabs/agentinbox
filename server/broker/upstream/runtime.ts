@@ -188,6 +188,21 @@ export class UpstreamRuntime {
     this.native.set(flow.preset, flow);
   }
 
+  /**
+   * Native flows for presets not registered up front (a code extension's `user_app` auth, built from its manifest):
+   * asked for each preset id that has no registered flow.
+   */
+  setNativeFlowResolver(resolve: (preset: string) => NativeOAuthFlow | null): void {
+    this.resolveNative = resolve;
+  }
+
+  private resolveNative: ((preset: string) => NativeOAuthFlow | null) | null = null;
+
+  private nativeFlow(preset: string | null): NativeOAuthFlow | undefined {
+    if (!preset) return undefined;
+    return this.native.get(preset) ?? this.resolveNative?.(preset) ?? undefined;
+  }
+
   /** The connection's guarded fetch, rebuilt when its private-target allow changes. */
   fetchFor(conn: Pick<ConnectionRow, "id" | "private_target" | "url">): GuardedFetch {
     const key = `${conn.private_target ?? ""}|${conn.url ?? ""}`;
@@ -210,7 +225,7 @@ export class UpstreamRuntime {
         return refreshGrant(this.fetchFor(getConnection(this.ctx.db, conn.id) ?? conn), client, current, signal, this.now);
       };
     }
-    const flow = conn.preset ? this.native.get(conn.preset) : undefined;
+    const flow = this.nativeFlow(conn.preset);
     return flow ? flow.refreshFn(this.store.client(conn.id)) : null;
   }
 
@@ -329,7 +344,7 @@ export class UpstreamRuntime {
     let verifier = "";
     let client: StoredClient | null = null;
 
-    const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
+    const native = conn.kind !== "remote_http" ? this.nativeFlow(conn.preset) : undefined;
     let nativeCandidate: Record<string, unknown> | null = null;
     if (native) {
       nativeCandidate = o.nativeClient ?? null;
@@ -427,7 +442,7 @@ export class UpstreamRuntime {
     const flow = this.store.takeFlow(connectionId, q.state!);
     const pending = flow?.pending ?? null;
     if (!flow || !pending) throw new HttpError(400, "oauth_state", "This sign-in link has expired or was already used.", "Start the connection again.");
-    const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
+    const native = conn.kind !== "remote_http" ? this.nativeFlow(conn.preset) : undefined;
     if (pending.origin !== undefined && (!conn.url || originKey(conn.url) !== pending.origin)) {
       throw new HttpError(409, "connection_changed", "The connection's URL changed after this sign-in started.", "Connect again from Connections in the console.");
     }
