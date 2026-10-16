@@ -25,6 +25,13 @@ export interface ClientEntry {
   headers: Record<string, string>;
   /** Names of environment variables the headers came from (for the "you can remove it from .env" note). */
   headerVars: string[];
+  /** Per header: the environment variables its value was built from (shown in the plan next to the destination). */
+  headerSources: Record<string, string[]>;
+  /**
+   * Defined in a file the project ships (Claude Code's ./.mcp.json), not by the user: anyone who can commit to the
+   * repository wrote it. Imported only when Claude Code approved it, and only after its own confirmation.
+   */
+  fromProject?: boolean;
   /** The client says it uses OAuth (Hermes `auth: oauth`, an oauth block). Its tokens stay in the client. */
   oauth: boolean;
   enabled: boolean;
@@ -94,7 +101,7 @@ const readJson = (file: string): Record<string, unknown> | null => {
 
 /** Shared by the JSON-shaped clients (Claude Code, Cursor): one `mcpServers` entry. */
 function jsonEntry(name: string, raw: unknown, file: string, vars: Record<string, string | undefined>, extra: Partial<ClientEntry> = {}): ClientEntry {
-  const base: ClientEntry = { name, file, transport: "http", headers: {}, headerVars: [], oauth: false, enabled: true, ...extra };
+  const base: ClientEntry = { name, file, transport: "http", headers: {}, headerVars: [], headerSources: {}, oauth: false, enabled: true, ...extra };
   if (!isObj(raw)) return { ...base, problem: "this entry isn't an object" };
   if (raw.disabled === true || raw.enabled === false) base.enabled = false;
   const type = typeof raw.type === "string" ? raw.type.toLowerCase() : null;
@@ -120,6 +127,7 @@ function withHeaders(entry: ClientEntry, headers: unknown, vars: Record<string, 
     if ("missing" in x) return { ...entry, problem: `its ${k} header uses \${${x.missing}}, which isn't set here` };
     entry.headers[k] = x.value;
     entry.headerVars.push(...x.vars);
+    entry.headerSources[k] = x.vars;
   }
   return entry;
 }
@@ -142,7 +150,7 @@ function readHermes(opts: ReadOptions): ClientConfig {
   const vars = { ...env, ...(existsSync(files.env) ? parseDotenv(readFileSync(files.env, "utf8")) : {}) };
   for (const [name, raw] of Object.entries(servers)) {
     if (name.startsWith("\u0000")) continue;
-    const base: ClientEntry = { name, file: files.config, transport: "http", headers: {}, headerVars: [], oauth: false, enabled: true };
+    const base: ClientEntry = { name, file: files.config, transport: "http", headers: {}, headerVars: [], headerSources: {}, oauth: false, enabled: true };
     if (!raw || raw === YAML_UNREADABLE || typeof raw !== "object" || Array.isArray(raw)) {
       result.entries.push({ ...base, problem: "this entry can't be read" });
       continue;
@@ -199,10 +207,26 @@ function readClaude(opts: ReadOptions): ClientConfig {
     result.entries.push(e);
   };
   const doc = readJson(userFile);
-  const local = doc && isObj(doc.projects) && isObj(doc.projects[cwd]) ? (doc.projects[cwd] as Record<string, unknown>).mcpServers : undefined;
+  const proj = doc && isObj(doc.projects) && isObj(doc.projects[cwd]) ? (doc.projects[cwd] as Record<string, unknown>) : {};
+  const local = proj.mcpServers;
   if (isObj(local)) for (const [n, raw] of Object.entries(local)) add(jsonEntry(n, raw, userFile, env, { scope: "local", projectDir: cwd }));
   const project = readJson(projectFile);
-  if (project && isObj(project.mcpServers)) for (const [n, raw] of Object.entries(project.mcpServers)) add(jsonEntry(n, raw, projectFile, env, { scope: "project", projectDir: cwd }));
+  if (project && isObj(project.mcpServers)) {
+    // ./.mcp.json comes with the repository. Claude Code itself only uses the servers the user approved for this
+    // project (kept in ~/.claude.json, which the repository can't write); a project's own .claude/settings*.json
+    // isn't trusted for this.
+    const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+    const enabled = new Set(list(proj.enabledMcpjsonServers));
+    const disabled = new Set(list(proj.disabledMcpjsonServers));
+    const all = proj.enableAllProjectMcpServers === true;
+    for (const [n, raw] of Object.entries(project.mcpServers)) {
+      const e = jsonEntry(n, raw, projectFile, env, { scope: "project", projectDir: cwd, fromProject: true });
+      const why = disabled.has(n) ? "turned off for this project in Claude Code" : !all && !enabled.has(n) ? "not approved in Claude Code" : null;
+      // An unapproved one isn't what Claude Code uses, so it doesn't shadow a user-scope server of the same name.
+      if (why) result.entries.push({ ...e, problem: why });
+      else add(e);
+    }
+  }
   if (doc && isObj(doc.mcpServers)) for (const [n, raw] of Object.entries(doc.mcpServers)) add(jsonEntry(n, raw, userFile, env, { scope: "user" }));
   return result;
 }
@@ -226,7 +250,7 @@ function readCodex(opts: ReadOptions): ClientConfig {
   const result: ClientConfig = { client: "codex", files: [file], entries: [] };
   if (!existsSync(file)) return result;
   for (const [name, raw] of Object.entries(readTomlMcpServers(readFileSync(file, "utf8")))) {
-    const base: ClientEntry = { name, file, transport: "http", headers: {}, headerVars: [], oauth: false, enabled: true };
+    const base: ClientEntry = { name, file, transport: "http", headers: {}, headerVars: [], headerSources: {}, oauth: false, enabled: true };
     if (raw === TOML_UNREADABLE) {
       result.entries.push({ ...base, problem: "this entry can't be read" });
       continue;
@@ -252,7 +276,10 @@ function readCodex(opts: ReadOptions): ClientConfig {
     let problem: string | undefined;
     if (e.http_headers !== undefined) {
       if (!isObj(e.http_headers) || Object.values(e.http_headers).some((v) => typeof v !== "string")) problem = "its http_headers can't be read";
-      else Object.assign(headers, e.http_headers);
+      else {
+        Object.assign(headers, e.http_headers);
+        for (const h of Object.keys(e.http_headers)) entry.headerSources[h] = [];
+      }
     }
     const fromEnv: Record<string, unknown> = isObj(e.env_http_headers) ? { ...e.env_http_headers } : {};
     if (e.bearer_token_env_var !== undefined) fromEnv.Authorization = e.bearer_token_env_var;
@@ -262,6 +289,7 @@ function readCodex(opts: ReadOptions): ClientConfig {
       else {
         headers[h] = h === "Authorization" && e.bearer_token_env_var === varName ? `Bearer ${env[varName]}` : env[varName]!;
         entry.headerVars.push(varName);
+        entry.headerSources[h] = [varName];
       }
     }
     entry.headers = headers;

@@ -78,6 +78,18 @@ describe("the local admin channel", () => {
     }
   });
 
+  it("mints a fresh session when the 15 minutes ran out mid-command", async () => {
+    const d = await startDaemon();
+    try {
+      expect(await d.api.list()).toEqual([]);
+      d.h.ctx.db.run("DELETE FROM admin_sessions WHERE ip = 'local-cli'");
+      expect(await d.api.list()).toEqual([]);
+      expect(d.h.ctx.db.get<{ n: number }>("SELECT count(*) AS n FROM admin_sessions WHERE ip = 'local-cli'")!.n).toBe(1);
+    } finally {
+      await d.dispose();
+    }
+  });
+
   it("refuses without a data directory or a running daemon", () => {
     expect(() => openAdminChannel({ dataDir: "/nonexistent/agentinbox" })).toThrow(/No agentinbox data/);
     expect(daemonOrigin({ host: "::", port: 9 })).toBe("http://127.0.0.1:9");
@@ -116,6 +128,40 @@ describe("connections add", () => {
     expect(p.text).toContain("An allow covers exactly http://127.0.0.1:8787");
     expect(p.text).not.toContain("bs-token");
     expect(p.text).toContain('✔ Connected "brightspace": 3 tools, seen by agents as brightspace__<tool> (Full access).');
+  });
+
+  it("--yes never allows a private host; --allow-private with the exact origin does", async () => {
+    d.upstreams.probe = (_u, allow) => (allow ? { reachable: true, auth: "none", message: "" } : { reachable: false, auth: "unknown", blocked: "private_target", message: "blocked" });
+    const p = new ScriptedPrompter([], true);
+    expect(await addConnection("http://127.0.0.1:3000/mcp", { yes: true }, deps(p))).toBe(0);
+    expect(p.text).toContain("--yes doesn't answer this; nothing was added (pass --allow-private http://127.0.0.1:3000 to allow it)");
+    expect(d.h.ctx.db.get<{ n: number }>("SELECT count(*) AS n FROM connections")!.n).toBe(0);
+    expect(await addConnection("http://127.0.0.1:3000/mcp", { yes: true, allowPrivate: "http://127.0.0.1:3000" }, deps(new ScriptedPrompter([], true)))).toBe(0);
+    expect(d.h.ctx.db.get("SELECT private_target FROM connections")).toEqual({ private_target: "http://127.0.0.1:3000" });
+  });
+
+  it("Reconnect on an active OAuth connection waits for the new credential, not just any update", async () => {
+    d.upstreams.probe = () => ({ reachable: true, auth: "oauth", message: "OAuth" });
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://t3.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A8425%2Foauth%2Fconnections%2Fcallback" });
+    const c = await d.api.create({ slug: "forge", url: "https://t3.example/mcp" });
+    d.giveTools("forge");
+    const t = new Date().toISOString();
+    d.h.ctx.db.run("UPDATE connections SET auth_type = 'oauth', status = 'active' WHERE id = ?", c.id);
+    d.h.ctx.db.run("INSERT INTO connection_credentials (connection_id, access_token_enc, issued_at, created_at, updated_at) VALUES (?, 'v1:old', ?, ?, ?)", c.id, t, t, t);
+    let signedIn = false;
+    const d2 = {
+      ...deps(new ScriptedPrompter([], true)),
+      openBrowser: async () => {
+        // Some unrelated update first (a catalog refresh), then the sign-in saving new tokens.
+        d.h.ctx.db.run("UPDATE connections SET updated_at = ? WHERE id = ?", new Date(Date.now() + 5000).toISOString(), c.id);
+        setTimeout(() => {
+          signedIn = true;
+          d.h.ctx.db.run("UPDATE connection_credentials SET access_token_enc = 'v1:new', issued_at = ? WHERE connection_id = ?", new Date(Date.now() + 9000).toISOString(), c.id);
+        }, 30);
+      },
+    };
+    expect(await reconnectConnection("forge", {}, d2)).toBe(0);
+    expect(signedIn).toBe(true);
   });
 
   it("declining the allow adds nothing", async () => {

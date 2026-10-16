@@ -12,6 +12,11 @@ export interface Prompter {
   /** Not echoed. */
   secret(question: string): Promise<string>;
   confirm(question: string, def: boolean): Promise<boolean>;
+  /**
+   * A confirmation only a person at the terminal can give (a private-network allow, a project's .mcp.json servers):
+   * --yes never answers it, and without a terminal it's a no. `skipped` says what happens then.
+   */
+  confirmExplicit(question: string, skipped: string): Promise<boolean>;
   choose<T extends string>(question: string, options: { value: T; label: string }[], def: T): Promise<T>;
   close(): void;
 }
@@ -54,6 +59,18 @@ abstract class BasePrompter implements Prompter {
       if (!a) return def;
       if (["y", "yes"].includes(a)) return true;
       if (["n", "no"].includes(a)) return false;
+    }
+  }
+
+  async confirmExplicit(question: string, skipped: string): Promise<boolean> {
+    if (this.assumeYes || !this.interactive) {
+      this.print(`${question} ${pc.yellow(`no: ${this.assumeYes ? "--yes doesn't answer this" : "not a terminal"}; ${skipped}`)}`);
+      return false;
+    }
+    for (;;) {
+      const a = (await this.line(`${question} ${pc.dim("[y/N]")} `)).trim().toLowerCase();
+      if (!a || ["n", "no"].includes(a)) return false;
+      if (["y", "yes"].includes(a)) return true;
     }
   }
 

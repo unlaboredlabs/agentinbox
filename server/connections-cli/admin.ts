@@ -43,9 +43,18 @@ export interface AdminChannel {
   /** The daemon's loopback origin, e.g. http://127.0.0.1:8425. */
   readonly baseUrl: string;
   request<T>(method: string, path: string, body?: unknown): Promise<T>;
+  /**
+   * A fingerprint of the connection's stored credential (issued_at plus its randomised ciphertext), read from the
+   * database: it changes on every saved sign-in, so a Reconnect's completion is seen even on an active connection.
+   * null when nothing is stored (or it can't be read). Never the credential itself.
+   */
+  credentialStamp(connectionId: string): string | null;
   /** Deletes the one-time session. Idempotent. */
   close(): void;
 }
+
+/** Signals that end a CLI command: the one-time session is deleted on each (and on a normal exit). */
+export const CLEANUP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 
 export interface OpenAdminOptions {
   dataDir: string;
@@ -127,14 +136,24 @@ export function openAdminChannel(opts: OpenAdminOptions): AdminChannel {
   const onExit = () => session.remove();
   process.once("exit", onExit);
   const doFetch = opts.fetch ?? fetch;
+  const send = (method: string, path: string, body: unknown) => {
+    const headers: Record<string, string> = { cookie: `${SESSION_COOKIE}=${session.token}`, [CSRF_HEADER]: "1", accept: "application/json" };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    return doFetch(`${baseUrl}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(120_000) });
+  };
   return {
     baseUrl,
     async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-      const headers: Record<string, string> = { cookie: `${SESSION_COOKIE}=${session.token}`, [CSRF_HEADER]: "1", accept: "application/json" };
-      if (body !== undefined) headers["content-type"] = "application/json";
       let res: Response;
       try {
-        res = await doFetch(`${baseUrl}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(120_000) });
+        res = await send(method, path, body);
+        // The session's 15 minutes ran out (a slow sign-in): mint a fresh one and retry once.
+        if (res.status === 401) {
+          await res.body?.cancel().catch(() => {});
+          session.remove();
+          session = createCliSession(dbPath, opts.clock);
+          res = await send(method, path, body);
+        }
       } catch (err) {
         throw new Error(`Couldn't reach agentinbox at ${baseUrl}: ${(err as Error).message}`);
       }
@@ -151,6 +170,22 @@ export function openAdminChannel(opts: OpenAdminOptions): AdminChannel {
         throw new AdminApiError(res.status, e?.code ?? `http_${res.status}`, e?.message ?? `HTTP ${res.status} from ${path}`, e?.hint, data);
       }
       return data as T;
+    },
+    credentialStamp(connectionId: string): string | null {
+      try {
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        try {
+          db.exec("PRAGMA busy_timeout = 5000");
+          const r = db.prepare("SELECT issued_at, access_token_enc, header_value_enc FROM connection_credentials WHERE connection_id = ?").get(connectionId) as
+            | { issued_at: string | null; access_token_enc: string | null; header_value_enc: string | null }
+            | undefined;
+          return r ? sha256(`${r.issued_at ?? ""}|${r.access_token_enc ?? ""}|${r.header_value_enc ?? ""}`) : null;
+        } finally {
+          db.close();
+        }
+      } catch {
+        return null;
+      }
     },
     close() {
       process.removeListener("exit", onExit);

@@ -1,5 +1,7 @@
 import type {
+  AccessLevel,
   Agent,
+  ConnectionGrant,
   ConnectionProbe,
   ConnectionView,
   CreateConnectionInput,
@@ -77,6 +79,13 @@ export class ConnectionsApi {
     const found = all.find((c) => c.slug === slug);
     if (!found) throw new Error(`No connection "${slug}". ${all.length ? `There are: ${all.map((c) => c.slug).join(", ")}.` : "There are none yet."}`);
     return found;
+  }
+  grants(id: string): Promise<ConnectionGrant[]> {
+    return this.call("GET", `/api/connections/${enc(id)}/grants`);
+  }
+  /** The full list: agents not in it lose access. */
+  setGrants(id: string, grants: { agentId: string; level: AccessLevel }[]): Promise<ConnectionGrant[]> {
+    return this.call("PUT", `/api/connections/${enc(id)}/grants`, { grants });
   }
   agents(): Promise<Agent[]> {
     return this.channel.request("GET", "/api/agents");

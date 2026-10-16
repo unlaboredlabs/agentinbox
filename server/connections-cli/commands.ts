@@ -15,19 +15,22 @@ const dataDirOf = (o: { data?: string }) => resolve(o.data ?? process.env.AGENTI
 const dataOption = (cmd: Command) => cmd.option("-d, --data <dir>", "agentinbox's data directory (default ~/.agentinbox, env AGENTINBOX_DATA)");
 
 async function withApi<T>(o: { data?: string; yes?: boolean }, run: (deps: { api: import("./api.ts").ConnectionsApi; prompter: import("./prompt.ts").Prompter }) => Promise<T>): Promise<T> {
-  const { openAdminChannel } = await import("./admin.ts");
+  const { CLEANUP_SIGNALS, openAdminChannel } = await import("./admin.ts");
   const { ConnectionsApi } = await import("./api.ts");
   const { TerminalPrompter } = await import("./prompt.ts");
   const channel = openAdminChannel({ dataDir: dataDirOf(o) });
-  const onSignal = () => {
-    channel.close();
-    process.exit(130);
-  };
-  process.once("SIGINT", onSignal);
+  const handlers = CLEANUP_SIGNALS.map((sig) => {
+    const h = () => {
+      channel.close();
+      process.exit(sig === "SIGINT" ? 130 : 128 + (sig === "SIGTERM" ? 15 : 1));
+    };
+    process.once(sig, h);
+    return [sig, h] as const;
+  });
   try {
     return await run({ api: new ConnectionsApi(channel), prompter: new TerminalPrompter(!!o.yes) });
   } finally {
-    process.removeListener("SIGINT", onSignal);
+    for (const [sig, h] of handlers) process.removeListener(sig, h);
     channel.close();
   }
 }
@@ -58,7 +61,8 @@ export function registerConnectionsCommands(program: Command): void {
     .option("--agent <name>", 'an agent that gets it (repeatable; default: all agents; "all")', collect)
     .option("--header <name>", "header for a server that wants a static key (default Authorization)")
     .option("--paste", "paste the address the browser lands on after signing in, instead of waiting for the redirect (automatic over SSH)")
-    .option("-y, --yes", "answer yes to confirmations and take the defaults")
+    .option("--allow-private <origin>", "allow this exact scheme://host:port on this machine or a private network without asking (--yes never does)")
+    .option("-y, --yes", "answer yes to confirmations and take the defaults (never to a private-network allow)")
     .addHelpText(
       "after",
       `
@@ -110,7 +114,8 @@ Examples:
     .option("--access <level>", "for every imported connection: full, ask (the default) or read")
     .option("--agent <name>", 'an agent that gets them (repeatable; default: all agents; "all")', collect)
     .option("--profile <name>", "the agent profile setup-mcp uses for the single agentinbox entry (default \"default\")")
-    .option("-y, --yes", "answer yes to every confirmation (scripts), including the private-network allow")
+    .option("--allow-private <origin>", "allow this exact scheme://host:port on this machine or a private network without asking (repeatable; --yes never does)", collect)
+    .option("-y, --yes", "answer yes to the confirmations (scripts); never to a private-network allow or a project's .mcp.json servers")
     .addHelpText(
       "after",
       `

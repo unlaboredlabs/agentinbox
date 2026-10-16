@@ -1,8 +1,9 @@
 import pc from "picocolors";
+import type { Agent } from "../../shared/types.ts";
 import type { AccessLevel } from "../broker/types.ts";
 import { mcpTarget, type McpSetupResult, type RemoveServer, setupMcp } from "../listen/mcpsetup.ts";
 import { DEFAULT_PROFILE, profilePath } from "../listen/paths.ts";
-import { loadProfile, profileExists } from "../listen/profile.ts";
+import { loadProfile, type Profile, profileExists } from "../listen/profile.ts";
 import { safeText } from "../listen/ui.ts";
 import { NPX } from "../listen/version.ts";
 import type { LookupFn } from "../webhooks/ssrf.ts";
@@ -28,6 +29,8 @@ export interface ImportFlags {
   access?: string;
   agent?: string[];
   profile?: string;
+  /** Exact `scheme://host:port` origins allowed without asking (--yes never allows one). */
+  allowPrivate?: string[];
 }
 
 export interface ImportDeps {
@@ -148,6 +151,21 @@ export async function planImport(config: ClientConfig, ctx: { existing?: Connect
 }
 
 const where = (e: ClientEntry) => (e.scope ? ` (${e.scope} scope)` : "");
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+/** "its Authorization header (from $GITHUB_TOKEN) is sent to mcp.example.com": where each secret ends up. */
+function headerLine(i: Extract<PlanItem, { action: "create" }>): string | null {
+  if (i.auth.type !== "header") return null;
+  const vars = i.entry.headerSources[i.auth.name] ?? [];
+  const from = vars.length ? ` (from ${vars.map((v) => `$${v}`).join(", ")})` : "";
+  return `its ${i.auth.name} header${from} moves into agentinbox (encrypted; never shown) and is sent to ${safeText(hostOf(i.url), 120)}`;
+}
 
 /** The plan in plain words. Never prints a header value. */
 export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
@@ -174,7 +192,9 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
         break;
       case "create": {
         out.push(`${name}${pc.green("create")} connection "${i.slug}" → ${safeText(i.url, 120)}${where(i.entry)}`);
-        if (i.auth.type === "header") out.push(`${cont}its ${i.auth.name} header moves into agentinbox (encrypted; never shown)`);
+        if (i.entry.fromProject) out.push(`${cont}${pc.yellow("from the project's .mcp.json")}: asked separately (--yes doesn't answer it)`);
+        const h = headerLine(i);
+        if (h) out.push(`${cont}${h}`);
         else if (i.auth.type === "oauth") out.push(`${cont}OAuth: created needing Connect (${label} keeps its own tokens); sign in once with the link it prints`);
         else out.push(`${cont}no credential in ${label}: connected as it is (if it turns out to use OAuth, it needs Connect)`);
         if (i.privateTarget) out.push(`${cont}${pc.yellow("private network")}: needs the allow for exactly ${i.privateTarget}`);
@@ -185,8 +205,10 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
   return out;
 }
 
+type CreateItem = Extract<PlanItem, { action: "create" }>;
+
 interface Outcome {
-  item: Extract<PlanItem, { action: "create" }>;
+  item: CreateItem;
   /** connected: works now; authorize: needs a sign-in (the link); failed: nothing was kept. */
   status: "connected" | "authorize" | "failed";
   connection?: ConnectionView;
@@ -209,6 +231,13 @@ function setupLines(r: McpSetupResult): string[] {
 
 const toRemove = (e: ClientEntry): RemoveServer => ({ name: e.name, scope: e.scope, projectDir: e.scope === "user" ? undefined : e.projectDir });
 
+/** The agent this machine's client uses (its agentinbox profile), if that agent is on this daemon. */
+interface ClientAgent {
+  profileName: string;
+  profile: Profile | null;
+  agent: Agent | null;
+}
+
 export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<number> {
   const p = deps.prompter;
   const client: ImportClient = parseImportClient(flags.from);
@@ -225,19 +254,19 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     const items = await planImport(config, { lookup: deps.lookup, selfOrigins: deps.selfOrigins });
     p.print(pc.bold("Dry run: nothing is created or changed."));
     for (const l of renderPlan(config, items)) p.print(l);
-    const creates = items.filter((i) => i.action === "create");
+    const creates = items.filter((i): i is CreateItem => i.action === "create");
     const priv = creates.filter((i) => i.privateTarget);
     p.print("");
     p.print(`Would create ${creates.length} connection${creates.length === 1 ? "" : "s"} with ${access ? accessLabel(access) : "the access you choose (default: Ask before risky actions)"}.`);
-    if (priv.length) p.print(`Would ask before allowing ${priv.map((i) => i.privateTarget).join(", ")}.`);
+    if (priv.length) p.print(`Would ask before allowing ${priv.map((i) => i.privateTarget).join(", ")} (--yes never does; --allow-private <origin> does for that origin).`);
     p.print(pc.dim("Existing connections are checked on the real run (a server already connected isn't created twice)."));
-    const removable = items.filter((i) => i.action === "create" && i.auth.type !== "oauth").map((i) => toRemove(i.entry));
+    const removable = creates.filter((i) => i.auth.type !== "oauth").map((i) => toRemove(i.entry));
     p.print("");
     if (!removable.length) p.print(`${label}'s config isn't changed.`);
     else if (!profileExists(profileName)) {
       p.print(`Afterwards it offers to replace the imported entries in ${label} with the single agentinbox entry, once this machine's ${label} is paired (${NPX} connect <agentinbox-url> --tool ${client}).`);
     } else {
-      p.print(`Afterwards it offers setup-mcp --tool ${client}, which would (for the entries whose connection works; OAuth ones after you Reconnect them):`);
+      p.print(`Afterwards it offers setup-mcp --tool ${client}, which would (for the entries whose connection works and that ${label}'s agent can use; OAuth ones after you Reconnect them):`);
       const r = setupMcp(client, mcpTarget(profileName, loadProfile(profileName)), profilePath(profileName), { dryRun: true, removeServers: removable });
       for (const l of setupLines(r)) p.print(l);
     }
@@ -248,31 +277,48 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   const existing = await api.list();
   const items = await planImport(config, { existing, lookup: deps.lookup, selfOrigins: deps.selfOrigins });
   for (const l of renderPlan(config, items)) p.print(l);
-  let creates = items.filter((i): i is Extract<PlanItem, { action: "create" }> => i.action === "create");
+  let creates = items.filter((i): i is CreateItem => i.action === "create");
   const already = items.filter((i): i is Extract<PlanItem, { action: "exists" }> => i.action === "exists");
   p.print("");
 
-  // The private-target allow: always its own explicit confirmation, listing the exact origins.
-  const priv = creates.filter((i) => i.privateTarget);
+  // A project's .mcp.json was written by whoever can commit to the repository: its own confirmation, never --yes.
+  const fromProject = creates.filter((i) => i.entry.fromProject);
+  if (fromProject.length) {
+    p.print(pc.yellow(`These come from ${fromProject[0]!.entry.file}, which ships with the project (anyone who can commit to it wrote them):`));
+    for (const i of fromProject) p.print(`  ${safeText(i.entry.name, 40)} → ${safeText(i.url, 120)}${headerLine(i) ? `; ${headerLine(i)}` : ""}`);
+    if (!(await p.confirmExplicit(`Import ${fromProject.length === 1 ? "it" : `these ${fromProject.length}`} into agentinbox?`, "they stay in Claude Code"))) {
+      creates = creates.filter((i) => !i.entry.fromProject);
+    }
+  }
+
+  // The private-target allow: only a person at the terminal (or --allow-private naming the exact origin) gives it.
+  const preAllowed = new Set(flags.allowPrivate ?? []);
+  const priv = creates.filter((i) => i.privateTarget && !preAllowed.has(i.privateTarget));
+  for (const i of creates.filter((x) => x.privateTarget && preAllowed.has(x.privateTarget))) p.print(`Allowing ${i.privateTarget} (${safeText(i.entry.name, 40)}): --allow-private.`);
   if (priv.length) {
     p.print(pc.yellow("These servers are on this machine or your private network:"));
     for (const i of priv) p.print(`  ${i.privateTarget}  (${safeText(i.entry.name, 40)})`);
     p.print(
       pc.dim("A connection to such a server can reach other services there too. Each allow covers exactly that scheme://host:port, for that connection only."),
     );
-    const ok = await p.confirm(`Allow agentinbox to connect to ${priv.length === 1 ? "it" : `these ${priv.length}`}?`, false);
-    if (!ok) {
-      p.print(`Skipping ${priv.map((i) => i.entry.name).join(", ")}: they stay in ${label}.`);
-      creates = creates.filter((i) => !i.privateTarget);
+    const names = priv.map((i) => i.entry.name).join(", ");
+    if (!(await p.confirmExplicit(`Allow agentinbox to connect to ${priv.length === 1 ? "it" : `these ${priv.length}`}?`, `skipping ${names} (pass --allow-private <origin> to allow one)`))) {
+      creates = creates.filter((i) => !priv.includes(i));
     }
   }
+
+  const who = await clientAgent(api, profileName);
   if (!creates.length) {
     p.print("Nothing to create.");
-    return await offerSetup(deps, client, profileName, already.filter((a) => works(a.connection)).map((a) => a.entry), [], 0);
+    return offerSetup(deps, api, client, who, already.filter((a) => works(a.connection)).map((a) => ({ entry: a.entry, connection: a.connection })), [], 0);
   }
 
   const level = await chooseAccess(p, access);
-  const agents = await chooseAgents(p, api, flags.agent);
+  let agents = await chooseAgents(p, api, flags.agent);
+  if (agents !== "all" && who.agent && !agents.includes(who.agent.id)) {
+    p.print(pc.yellow(`${safeText(who.agent.name, 60)} (the agent ${label} on this machine uses) isn't among them, so ${label} couldn't use these through agentinbox.`));
+    if (await p.confirm(`Include ${safeText(who.agent.name, 60)}?`, true)) agents = [...agents, who.agent.id];
+  }
   if (!(await p.confirm(`Create ${creates.length} connection${creates.length === 1 ? "" : "s"} (${accessLabel(level)}, ${agentsLabel(agents)})?`, true))) {
     p.print("Nothing was created.");
     return 0;
@@ -307,36 +353,86 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     }
   }
   const failed = outcomes.filter((o) => o.status === "failed").length;
-  const working = [...already.filter((a) => works(a.connection)).map((a) => a.entry), ...outcomes.filter((o) => o.status === "connected").map((o) => o.item.entry)];
+  const working = [
+    ...already.filter((a) => works(a.connection)).map((a) => ({ entry: a.entry, connection: a.connection })),
+    ...outcomes.filter((o) => o.status === "connected").map((o) => ({ entry: o.item.entry, connection: o.connection! })),
+  ];
   const pending = outcomes.filter((o) => o.status === "authorize").map((o) => o.item.entry.name);
-  return offerSetup(deps, client, profileName, working, pending, failed ? 1 : 0);
+  return offerSetup(deps, api, client, who, working, pending, failed ? 1 : 0);
 }
 
-/** Step 2: replace the entries now served by the broker with the single agentinbox entry (setup-mcp). */
-async function offerSetup(deps: ImportDeps, client: ImportClient, profileName: string, working: ClientEntry[], pending: string[], code: number): Promise<number> {
+async function clientAgent(api: ConnectionsApi, profileName: string): Promise<ClientAgent> {
+  if (!profileExists(profileName)) return { profileName, profile: null, agent: null };
+  const profile = loadProfile(profileName);
+  const agent = (await api.agents()).find((a) => a.id === profile.agentId && !a.disabled) ?? null;
+  return { profileName, profile, agent };
+}
+
+/**
+ * Step 2: replace the entries now served by the broker with the single agentinbox entry (setup-mcp). Only entries
+ * the client's own agent can use through agentinbox go: the profile's agent must be on this daemon and have a grant
+ * on the connection (offered when it has none).
+ */
+async function offerSetup(
+  deps: ImportDeps,
+  api: ConnectionsApi,
+  client: ImportClient,
+  who: ClientAgent,
+  working: { entry: ClientEntry; connection: ConnectionView }[],
+  pending: string[],
+  code: number,
+): Promise<number> {
   const p = deps.prompter;
   const label = CLIENT_LABELS[client];
   if (pending.length) p.print(pc.dim(`${pending.join(", ")} stay${pending.length === 1 ? "s" : ""} in ${label} until you Reconnect; then run this import again to replace ${pending.length === 1 ? "it" : "them"}.`));
   if (!working.length) return code;
-  if (!profileExists(profileName)) {
+  if (!who.profile) {
     p.print(
-      `To replace ${working.map((e) => e.name).join(", ")} in ${label} with the single agentinbox entry, pair it first ` +
+      `To replace ${working.map((w) => w.entry.name).join(", ")} in ${label} with the single agentinbox entry, pair it first ` +
         `(${NPX} connect <agentinbox-url> --tool ${client}) and run this import again.`,
     );
     return code;
   }
+  if (!who.agent) {
+    p.print(
+      pc.yellow(
+        `The agent in your "${who.profileName}" profile (${safeText(who.profile.agentId, 40)}) isn't an agent of this agentinbox (or is disabled), so ${label} ` +
+          `couldn't use these through it. Not replacing anything in ${label}. Pair it with this agentinbox (${NPX} connect <agentinbox-url> --tool ${client} --force), then run this import again.`,
+      ),
+    );
+    return code;
+  }
+  const agentName = safeText(who.agent.name, 60);
+  const usable: ClientEntry[] = [];
+  for (const w of working) {
+    if (w.entry.fromProject) {
+      // ./.mcp.json is the project's file (often committed): left for its owners to change.
+      p.print(pc.dim(`  "${w.entry.name}" stays in ${w.entry.file}: it ships with the project. Remove it there if the project no longer needs it.`));
+      continue;
+    }
+    const grants = await api.grants(w.connection.id);
+    if (grants.some((g) => g.agentId === who.agent!.id)) {
+      usable.push(w.entry);
+      continue;
+    }
+    if (await p.confirm(`${agentName} (the agent ${label} uses) has no access to "${w.connection.slug}". Give it ${accessLabel(w.connection.levelDefault)}?`, true)) {
+      await api.setGrants(w.connection.id, [...grants.map((g) => ({ agentId: g.agentId, level: g.level })), { agentId: who.agent.id, level: w.connection.levelDefault }]);
+      usable.push(w.entry);
+    } else p.print(pc.dim(`  "${w.entry.name}" stays in ${label}: its agent couldn't use "${w.connection.slug}".`));
+  }
+  if (!usable.length) return code;
   p.print("");
   const ok = await p.confirm(
-    `Replace ${working.map((e) => `"${e.name}"`).join(", ")} in ${label} with the single agentinbox entry (setup-mcp --tool ${client}, with a backup)?`,
+    `Replace ${usable.map((e) => `"${e.name}"`).join(", ")} in ${label} with the single agentinbox entry (setup-mcp --tool ${client}, with a backup)?`,
     true,
   );
   if (!ok) {
     p.print(`${label}'s config wasn't changed. Run this import again any time to do it.`);
     return code;
   }
-  const r = setupMcp(client, mcpTarget(profileName, loadProfile(profileName)), profilePath(profileName), { removeServers: working.map(toRemove) });
+  const r = setupMcp(client, mcpTarget(who.profileName, who.profile), profilePath(who.profileName), { removeServers: usable.map(toRemove) });
   for (const l of setupLines(r)) p.print(l);
-  const vars = [...new Set(working.flatMap((e) => (r.removed ?? []).includes(e.name) ? e.headerVars : []))];
+  const vars = [...new Set(usable.flatMap((e) => ((r.removed ?? []).includes(e.name) ? e.headerVars : [])))];
   if (r.ok && vars.length) {
     p.print(pc.dim(`  ${vars.join(", ")} ${vars.length === 1 ? "is" : "are"} no longer needed by the removed entries; delete ${vars.length === 1 ? "it" : "them"} from your environment${client === "hermes" ? " (~/.hermes/.env)" : ""} once everything works through agentinbox.`));
   }

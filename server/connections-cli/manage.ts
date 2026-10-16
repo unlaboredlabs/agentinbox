@@ -18,6 +18,8 @@ export interface AddFlags {
   header?: string;
   /** Always paste the address the browser lands on, instead of waiting for the redirect. */
   paste?: boolean;
+  /** The exact `scheme://host:port` to allow without asking (--yes never allows one). */
+  allowPrivate?: string;
   yes?: boolean;
 }
 
@@ -140,7 +142,11 @@ export async function authorize(
       throw new Error(r.status === "error" ? r.message : "The sign-in didn't finish.");
     }
   }
-  const before = (await api.get(conn.id)).updatedAt;
+  // A sign-in that completes saves a new credential: its fingerprint changes even on an already-active
+  // connection (a Reconnect), where status and updated_at can't tell.
+  const stamp = () => api.channel.credentialStamp(conn.id);
+  const before = stamp();
+  const beforeView = await api.get(conn.id);
   p.print(`Opening your browser to sign in to ${name}. If it doesn't open, use this link:`);
   p.print(`  ${pc.cyan(authorizeUrl)}`);
   try {
@@ -154,8 +160,10 @@ export async function authorize(
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs));
     const now = await api.get(conn.id);
-    // The callback marks it active and touches updated_at; the sign-in page itself shows any error.
-    if (now.status === "active" && now.updatedAt !== before) return now;
+    const after = stamp();
+    const changed = after !== null ? after !== before : now.expiresAt !== beforeView.expiresAt || now.updatedAt !== beforeView.updatedAt;
+    // The sign-in page itself shows any error.
+    if (now.status === "active" && changed) return now;
   }
   throw new Error(`Timed out waiting for the sign-in. Try again with \`${NPX} connections reconnect ${conn.slug}\`${overSsh(env) ? "" : " (add --paste to paste the address instead)"}.`);
 }
@@ -259,7 +267,8 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
       "agentinbox blocks those by default: a connection to a server there can reach other services on the same machine or network. " +
         `An allow covers exactly ${origin}, for this connection only (and plain http on that host).`,
     );
-    if (!(await p.confirm(`Allow this connection to reach ${origin}?`, false))) {
+    const allowed = flags.allowPrivate === origin || (await p.confirmExplicit(`Allow this connection to reach ${origin}?`, `nothing was added (pass --allow-private ${origin} to allow it)`));
+    if (!allowed) {
       p.print("Nothing was added.");
       return 0;
     }

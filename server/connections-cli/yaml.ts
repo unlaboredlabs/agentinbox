@@ -211,10 +211,14 @@ export function removeYamlServers(yaml: string, names: string[]): string | null 
       if (hit) {
         if (found.has(hit)) return null;
         found.add(hit);
+        // Comment lines right above a removed entry (at its indent or less) were about it: they go with it.
+        while (kept.length && kept[kept.length - 1]!.trimStart().startsWith("#") && /^(\s*)/.exec(kept[kept.length - 1]!)![1]!.length <= indent.length) kept.pop();
         // Only block entries: a flow-style `name: { … }` might span lines we can't see the end of.
         if (stripComment(l).replace(/^[^:]*:/, "").trim()) return null;
       }
     } else if (l.trim() && !l.trimStart().startsWith("#") && own < indent.length) return null;
+    // A comment at the entries' own indent (or less) introduces the next entry: it's kept with it.
+    else if (skipping && l.trimStart().startsWith("#") && own <= indent.length) skipping = false;
     if (!skipping) kept.push(l);
   }
   if (found.size !== names.length) return null;
