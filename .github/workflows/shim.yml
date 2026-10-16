@@ -64,7 +64,9 @@ jobs:
 
       - name: Set the version
         if: inputs.version != ''
-        run: npm version "${{ inputs.version }}" --no-git-tag-version
+        env:
+          VERSION: ${{ inputs.version }} # through env, never spliced into the script
+        run: npm version "$VERSION" --no-git-tag-version
 
       # The packed shim must start xaq-cli: `agentinbox --version` prints xaq-cli's version, after the notice.
       - name: Smoke test

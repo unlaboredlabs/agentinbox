@@ -19,8 +19,7 @@
     "ai"
   ],
   "bin": {
-    "xaq": "dist/cli.js",
-    "agentinbox": "dist/cli.js"
+    "xaq": "dist/cli.js"
   },
   "files": [
     "dist",

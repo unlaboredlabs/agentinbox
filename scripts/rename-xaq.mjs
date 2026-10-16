@@ -28,7 +28,7 @@ const INCLUDE = /\.(ts|tsx|mts|mjs|js|cjs|md|html|css|json|txt|sh)$/;
 /** Never touched: history, plans, generated or owned elsewhere. */
 const EXCLUDE = [
   /^pnpm-lock\.yaml$/,
-  /^package\.json$/, // hand-written: name, bin (with the agentinbox alias), URLs
+  /^package\.json$/, // hand-written: name, bin, URLs
   /^\.github\//, // hand-written: nightly.yml, shim.yml
   /^shim\//, // the agentinbox-cli shim is about the old name
   /^docs\/(HANDOFF|STATUS|FOLLOWUPS|MCP-BROKER|calendar)\.md$/, // history and plans: they describe what was
@@ -58,6 +58,9 @@ const HAND_WRITTEN = [
   "test/rename-migration.test.ts",
   "vite.config.ts",
 ];
+
+/** Hand-written files that are about the rename itself: every mention there is deliberate, so no review. */
+const ABOUT_THE_RENAME = ["scripts/rename-xaq.mjs", "server/listen/names.ts", "test/rename-migration.test.ts"];
 
 /**
  * Names that keep the old spelling everywhere, because something outside this repo depends on them:
@@ -149,7 +152,7 @@ let replacements = 0;
 for (const file of files) {
   if (EXCLUDE.some((re) => re.test(file))) continue;
   if (HAND_WRITTEN.includes(file)) {
-    if (!existsSync(join(ROOT, file))) continue;
+    if (ABOUT_THE_RENAME.includes(file) || !existsSync(join(ROOT, file))) continue;
     readFileSync(join(ROOT, file), "utf8")
       .split("\n")
       .forEach((line, i) => {

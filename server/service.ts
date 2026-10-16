@@ -5,8 +5,8 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_NAME, NPM_PACKAGE as PACKAGE } from "../shared/types.ts";
 import { readSetupToken } from "./auth/setup-token.ts";
-import { LEGACY_PRODUCT } from "./brand.ts";
-import { type Config, dataFiles } from "./config.ts";
+import { envVar, LEGACY_PRODUCT } from "./brand.ts";
+import { type Config, type ConfigInput, dataFiles, legacyDataDir } from "./config.ts";
 import { Crypto } from "./crypto.ts";
 import { assertMasterKeyUsable, cliCommand, type InstanceInfo, runningInstance, serviceInstallCommand } from "./instance.ts";
 import { consoleUrls, loopbackUrl } from "./urls.ts";
@@ -190,7 +190,21 @@ function writeServiceEnv(dataDir: string, env: Record<string, string>): void {
   for (const [k, v] of Object.entries(env)) {
     if (/[\r\n]/.test(v)) throw new Error(`${k} must be a single line.`);
   }
-  writeFileSync(file, Object.entries(env).map(([k, v]) => `${k}=${v}\n`).join(""), { mode: 0o600 });
+  writeFileSync(file, serviceEnvText(env), { mode: 0o600 });
+}
+
+/**
+ * service.env's content. For one release, XAQ_MASTER_KEY and XAQ_LOG_LEVEL are also written under their
+ * pre-rename names, so going back to agentinbox-cli by hand (its `service install` reads only those)
+ * still finds the key and starts.
+ */
+export function serviceEnvText(env: Record<string, string>): string {
+  const lines = Object.entries(env).map(([k, v]) => `${k}=${v}\n`);
+  for (const [key, old] of Object.entries(LEGACY_ENV_KEYS)) {
+    const value = env[key];
+    if (value && old) lines.push(`${old}=${value}\n`);
+  }
+  return lines.join("");
 }
 
 /**
@@ -575,11 +589,36 @@ export function notTheService(owner: InstanceInfo | null, before: InstanceInfo |
  * A daemon service installed under the names from before the rename (agentinbox), if any: its unit file,
  * the file's content, and the data directory it runs on.
  */
-export function legacyDaemonUnit(ops: Pick<ServiceOps, "platform" | "unitDir">): { file: string; text: string; dataDir: string | null } | null {
+export function legacyDaemonUnit(
+  ops: Pick<ServiceOps, "platform" | "unitDir">,
+): { file: string; text: string; dataDir: string | null; port: number | null; host: string | null } | null {
   if (ops.platform !== "linux" && ops.platform !== "darwin") return null;
   const file = unitPath(ops, LEGACY_DAEMON_UNIT);
   const text = readText(file);
-  return text === null ? null : { file, text, dataDir: unitDataDir(text) };
+  if (text === null) return null;
+  const rawPort = unitEnv(text, "PORT");
+  const port = rawPort && /^\d+$/.test(rawPort) && Number(rawPort) <= 65535 ? Number(rawPort) : null;
+  return { file, text, dataDir: unitDataDir(text), port, host: unitEnv(text, "HOST") || null };
+}
+
+/**
+ * Where `service install` puts the service when the command line and environment don't say: replacing a
+ * service from before the rename keeps its data directory, port and host (a bind to 127.0.0.1 must not
+ * widen to 0.0.0.0 on upgrade). A service already moved keeps ~/.agentinbox too, even if a ~/.xaq has
+ * appeared since. `given` is what the flags (and PORT / HOST / XAQ_DATA) said.
+ */
+export function serviceInstallInput(
+  given: { dataDir?: string; port?: number; host?: string },
+  ops: Pick<ServiceOps, "platform" | "unitDir">,
+  env: NodeJS.ProcessEnv = process.env,
+): Pick<ConfigInput, "dataDir" | "port" | "host"> {
+  const legacy = legacyDaemonUnit(ops);
+  const installed = installedDaemonDataDir(ops);
+  return {
+    dataDir: given.dataDir ?? (envVar("DATA", env) || undefined) ?? legacy?.dataDir ?? (installed && installed === legacyDataDir() ? installed : undefined) ?? undefined,
+    port: given.port ?? (env.PORT?.trim() ? undefined : (legacy?.port ?? undefined)),
+    host: given.host ?? (env.HOST ? undefined : (legacy?.host ?? undefined)),
+  };
 }
 
 /** The data directory the installed (xaq) daemon service runs on, if one is installed and says. */
@@ -707,9 +746,14 @@ export function enableLinger(ops: ServiceOps): void {
 
 /** XAQ_DATA (AGENTINBOX_DATA in a unit from before the rename) from an installed unit or plist. */
 export function unitDataDir(text: string): string | null {
-  const systemd = /^Environment="(?:XAQ|AGENTINBOX)_DATA=((?:[^"\\]|\\.)*)"/m.exec(text);
+  return unitEnv(text, "XAQ_DATA") ?? unitEnv(text, "AGENTINBOX_DATA");
+}
+
+/** An environment variable a unit (`Environment="K=v"`) or plist (`<key>K</key><string>v</string>`) sets. */
+export function unitEnv(text: string, name: string): string | null {
+  const systemd = new RegExp(`^Environment="${name}=((?:[^"\\\\]|\\\\.)*)"`, "m").exec(text);
   if (systemd) return systemd[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%");
-  const plist = /<key>(?:XAQ|AGENTINBOX)_DATA<\/key><string>([^<]*)<\/string>/.exec(text);
+  const plist = new RegExp(`<key>${name}</key><string>([^<]*)</string>`).exec(text);
   if (plist) return plist[1]!.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   return null;
 }

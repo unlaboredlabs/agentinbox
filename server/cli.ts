@@ -11,8 +11,8 @@ const { default: pc } = await import("picocolors");
 
 process.title = "xaq";
 
-// `agentinbox` stays an alias of `xaq` for a release cycle (the old agentinbox-cli package, now a shim,
-// says the same before it runs us: it sets the flag so the notice isn't printed twice).
+// The `agentinbox` command now comes from the agentinbox-cli shim, which says this itself and sets the
+// flag before running us; the check stays for anything else that starts us under that name.
 if (basename(process.argv[1] ?? "") === "agentinbox" && !(globalThis as { __xaqShimNotice?: boolean }).__xaqShimNotice && !underService()) {
   process.stderr.write("agentinbox is now xaq: use `npx xaq-cli …` (or `xaq …` once installed with npm i -g xaq-cli).\n");
 }
@@ -122,15 +122,10 @@ const service = program
 withServerOptions(
   service.command("install").description("install and start the service; re-run it to change the port or update (replaces an agentinbox service, keeping its data)"),
 ).action(async (o: ServerFlags) => {
-  const { legacyDataDir, loadConfig } = await import("./config.ts");
-  const { installedDaemonDataDir, installService, legacyDaemonUnit, systemOps } = await import("./service.ts");
-  // Replacing a service from before the rename: keep the data directory it runs on unless told otherwise.
-  // A service already moved keeps ~/.agentinbox too, even if a ~/.xaq has appeared since.
-  const ops = systemOps();
-  const installed = installedDaemonDataDir(ops);
-  const dataDir =
-    o.data ?? (envVar("DATA") || undefined) ?? legacyDaemonUnit(ops)?.dataDir ?? (installed && installed === legacyDataDir() ? installed : undefined) ?? undefined;
-  await installService(loadConfig({ ...configInput(o), dataDir }, version));
+  const { loadConfig } = await import("./config.ts");
+  const { installService, serviceInstallInput, systemOps } = await import("./service.ts");
+  // Replacing a service from before the rename keeps its data directory, port and host unless told otherwise.
+  await installService(loadConfig(serviceInstallInput(configInput(o), systemOps()), version));
 });
 
 service

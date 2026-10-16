@@ -19,7 +19,19 @@ import { configDir, dataDir as listenDataDir, listenAppDir, profilePath, stateDi
 import { loadProfile, type Profile, saveProfile } from "../server/listen/profile.ts";
 import { hermesRoute, hermesRouteToolset, recipe, recipeToolFor } from "../server/listen/recipes.ts";
 import { installListenService, isServiceInstalled, uninstallListenService, writeLegacyEntry } from "../server/listen/service.ts";
-import { installService, legacyDaemonUnit, mergeServiceEnv, renderLaunchdPlist, renderSystemdUnit, type ServiceOps, serviceStatus, uninstallService, unitDataDir } from "../server/service.ts";
+import {
+  installService,
+  legacyDaemonUnit,
+  mergeServiceEnv,
+  parseEnvFile,
+  renderLaunchdPlist,
+  renderSystemdUnit,
+  serviceInstallInput,
+  type ServiceOps,
+  serviceStatus,
+  uninstallService,
+  unitDataDir,
+} from "../server/service.ts";
 import { removeLegacySkill, skillPath, writeSkill } from "../server/skill/index.ts";
 import { testConfig } from "./helpers.ts";
 import { FAKE_KEY, isolateXdg, makeEvent } from "./listen-client-fake.ts";
@@ -486,8 +498,8 @@ describe("service install: an agentinbox service moves to xaq", () => {
     const oldFile = join(units, platform === "darwin" ? OLD_PLIST : "agentinbox.service");
     const oldText =
       platform === "darwin"
-        ? `<plist><dict><key>Label</key><string>com.unlaboredlabs.agentinbox</string><key>AGENTINBOX_DATA</key><string>${config.dataDir}</string></dict></plist>\n`
-        : `[Service]\nExecStart="/n" "${config.dataDir}/app/node_modules/agentinbox-cli/dist/cli.js" start --no-open\nEnvironment="AGENTINBOX_DATA=${config.dataDir}"\n`;
+        ? `<plist><dict><key>Label</key><string>com.unlaboredlabs.agentinbox</string><key>AGENTINBOX_DATA</key><string>${config.dataDir}</string><key>PORT</key><string>9425</string><key>HOST</key><string>127.0.0.1</string></dict></plist>\n`
+        : `[Service]\nExecStart="/n" "${config.dataDir}/app/node_modules/agentinbox-cli/dist/cli.js" start --no-open\nEnvironment="AGENTINBOX_DATA=${config.dataDir}"\nEnvironment="PORT=9425"\nEnvironment="HOST=127.0.0.1"\n`;
     writeFileSync(oldFile, oldText, { mode: platform === "darwin" ? 0o600 : 0o644 });
     oldApp(join(config.dataDir, "app"));
     writeFileSync(join(config.dataDir, "service.env"), `AGENTINBOX_MASTER_KEY=${Buffer.alloc(32, 3).toString("base64")}\n`, { mode: 0o600 });
@@ -595,6 +607,48 @@ describe("service install: an agentinbox service moves to xaq", () => {
     expect(readFileSync(oldFile, "utf8")).toBe(oldText);
     expect(ops.active.size).toBe(0);
     expect(ops.enabled.size).toBe(0);
+  });
+
+  it("keeps the old service's data directory, port and host unless the command line or environment says otherwise", () => {
+    for (const platform of ["darwin", "linux"] as const) {
+      const { config, units } = setup(platform);
+      const ops = platform === "darwin" ? fakeLaunchd(units) : fakeSystemd(units);
+      expect(serviceInstallInput({}, ops, {})).toEqual({ dataDir: config.dataDir, port: 9425, host: "127.0.0.1" });
+      expect(serviceInstallInput({ port: 8000, host: "0.0.0.0", dataDir: "/srv/x" }, ops, {})).toEqual({ dataDir: "/srv/x", port: 8000, host: "0.0.0.0" });
+      // PORT / HOST / XAQ_DATA in the environment count as given (loadConfig reads them).
+      expect(serviceInstallInput({}, ops, { HOST: "::1", PORT: "7000", XAQ_DATA: "/srv/y" })).toEqual({ dataDir: "/srv/y", port: undefined, host: undefined });
+    }
+  });
+
+  it("the new unit binds where the old one did: a 127.0.0.1 service doesn't widen to 0.0.0.0 on upgrade", async () => {
+    for (const platform of ["darwin", "linux"] as const) {
+      const { config, units } = setup(platform);
+      const ops = platform === "darwin" ? fakeLaunchd(units, { loaded: ["com.unlaboredlabs.agentinbox"] }) : fakeSystemd(units, { active: ["agentinbox"], enabled: ["agentinbox"] });
+      stageInto(ops);
+      const input = serviceInstallInput({}, ops, {});
+      await installService({ ...config, port: input.port!, host: input.host! }, ops, { launchdPollMs: 1 });
+      const text = readFileSync(join(units, platform === "darwin" ? NEW_PLIST : "xaq.service"), "utf8");
+      if (platform === "darwin") {
+        expect(text).toContain("<key>HOST</key><string>127.0.0.1</string>");
+        expect(text).toContain("<key>PORT</key><string>9425</string>");
+      } else {
+        expect(text).toContain('Environment="HOST=127.0.0.1"');
+        expect(text).toContain('Environment="PORT=9425"');
+      }
+    }
+  });
+
+  it("service.env keeps the key under both names, so going back to agentinbox-cli by hand still starts", async () => {
+    const { config, units } = setup("darwin");
+    const key = Buffer.alloc(32, 3).toString("base64");
+    const ops = fakeLaunchd(units, { loaded: ["com.unlaboredlabs.agentinbox"] });
+    stageInto(ops);
+    await installService(config, ops, { launchdPollMs: 1 });
+    const env = parseEnvFile(readFileSync(join(config.dataDir, "service.env"), "utf8"));
+    expect(env).toEqual({ XAQ_MASTER_KEY: key, AGENTINBOX_MASTER_KEY: key });
+    // A reinstall reads it back without piling up or diverging.
+    await installService(config, ops, { launchdPollMs: 1 });
+    expect(readFileSync(join(config.dataDir, "service.env"), "utf8")).toBe(`XAQ_MASTER_KEY=${key}\nAGENTINBOX_MASTER_KEY=${key}\n`);
   });
 
   it("systemd: a second run is a plain reinstall", async () => {
@@ -788,9 +842,9 @@ describe("agentinbox-cli shim and the old entry point", () => {
     expect(run(join(app, "node_modules/agentinbox-cli/dist/cli.js"), ["listen", "--profile", "work"]).args).toEqual(["listen", "--profile", "work"]);
   });
 
-  it("xaq-cli itself: bin xaq plus the agentinbox alias", () => {
+  it("xaq-cli has only the xaq bin: the agentinbox bin belongs to the shim (no EEXIST next to a global agentinbox-cli)", () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
     expect(pkg.name).toBe("xaq-cli");
-    expect(pkg.bin).toEqual({ xaq: "dist/cli.js", agentinbox: "dist/cli.js" });
+    expect(pkg.bin).toEqual({ xaq: "dist/cli.js" });
   });
 });

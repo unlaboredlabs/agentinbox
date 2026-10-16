@@ -53,8 +53,8 @@ and is delivered once the listener is back: nothing is lost or delivered twice.
   `AGENTINBOX_EVENT_FILE` and the other ids next to the new `XAQ_*` ones.
 
 **Changes:**
-- the command is `xaq` (`npx xaq-cli …`); `agentinbox` still works for a release as an alias, and
-  `npx agentinbox-cli …` runs xaq after saying so;
+- the command is `xaq` (`npx xaq-cli …`); `agentinbox` (from the `agentinbox-cli` package, now a shim) and
+  `npx agentinbox-cli …` still work: they run xaq after saying so;
 - the service names above, and the services write `XAQ_*` variables;
 - new profiles and setups use `xaq` / `xaq-<profile>` for the MCP server and Hermes route, and the skill is
   installed as `xaq` (replacing the `agentinbox` one);
