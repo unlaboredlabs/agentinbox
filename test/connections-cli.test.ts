@@ -310,10 +310,13 @@ describe("config readers", () => {
     expect(s.anchored).toBe(UNREADABLE);
     expect((s.block as Record<string, unknown>).url).toBe(UNREADABLE);
     expect(s["quoted name"]).toEqual({ url: "https://q.example/mcp#frag" });
-    expect(removeYamlServers(yaml, ["ok", "quoted name"])).toBe(
-      ["a: 1", "mcp_servers:", "  flow: { url: https://y }", "  anchored: &a", "    url: https://z", "  block:", "    url: |", "      https://w", "b: 2", ""].join("\n"),
+    // An anchor anywhere in the block: never rewritten (a kept entry might use one a removed entry defines).
+    expect(removeYamlServers(yaml, ["ok", "quoted name"])).toBeNull();
+    const plain = yaml.replace("  anchored: &a\n    url: https://z\n", "");
+    expect(removeYamlServers(plain, ["ok", "quoted name"])).toBe(
+      ["a: 1", "mcp_servers:", "  flow: { url: https://y }", "  block:", "    url: |", "      https://w", "b: 2", ""].join("\n"),
     );
-    expect(removeYamlServers(yaml, ["flow"])).toBeNull();
+    expect(removeYamlServers(plain, ["flow"])).toBeNull();
     expect(removeYamlServers("mcp_servers:\n  only:\n    url: x\nz: 1\n", ["only"])).toBe("mcp_servers: {}\nz: 1\n");
     expect(readMcpServers("mcp_servers: {}\n")).toEqual({});
     expect(readMcpServers("other: 1\n")).toEqual({});

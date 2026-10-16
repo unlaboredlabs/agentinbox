@@ -209,7 +209,21 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * part of the cut entry. So a commented-out property (`#    timeout: 120`) or a note (`  # TODO`) inside an entry
  * never ends it early, and none of its lines can end up under a neighbour. null when a layout can't be cut safely.
  */
+/**
+ * Whether lines use YAML anchors, aliases or merge keys (`&a`, `*a`, `<<:`) outside quotes and comments. Cutting
+ * an entry could then remove an anchor a kept entry still refers to, so those blocks are never rewritten.
+ */
+export function hasAnchors(lines: string[]): boolean {
+  return lines.some((l) => {
+    const t = stripComment(l)
+      .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/'(?:[^']|'')*'/g, "''");
+    return /(^|[\s:[{,-])[&*][^\s,\]}]/.test(t) || /(^|[\s{,-])<<\s*:/.test(t);
+  });
+}
+
 export function cutEntries(body: string[], indent: string, names: string[]): { kept: string[]; found: Set<string> } | null {
+  if (hasAnchors(body)) return null;
   const isKey = (l: string, name: string) => new RegExp(`^${escapeRe(indent)}(["']?)${escapeRe(name)}\\1\\s*:`).test(l);
   const ind = (l: string) => /^(\s*)/.exec(l)![1]!.length;
   const isComment = (l: string) => l.trimStart().startsWith("#");

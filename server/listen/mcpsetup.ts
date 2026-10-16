@@ -12,7 +12,7 @@ import { NPX } from "./version.ts";
 import { safeText } from "./ui.ts";
 import { isDeepStrictEqual } from "node:util";
 import { readTomlMcpServers } from "../connections-cli/toml.ts";
-import { cutEntries, readMcpServers, removeYamlServers } from "../connections-cli/yaml.ts";
+import { cutEntries, hasAnchors, mcpServersBlock, readMcpServers, removeYamlServers } from "../connections-cli/yaml.ts";
 
 /**
  * `--setup-mcp`: registers the agentinbox MCP server in the agent's own tool without the key ever
@@ -69,10 +69,13 @@ export function checkRewrite(
   removed: string[],
 ): string | null {
   if (!before || !after) return "it can't be read back";
+  // A value the reader couldn't read compares equal to any other unreadable one: that verifies nothing.
+  const opaque = (v: unknown): boolean => typeof v === "symbol" || (!!v && typeof v === "object" && Object.values(v as Record<string, unknown>).some(opaque));
   const gone = new Set(removed);
   for (const [name, entry] of Object.entries(before)) {
     if (name === ours.name || gone.has(name)) continue;
     if (!(name in after)) return `"${name}" would disappear`;
+    if (opaque(entry) || opaque(after[name])) return `"${name}" has a value this can't read, so the result can't be verified`;
     if (!isDeepStrictEqual(after[name], entry)) return `"${name}" would change`;
   }
   for (const name of removed) if (name in after) return `"${name}" would still be there`;
@@ -441,6 +444,14 @@ function setupHermes(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
   ];
   const current = existsSync(configFile) ? readFileSync(configFile, "utf8") : "";
   const extra = removals(t, opts);
+  const blk = mcpServersBlock(current);
+  if (blk && hasAnchors(current.split("\n").slice(blk.start + 1, blk.end))) {
+    return {
+      ok: false,
+      message: `${configFile} uses YAML anchors, aliases or merge keys (&, *, <<) under mcp_servers; not rewriting it automatically. Nothing was changed.`,
+      manual,
+    };
+  }
   const upserted = upsertYamlServer(current, t.name, entry);
   // Removed in the same write, before anything touches the disk: one entry we can't cut out cleanly changes nothing.
   const next = upserted === null ? null : removeYamlServers(upserted, extra.map((r) => r.name));

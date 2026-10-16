@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readClientConfig } from "../server/connections-cli/clients.ts";
 import { planImport, runImport } from "../server/connections-cli/import.ts";
 import { ScriptedPrompter } from "../server/connections-cli/prompt.ts";
-import { readMcpServers } from "../server/connections-cli/yaml.ts";
+import { hasAnchors, readMcpServers, removeYamlServers } from "../server/connections-cli/yaml.ts";
 import { checkRewrite, setupMcp } from "../server/listen/mcpsetup.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { type Daemon, publicLookup, startDaemon } from "./connections-cli-fake.ts";
@@ -535,6 +535,30 @@ describe("setup-mcp removing imported entries", () => {
       write(["mcp_servers:", "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  agentinbox:", "    url: https://old.example/mcp", "  # rotated 2026-10", "    headers:", '      Authorization: "Bearer ${AGENTINBOX_API_KEY}"', "      X-Old: yes", ""].join("\n"));
       expect(setupMcp("hermes", target, "/p.json").ok).toBe(true);
       expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+    });
+
+    it("an anchor in a removed entry used by a kept one: refused, nothing changed", () => {
+      const yaml = ["mcp_servers:", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "    timeout: &to 120", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    timeout: *to", ""].join("\n");
+      write(yaml);
+      const envBefore = readFileSync(join(hermes, ".env"), "utf8");
+      const r = setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] });
+      expect(r.ok).toBe(false);
+      expect(r.message).toContain("uses YAML anchors, aliases or merge keys (&, *, <<) under mcp_servers; not rewriting it automatically. Nothing was changed.");
+      expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(yaml);
+      expect(readFileSync(join(hermes, ".env"), "utf8")).toBe(envBefore);
+      expect(backups(hermes)).toEqual([]);
+      // Merge keys too; and a quoted "&" or a URL's query isn't mistaken for one.
+      expect(hasAnchors(["  base:", "    <<: *defaults"])).toBe(true);
+      expect(hasAnchors(['    url: "https://x.example/?a=1&b=2"', "    url: https://x.example/?a=1&b=2", "    # &not-an-anchor"])).toBe(false);
+      expect(removeYamlServers(yaml, ["whoop"])).toBeNull();
+    });
+
+    it("the safety net refuses an entry it can't read (an unreadable value verifies nothing)", () => {
+      const entry = { url: "u" };
+      const sym = Symbol("unreadable");
+      expect(checkRewrite({ a: { url: sym }, b: { url: "y" } }, { a: { url: sym }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe(
+        '"a" has a value this can\'t read, so the result can\'t be verified',
+      );
     });
 
     it("the safety net refuses any rewrite that doesn't read back exactly", () => {
