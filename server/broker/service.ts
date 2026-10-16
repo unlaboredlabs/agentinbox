@@ -32,7 +32,7 @@ import { randomToken } from "../util/ids.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
 import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
 import { tableCredentials } from "./credentials-table.ts";
-import { type BrokerPolicyRuntime, createBrokerPolicyRuntime } from "./policy/index.ts";
+import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
 import {
   type BrokerCalls,
   type CredentialStore,
@@ -232,11 +232,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
   });
   // A tool that left the upstream: its pending calls fail closed and its allow rules go.
-  catalog.onToolRemoved((e) => void policy.onToolRemoved(e.connectionId, e.name));
+  // The runtime registered for this context (brokerPolicyOf): this one, unless a test attached its own.
+  const rt = (): BrokerPolicyRuntime => brokerPolicyOf(ctx) ?? policy;
+  catalog.onToolRemoved((e) => void rt().onToolRemoved(e.connectionId, e.name));
   const parts: BrokerParts = {
-    calls: policy,
-    callStatus: (agentId, id) => policy.getCallStatus(agentId, id),
-    runApprovedCall: (approval) => policy.runApprovedCall(approval),
+    calls: { call: (agentId, name, args, signal) => rt().call(agentId, name, args, signal) },
+    callStatus: (agentId, id) => rt().getCallStatus(agentId, id),
+    runApprovedCall: (approval) => rt().runApprovedCall(approval),
     ...base,
   };
 
@@ -364,8 +366,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   const service: BrokerService = {
     enabled,
     policy,
-    onGrantChanged: (agentId, connectionId) => void policy.onGrantChanged(agentId, connectionId),
-    onGrantRemoved: (agentId, connectionId) => void policy.onGrantRemoved(agentId, connectionId),
+    onGrantChanged: (agentId, connectionId) => void rt().onGrantChanged(agentId, connectionId),
+    onGrantRemoved: (agentId, connectionId) => void rt().onGrantRemoved(agentId, connectionId),
 
     view(agentId) {
       if (!enabled()) return null;
@@ -418,7 +420,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         }
       }
       // The policy's kill: cancel pending calls, clear credentials, untrack refresh, close the source. Audited.
-      await policy.killConnection(connectionId);
+      await rt().killConnection(connectionId);
       ctx.db.run("UPDATE connections SET status_reason = ? WHERE id = ?", reason, connectionId);
       await closeSource(connectionId);
     },
