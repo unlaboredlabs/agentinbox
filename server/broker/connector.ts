@@ -135,7 +135,7 @@ export function upstreamConnector(ctx: AppContext, up: UpstreamRuntime, presetFo
         }
         const clientId = input.inputs?.client_id?.trim();
         const preRegistered = clientId ? { client_id: clientId, ...(input.inputs?.client_secret ? { client_secret: input.inputs.client_secret } : {}) } : null;
-        const r = await up.startConnect(conn.id, { preRegistered, reconnectPolicy: preset?.reconnectPolicy });
+        const r = await up.startConnect(conn.id, { preRegistered, reconnectPolicy: preset?.reconnectPolicy, sameOriginIssuer: preset?.userServer?.sameOriginIssuer === true });
         return { status: "authorize", authorizeUrl: r.authUrl, callbackMode: r.callbackMode, redirectUri: r.redirectUri };
       } catch (err) {
         ctx.log.child("broker").warn("Starting a connection failed", { connection: conn.id, error: scrubText(errorMessage(err), [], 200) });

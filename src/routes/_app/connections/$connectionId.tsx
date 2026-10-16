@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, CheckIcon, CircleCheckIcon, NetworkIcon, PauseIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { PageHeader, QueryError, TimeAgo, ToneBadge } from "@/components/common";
-import { connectionStatusView, hostPort } from "@/components/connections/connection-flow";
+import { connectionStatusView, grantedScopesView, hostPort } from "@/components/connections/connection-flow";
 import { useConnectionActions, useReconnect } from "@/components/connections/connection-row";
 import { hasHidden, HiddenCharsWarning, Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
@@ -46,6 +46,7 @@ function ConnectionPage() {
   if (conn.isError) return <QueryError error={conn.error} onRetry={() => void conn.refetch()} />;
   const c = conn.data;
   const view = connectionStatusView(c, now);
+  const scopes = grantedScopesView(c);
 
   return (
     <>
@@ -104,6 +105,23 @@ function ConnectionPage() {
           Connected <TimeAgo date={c.createdAt} />
         </span>
       </div>
+      {scopes && (
+        <div className="space-y-1 text-sm">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-muted-foreground">Access {c.name} granted:</span>
+            {scopes.scopes.length ? (
+              scopes.scopes.map((s) => (
+                <Badge key={s} variant="outline" className="font-mono">
+                  {s}
+                </Badge>
+              ))
+            ) : (
+              <span className="text-muted-foreground">no scopes named</span>
+            )}
+          </div>
+          {scopes.note && <p className="text-muted-foreground">{scopes.note}</p>}
+        </div>
+      )}
 
       <section className="space-y-3" aria-labelledby="held-heading">
         <div>

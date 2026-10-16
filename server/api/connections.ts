@@ -25,6 +25,7 @@ import { connectionView, getConnection, listConnections, notifyAgent } from "../
 import { Approvals } from "../mail/approvals.ts";
 import { connectionHookUrl } from "../integrations/hooks.ts";
 import type { WebhookReachability } from "../broker/reachability.ts";
+import { presetServerSlug, presetServerUrl } from "../integrations/user-server.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
@@ -87,6 +88,16 @@ export function exactOrigin(url: string): string {
   } catch (err) {
     throw badRequest(err instanceof PrivateTargetError ? err.message : "That URL can't be allowed", "Use a hostname or an IPv4 address.");
   }
+}
+
+/** Names are unique per owner (case-insensitive). NULL owner = the install's single owner. */
+const nameTaken = (ctx: AppContext, name: string, ownerId: string | null, exceptId: string | null = null): boolean =>
+  !!ctx.db.get("SELECT 1 FROM connections WHERE lower(name) = lower(?) AND owner_id IS ? AND id IS NOT ?", name, ownerId, exceptId);
+
+/** A free default name: `base`, else `base (2)`, `base (3)`… */
+function freeName(ctx: AppContext, base: string, ownerId: string | null): string {
+  if (!nameTaken(ctx, base, ownerId)) return base;
+  for (let i = 2; ; i++) if (!nameTaken(ctx, `${base} (${i})`, ownerId)) return `${base} (${i})`;
 }
 
 /** A free slug from a host or preset slug: lowercase, dashes, at most 24, suffixed -2, -3… on collision. */
@@ -195,6 +206,7 @@ export function connectionsApi(ctx: AppContext) {
       authType: authTypeOf(p.auth),
       setupSteps: steps.map((s) => ({ ...s })),
       reconnectPolicy: p.reconnectPolicy ?? null,
+      userServer: p.userServer ? { defaultPath: p.userServer.defaultPath } : null,
     };
   };
 
@@ -217,13 +229,21 @@ export function connectionsApi(ctx: AppContext) {
     const body = await readBody(c, createSchema);
     const preset = body.preset ? (ctx.broker.presets().find((p) => p.id === body.preset) ?? null) : null;
     if (body.preset && !preset) throw badRequest(`The ${body.preset} integration isn't available in this version`);
-    const url = preset?.url ?? body.url ?? null;
+    // A preset whose server the user names (T3 Code): one connection per server, at the URL given.
+    const userServer = preset?.userServer ?? null;
+    if (userServer && !body.url) throw badRequest(`Enter the address of your ${preset!.displayName} server`, "For example http://100.101.102.103:3773 on Tailscale.");
+    const url = userServer ? presetServerUrl(body.url!, userServer.defaultPath) : (preset?.url ?? body.url ?? null);
     if (!preset && !url) throw badRequest("Pass a url, or a preset");
     const kind: ConnectionKind = preset?.kind === "native" ? (`native_${preset.id}` as ConnectionKind) : "remote_http";
     if (!(CONNECTION_KINDS as readonly string[]).includes(kind)) throw badRequest(`The ${preset!.id} integration isn't available in this version`);
     if (kind === "remote_http" && !url) throw badRequest("This integration has no URL");
-    const chosenSlug = body.slug ?? freeSlug(ctx, preset?.slug ?? new URL(url!).hostname.split(".").find((p) => p !== "mcp" && p !== "www") ?? "mcp");
+    const slugBase = userServer ? presetServerSlug(preset!.slug, url!) : (preset?.slug ?? new URL(url!).hostname.split(".").find((p) => p !== "mcp" && p !== "www") ?? "mcp");
+    const chosenSlug = body.slug ?? freeSlug(ctx, slugBase);
     if (ctx.db.get("SELECT 1 FROM connections WHERE slug = ?", chosenSlug)) throw conflict(`The slug ${chosenSlug} is taken`, "Pick another: tools are named <slug>__<tool>.");
+    // Names are unique per owner (the single owner today): a default one gets " (2)", a chosen one that's taken is refused.
+    const ownerId: string | null = null;
+    if (body.name !== undefined && nameTaken(ctx, body.name, ownerId)) throw conflict(`You already have a connection named ${body.name}`, "Give this one another name.");
+    const chosenName = body.name ?? freeName(ctx, userServer ? new URL(url!).host : (preset?.displayName ?? new URL(url!).hostname), ownerId);
     const agentIds = body.agentIds ?? ctx.db.all<{ id: string }>("SELECT id FROM agents ORDER BY created_at").map((a) => a.id);
     requireAgents(agentIds);
     const levelDefault = body.levelDefault ?? "ask";
@@ -237,7 +257,7 @@ export function connectionsApi(ctx: AppContext) {
         kind,
         preset?.id ?? null,
         chosenSlug,
-        body.name ?? preset?.displayName ?? new URL(url!).hostname,
+        chosenName,
         url,
         preset ? authTypeOf(preset.auth) : "none",
         levelDefault,
@@ -270,6 +290,7 @@ export function connectionsApi(ctx: AppContext) {
     ctx.db.tx(() => {
       const t = now();
       if (body.name !== undefined && body.name !== before.name) {
+        if (nameTaken(ctx, body.name, before.ownerId, id)) throw conflict(`You already have a connection named ${body.name}`, "Give this one another name.");
         ctx.db.run("UPDATE connections SET name = ?, updated_at = ? WHERE id = ?", body.name, t, id);
         changed.push("name");
       }

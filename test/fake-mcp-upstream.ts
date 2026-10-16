@@ -62,7 +62,7 @@
  *   dcr (false: no registration_endpoint; use `preRegistered` clients), scopesSupported, pkce "absent" (no
  *   code_challenge_methods_supported at all), advertiseIss (false: no authorization_response_iss_parameter_supported),
  *   cimd (client ID metadata documents: an https client_id is fetched with `cimdFetch`), challengeScope (a
- *   `scope="…"` in the 401, for step-up). The token endpoint checks
+ *   `scope="…"` in the 401, for step-up), grantScope (T3: the scope granted whatever was asked). The token endpoint checks
  *   the RFC 7636 verifier format (43–128 unreserved characters). `issuerPath` puts the issuer under a path (RFC 8414
  *   path insertion; the root documents 404). Fixed at start: authServer,
  *   prm, advertiseResourceMetadata (false: a bare `WWW-Authenticate: Bearer`), metadataAt, preRegistered.
@@ -162,6 +162,11 @@ export interface FakeOAuthSettings {
   cimd: boolean;
   /** A `scope="…"` to put in the 401's WWW-Authenticate (step-up), or null. */
   challengeScope: string | null;
+  /**
+   * The scope granted whatever was asked for, or null (grant what was asked). T3 Code: the access level the user picks
+   * decides (Full access adds settings:write and source-control:write; Read only grants orchestration:read alone).
+   */
+  grantScope: string | null;
 }
 
 export interface FakeOAuthOptions extends Partial<FakeOAuthSettings> {
@@ -499,6 +504,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     advertiseIss: oauthCfg?.advertiseIss ?? true,
     cimd: oauthCfg?.cimd ?? false,
     challengeScope: oauthCfg?.challengeScope ?? null,
+    grantScope: oauthCfg?.grantScope ?? null,
   };
   const issuerPath = (oauthCfg?.issuerPath ?? "").replace(/\/$/, "");
 
@@ -1055,7 +1061,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
         redirectUri,
         challenge: q.get("code_challenge")!,
         resource,
-        scope: q.get("scope") ?? settings.scopesSupported.join(" "),
+        scope: settings.grantScope ?? q.get("scope") ?? settings.scopesSupported.join(" "),
         exp: now() + 600_000,
         used: false,
       });

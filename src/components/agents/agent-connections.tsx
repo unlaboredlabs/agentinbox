@@ -37,7 +37,7 @@ export function AgentConnections({ agentId }: { agentId: string }) {
       ) : list.data.length === 0 ? (
         <Card>
           <CardContent className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-muted-foreground">No connections yet. Add Notion, WHOOP or any MCP server for your agents.</p>
+            <p className="text-sm text-muted-foreground">No connections yet. Add Notion, WHOOP, T3 Code or any MCP server for your agents.</p>
             <Button variant="outline" onClick={() => openAddConnection()}>
               <PlusIcon /> Add connection
             </Button>

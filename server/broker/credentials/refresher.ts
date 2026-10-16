@@ -59,7 +59,8 @@ export class Refresher implements TokenRefresher {
     if (!t.refreshToken) {
       if (!forced && t.expiresAt !== null && this.now() < t.expiresAt) return t.accessToken;
       const reason = forced ? "The server rejected the access token and there's no refresh token" : "The access token expired and the server issues no refresh token";
-      this.store.markNeedsReauth(connectionId, reason);
+      // No refresh token (T3): the access token was the whole credential, so it has expired.
+      this.store.markNeedsReauth(connectionId, reason, { expired: true });
       throw new SourceError("needs_reauth", reason);
     }
     let p = this.inflight.get(connectionId);

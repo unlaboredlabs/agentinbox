@@ -24,8 +24,14 @@ import {
   connectInput,
   connectionStatusView,
   createInput,
+  defaultName,
+  draftControl,
   draftProblems,
+  draftUrl,
   emptyDraft,
+  grantedScopesView,
+  presetServerSlug,
+  suggestDraftSlug,
   exactOrigin,
   finishEarlyCreate,
   grantsWith,
@@ -71,6 +77,8 @@ const conn = (over: Partial<Shared.ConnectionView> = {}): Shared.ConnectionView 
   updatedAt: inDays(-3),
   tools: { total: 12, active: 12, held: 0 },
   expiresInDays: null,
+  expired: false,
+  grantedScopes: null,
   agents: 2,
   ...over,
 });
@@ -121,7 +129,7 @@ const view = (over: Partial<Shared.McpCallApprovalView> = {}): Shared.McpCallApp
   ...over,
 });
 
-const notion: Shared.PresetView = { id: "notion", displayName: "Notion", slug: "notion", kind: "remote_http", url: "https://mcp.notion.com/mcp", authType: "oauth", setupSteps: [], reconnectPolicy: { maxLifetimeDays: 180 } };
+const notion: Shared.PresetView = { id: "notion", displayName: "Notion", slug: "notion", kind: "remote_http", url: "https://mcp.notion.com/mcp", authType: "oauth", setupSteps: [], reconnectPolicy: { maxLifetimeDays: 180 }, userServer: null };
 const whoop: Shared.PresetView = {
   id: "whoop",
   displayName: "WHOOP",
@@ -130,6 +138,7 @@ const whoop: Shared.PresetView = {
   url: null,
   authType: "oauth",
   reconnectPolicy: null,
+  userServer: null,
   setupSteps: [
     { id: "dash", title: "Open the developer dashboard", body: "Sign in with your WHOOP account.", link: { label: "Open dashboard", url: "https://developer.whoop.com" } },
     { id: "redirect", title: "Add the redirect URI", body: "Paste it as `Redirect URL`.", copy: { label: "Redirect URI", value: "http://localhost:8425/oauth/connections/callback" } },
@@ -167,6 +176,60 @@ describe("Connections: status in plain words", () => {
       { id: "con_1", text: "Notion changed 1 tool" },
       { id: "con_2", text: "T3 forge changed 3 tools" },
     ]);
+  });
+});
+
+describe("T3 Code in the console: a user-named server, expiry and granted scopes", () => {
+  const t3: Shared.PresetView = {
+    id: "t3code",
+    displayName: "T3 Code",
+    slug: "t3",
+    kind: "remote_http",
+    url: null,
+    authType: "oauth",
+    setupSteps: [{ id: "server", title: "Enter your T3 Code server's address", body: "" }],
+    reconnectPolicy: null,
+    userServer: { defaultPath: "/mcp" },
+  };
+
+  it("asks for the address and checks it like a custom server; names and slugs come from the host", () => {
+    const d = emptyDraft(t3);
+    expect(d).toMatchObject({ url: "", name: "", slug: "" });
+    expect(draftControl(d)).toBeNull();
+    expect(draftProblems(d, [])[0]).toBe("Check the address first.");
+    const typed = { ...d, url: "http://100.104.249.49:3773" };
+    expect(draftUrl(typed)).toBe("http://100.104.249.49:3773/mcp");
+    expect(defaultName(typed)).toBe("100.104.249.49:3773");
+    expect(suggestDraftSlug(typed)).toBe("t3-100-104-249-49");
+    expect(presetServerSlug("t3", "http://forge.tail1.ts.net:3773/mcp")).toBe("t3-forge");
+    // On the tailnet: the private-network allow first, like any custom server.
+    const blocked = { ...typed, slug: "t3-100-104-249-49", probe: probe({ reachable: false, auth: "unknown", blocked: "private_target", privateTarget: "http://100.104.249.49:3773" }) };
+    expect(draftControl(blocked)).toEqual({ kind: "private" });
+    expect(draftProblems(blocked, [])).toContain("Allow the private-network address, or use another one.");
+    const ready = { ...blocked, probe: probe({ auth: "oauth", issuer: "http://100.104.249.49:3773", registration: "dcr", refresh: false }) };
+    expect(draftProblems(ready, [])).toEqual([]);
+    // A server that doesn't sign in isn't T3.
+    expect(draftProblems({ ...ready, probe: probe({ auth: "none" }) }, [])[0]).toMatch(/doesn't look like a T3 Code server/);
+    // The create body carries the preset, the address (path added) and a typed name.
+    expect(createInput(ready)).toEqual({ preset: "t3code", url: "http://100.104.249.49:3773/mcp", slug: "t3-100-104-249-49", levelDefault: "ask" });
+    expect(createInput({ ...ready, name: "forge" }).name).toBe("forge");
+  });
+
+  it("an expired connection says so and offers Reconnect", () => {
+    const expired = connectionStatusView(conn({ preset: "t3code", status: "needs_reauth", statusReason: "forge's sign-in expired on 2026-10-15. Reconnect it.", expiresAt: inDays(-1), expired: true }), NOW);
+    expect(expired).toMatchObject({ label: "Expired", tone: "bad", action: "reconnect" });
+    expect(expired.description).toMatch(/expired on 2026-10-15.*Reconnect keeps its name, agents and access/);
+    expect(connectionStatusView(conn({ expiresAt: inDays(6.5) }), NOW)).toMatchObject({ label: "Expires in 7 days", action: "reconnect" });
+    expect(connectionStatusView(conn({ expiresAt: inDays(0.5) }), NOW)).toMatchObject({ label: "Expires in 1 day", tone: "bad" });
+  });
+
+  it("shows the scopes T3 granted, and what Full access means", () => {
+    expect(grantedScopesView(conn({ grantedScopes: null }))).toBeNull();
+    expect(grantedScopesView(conn({ preset: "notion", grantedScopes: ["read"] }))).toEqual({ scopes: ["read"], note: null });
+    const full = grantedScopesView(conn({ preset: "t3code", grantedScopes: ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"] }));
+    expect(full?.note).toMatch(/Full access in T3/);
+    expect(grantedScopesView(conn({ preset: "t3code", grantedScopes: ["orchestration:read", "orchestration:operate"] }))?.note).toMatch(/start, message and stop/);
+    expect(grantedScopesView(conn({ preset: "t3code", grantedScopes: ["orchestration:read"] }))?.note).toMatch(/Read only in T3/);
   });
 });
 

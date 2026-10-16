@@ -169,6 +169,18 @@ export interface IntegrationPreset {
   events?: NativeEvents;
   /** Shown as dated warnings (e.g. Notion: 180-day cap, 30-day idle). */
   reconnectPolicy?: { maxLifetimeDays?: number; idleDays?: number };
+  /**
+   * Additive (T3 Code): a remote preset with no fixed `url`, where the user names the server (one connection per
+   * server). `defaultPath` is appended when only an origin is given; with `sameOriginIssuer` the authorization server
+   * must be that server's own origin (the approval page the user types a pairing code into is never elsewhere).
+   */
+  userServer?: { defaultPath: string; sameOriginIssuer: boolean };
+  /**
+   * Additive (T3 Code): exact tool names whose risky-verb name match is a reviewed false positive (`t3_thread_send`
+   * posts to one of T3's own threads). `classify`'s answer is final for these names only: a new or renamed tool still
+   * gets the name check.
+   */
+  nameCheckExempt?: readonly string[];
 }
 
 export interface NativeSourceDeps {
@@ -263,8 +275,11 @@ export interface CredentialStore {
   /** OAuth client registration / user app (client id, secret, registration response), per issuer. */
   client(connectionId: string): Record<string, unknown> | null;
   setClient(connectionId: string, client: Record<string, unknown>): void;
-  /** Sets status `needs_reauth` (with reason), emits `connection.auth_failed` once, audits. */
-  markNeedsReauth(connectionId: string, reason: string): void;
+  /**
+   * Sets status `needs_reauth` (with reason), emits `connection.auth_failed` once, audits. `expired` (additive): the
+   * credential's lifetime is over (no refresh token), so the connection reads as expired.
+   */
+  markNeedsReauth(connectionId: string, reason: string, opts?: { expired?: boolean }): void;
   /** Deletes every credential of the connection (kill switch, disconnect). */
   clear(connectionId: string): void;
 }

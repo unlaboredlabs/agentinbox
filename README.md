@@ -4,19 +4,21 @@
 [![npm](https://img.shields.io/npm/v/xaq-cli)](https://www.npmjs.com/package/xaq-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A self-hosted MCP broker for AI agents (formerly agentinbox, see [Upgrading from agentinbox](#upgrading-from-agentinbox)). One small server holds all your credentials (Notion, WHOOP, any MCP server,
-Gmail and Google Calendar) and gives each agent a single MCP endpoint with only the tools it's allowed. Risky actions
+A self-hosted MCP broker for AI agents (formerly agentinbox, see [Upgrading from agentinbox](#upgrading-from-agentinbox)). One small server holds all your credentials (Notion, WHOOP, T3 Code, any MCP
+server, Gmail and Google Calendar) and gives each agent a single MCP endpoint with only the tools it's allowed. Risky actions
 (deleting, sending, publishing, payments) can wait for your one-tap approval, and every call is audited.
 
 ```sh
 npx xaq-cli
 ```
 
-Open the link it prints and pick what to connect first: Notion, WHOOP, another MCP server, or Gmail and Calendar.
+Open the link it prints and pick what to connect first: Notion, WHOOP, T3 Code, another MCP server, or Gmail and
+Calendar.
 Only Gmail and Calendar need a Google Cloud project; everything else is a few clicks. The console then connects your
 first agent. Requires Node.js 22.13 or newer.
 
-From the terminal on the same machine: `npx xaq-cli connections add notion` (or `whoop`, or an MCP server URL),
+From the terminal on the same machine: `npx xaq-cli connections add notion` (or `whoop`, `t3code --url
+http://<your T3 server>:3773`, or an MCP server URL),
 and `npx xaq-cli import --from hermes` (also `claude-code`, `cursor`, `codex`) to move an agent's existing MCP
 servers behind the broker. Details: [Connections](docs/reference.md#connections-mcp-broker).
 

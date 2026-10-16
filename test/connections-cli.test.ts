@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exactOrigin as serverExactOrigin } from "../server/api/connections.ts";
 import type { IntegrationPreset } from "../server/broker/types.ts";
+import { t3codePreset } from "../server/integrations/t3code/index.ts";
 import { SessionStore } from "../server/auth/sessions.ts";
 import { sha256 } from "../server/crypto.ts";
 import { AdminApiError, CLI_SESSION_TTL_MS, createCliSession, daemonOrigin, openAdminChannel } from "../server/connections-cli/admin.ts";
@@ -248,6 +249,36 @@ describe("connections add", () => {
     expect(d.upstreams.connects).toEqual([{ slug: "whoop", input: { inputs: { clientId: "0f8e2c1a-1111", clientSecret: "whsecret" } }, privateTarget: null }]);
     expect(p.text).not.toContain("whsecret");
     expect(p.text).toContain('Connected "whoop": 7 tools');
+  });
+
+  it("t3code: the server's address (path added), the private allow, the steps, and a host-named connection", async () => {
+    const t3 = await startDaemon({ presets: [t3codePreset] });
+    try {
+      t3.upstreams.probe = (_u, allow) =>
+        allow ? { reachable: true, auth: "oauth", message: "OAuth", issuer: "http://100.104.249.49:3773", registration: "dcr", refresh: false } : { reachable: false, auth: "unknown", blocked: "private_target", message: "blocked" };
+      t3.upstreams.connect = (conn) => {
+        t3.giveTools(conn.slug, 83);
+        return { status: "connected" };
+      };
+      const p = new ScriptedPrompter([], true);
+      const flags = { yes: true, url: "http://100.104.249.49:3773", allowPrivate: "http://100.104.249.49:3773" };
+      expect(await addConnection("t3code", flags, { api: t3.api, prompter: p, env: {}, pollMs: 1, timeoutMs: 2000 })).toBe(0);
+      expect(t3.h.ctx.db.get("SELECT preset, name, url, private_target FROM connections WHERE slug = 't3-100-104-249-49'")).toEqual({
+        preset: "t3code",
+        name: "100.104.249.49:3773",
+        url: "http://100.104.249.49:3773/mcp",
+        private_target: "http://100.104.249.49:3773",
+      });
+      expect(p.text).toContain("Settings → Connections");
+      expect(p.text).toContain('Connected "t3-100-104-249-49": 83 tools');
+      // Something that doesn't sign in isn't T3.
+      t3.upstreams.probe = () => ({ reachable: true, auth: "none", message: "" });
+      await expect(addConnection("t3code", { yes: true, url: "https://other.example.com" }, { api: t3.api, prompter: new ScriptedPrompter([], true), env: {}, pollMs: 1, timeoutMs: 2000 })).rejects.toThrow(
+        /doesn't look like a T3 Code server/,
+      );
+    } finally {
+      await t3.dispose();
+    }
   });
 
   it("an unknown integration names the presets", async () => {

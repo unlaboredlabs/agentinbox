@@ -47,6 +47,8 @@ export interface ExpiryDeps {
   emit: EmitConnectionEvent;
   store: SqliteCredentialStore;
   now?: () => number;
+  /** The console page of a connection: the one-click Reconnect link in `connection.expiring`. */
+  consoleUrl?: (connectionId: string) => string;
 }
 
 /** One pass: emits `connection.expiring` once per threshold and credential, marks expired ones needs_reauth. */
@@ -59,7 +61,7 @@ export function checkExpiries(deps: ExpiryDeps): void {
     const n = expiryNotice({ name: r.name, expiresAt: r.expires_at }, now);
     if (!n?.level) continue;
     if (n.level === "expired") {
-      deps.store.markNeedsReauth(r.id, n.message);
+      deps.store.markNeedsReauth(r.id, n.message, { expired: true });
       continue;
     }
     // The outbox dedupes on the key: one event per threshold per credential (a reconnect moves expires_at).
@@ -67,7 +69,20 @@ export function checkExpiries(deps: ExpiryDeps): void {
     const seen = deps.db.get("SELECT 1 FROM audit_log WHERE action = 'connection.expiring' AND target = ? AND reason = ?", r.id, dedupeKey);
     if (seen) continue;
     try {
-      deps.emit({ type: "connection.expiring", connectionId: r.id, detail: { slug: r.slug, name: r.name, expiresAt: r.expires_at, daysLeft: n.daysLeft, message: n.message }, dedupeKey });
+      deps.emit({
+        type: "connection.expiring",
+        connectionId: r.id,
+        detail: {
+          slug: r.slug,
+          name: r.name,
+          expiresAt: r.expires_at,
+          daysLeft: n.daysLeft,
+          message: n.message,
+          // The one-click Reconnect: the connection's page in the console (webhooks and the listener carry it).
+          ...(deps.consoleUrl ? { reconnectUrl: deps.consoleUrl(r.id) } : {}),
+        },
+        dedupeKey,
+      });
     } catch (err) {
       deps.log.child("broker").error("Could not record connection.expiring", { error: errorMessage(err) });
     }
