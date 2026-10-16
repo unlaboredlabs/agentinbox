@@ -332,6 +332,63 @@ describe("mcp.call approvals", () => {
     expect(w.src.calls).toHaveLength(1);
   });
 
+  it("runApprovedCall claims the run itself: concurrent or repeated hooks forward it once", async () => {
+    const { id } = await queue();
+    w.h.ctx.db.run("UPDATE approvals SET status = 'approved', decided_at = ? WHERE id = ?", new Date().toISOString(), id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    w.src.handler = async () => {
+      await gate;
+      return { content: [{ type: "text", text: "ok" }] };
+    };
+    const a = w.h.ctx.mail.getApproval(id) as McpCallApproval;
+    const runs = [w.rt.runApprovedCall(a), w.rt.runApprovedCall(a)];
+    release();
+    await Promise.all(runs);
+    await w.rt.runApprovedCall(a);
+    expect(w.src.calls).toHaveLength(1);
+    // Still pending (never claimed by a human): the hook doesn't run it.
+    const { id: id2 } = await queue();
+    await w.rt.runApprovedCall(w.h.ctx.mail.getApproval(id2) as McpCallApproval);
+    expect(w.src.calls).toHaveLength(1);
+  });
+
+  it("pending_approval tells the agent not to call again", async () => {
+    const r = await w.rt.call(w.agent, "notion__delete_pages", { page_ids: ["p1"] }, signal());
+    expect(textOf(r)).toContain("Don't call this tool again for the same action");
+    expect(textOf(r)).toContain("check with get_call_status");
+  });
+
+  it("always allow also approves and runs the agent's other pending calls the new rule covers", async () => {
+    const { id } = await queue({ page_ids: ["p1"] });
+    const { id: covered } = await queue({ page_ids: ["p1"], reason: "again" });
+    const { id: uncovered } = await queue({ page_ids: ["p1", "p2"] });
+    grant(w.h.ctx, w.other, w.con, "ask");
+    const otherId = approvalIdOf(await w.rt.call(w.other, "notion__delete_pages", { page_ids: ["p1"] }, signal()))!;
+    await w.rt.approve(id, { alwaysAllow: { target: true } });
+    expect(w.h.ctx.mail.getApproval(covered)!.status).toBe("sent");
+    expect(w.h.ctx.mail.getApproval(uncovered)!.status).toBe("pending");
+    expect(w.h.ctx.mail.getApproval(otherId)!.status).toBe("pending");
+    expect(w.src.calls).toHaveLength(2);
+  });
+
+  it("both recoveries, in either order, leave an interrupted mcp.call failed with an unknown outcome", async () => {
+    const mail = new Approvals(w.h.ctx);
+    for (const order of [["mail", "broker"], ["broker", "mail"]]) {
+      const { id } = await queue();
+      w.h.ctx.db.run("UPDATE approvals SET status = 'approved', decided_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", id);
+      for (const step of order) {
+        if (step === "mail") mail.recoverInterrupted(0);
+        else w.rt.recoverInterrupted();
+      }
+      const a = w.h.ctx.mail.getApproval(id) as McpCallApproval;
+      expect(a.status).toBe("failed");
+      expect(a.call.outcomeUnknown).toBe(true);
+      expect(textOf(w.rt.getCallStatus(w.agent, id))).toMatch(/^outcome unknown: /);
+    }
+    expect(w.src.calls).toHaveLength(0);
+  });
+
   it("reject and expire", async () => {
     const { id } = await queue();
     w.rt.reject(id, "no thanks");
@@ -488,6 +545,14 @@ describe("token scrubbing", () => {
     expect(audits("notion__search")[0]!.detail).toMatchObject({ signals: { redacted: 6 } });
   });
 
+  it("redacts the OAuth client secret", async () => {
+    w.credentials.setClient(w.con, { client_id: "public-client-id", client_secret: "cs-very-secret-value-42" });
+    w.src.handler = () => ({ content: [{ type: "text", text: "echo cs-very-secret-value-42 public-client-id" }] });
+    const t = textOf(await w.rt.call(w.agent, "notion__search", {}, signal()));
+    expect(t).not.toContain("cs-very-secret-value-42");
+    expect(t).toContain("public-client-id");
+  });
+
   it("redacts in error messages, and in what's stored for get_call_status", async () => {
     w.src.handler = () => {
       throw new SourceError("unavailable", `upstream said ${ACCESS} is bad`);
@@ -535,10 +600,11 @@ describe("SourceError → plain words", () => {
     [new SourceError("blocked_target", "x"), /blocked the connection to Notion.*allow this host/, "blocked_target"],
     [new SourceError("unavailable", "connection refused"), /Notion is unavailable right now \(connection refused\)/, "unavailable"],
     [new SourceError("protocol", "bad json"), /couldn't understand \(bad json\)/, "protocol"],
-    [new Error("boom"), /The call to Notion failed \(boom\)/, "internal"],
+    [new Error("boom at /srv/internal.js"), /^The call to Notion failed unexpectedly\. It may or may not have run there/, "internal"],
   ])("%s", async (err, message, reason) => {
     const { text, audit } = await failWith(err);
     expect(text).toMatch(message);
+    expect(text).not.toContain("/srv/internal.js");
     expect(audit).toMatchObject({ outcome: "error", reason });
   });
 

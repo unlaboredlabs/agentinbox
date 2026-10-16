@@ -301,7 +301,9 @@ export class Approvals {
   recoverInterrupted(olderThanMs = STUCK_AFTER_MS): number {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
     const rows = this.ctx.db.all<{ id: string; kind: string }>(
-      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? ORDER BY rowid",
+      // Never mcp.call: an interrupted upstream call may have run, so it ends "failed" with an unknown outcome
+      // (the broker's recoverInterrupted) and must never go back to pending.
+      "SELECT id, kind FROM approvals WHERE status = 'approved' AND sent_message_id IS NULL AND decided_at < ? AND kind <> 'mcp.call' ORDER BY rowid",
       cutoff,
     );
     for (const { id, kind } of rows) {

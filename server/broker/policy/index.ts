@@ -9,7 +9,7 @@ import { sha256 } from "../../crypto.ts";
 import { bool, json, now } from "../../db/index.ts";
 import { CANCELLED_PREFIX } from "../../mail/approvals.ts";
 import { cleanLine } from "../../mail/content.ts";
-import { badRequest, conflict, notFound } from "../../util/errors.ts";
+import { badRequest, conflict, errorMessage, notFound } from "../../util/errors.ts";
 import type { BrokerCalls, CredentialStore, RegisteredTool, ToolRegistry, ToolResult, ToolSource, TokenRefresher } from "../types.ts";
 import { SourceError } from "../types.ts";
 import { fingerprint, redactArgs } from "./audit.ts";
@@ -29,6 +29,8 @@ import {
   listRules,
   type McpCallRow,
   mcpCallRow,
+  rulesAllow,
+  rulesFor,
   transition,
   updateToolCall,
 } from "./store.ts";
@@ -214,7 +216,8 @@ export class BrokerPolicyRuntime implements BrokerCalls {
         record("ok", null, { ...fp, ...fullArgs, decision: "ask", approvalId: approval.id, [RISKY_COUNTED]: true });
         return text(
           `pending_approval: ${exposedName} needs the owner's approval before it runs, and it hasn't run yet. ` +
-            `approval_id: ${approval.id}. Carry on with other work and check with get_call_status (approval_id "${approval.id}"). ` +
+            `approval_id: ${approval.id}. Don't call this tool again for the same action: it would only queue a second request. ` +
+            `Carry on with other work and check with get_call_status (approval_id "${approval.id}"). ` +
             `If nobody answers, it expires at ${approval.expiresAt}.`,
         );
       }
@@ -262,7 +265,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       return { result, signals, failure: null, sourceDetail };
     } catch (err) {
       const failure = describeFailure(err, connectionName, opts.scrubber);
-      if (failure.reason === "internal") this.log.warn("Upstream call failed", { connection: connectionId, tool: tool.def.name, error: opts.scrubber.scrub(String(err)).text });
+      if (failure.reason === "internal") this.log.warn("Upstream call failed", { connection: connectionId, tool: tool.def.name, error: opts.scrubber.scrub(errorMessage(err)).text });
       return { result: text(failure.message, true), signals: null, failure, sourceDetail };
     }
   }
@@ -427,7 +430,34 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       }
     }
     await this.runApprovedCall(this.ctx.mail.getApproval(id) as McpCallApproval, started);
+    if (rules) await this.approveCoveredBy(row, call);
     return this.emit(id);
+  }
+
+  /**
+   * "Never asks twice": after "always allow" created rules, the agent's other pending calls to the same tool that
+   * the rules now cover are approved and run too (each with its own re-checks; one that fails them is cancelled).
+   */
+  private async approveCoveredBy(row: McpCallRow, call: McpCallApprovalDetail): Promise<void> {
+    const rules = rulesFor(this.ctx.db, row.agent_id, row.connection_id, call.tool);
+    const covered = this.pendingFor("agent_id = ? AND connection_id = ? AND id <> ?", row.agent_id, row.connection_id, row.id).filter((r) => {
+      const c = parseCall(r);
+      if (c.tool !== call.tool) return false;
+      let args: unknown;
+      try {
+        args = JSON.parse(c.args);
+      } catch {
+        return false;
+      }
+      return rulesAllow(rules, (pointer) => atPointer(args, pointer)) !== null;
+    });
+    await Promise.allSettled(
+      covered.map((r) =>
+        this.approve(r.id, { note: `approved by an "always allow" rule (with ${row.id})` }).catch((err) => {
+          this.log.info("A pending call covered by a new rule couldn't be approved", { approval: r.id, error: errorMessage(err) });
+        }),
+      ),
+    );
   }
 
   /** The rules "always allow" creates: one for the tool, or one per target value (every id of an array target). */
@@ -451,10 +481,22 @@ export class BrokerPolicyRuntime implements BrokerCalls {
    * truncated, scrubbed) for get_call_status. A call that may have run but didn't answer ends "failed" with an
    * unknown outcome and is never retried; one that provably never left (re-auth, rate limit, blocked) goes back
    * to pending. Used by approve() above and by server/mail/approvals.ts approve() for mcp.call.
+   *
+   * Claiming: callers first move the row pending → approved (the human's decision, atomic). This method then
+   * claims the run itself with a compare-and-swap on `tool_call.attemptedAt` (NULL → now, only while
+   * "approved"): it is the single gate to the upstream, so two paths (or two calls of this hook) can never
+   * forward the same approval twice. A run that provably never left clears attemptedAt with the row back to pending.
    */
   async runApprovedCall(approval: McpCallApproval, started = Date.now()): Promise<void> {
+    const claimed =
+      this.ctx.db.run(
+        `UPDATE approvals SET tool_call = json_set(tool_call, '$.attemptedAt', ?)
+         WHERE id = ? AND kind = 'mcp.call' AND status = 'approved' AND json_extract(tool_call, '$.attemptedAt') IS NULL`,
+        now(),
+        approval.id,
+      ).changes > 0;
+    if (!claimed) return;
     const row = this.requireRow(approval.id);
-    if (row.status !== "approved") return;
     const call = parseCall(row);
     const blocked = this.blockedReason(row, call);
     if (blocked) {
@@ -465,7 +507,6 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     const conn = connectionInfo(this.ctx.db, row.connection_id);
     const scrubber = this.scrubberFor(row.connection_id);
     const args = JSON.parse(call.args) as Record<string, unknown>;
-    updateToolCall(this.ctx.db, row.id, { attemptedAt: now() });
     // Approved calls aren't tied to the approver's request: the source's own timeout bounds them.
     const ran = await this.execute(row.connection_id, conn?.name ?? tool.slug, tool, args, { agentId: row.agent_id, signal: new AbortController().signal, scrubber });
     const detail = {
@@ -481,6 +522,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       this.ctx.db.run("UPDATE approvals SET status = 'sent', error = NULL WHERE id = ? AND status = 'approved'", row.id);
       this.adminAudit("approval.approve", row, call, ran.result.isError ? "error" : "ok", started, detail);
     } else if (!ran.failure.maybeRan) {
+      updateToolCall(this.ctx.db, row.id, { attemptedAt: null });
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
         `${ran.failure.message} Approve again once that's fixed.`,

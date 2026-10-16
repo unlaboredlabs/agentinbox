@@ -1,6 +1,5 @@
 // SourceError → plain words for the agent (docs/MCP-BROKER.md "Every failure names its fix").
 
-import { errorMessage } from "../../util/errors.ts";
 import { SourceError, type SourceErrorCode } from "../types.ts";
 import type { Scrubber } from "./output.ts";
 
@@ -20,13 +19,15 @@ export const reconnectMessage = (name: string) =>
 
 export function describeFailure(err: unknown, connectionName: string, scrubber: Scrubber): DescribedFailure {
   const detail = (msg: string) => {
-    const s = scrubber.scrub(msg.replace(/\s+/g, " ").trim().slice(0, 300)).text;
+    // Scrub before clipping, so a clipped secret can't survive as an unmatched prefix.
+    const s = scrubber.scrub(msg.replace(/\s+/g, " ").trim()).text.slice(0, 300);
     return s ? ` (${s})` : "";
   };
   if (!(err instanceof SourceError)) {
+    // Not a SourceError: an unexpected failure. The agent gets plain words only; the caller logs the detail.
     return {
       reason: "internal",
-      message: `The call to ${connectionName} failed${detail(errorMessage(err))}. It may or may not have run there: check before trying again.`,
+      message: `The call to ${connectionName} failed unexpectedly. It may or may not have run there: check before trying again.`,
       maybeRan: true,
     };
   }

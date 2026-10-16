@@ -185,10 +185,13 @@ export class MemoryCredentials implements CredentialStore {
     this.tokenMap.set(id, tokens);
     return true;
   }
-  client() {
-    return null;
+  clients = new Map<string, Record<string, unknown>>();
+  client(id: string) {
+    return this.clients.get(id) ?? null;
   }
-  setClient() {}
+  setClient(id: string, client: Record<string, unknown>) {
+    this.clients.set(id, client);
+  }
   markNeedsReauth() {}
   clear(id: string) {
     this.cleared.push(id);

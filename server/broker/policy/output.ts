@@ -63,8 +63,15 @@ export function makeScrubber(secrets: (string | null | undefined)[]): Scrubber {
 }
 
 /** This connection's decrypted secrets: access and refresh tokens, and the static header's value (and its token part). */
-export function connectionSecrets(credentials: Pick<CredentialStore, "tokens" | "header">, connectionId: string): string[] {
+export function connectionSecrets(credentials: Pick<CredentialStore, "tokens" | "header" | "client">, connectionId: string): string[] {
   const out: string[] = [];
+  try {
+    // The OAuth client registration / user app (client_secret, a WHOOP app's secret…): every secret-named string.
+    const c = credentials.client(connectionId);
+    for (const [k, v] of Object.entries(c ?? {})) if (/secret/i.test(k) && typeof v === "string") out.push(v);
+  } catch {
+    // As below.
+  }
   try {
     const t = credentials.tokens(connectionId);
     if (t) out.push(t.accessToken, ...(t.refreshToken ? [t.refreshToken] : []));
