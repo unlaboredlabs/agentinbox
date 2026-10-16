@@ -15,7 +15,7 @@ export const REFUSALS: Record<string, { permanent: boolean; text: string }> = {
   key_rotated: { permanent: true, text: "This agent's API key was replaced (rotated) in the console." },
   unauthorized: { permanent: true, text: "The daemon doesn't recognize this API key (it was rotated, or the agent was deleted)." },
   agent_disabled: { permanent: false, text: "An admin disabled this agent. Waiting; it resumes on its own when the agent is re-enabled." },
-  no_read_grant: { permanent: false, text: "This agent has no read access to any mailbox right now. Waiting; it resumes when an admin grants read access." },
+  no_read_grant: { permanent: false, text: "This agent has no read access to any mailbox or calendar right now. Waiting; it resumes when an admin grants read or calendar.read." },
   forbidden: { permanent: false, text: "The daemon refused access for now. Waiting and retrying." },
 };
 

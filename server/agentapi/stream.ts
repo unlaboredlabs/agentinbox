@@ -69,7 +69,7 @@ const OPEN_REFUSALS: Record<RevokeReason, [string, string]> = {
   agent_deleted: ["This agent no longer exists", "Pair again with `npx agentinbox-cli connect`."],
   agent_disabled: ["This agent is disabled", "Enable it in the agentinbox console under Agents."],
   key_rotated: ["This API key was replaced", "Pair again with `npx agentinbox-cli connect`, or use the new key."],
-  no_read_grant: ["This agent has no read access to any account", "Grant it read access to an account in the agentinbox console."],
+  no_read_grant: ["This agent has no read access to any account", "Grant it read or calendar.read on an account in the agentinbox console."],
 };
 
 /** Destroys the underlying socket (a stalled client never drains, so a graceful end would hang). */

@@ -5,6 +5,7 @@
 import type { Account, Address, Approval, Capability, GmailLabel, Grant, MessageSummary } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { GmailClient, GmailMessage, GmailPart, GmailThread, ParsedMessage } from "../google/types.ts";
+import { isOutcomeUnknown, rejectedBeforeProcessing } from "../google/http.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
 import {
   assertRecipientsAllowed,
@@ -698,14 +699,17 @@ export class AgentMail {
 
   /**
    * Runs the Gmail write that sends (or saves) mail. A failure that may have happened after Gmail accepted
-   * it (5xx, network error, timeout) is recorded as "maybeSent", which counts toward the send caps, and the
-   * agent is told to check before retrying.
+   * it (5xx, a timeout or reset: status 0) is recorded as "maybeSent", which counts toward the send caps, and
+   * the agent is told to check before retrying. Only a connection that never reached Google is a clean failure.
    */
   private async uncertain<T>(fn: () => Promise<T>, what: string): Promise<T> {
     try {
       return await fn();
     } catch (err) {
-      const ambiguous = err instanceof GoogleApiError ? err.status >= 500 : !(err instanceof AccountNeedsReauthError);
+      const ambiguous =
+        err instanceof GoogleApiError
+          ? (err.status === 0 || err.status >= 500 || isOutcomeUnknown(err)) && !rejectedBeforeProcessing(err)
+          : !(err instanceof AccountNeedsReauthError);
       if (!ambiguous) throw err;
       this.trace.detail.maybeSent = true;
       throw new ToolError(

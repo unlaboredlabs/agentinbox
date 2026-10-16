@@ -105,9 +105,12 @@ class Acker {
 
 const describeEvent = (p: WebhookPayload) => {
   const m = p.data.message;
-  const who = m?.from?.email ? ` from ${safeText(m.from.email, 80)}` : "";
-  const subject = m?.subject ? ` "${safeText(m.subject, 70)}"` : "";
-  return `#${p.data.seq} ${p.type}${who}${subject}`;
+  const e = p.data.calendarEvent;
+  const sender = m?.from?.email ?? (e && !e.organizerSelf ? e.organizer?.email : undefined);
+  const who = sender ? ` from ${safeText(sender, 80)}` : "";
+  const title = m?.subject ?? e?.summary;
+  const subject = title ? ` "${safeText(title, 70)}"` : "";
+  return `#${p.data.seq} ${p.type}${who}${subject}${e ? ` (${safeText(e.start, 30)})` : ""}`;
 };
 
 /** A finished job in the log: the event, or "batch of N (#a–#b)". */

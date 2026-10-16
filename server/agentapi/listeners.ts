@@ -7,7 +7,10 @@ import { badRequest, HttpError } from "../util/errors.ts";
 
 const CONSUMER_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
-/** Why a live stream must end, or null while the key, agent and a read grant are all still valid. */
+/** Capabilities that put events in an agent's feed: mail `read` for mail events, `calendar.read` for calendar ones. */
+export const readsEvents = (capabilities: readonly string[]): boolean => capabilities.includes("read") || capabilities.includes("calendar.read");
+
+/** Why a live stream must end, or null while the key, agent and a read grant (mail or calendar) are all still valid. */
 export type RevokeReason = "agent_deleted" | "agent_disabled" | "key_rotated" | "no_read_grant";
 
 export function accessProblem(db: Db, agentId: string, keyHash: string): RevokeReason | null {
@@ -16,7 +19,7 @@ export function accessProblem(db: Db, agentId: string, keyHash: string): RevokeR
   if (a.key_hash !== keyHash) return "key_rotated";
   if (bool(a.disabled)) return "agent_disabled";
   const grants = db.all<{ capabilities: string }>("SELECT capabilities FROM grants WHERE agent_id = ?", agentId);
-  if (!grants.some((g) => json.parse<string[]>(g.capabilities, []).includes("read"))) return "no_read_grant";
+  if (!grants.some((g) => readsEvents(json.parse<string[]>(g.capabilities, [])))) return "no_read_grant";
   return null;
 }
 
@@ -80,7 +83,7 @@ export const ackedSeq = (db: Db, agentId: string, consumer: string): number =>
 const VISIBLE_SCAN_MAX = 2000;
 
 /**
- * Cursor cap: the newest event seq in the accounts this agent can read (one indexed lookup per
+ * Cursor cap: the newest event seq in the accounts this agent can read mail or calendars of (one indexed lookup per
  * account, no label check). Capping acks, `after` and Last-Event-ID there means a client can't skip
  * future events by acking ahead, and only learns seqs of accounts it already reads. Anything between
  * the newest visible event and this cap is invisible to the agent, so a new consumer starts here too.
@@ -88,7 +91,7 @@ const VISIBLE_SCAN_MAX = 2000;
 export function newestGrantedSeq(ctx: AppContext, agentId: string): number {
   let max = 0;
   for (const g of ctx.policy.grants(agentId)) {
-    if (!g.capabilities.includes("read")) continue;
+    if (!readsEvents(g.capabilities)) continue;
     const r = ctx.db.get<{ m: number | null }>("SELECT MAX(seq) AS m FROM events WHERE account_id = ? AND seq > 0", g.accountId);
     max = Math.max(max, r?.m ?? 0);
   }
@@ -103,7 +106,7 @@ export function newestGrantedSeq(ctx: AppContext, agentId: string): number {
 export function newestVisibleSeq(ctx: AppContext, agentId: string): number {
   const accounts = ctx.policy
     .grants(agentId)
-    .filter((g) => g.capabilities.includes("read"))
+    .filter((g) => readsEvents(g.capabilities))
     .map((g) => g.accountId);
   if (!accounts.length) return 0;
   const sql = `${EVENT_SELECT} WHERE e.seq > 0 AND e.seq < ? AND e.account_id IN (${accounts.map(() => "?").join(", ")}) ORDER BY e.seq DESC LIMIT 200`;

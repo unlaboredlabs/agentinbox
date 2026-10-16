@@ -189,6 +189,8 @@ export function agentApiRoutes(ctx: AppContext): Hono<AgentApiEnv> {
         replyOnly: g.replyOnly,
         maxSendsPerHour: g.maxSendsPerHour,
         maxSendsPerDay: g.maxSendsPerDay,
+        calendarScope: g.calendarScope,
+        calendarWriteMode: g.calendarWriteMode,
       })),
       consumers: ctx.db
         .all<{ consumer: string; start_seq: number | null; acked_seq: number; connected: number }>(
