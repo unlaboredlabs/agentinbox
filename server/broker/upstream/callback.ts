@@ -22,6 +22,9 @@ export function connectionOAuthRoutes(ctx: AppContext) {
     const q = new URL(c.req.url).searchParams;
     try {
       const done = await rt.finishConnect({ code: q.get("code"), state: q.get("state"), iss: q.get("iss"), error: q.get("error"), errorDescription: q.get("error_description") });
+      // The broker re-lists the connection's tools with the new credential.
+      ctx.broker.invalidate({ connectionId: done.connectionId });
+      ctx.broker.attach(done.connectionId);
       return c.html(
         callbackPage({
           ok: true,

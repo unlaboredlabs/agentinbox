@@ -128,6 +128,7 @@ export const EVENT_TYPE_INFO: Record<EventType, { label: string; description: st
     label: "Tool changed",
     description: "An integration's tool changed or appeared and is held until you accept it.",
   },
+  "connection.expiring": { label: "Connection expiring", description: "An integration's sign-in stops working soon; reconnect it before then." },
   "approval.requested": { label: "Approval requested", description: "An agent's risky tool call waits for your approval." },
 };
 

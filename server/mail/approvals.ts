@@ -247,9 +247,13 @@ export class Approvals {
     try {
       await this.ctx.broker.runApprovedCall(current);
     } catch (err) {
-      // The runner records every outcome itself; this is a bug path, so the outcome is unknown.
+      // The runner records every outcome itself; this is a bug path, so the outcome is unknown (never retried).
       const message = errorMessage(err);
-      this.ctx.db.run("UPDATE approvals SET status = 'failed', error = ? WHERE id = ? AND status = 'approved'", `${message} (outcome unknown; not retried)`, id);
+      this.ctx.db.run(
+        "UPDATE approvals SET status = 'failed', error = ?, tool_call = json_set(tool_call, '$.outcomeUnknown', json('true')) WHERE id = ? AND status = 'approved'",
+        `${message} (outcome unknown; not retried)`,
+        id,
+      );
       this.audit("approval.approve", current, "error", started, { connectionId: current.connectionId, tool: current.call.exposedName, error: message });
     }
     return this.emit(id);
@@ -329,16 +333,6 @@ export class Approvals {
       cutoff,
     );
     for (const { id, kind } of rows) {
-      if (kind === "mcp.call") {
-        // The call may have reached the upstream: its outcome is unknown, and it's never retried automatically.
-        this.fail(
-          id,
-          "The tool call was interrupted before its result came back, so its outcome is unknown. It is not retried; check the integration, then ask the agent to call again if needed.",
-        );
-        this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: id, outcome: "error", reason: "outcome_unknown" });
-        this.emit(id);
-        continue;
-      }
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
         isCalendarApprovalKind(kind)
@@ -349,7 +343,8 @@ export class Approvals {
       this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: id, outcome: "ok" });
       this.emit(id);
     }
-    return rows.length;
+    // mcp.call: the broker's recovery marks them failed with tool_call.outcomeUnknown (never back to pending).
+    return rows.length + (this.ctx.broker?.policy.recoverInterrupted(olderThanMs) ?? 0);
   }
 
   /**

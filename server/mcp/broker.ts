@@ -7,7 +7,16 @@
 // McpServer installed are extended: broker names are answered here, everything else goes to McpServer.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CallToolRequestSchema, type CallToolResult, ListToolsRequestSchema, type ListToolsResult, type RequestId, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  type CallToolResult,
+  CallToolResultSchema,
+  ListToolsRequestSchema,
+  type ListToolsResult,
+  type RequestId,
+  type Tool,
+  ToolSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type AccessLevel, EXPOSED_TOOL_NAME_RE } from "../../shared/types.ts";
 import { GET_CALL_STATUS_TOOL } from "../broker/policy/index.ts";
@@ -46,14 +55,44 @@ function installedHandler(server: McpServer, method: string): Handler {
   return handler;
 }
 
-/** MCP requires an object input schema; an exposed name never has a "." (isMcpToolAction relies on it). */
-const listable = (t: RegisteredTool) => EXPOSED_TOOL_NAME_RE.test(t.exposedName) && !t.exposedName.includes(".") && t.def.inputSchema?.type === "object";
+/** An exposed name never has a "." (isMcpToolAction relies on it); MCP requires an object input schema. */
+const nameOk = (t: RegisteredTool) => EXPOSED_TOOL_NAME_RE.test(t.exposedName) && !t.exposedName.includes(".") && t.def.inputSchema?.type === "object";
+
+/**
+ * Only tools whose listing parses as an MCP Tool: TS-SDK clients validate the whole tools/list result, so one bad
+ * upstream schema (e.g. `properties: {x: true}`) would otherwise take every tool down, native ones included.
+ */
+function listableTools(tools: RegisteredTool[], warn: (msg: string, meta: Record<string, unknown>) => void): { tool: RegisteredTool; listed: Tool }[] {
+  const out: { tool: RegisteredTool; listed: Tool }[] = [];
+  for (const t of tools) {
+    const listed = nameOk(t) ? toTool(t) : null;
+    if (listed && ToolSchema.safeParse(listed).success) out.push({ tool: t, listed });
+    else warn("Skipped an upstream tool that isn't a valid MCP tool listing", { tool: t.exposedName.slice(0, 64), connection: t.connectionId });
+  }
+  return out;
+}
+
+/**
+ * The result as the agent gets it: valid per CallToolResultSchema, or the protocol layer would turn it into an error
+ * after the call already ran. Invalid structuredContent is dropped (the text twin is there); anything else invalid
+ * becomes an isError text.
+ */
+export function safeResult(result: ToolResult): CallToolResult {
+  if (CallToolResultSchema.safeParse(result).success) return result as CallToolResult;
+  const { structuredContent: _dropped, ...rest } = result;
+  if (CallToolResultSchema.safeParse(rest).success) return rest as CallToolResult;
+  return {
+    isError: true,
+    content: [{ type: "text", text: "The integration returned a result agentinbox can't pass on (it isn't a valid MCP tool result). The call itself ran; don't retry it blindly." }],
+  };
+}
 
 function toTool(t: RegisteredTool): Tool {
   const { def, cls } = t;
-  // Annotations pass through as pinned, except that an upstream can't call a risky tool read-only. No outputSchema:
-  // clients reject a non-error result without structuredContent when a tool declares one.
-  const annotations = { ...def.annotations, ...(cls.risky ? { readOnlyHint: false, destructiveHint: true } : {}) };
+  // Annotations pass through as pinned, except the hints the broker decides: readOnlyHint is the broker's read class
+  // (never an upstream's claim), and a risky tool is destructive. No outputSchema: clients reject a non-error result
+  // without structuredContent when a tool declares one.
+  const annotations = { ...def.annotations, readOnlyHint: cls.read, ...(cls.risky ? { destructiveHint: true } : {}) };
   return {
     name: t.exposedName,
     ...(def.title ? { title: def.title } : {}),
@@ -117,12 +156,23 @@ export function registerBrokerTools(ctx: AppContext, server: McpServer, principa
 
   // ───────────── upstream tools ─────────────
 
-  const tools = view.tools.filter((t) => listable(t) && (!state.only || state.only.has(t.exposedName)));
+  const tools = listableTools(
+    view.tools.filter((t) => !state.only || state.only.has(t.exposedName)),
+    (msg, meta) => log.warn(msg, meta),
+  );
   if (!tools.length) return;
-  for (const t of tools) state.dynamic.add(t.exposedName);
-  const listed = tools.map(toTool);
-  const listNative = installedHandler(server, "tools/list");
-  const callNative = installedHandler(server, "tools/call");
+  let listNative: Handler;
+  let callNative: Handler;
+  try {
+    listNative = installedHandler(server, "tools/list");
+    callNative = installedHandler(server, "tools/call");
+  } catch (err) {
+    // An SDK change broke the extension point: native tools keep working, integration tools are left out.
+    log.error("Can't add integration tools to /mcp", { error: errorMessage(err) });
+    return;
+  }
+  for (const { tool } of tools) state.dynamic.add(tool.exposedName);
+  const listed = tools.map((t) => t.listed);
 
   server.server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
     const native = (await listNative(request, extra)) as ListToolsResult;
@@ -137,7 +187,7 @@ export function registerBrokerTools(ctx: AppContext, server: McpServer, principa
     const started = Date.now();
     const signal = state.signal ? AbortSignal.any([extra.signal, state.signal]) : extra.signal;
     try {
-      return (await ctx.broker.calls.call(agentId, name, request.params.arguments ?? {}, signal)) as CallToolResult;
+      return safeResult(await ctx.broker.calls.call(agentId, name, request.params.arguments ?? {}, signal));
     } catch (err) {
       log.error(`Tool ${name} failed`, { agent: agentId, error: errorMessage(err) });
       audit(name, "error", "internal", started);
