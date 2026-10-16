@@ -24,6 +24,8 @@ export interface AddFlags {
   yes?: boolean;
   /** The server's address, for an integration whose server you name (t3code). */
   url?: string;
+  /** The connection's name (unique per owner); without it the server picks one (host or preset name, " (2)" when taken). */
+  name?: string;
 }
 
 export interface ManageDeps {
@@ -208,7 +210,8 @@ function printResult(p: Prompter, c: ConnectionView): void {
 
 interface Pending {
   slug: string;
-  name: string;
+  /** Only when the user gave one (--name): otherwise the server's default, which never collides. */
+  name?: string;
   preset?: string;
   url?: string;
 }
@@ -250,7 +253,7 @@ async function addPreset(preset: PresetView, flags: AddFlags, deps: ManageDeps, 
   }
   const slug = await askSlug(p, flags.slug, preset.slug, taken);
   const input: StartConnectInput = { ...(header ? { header } : {}), ...(Object.keys(inputs).length ? { inputs } : {}) };
-  return createThen({ slug, name: preset.displayName, preset: preset.id }, flags, deps, (c) => connectNow(c, input, deps, flags));
+  return createThen({ slug, ...(flags.name ? { name: flags.name } : {}), preset: preset.id }, flags, deps, (c) => connectNow(c, input, deps, flags));
 }
 
 async function headerFor(p: Prompter, flags: { header?: string }): Promise<NonNullable<StartConnectInput["header"]>> {
@@ -310,7 +313,7 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
   }
   if (preset && !allowPrivate && probe.auth !== "oauth") throw new Error(`${url.host} doesn't look like a ${preset.displayName} server: it doesn't ask for a sign-in.`);
   const slug = await askSlug(p, flags.slug, preset ? presetServerSlug(preset.slug, url.href) : slugFromUrl(url), taken);
-  const base: Pending = preset ? { slug, name: url.host, preset: preset.id, url: url.href } : { slug, name: url.hostname, url: url.href };
+  const base: Pending = { slug, ...(flags.name ? { name: flags.name } : {}), ...(preset ? { preset: preset.id } : {}), url: url.href };
   return createThen(base, flags, deps, async (c) => {
     if (allowPrivate) {
       await api.allowPrivateTarget(c.id, true);
@@ -328,6 +331,14 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
 export async function addConnection(target: string, flags: AddFlags, deps: ManageDeps): Promise<number> {
   const existing = await deps.api.list();
   const taken = new Set(existing.map((c) => c.slug));
+  // A name you chose that's taken fails now, before any question (names are unique per owner, case-insensitive).
+  if (flags.name !== undefined) {
+    const name = flags.name.trim();
+    if (!name) throw new Error("--name can't be empty.");
+    const clash = existing.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (clash) throw new Error(`You already have a connection named "${safeText(clash.name, 100)}" ("${clash.slug}"). Pick another --name, or leave it out.`);
+    flags = { ...flags, name };
+  }
   if (isUrl(target)) return addUrl(target, flags, deps, taken);
   const presets = await deps.api.presets();
   const preset = presets.find((x) => x.id === target.trim().toLowerCase());

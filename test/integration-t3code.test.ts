@@ -108,7 +108,6 @@ const OTHER_WRITES = [
   "preview_drag",
   "preview_press",
   "preview_scroll",
-  "preview_evaluate",
   "preview_dialog",
   "preview_recording_start",
   "preview_recording_stop",
@@ -120,7 +119,9 @@ const OTHER_WRITES = [
 ];
 const RISKY_DELETE = ["t3_project_delete", "delete_scheduled_task"];
 const RISKY_SETTINGS = ["t3_environment_preferences_update", "t3_project_update"];
-const RISKY_OTHER = ["schedule_task", "update_scheduled_task", "preview_upload"];
+// The browser preview runs in the user's profile with its saved logins: page JavaScript and file uploads send data out as them.
+const RISKY_BROWSER = ["preview_evaluate", "preview_upload"];
+const RISKY_OTHER = ["schedule_task", "update_scheduled_task"];
 
 /** A tool as T3 lists it: reads readOnlyHint, everything else destructiveHint (as T3 does). */
 const t3Tool = (name: string, properties: Record<string, unknown> = {}): ToolDef => ({
@@ -145,7 +146,7 @@ describe("T3 Code preset: shape and risk table", () => {
   });
 
   it("covers exactly T3's 83 tools", () => {
-    const all = [...READ, ...THREAD_WRITES, ...OTHER_WRITES, ...RISKY_DELETE, ...RISKY_SETTINGS, ...RISKY_OTHER].sort();
+    const all = [...READ, ...THREAD_WRITES, ...OTHER_WRITES, ...RISKY_DELETE, ...RISKY_SETTINGS, ...RISKY_BROWSER, ...RISKY_OTHER].sort();
     expect(new Set(all).size).toBe(83);
     expect(Object.keys(T3_TOOLS).sort()).toEqual(all);
   });
@@ -162,8 +163,17 @@ describe("T3 Code preset: shape and risk table", () => {
     expect(classifyTool(t3Tool(name), t3codePreset)).toEqual({ risky: false, read: false, source: "preset" });
   });
 
-  it.each([...RISKY_DELETE, ...RISKY_SETTINGS, ...RISKY_OTHER])("risky (asks at the ask level): %s", (name) => {
+  it.each([...RISKY_DELETE, ...RISKY_SETTINGS, ...RISKY_BROWSER, ...RISKY_OTHER])("risky (asks at the ask level): %s", (name) => {
     expect(classifyTool(t3Tool(name), t3codePreset)).toMatchObject({ risky: true, read: false, source: "preset" });
+  });
+
+  it("preview_evaluate (JavaScript in the user's signed-in browser profile) asks; the other preview actions don't", () => {
+    const evaluate = { ...t3Tool("preview_evaluate", { tabId: {}, expression: {} }), description: "Evaluate JavaScript in the tab." };
+    expect(classifyTool(evaluate, t3codePreset)).toEqual({ risky: true, read: false, source: "preset" });
+    expect(classifyT3Tool(evaluate)).toEqual({ risky: true, read: false, source: "preset" });
+    for (const name of ["preview_open", "preview_navigate", "preview_click", "preview_type"]) expect(classifyTool(t3Tool(name), t3codePreset).risky, name).toBe(false);
+    const steps = t3codePreset.setupSteps({ publicUrl: "http://x", redirectUri: "http://x/cb", webhookUrl: null });
+    expect(steps.find((s) => s.id === "access")!.body).toMatch(/browser profile on that computer with its saved logins/);
   });
 
   it("targets for always-allow come from the tool's own id argument", () => {

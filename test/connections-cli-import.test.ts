@@ -165,6 +165,23 @@ describe("import --from hermes", () => {
     expect(backups(hermes)).toEqual([]);
   });
 
+  it("a name an existing connection already has (any case) gets a suffix instead of a 409", async () => {
+    pairHermes(d.agents.hermes);
+    unconfine();
+    await d.api.create({ slug: "old-whoop", name: "WHOOP", url: "https://other.example.com/mcp", agentIds: [] });
+    const items = await planImport(readClientConfig("hermes", { env: process.env }), { lookup: publicLookup, existing: await d.api.list() });
+    expect(items.flatMap((i) => (i.action === "create" ? [i.name] : []))).toEqual(["whoop (2)", "brightspace", "hearloom", "t3code-macbook", "forge"]);
+    expect(await runImport(YES, deps(d, new ScriptedPrompter([], true)))).toBe(0);
+    expect(rows().map((r) => [r.slug, r.name])).toEqual([
+      ["old-whoop", "WHOOP"],
+      ["whoop", "whoop (2)"],
+      ["brightspace", "brightspace"],
+      ["hearloom", "hearloom"],
+      ["t3code-macbook", "t3code-macbook"],
+      ["forge", "forge"],
+    ]);
+  });
+
   it("--yes creates the connections, moves the headers, then replaces only the working entries (with a backup)", async () => {
     pairHermes(d.agents.hermes);
     unconfine();

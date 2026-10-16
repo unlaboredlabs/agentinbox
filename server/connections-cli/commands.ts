@@ -60,7 +60,8 @@ export function registerConnectionsCommands(program: Command): void {
       .argument("<integration-or-url>", "notion, whoop, t3code, or an MCP server URL such as https://mcp.example.com/mcp"),
   )
     .option("--url <address>", "t3code: your T3 Code server's address, e.g. http://100.101.102.103:3773 (asked when omitted)")
-    .option("--slug <name>", "its name: agents see its tools as <name>__<tool>")
+    .option("--slug <name>", "its short name: agents see its tools as <name>__<tool>")
+    .option("--name <name>", "its display name (unique; default: the server's host, or the integration's name)")
     .option("--access <level>", "full, ask (ask before risky actions; the default) or read")
     .option("--agent <name>", 'an agent that gets it (repeatable; default: all agents; "all")', collect)
     .option("--header <name>", "header for a server that wants a static key (default Authorization)")

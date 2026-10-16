@@ -3,8 +3,8 @@
 // T3 annotates nearly every write `destructiveHint: true` (sending to a thread, reordering a queue), so without this
 // table the annotation rule would ask before almost everything. The table says what is irreversible instead.
 // Risky = irreversible only, as everywhere: deleting, settings and environment writes, persistent automation, and
-// handing local files to a web page. Starting, messaging and stopping threads go straight through: T3's own access
-// level (picked on its approval page) already caps what a thread may run, and none of it leaves T3.
+// sending data outside through the browser preview (page JavaScript, file uploads). Starting, messaging and stopping
+// threads go straight through: T3's own access level (picked on its approval page) caps what a thread may run.
 // A tool missing here (a newer T3) falls back to the generic rules: its annotations, then the verb list, which
 // catches future `*_delete` / `*_remove` names (deleting a thread, removing a worktree).
 
@@ -84,8 +84,12 @@ export const T3_TOOLS: Readonly<Record<string, T3ToolSpec>> = {
   unwatch_pull_request: { cls: "write" },
   write_pull_request_guides: { cls: "write" },
 
-  // Browser previews, devices and rendered pages: interactive, in T3's own browser and simulators. Writes, not reads:
-  // html_preview loads whatever URLs the page names, so it isn't offered at "read only".
+  // Browser previews, devices and rendered pages. The preview tools drive a browser on T3's machine in the user's own
+  // browser profile, saved logins included (by default), so they can act on websites as the user. Deliberate: T3
+  // access is close to acting as the user on that machine anyway (a launched thread runs whatever T3's level allows),
+  // so opening, navigating, clicking and typing stay normal writes. Running page JavaScript (preview_evaluate) and
+  // uploading local files (preview_upload) ask: see the risky group below. Writes, not reads: html_preview loads
+  // whatever URLs the page names, so it isn't offered at "read only".
   preview_open: { cls: "write" },
   preview_navigate: { cls: "write" },
   preview_resize: { cls: "write" },
@@ -97,7 +101,6 @@ export const T3_TOOLS: Readonly<Record<string, T3ToolSpec>> = {
   preview_drag: { cls: "write" },
   preview_press: { cls: "write" },
   preview_scroll: { cls: "write" },
-  preview_evaluate: { cls: "write" },
   preview_dialog: { cls: "write" },
   preview_recording_start: { cls: "write" },
   preview_recording_stop: { cls: "write" },
@@ -121,7 +124,10 @@ export const T3_TOOLS: Readonly<Record<string, T3ToolSpec>> = {
   schedule_task: { cls: "risky" },
   update_scheduled_task: { cls: "risky", target: "scheduledTaskId" },
 
-  // Hands files from T3's machine to a web page: sending data outside. Asks.
+  // The browser preview, in the user's profile with its saved logins: running JavaScript in a page (it can act on any
+  // signed-in site and returns up to 64 KB of what it reads) and handing files from T3's machine to a web page.
+  // Sending data outside, as the user. Asks.
+  preview_evaluate: { cls: "risky" },
   preview_upload: { cls: "risky" },
 };
 

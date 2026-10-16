@@ -49,8 +49,10 @@ export function t3codeSetupSteps(_ctx: SetupContext): SetupStep[] {
         "Supervised (Limited on older T3 versions): they can also start, message and stop threads, and those threads " +
         "still ask before commands and file changes. The levels above it let threads run commands and edit files without " +
         "asking, and Full access also lets agents add and change projects, T3's settings and source control. We recommend " +
-        "Supervised (or Limited) unless an agent needs more. xaq shows what T3 granted, and still asks you before risky " +
-        "actions such as deleting a project, at the access level you choose next.",
+        "Supervised (or Limited) unless an agent needs more. Depending on the level, agents can also use T3's browser " +
+        "preview, which runs in your browser profile on that computer with its saved logins: they can browse websites as you. " +
+        "xaq shows what T3 granted, and still asks you before risky actions such as deleting a project, running " +
+        "JavaScript in a page or uploading files to one, at the access level you choose next.",
     },
     {
       id: "reconnect",

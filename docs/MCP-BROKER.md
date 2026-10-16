@@ -236,8 +236,8 @@ and payments. Creating and editing goes through without asking. Classification, 
      workspace;
    - Gmail: sending (already native);
    - WHOOP: none, since everything is read;
-   - T3 Code: deleting a project or scheduled task, project and environment settings, schedules, and uploading local
-     files to a web page (see [T3 Code](#t3-code-the-users-own-server-30-days-no-refresh)).
+   - T3 Code: deleting a project or scheduled task, project and environment settings, schedules, and, in the browser
+     preview (the user's profile, saved logins), running page JavaScript and uploading local files (see [T3 Code](#t3-code-the-users-own-server-30-days-no-refresh)).
 2. **Generic MCP servers with annotations:** `destructiveHint: true` is risky, and `readOnlyHint: true` is a read
    tool.
 3. **Generic MCP servers, either way** (the code's single source is `CLASSIFICATION_WORDS` in
@@ -515,10 +515,21 @@ As built (`server/integrations/t3code/`), on the generic MCP OAuth upstream, che
 - **Risk table.** `server/integrations/t3code/tools.ts` covers all 83 tools, one group per comment:
   - **Reads (free):** projects, threads, queues, environment, worktrees, schedules, pull requests, devices.
   - **Normal writes:** thread launch, send, interrupt and the rest of a thread's life; creating, cloning and handing
-    off to worktrees; pull-request bookkeeping; previews and devices. T3 marks almost all of these
-    `destructiveHint`, so without the table the annotation rule would ask before nearly everything.
+    off to worktrees; pull-request bookkeeping; opening, navigating, clicking and typing in previews; devices. T3
+    marks almost all of these `destructiveHint`, so without the table the annotation rule would ask before nearly
+    everything.
   - **Risky:** deleting a project or scheduled task, project and environment settings, schedules (persistent
-    unattended turns, webhook URLs), and `preview_upload` (local files to a web page).
+    unattended turns, webhook URLs), `preview_evaluate` (JavaScript in a page, returning up to 64 KB) and
+    `preview_upload` (local files to a web page).
+
+  **Decision: T3 access is close to acting as the user on that machine.** A launched thread runs whatever T3's
+  access level allows (commands and file edits, up to Full access), and the owner decided thread launch is a normal
+  write. T3's browser preview runs in the user's own browser profile on T3's machine, with its saved logins (by
+  default), so preview tools browse websites as the user. We keep the other `preview_*` actions as normal writes on
+  the same reasoning: the T3 access level is the real limit, and asking before every click would make the preview
+  unusable. Only the two that move data out as the user ask: `preview_evaluate` (arbitrary JavaScript in a signed-in
+  page, whose result comes back to the agent) and `preview_upload`. The setup step and the connection page say
+  plainly that previews use the browser profile and its saved logins.
 
   `t3_thread_send`, `t3_thread_send_attachments` and `t3_thread_merge_back` are exempt from the name check by exact
   name (`nameCheckExempt`), because their `send`/`merge` stays inside T3. Unknown tools fall back to the generic

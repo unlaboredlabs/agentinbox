@@ -124,10 +124,16 @@ export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "pre
   if (scopes.some((s) => T3_FULL_ACCESS_SCOPES.includes(s))) {
     return {
       scopes,
-      note: "Full access in T3: agents can also add and change projects, T3's settings and source control. If they don't need that, reconnect and pick a lower level.",
+      note:
+        "Full access in T3: agents can also add and change projects, T3's settings and source control, and T3's browser preview runs in your browser profile with its saved logins. If they don't need that, reconnect and pick a lower level.",
     };
   }
-  if (scopes.includes("orchestration:operate")) return { scopes, note: "Agents can read, start, message and stop T3 threads." };
+  if (scopes.includes("orchestration:operate")) {
+    return {
+      scopes,
+      note: "Agents can read, start, message and stop T3 threads. T3's browser preview runs in your browser profile on that computer, with its saved logins.",
+    };
+  }
   if (scopes.includes("orchestration:read")) return { scopes, note: "Read only in T3: agents can read projects and threads, nothing more." };
   return { scopes, note: null };
 }

@@ -62,8 +62,10 @@ key; the broker holds every upstream credential and lists only the tools the age
     (`connection.expiring`, with a Reconnect link), and once it expires agents get "The T3 Code connection '<name>'
     expired; ask your user to reconnect it in xaq at <link>" instead of a failure. Reconnect takes a new pairing code
     and keeps the name, agents and access levels. Asks before (at "Ask before risky actions"): deleting a project or
-    scheduled task, project and environment settings, schedules, and uploading local files to a web page; starting,
-    messaging and stopping threads go straight through.
+    scheduled task, project and environment settings, schedules, and running JavaScript in or uploading local files
+    to a page in T3's browser preview; starting, messaging and stopping threads go straight through. T3's browser
+    preview runs in your browser profile on T3's machine, with its saved logins: an agent that can use it browses
+    websites as you.
 
   Any other server: paste its URL; xaq finds out whether it needs an OAuth
   sign-in or an API key. Servers on this machine or your private network (loopback, Tailscale) need an explicit

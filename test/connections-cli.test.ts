@@ -99,6 +99,36 @@ describe("the local admin channel", () => {
   });
 });
 
+describe("connections add: names are unique, so the CLI only sends one you chose", () => {
+  let d: Daemon;
+  beforeEach(async () => {
+    d = await startDaemon();
+  });
+  afterEach(() => d.dispose());
+  const deps = (p: ScriptedPrompter) => ({ api: d.api, prompter: p, env: {}, pollMs: 1, timeoutMs: 2000 });
+  const names = () => d.h.ctx.db.all<{ slug: string; name: string }>("SELECT slug, name FROM connections ORDER BY created_at, rowid").map((r) => `${r.slug}=${r.name}`);
+
+  it("the same host twice (another port or path) and the same preset twice get the server's suffixed defaults", async () => {
+    const yes = () => new ScriptedPrompter([], true);
+    expect(await addConnection("http://127.0.0.1:8787/mcp", { yes: true }, deps(yes()))).toBe(0);
+    expect(await addConnection("http://127.0.0.1:8788/mcp", { yes: true, slug: "local-b" }, deps(yes()))).toBe(0);
+    expect(await addConnection("https://mcp.example.com/a/mcp", { yes: true }, deps(yes()))).toBe(0);
+    expect(await addConnection("https://mcp.example.com/b/mcp", { yes: true, slug: "example-b" }, deps(yes()))).toBe(0);
+    expect(await addConnection("notion", { yes: true }, deps(yes()))).toBe(0);
+    expect(await addConnection("notion", { yes: true, slug: "notion-work" }, deps(yes()))).toBe(0);
+    expect(names().map((n) => n.slice(n.indexOf("=") + 1))).toEqual(["127.0.0.1", "127.0.0.1 (2)", "mcp.example.com", "mcp.example.com (2)", "Notion", "Notion (2)"]);
+  });
+
+  it("--name is used as given; a taken one (any case) fails before any question", async () => {
+    expect(await addConnection("notion", { yes: true, name: "Work wiki" }, deps(new ScriptedPrompter([], true)))).toBe(0);
+    expect(names()).toEqual(["notion=Work wiki"]);
+    const p = new ScriptedPrompter([]); // no answers: any prompt would throw
+    await expect(addConnection("https://mcp.example.com/mcp", { name: "work WIKI" }, deps(p))).rejects.toThrow(/already have a connection named "Work wiki"/);
+    expect(d.upstreams.probes).toEqual([]);
+    expect(names()).toEqual(["notion=Work wiki"]);
+  });
+});
+
 describe("connections add", () => {
   let d: Daemon;
   beforeEach(async () => {
