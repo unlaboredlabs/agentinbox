@@ -67,7 +67,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
   // network-online.target only exists for system units; a user unit waiting on it never starts it.
   const network = spec.system ? "\nAfter=network-online.target\nWants=network-online.target" : "";
   return `[Unit]
-Description=agentinbox (Gmail broker for AI agents)${network}
+Description=agentinbox (MCP broker for AI agents)${network}
 
 [Service]
 ExecStart=${sdQuote(spec.execPath)} ${sdQuote(spec.entry)} start --no-open
