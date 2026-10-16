@@ -109,8 +109,14 @@ export function stripInvisible(text: string): { text: string; removed: number } 
 
 const visibleText = (s: string | null) => stripInvisible(s ?? "").text.trim();
 
-/** Neutralizes our delimiter and look-alikes (`</ email_content >`, turndown's `email\_content`) in untrusted text. */
-export const escapeDelimiters = (s: string) => s.replace(/<(?=\s{0,16}\/?\s{0,16}email\\?_content)/gi, "&lt;");
+/** Tags delimiting untrusted third-party content in tool results: mail bodies and calendar event descriptions. */
+export type UntrustedTag = "email_content" | "calendar_content";
+
+/**
+ * Neutralizes our delimiters and look-alikes (`</ email_content >`, turndown's `calendar\_content`) in
+ * untrusted text. Both tags are escaped everywhere: an event description must not close a mail wrapper either.
+ */
+export const escapeDelimiters = (s: string) => s.replace(/<(?=\s{0,16}\/?\s{0,16}(?:email|calendar)\\?_content)/gi, "&lt;");
 
 // ───────────── HTML cleaning ─────────────
 
@@ -689,9 +695,14 @@ export function buildContent(parsed: ParsedMessage, opts: { accountEmail: string
 
 const escapeAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-/** Wraps untrusted content in the delimiter. Delimiter tags and look-alikes inside the content are escaped. */
-export function wrapUntrusted(from: string | null | undefined, body: string): string {
-  return `<email_content from="${escapeAttr(cleanLine(from ?? "unknown", 320))}" untrusted>\n${escapeDelimiters(body)}\n</email_content>`;
+/**
+ * Wraps untrusted content in the delimiter: `<email_content from="…" untrusted>` for mail,
+ * `<calendar_content organizer="…" untrusted>` for event descriptions. Delimiter tags and look-alikes inside
+ * the content are escaped.
+ */
+export function wrapUntrusted(from: string | null | undefined, body: string, tag: UntrustedTag = "email_content"): string {
+  const attr = tag === "calendar_content" ? "organizer" : "from";
+  return `<${tag} ${attr}="${escapeAttr(cleanLine(from ?? "unknown", 320))}" untrusted>\n${escapeDelimiters(body)}\n</${tag}>`;
 }
 
 const MAX_LINE_INPUT = 4096;
