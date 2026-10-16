@@ -2,7 +2,7 @@
 // action-side guardrails (capabilities, label scope, send rules) and returns structured data that
 // server/mcp formats for the agent. Denials throw PolicyDenied; bad input throws ToolError.
 
-import type { Account, Address, Approval, Capability, GmailLabel, Grant, MessageSummary } from "../../shared/types.ts";
+import type { Account, Address, Approval, Capability, GmailLabel, GoogleApproval, Grant, MessageSummary } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { GmailClient, GmailMessage, GmailPart, GmailThread, ParsedMessage } from "../google/types.ts";
 import { UPLOAD_MAX_BYTES } from "../google/gmail.ts";
@@ -647,7 +647,7 @@ export class AgentMail {
   /** Recipient allowlist, send caps, then the grant's send mode. */
   private async deliver(
     a: Access,
-    kind: Approval["kind"],
+    kind: GoogleApproval["kind"],
     m: {
       to: Address[];
       cc: Address[];

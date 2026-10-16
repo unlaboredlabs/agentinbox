@@ -914,8 +914,14 @@ export const MAIL_APPROVAL_KINDS = ["send", "reply", "forward"] as const;
 export const CALENDAR_APPROVAL_KINDS = ["calendar.create", "calendar.update", "calendar.delete", "calendar.rsvp"] as const;
 export type MailApprovalKind = (typeof MAIL_APPROVAL_KINDS)[number];
 export type CalendarApprovalKind = (typeof CALENDAR_APPROVAL_KINDS)[number];
-export type ApprovalKind = MailApprovalKind | CalendarApprovalKind;
+/** A risky upstream tool call at the "ask" level (docs/MCP-BROKER.md). Goes through a connection, not an account. */
+export const MCP_APPROVAL_KINDS = ["mcp.call"] as const;
+export type McpApprovalKind = (typeof MCP_APPROVAL_KINDS)[number];
+/** The kinds that act on a Google account (an Approval with accountId set). */
+export type GoogleApprovalKind = MailApprovalKind | CalendarApprovalKind;
+export type ApprovalKind = GoogleApprovalKind | McpApprovalKind;
 export const isCalendarApprovalKind = (k: string): k is CalendarApprovalKind => (CALENDAR_APPROVAL_KINDS as readonly string[]).includes(k);
+export const isMcpApprovalKind = (k: string): k is McpApprovalKind => (MCP_APPROVAL_KINDS as readonly string[]).includes(k);
 
 /** The calendar change a calendar.* approval applies. */
 export interface CalendarApprovalDetail {
@@ -953,23 +959,34 @@ export interface CalendarApprovalDetail {
   attemptedAt?: string | null;
 }
 
-/**
- * A send or calendar change waiting for (or decided by) a human. For calendar kinds the mail fields are
- * filled so generic lists read well: to = `calendar.notified`, cc/bcc empty, subject = event summary,
- * body = description, draftId "" and threadId null; status "sent" means "applied" and sentMessageId holds
- * the Google event id.
- */
-export interface Approval {
+/** The exact call an mcp.call approval forwards once approved (approvals.tool_call). */
+export interface McpCallApprovalDetail {
+  /** The upstream's own tool name (UpstreamTool.name). */
+  tool: string;
+  /** The name the agent called (UpstreamTool.exposedName, `<slug>__<tool>`). */
+  exposedName: string;
+  /** The validated, canonicalised arguments: exactly the bytes shown on the card and forwarded on approve. */
+  args: string;
+  /** sha256 (hex) of `args`, re-checked on approve. */
+  argsSha256: string;
+  /** The tool's pin when the call was queued; a different pin on approve means the tool changed. */
+  pinHash: string;
+  /** The upstream's result once the approved call ran (what get_call_status returns). */
+  result?: McpCallResult | null;
+}
+
+/** An upstream CallToolResult as stored for get_call_status. */
+export interface McpCallResult {
+  content: unknown[];
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
+interface ApprovalCommon {
   id: string; // apr_…
   agentId: string;
   agentName: string;
-  accountId: string;
-  accountEmail: string;
-  kind: ApprovalKind;
   status: ApprovalStatus;
-  /** Calendar kinds only. */
-  calendar?: CalendarApprovalDetail;
-  draftId: string;
   to: Address[];
   cc: Address[];
   bcc: Address[];
@@ -987,6 +1004,166 @@ export interface Approval {
   error: string | null;
   createdAt: string;
   expiresAt: string;
+}
+
+/**
+ * A send or calendar change waiting for (or decided by) a human. For calendar kinds the mail fields are
+ * filled so generic lists read well: to = `calendar.notified`, cc/bcc empty, subject = event summary,
+ * body = description, draftId "" and threadId null; status "sent" means "applied" and sentMessageId holds
+ * the Google event id.
+ */
+export interface GoogleApproval extends ApprovalCommon {
+  kind: GoogleApprovalKind;
+  accountId: string;
+  accountEmail: string;
+  draftId: string;
+  /** Calendar kinds only. */
+  calendar?: CalendarApprovalDetail;
+  connectionId?: null;
+  call?: undefined;
+}
+
+/**
+ * A risky upstream tool call waiting for (or decided by) a human. No Google account and no draft; the
+ * mail fields stay empty unless the server fills them for generic lists.
+ */
+export interface McpCallApproval extends ApprovalCommon {
+  kind: McpApprovalKind;
+  accountId: null;
+  accountEmail: null;
+  draftId: null;
+  connectionId: string;
+  call: McpCallApprovalDetail;
+  calendar?: undefined;
+}
+
+export type Approval = GoogleApproval | McpCallApproval;
+
+// ───────────────────────────── MCP broker: connections ─────────────────────────────
+// docs/MCP-BROKER.md. Stored since migration 8; nothing serves these until the broker PRs land (behind the
+// brokerUpstreams setting). Credentials never cross the API boundary: there's no DTO for them.
+// AccessLevel and ToolAnnotations mirror server/broker/types.ts: the console can't import that file (it uses
+// Node's Buffer, and tsconfig.app has no Node types). Keep them in step.
+
+/** native_whoop (M2), stdio (M4) and native_google are reserved; M1 creates remote_http only. */
+export const CONNECTION_KINDS = ["remote_http", "native_whoop", "stdio", "native_google"] as const;
+export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
+
+export const CONNECTION_AUTH_TYPES = ["none", "header", "oauth"] as const;
+export type ConnectionAuthType = (typeof CONNECTION_AUTH_TYPES)[number];
+
+export const CONNECTION_STATUSES = ["active", "needs_reauth", "error", "disabled"] as const;
+export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
+
+/**
+ * What an agent may do with a connection (Wynn's model). No grant row = no access.
+ * - full: every tool listed and called without asking
+ * - ask: every tool listed; risky (irreversible) tools wait for an mcp.call approval. The default.
+ * - read: only read tools are listed or callable
+ */
+export const ACCESS_LEVELS = ["full", "ask", "read"] as const;
+export type AccessLevel = (typeof ACCESS_LEVELS)[number];
+
+/** Connection slugs, chosen by the operator: tools are exposed as `<slug>__<tool>`. Same rule as the schema CHECK. */
+export const CONNECTION_SLUG_RE = /^[a-z0-9-]{1,24}$/;
+/** Exposed tool names: `[A-Za-z0-9_-]`, at most 64 (clients prepend `mcp__<server>__` and cap at 128). */
+export const EXPOSED_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** One upstream (an MCP server, or a native integration) with its credential. */
+export interface Connection {
+  id: string; // con_…
+  /** null = the install's single owner. */
+  ownerId: string | null;
+  kind: ConnectionKind;
+  /** IntegrationPreset.id (server/broker/types.ts), checked against the preset registry in code; null = custom. */
+  preset: string | null;
+  slug: string;
+  name: string;
+  /** The MCP endpoint (remote_http). */
+  url: string | null;
+  authType: ConnectionAuthType;
+  /** The level new grants get. */
+  levelDefault: AccessLevel;
+  /** Admin-only private-target allow: the exact `scheme://host:port`, or null when off. */
+  privateTarget: string | null;
+  status: ConnectionStatus;
+  statusReason: string | null;
+  /** When the credential stops working without a human (no refresh, or a hard cap); null = not known to expire. */
+  expiresAt: string | null;
+  /** Negotiated protocol generation, cached. */
+  protocol: string | null;
+  toolsCachedAt: string | null;
+  instructionsHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** MCP tool annotations as the upstream sent them: hints only, never trusted on their own. */
+export interface ToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/** A tool definition as pinned (upstream_tools.definition). The pin hashes this plus the tool's name. */
+export interface UpstreamToolDefinition {
+  title?: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: ToolAnnotations;
+}
+
+export type ToolClassSource = "preset" | "annotation" | "heuristic";
+export type UpstreamToolState = "active" | "held";
+/** changed: the definition's hash differs from the pin; new: the tool wasn't there at connect. */
+export type ToolHeldReason = "changed" | "new";
+
+export interface UpstreamTool {
+  connectionId: string;
+  /** The upstream's own name. */
+  name: string;
+  /** `<slug>__<name>`, as listed to agents. */
+  exposedName: string;
+  /** What agents see. null only for a held new tool (nothing pinned yet). */
+  definition: UpstreamToolDefinition | null;
+  pinHash: string | null;
+  /** Irreversible: waits for approval at the "ask" level. */
+  risky: boolean;
+  /** Listed at the "read" level. Never both risky and read. */
+  read: boolean;
+  classSource: ToolClassSource;
+  state: UpstreamToolState;
+  heldReason: ToolHeldReason | null;
+  /** While held: what accepting would pin. */
+  candidate: UpstreamToolDefinition | null;
+  candidateHash: string | null;
+  firstSeenAt: string;
+  updatedAt: string;
+}
+
+/** One agent's access to one connection. */
+export interface ConnectionGrant {
+  agentId: string;
+  connectionId: string;
+  level: AccessLevel;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** "Always allow this": matching calls by this agent to this tool never ask again. */
+export interface ApprovalRule {
+  id: string; // rul_…
+  agentId: string;
+  connectionId: string;
+  /** The upstream tool name (UpstreamTool.name). */
+  tool: string;
+  /** Only for one target: a JSON Pointer into the call's arguments, and that argument's canonical JSON. */
+  targetPath: string | null;
+  targetValue: string | null;
+  createdAt: string;
 }
 
 // ───────────────────────────── Audit ─────────────────────────────

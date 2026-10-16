@@ -306,7 +306,7 @@ describe("approvals", () => {
     const s = await queue();
     const a = s.ctx.mail.getApproval(s.approvalId)!;
     expect(a).toMatchObject({ status: "pending", kind: "reply", agentName: "bot", accountEmail: ME, threadId: "t1", reason: "customer asked", body: "Refund approved" });
-    expect(s.gmail.drafts.has(a.draftId)).toBe(true);
+    expect(s.gmail.drafts.has(a.draftId!)).toBe(true);
     expect(s.seen.map((x) => x.status)).toEqual(["pending"]);
     const ttl = Date.parse(a.expiresAt) - Date.parse(a.createdAt);
     expect(ttl).toBe(72 * 3_600_000);
@@ -328,7 +328,7 @@ describe("approvals", () => {
 
   it("reject deletes the draft", async () => {
     const s = await queue();
-    const draftId = s.ctx.mail.getApproval(s.approvalId)!.draftId;
+    const draftId = s.ctx.mail.getApproval(s.approvalId)!.draftId!;
     const a = await s.ctx.mail.reject(s.approvalId, "no");
     expect(a.status).toBe("rejected");
     expect(s.gmail.drafts.has(draftId)).toBe(false);
@@ -346,7 +346,7 @@ describe("approvals", () => {
 
   it("expires overdue approvals and deletes their drafts", async () => {
     const s = await queue();
-    const draftId = s.ctx.mail.getApproval(s.approvalId)!.draftId;
+    const draftId = s.ctx.mail.getApproval(s.approvalId)!.draftId!;
     expect(await s.ctx.mail.expireApprovals()).toBe(0);
     s.ctx.db.run("UPDATE approvals SET expires_at = ? WHERE id = ?", new Date(Date.now() - 1000).toISOString(), s.approvalId);
     expect(await s.ctx.mail.expireApprovals()).toBe(1);
