@@ -210,7 +210,11 @@ export interface ToolRegistry {
 }
 
 /** The policy's verdict on one call. FROZEN. */
-export type CallDecision = { kind: "allow" } | { kind: "ask" } | { kind: "deny"; reason: string; message: string };
+export type CallDecision =
+  /** `ruleId`: the "always allow" rule that let a risky call through at the "ask" level (audit). */
+  | { kind: "allow"; ruleId?: string }
+  | { kind: "ask" }
+  | { kind: "deny"; reason: string; message: string };
 
 export interface BrokerPolicy {
   /** Level + risk + "always allow" rules + caps. Never runs the call. */

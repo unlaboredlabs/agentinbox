@@ -54,6 +54,17 @@ export interface InternalState {
       activationUrl?: string | null;
     };
   };
+  /**
+   * MCP broker policy limits (server/broker/policy). Missing fields take the defaults in
+   * server/broker/policy/store.ts (BROKER_POLICY_DEFAULTS). null caps = no cap.
+   */
+  "broker.policy": {
+    /** mcp.call approvals expire after this many hours. */
+    approvalTtlHours?: number;
+    /** Per agent, risky tool calls (run, queued or of unknown outcome) per rolling hour / 24 hours. */
+    riskyPerHour?: number | null;
+    riskyPerDay?: number | null;
+  };
   "admin.passwordHash": string;
   /** When SetupState.verified first had evidence; kept so pruning the audit log doesn't undo it. */
   "setup.verifiedAt": string;
@@ -81,6 +92,7 @@ export class SettingsStore {
       webhookAllowlist: ["localhost", "127.0.0.0/8", "::1"],
       pairingEnabled: true,
       calendarPollSeconds: 60,
+      brokerUpstreams: false,
     };
   }
 
@@ -154,6 +166,7 @@ function validate(s: Settings): Settings {
     webhookAllowlist: [...new Set(allowlist)],
     pairingEnabled: s.pairingEnabled !== false,
     calendarPollSeconds: int(s.calendarPollSeconds, "Calendar poll interval", 15, 3600),
+    brokerUpstreams: s.brokerUpstreams === true,
   };
 }
 
