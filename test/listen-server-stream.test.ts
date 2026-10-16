@@ -306,6 +306,8 @@ describe("agent API auth", () => {
           replyOnly: false,
           maxSendsPerHour: null,
           maxSendsPerDay: null,
+          calendarScope: null,
+          calendarWriteMode: "approval",
         },
       ],
       consumers: [],
