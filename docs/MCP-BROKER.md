@@ -31,6 +31,27 @@ approvals.
 4. **Hermes dogfoods it.** Once milestone 1 works, Hermes moves its MCPs onto the broker endpoint. Milestone 1
    therefore covers remote HTTP upstreams with OAuth (like the T3 servers) and with bearer tokens.
 
+### Also DECIDED (2026-10-16, via Adri)
+
+5. **No stdio in M1 (question 3).** Every Hermes upstream is remote Streamable HTTP, so stdio upstreams wait for M4.
+6. **Keys and data directory (question 7).** Every agent key keeps the `aib_` prefix, including new ones after the
+   rename. Existing installs keep `~/.agentinbox`, with no automatic move.
+
+### Hermes's upstreams today (from `~/.hermes/config.yaml` on Wynn's Mac)
+
+| Entry | URL | Auth | In the broker |
+|---|---|---|---|
+| agentinbox | `https://macbook.tailb10092.ts.net/mcp` | `aib_` bearer | Becomes the broker endpoint itself (native tools) |
+| whoop | `https://whoop.weish.me/api/mcp` | static bearer | M1: a generic bearer connection; M2: replaced by the native WHOOP integration |
+| brightspace | `http://127.0.0.1:8787/mcp` | static bearer | M1 bearer connection, private-target allow (loopback) |
+| hearloom | `http://127.0.0.1:3000/mcp` | static bearer | M1 bearer connection, private-target allow (loopback) |
+| t3code-macbook | `http://127.0.0.1:3773` | OAuth | M1 OAuth connection, private-target allow (loopback) |
+| forge | `http://100.104.249.49:3773` | OAuth | M1 OAuth connection, private-target allow (Tailscale CGNAT) |
+| t3code-worldstream | `100.91.67.127` | OAuth | Retired around 10-19; not migrated |
+
+Four of the six that move are on loopback or Tailscale's CGNAT range (100.64.0.0/10), and three speak plain `http`.
+So the SSRF guard needs the [private-target allow](#private-targets) below, or M1's Hermes goal can't be reached.
+
 ## Architecture
 
 ```
@@ -100,8 +121,28 @@ A **connection** is one upstream with its credential. It has:
 - **Outbound fetch is pinned and SSRF-guarded.** It reuses the webhook guard `resolveTarget`, through an undici
   `Agent` whose `lookup` is pinned. It applies to the upstream URL and to every discovered OAuth URL, with redirects
   re-checked hop by hop (CVE-2025-6514 was an `authorization_endpoint` RCE,
-  [NVD](https://nvd.nist.gov/vuln/detail/CVE-2025-6514)). Loopback and private hosts need an explicit allowlist entry,
-  because local MCP servers are a legitimate case.
+  [NVD](https://nvd.nist.gov/vuln/detail/CVE-2025-6514)). Loopback, private and CGNAT hosts are blocked unless a
+  connection has a private-target allow (next).
+
+<a id="private-targets"></a>**Private-target allow (admin-only, per connection).** Local and tailnet MCP servers are a
+legitimate case, and they're most of Hermes's list. A connection may carry an allow that is:
+- **admin-only:** set in the console (password and CSRF) or by the local CLI, never through the agent API or pairing;
+- **pinned to the exact `scheme://host:port`** the admin entered. The DNS-pinned IP must still match after every
+  resolution. It covers that connection's own upstream URL and its discovered OAuth endpoints, and only when they're on
+  that same host. An authorization server elsewhere goes through the normal guard. A redirect to any other private
+  target is refused;
+- **explicit about ranges:** loopback (`127.0.0.0/8`, `::1`), RFC 1918, CGNAT `100.64.0.0/10` (Tailscale) and ULA
+  `fc00::/7`. Link-local and cloud metadata (`169.254.0.0/16`, `fd00:ec2::254`) are never allowed;
+- **http on the allowed host only:** plain `http` is accepted for that host, both for the MCP URL and for its own OAuth
+  endpoints. On loopback, and on a tailnet (which WireGuard already encrypts), that's acceptable. On public hosts
+  https stays mandatory;
+- **off by default and visible:** the Add connection dialog offers it only after the probe hits the block. It explains
+  that a "connection to a server on this machine or your private network" can reach other services there, and the
+  connection row shows a "private network" badge;
+- **audited:** granting and revoking the allow are audit entries, and editing the URL clears it.
+
+The webhook allowlist (`Settings.webhookAllowlist`) stays separate: allowing a host for one connection mustn't open
+it to webhooks, or the reverse.
 
 **stdio upstreams.** Only the console admin can add one, and the console shows the full command, arguments and
 environment keys, untruncated.
@@ -475,7 +516,7 @@ controls are enforced in code, on the action side, as agentinbox already does fo
 | | | Session taint: after untrusted output, egress calls escalate to approval for N minutes (CaMeL-style; [arXiv 2503.18813](https://arxiv.org/abs/2503.18813), [design patterns](https://arxiv.org/abs/2506.08837)) | later |
 | Tool poisoning and rug pulls | `<IMPORTANT>` `add` tool reading `~/.ssh` ([Invariant](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)); [line jumping](https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/); postmark-mcp 1.0.16 BCC'ing all mail ([BleepingComputer](https://www.bleepingcomputer.com/news/security/unofficial-postmark-mcp-npm-silently-stole-users-emails/)) | Hash pinning, review on change, serving the pinned snapshot, cleaned descriptions, review-time signals, pinned stdio versions | v1 |
 | Cross-server shadowing | A description rewriting another server's `send_email` | Operator-chosen slugs, collision checks, flagging descriptions that name other servers' tools, per-agent grants | v1 |
-| Token exfiltration and confused deputy | Token passthrough and SSRF ([MCP security](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)); CVE-2025-6514 | No passthrough; encrypted per-connection credentials; scrubbing of exact token strings and `Bearer …` from results and errors; one pinned, guarded fetch; https only for authorization URLs | v1 |
+| Token exfiltration and confused deputy | Token passthrough and SSRF ([MCP security](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)); CVE-2025-6514 | No passthrough; encrypted per-connection credentials; scrubbing of exact token strings and `Bearer …` from results and errors; one pinned, guarded fetch; https only for authorization URLs, except on a connection's own admin-allowed private host | v1 |
 | stdio as a code-execution surface | Spec "local MCP server compromise" | Admin-only; full command shown; pinned versions; `shell: false`; minimal env; no `process.env` inheritance | v1 |
 | | | bubblewrap or `systemd-run` sandbox, network namespace | later |
 | Approval bypass | Arguments hidden past a scrollbar; "always allow" fatigue; lying annotations | Exact-bytes approvals with hash re-check; annotations can only raise risk; scoped expiring rules; caps and an egress byte budget against split calls | v1 |
@@ -557,7 +598,8 @@ grants or migrations. It ships as a nightly and is done when every item under "D
 - CLI: `connections add|list|reconnect|disable` and `import --from hermes|claude-code|cursor|codex`;
 - docs and SKILL.md.
 
-stdio is in M1 only if Hermes's brightspace or hearloom server needs it (see question 3).
+No stdio in M1 (decision 5): every Hermes upstream is remote HTTP. The **private-target allow** is in M1, because
+four of Hermes's six upstreams are on loopback or Tailscale.
 
 **Done when:**
 1. An E2E test against fake upstream MCP servers covers:
@@ -570,7 +612,9 @@ stdio is in M1 only if Hermes's brightspace or hearloom server needs it (see que
    - an SSRF block;
    - native Gmail and Calendar tools unchanged.
 2. Notion connects through the preset on a real workspace, and an agent reads and writes, with the write approved.
-3. Hermes on Wynn's install has **one** MCP entry, the broker, serving agentinbox plus the T3 servers and the others.
+3. Hermes on Wynn's install has **one** MCP entry, the broker. It serves agentinbox's native tools plus brightspace,
+   hearloom, t3code-macbook and forge through the private-target allow, and whoop as a generic bearer connection
+   until M2. t3code-worldstream is retired and isn't migrated.
 4. One fresh-persona walk passes: a new user with Notion only, no Google.
 
 ### M2: WHOOP native
@@ -598,7 +642,7 @@ stdio is in M1 only if Hermes's brightspace or hearloom server needs it (see que
 ### M4: Hardening and the rest (each item ships alone)
 
 - session taint (egress escalates to approval after untrusted reads);
-- the stdio sandbox (if stdio shipped);
+- stdio upstreams (admin-only, pinned versions, minimal env), with a bubblewrap or `systemd-run` sandbox;
 - near-duplicate egress detection;
 - hash-chained audit rows;
 - resources and prompts passthrough;
@@ -618,10 +662,10 @@ Planned now and executed when the name is final. `<new>` stands for the chosen n
   workflow moves to the new package, which needs a trusted publisher registered for it.
 - **The repo:** GitHub rename `wynn-dev/agentinbox` → `wynn-dev/<new>`. Old URLs redirect; update the badges and
   links.
-- **The data directory:** new installs use `~/.<new>`. If `~/.<new>` doesn't exist and `~/.agentinbox` does, keep
-  using `~/.agentinbox` and say so once. Moving it automatically is a risk to `master.key` and isn't worth taking.
+- **The data directory (DECIDED):** new installs use `~/.<new>`. If `~/.<new>` doesn't exist and `~/.agentinbox` does,
+  keep using `~/.agentinbox` and say so once. There's no automatic move: it would put `master.key` at risk.
 - **Environment variables:** read `<NEW>_*` first, then `AGENTINBOX_*` (MASTER_KEY, DATA, GOOGLE_* bases).
-- **Agent keys:** existing `aib_` keys stay valid forever. Whether new keys get a new prefix is question 7.
+- **Agent keys (DECIDED):** every key keeps the `aib_` prefix, existing and new.
 - **Services:** `service install` on the new name detects the old launchd label (`com.unlaboredlabs.agentinbox*`) or
   systemd unit, boots it out (waiting for it to unload, as #48 does), installs the new one, and rolls back on failure.
   The listener profiles move the same way. This is the one place where a rename can cost mail, so it needs an E2E
@@ -633,7 +677,8 @@ Planned now and executed when the name is final. `<new>` stands for the chosen n
 
 ## Questions for Wynn
 
-The decided items above aren't repeated here. Each question has a recommendation, so a plain "yes" to all of them
+The decided items above aren't repeated here. Questions 3 and 7 are answered and keep their numbers so the
+answers stay easy to match. Each question has a recommendation, so a plain "yes" to all of them
 works.
 
 1. **"Multi-user": one install shared by several people, or many people each running their own?**
@@ -644,9 +689,7 @@ works.
    **Rec: no.** Stay fully self-hosted. Notion needs no app thanks to automatic registration, and WHOOP's rules (the
    secret, the 10-member cap, one webhook per app) make a per-user app the only clean option. Its guided setup is 5
    steps.
-3. **Hermes's brightspace and hearloom servers: remote HTTP or local stdio, and what auth?**
-   **Rec:** if either is stdio, put admin-only stdio in M1 so Hermes can drop all 7 entries. Otherwise stdio waits
-   for M4. (Adri can read `~/.hermes/config.yaml` to answer this.)
+3. *Answered (decision 5): both are remote HTTP with a static bearer, so there's no stdio in M1.*
 4. **Google optional in the first-run wizard** (a Notion- or WHOOP-only install skips Google Cloud entirely)?
    **Rec: yes.** It's the biggest win for a public product: the Google path is 8 steps.
 5. **Default policy for newly connected tools:** hidden until reviewed, then reads allowed, writes need approval,
@@ -657,10 +700,7 @@ works.
    Hermes can message you on Telegram with a link.
    **Rec: yes, link only.** Approving from Telegram itself (a reply that approves) is M4 at the earliest, because a
    chat reply is spoofable.
-7. **Rename details:**
-   - New agent keys use a new prefix, with `aib_` valid forever. **Rec: keep `aib_` for everything.** It's invisible
-     to users, and changing it costs more than it gives.
-   - Keep `~/.agentinbox` for existing installs. **Rec: yes.** No automatic data move.
+7. *Answered (decision 6): `aib_` for every key, and `~/.agentinbox` kept with no automatic move.*
 8. **Search mode for Hermes:** Hermes loads every tool. **Rec: turn search mode on automatically for any agent with
    more than about 30 tools**, with real tool names kept for agents under that.
 9. **Order after M1:** **Rec: M2 WHOOP, then M3 search mode.** If Hermes's tool count is already over about 50 after
