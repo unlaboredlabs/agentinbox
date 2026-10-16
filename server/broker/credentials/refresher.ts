@@ -21,6 +21,8 @@ export interface RefresherOptions {
 export interface AccessTokenOptions {
   /** A 401 rejected this access token: refresh unless another caller already replaced it. */
   rejected?: string;
+  /** Refresh now (joins one already in flight). Prefer `rejected`, which skips a refresh someone else already did. */
+  force?: boolean;
 }
 
 /**
@@ -50,7 +52,7 @@ export class Refresher implements TokenRefresher {
     signal.throwIfAborted();
     const t = this.store.tokens(connectionId);
     if (!t) throw new SourceError("needs_reauth", "This connection isn't signed in");
-    const forced = o.rejected !== undefined && o.rejected === t.accessToken;
+    const forced = o.force === true || (o.rejected !== undefined && o.rejected === t.accessToken);
     if (o.rejected !== undefined && !forced) return t.accessToken; // someone already refreshed past the rejected token
     const due = refreshDueAt(t);
     if (!forced && (due === null || this.now() < due)) return t.accessToken;

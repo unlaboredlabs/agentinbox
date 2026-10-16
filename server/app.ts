@@ -17,6 +17,7 @@ import { authApi, authPublicApi } from "./api/auth.ts";
 import { eventsApi } from "./api/events.ts";
 import { googleApi } from "./api/google.ts";
 import { oauthRoutes } from "./api/oauth.ts";
+import { connectionOAuthRoutes } from "./broker/upstream/callback.ts";
 import { overviewApi } from "./api/overview.ts";
 import { pairingsApi } from "./api/pairings.ts";
 import { settingsApi } from "./api/settings.ts";
@@ -122,6 +123,8 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
     return c.body(renderSkill(ctx.settings.publicUrl()));
   });
   app.route("/", oauthRoutes(ctx));
+  // Upstream connections' sign-ins (MCP broker); 404 while the brokerUpstreams setting is off.
+  app.route("/", connectionOAuthRoutes(ctx));
   // Google-facing: verified by channel id + X-Goog-Channel-Token, outside the admin session and CSRF guard.
   app.post(CALENDAR_PUSH_PATH, (c) => c.body(null, ctx.calendar.handlePush(c.req.raw.headers) as 204));
   const mcp = mcpRoutes(ctx);

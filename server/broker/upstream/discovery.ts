@@ -1,4 +1,5 @@
 import { SourceError } from "../types.ts";
+import { scrubText } from "../credentials/scrub.ts";
 import { originKey, type PrivateTargetAllow } from "./fetch.ts";
 
 /**
@@ -90,7 +91,7 @@ export async function discoverResource(fetch: Fetch, serverUrl: URL, hinted: str
     // RFC 9728 §3.3: the resource must be the one we asked about (a prefix match allows a server-wide document).
     const got = canonicalResource(doc.resource);
     if (got !== expected && !expected.startsWith(`${got.replace(/\/$/, "")}/`)) {
-      throw new SourceError("protocol", `The server's resource metadata names a different resource (${doc.resource})`);
+      throw new SourceError("protocol", `The server's resource metadata names a different resource (${scrubText(doc.resource, [], 200)})`);
     }
     return doc as ResourceMetadata;
   }
@@ -135,7 +136,7 @@ export async function discoverAuthServer(fetch: Fetch, issuer: string, allow: Pr
     const doc = await fetchJsonDoc(fetch, url, signal);
     if (!doc) continue;
     if (doc.issuer !== issuer) {
-      throw new SourceError("protocol", `Authorization server metadata at ${url} names issuer ${String(doc.issuer)}, expected ${issuer}`);
+      throw new SourceError("protocol", `Authorization server metadata at ${url} names issuer ${scrubText(String(doc.issuer), [], 200)}, expected ${issuer}`);
     }
     const md = doc as AuthServerMetadata;
     if (!md.code_challenge_methods_supported?.includes("S256")) {

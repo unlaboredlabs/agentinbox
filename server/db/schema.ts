@@ -455,7 +455,8 @@ export const MIGRATIONS: string[] = [
   -- When the stored access token was issued: proactive refresh runs at expires_at - max(60 s, 10 % of the lifetime).
   ALTER TABLE connection_credentials ADD COLUMN issued_at TEXT;
   -- An upstream connection's authorization in flight (/oauth/connections/callback). NULL for Google's flow.
-  -- code_verifier holds the PKCE verifier encrypted (ctx.crypto) for these rows.
+  -- code_verifier is '' for these rows: the verifier is kept encrypted, keyed by state, in
+  -- connection_credentials.pkce_verifier_enc.
   ALTER TABLE oauth_states ADD COLUMN connection_id TEXT REFERENCES connections(id) ON DELETE CASCADE;
   `,
 ];

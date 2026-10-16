@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { SourceError, type StoredTokens } from "../types.ts";
 import type { AuthServerMetadata } from "./discovery.ts";
+import { scrubText } from "../credentials/scrub.ts";
 
 /**
  * MCP OAuth for upstream connections (docs/MCP-BROKER.md "The authorization flow"): client registration
@@ -116,7 +117,7 @@ export async function ensureClient(fetch: Fetch, md: AuthServerMetadata, existin
   });
   const body = await readJson(res);
   if (!res.ok || typeof body?.client_id !== "string") {
-    const err = typeof body?.error === "string" ? `${body.error}${typeof body.error_description === "string" ? `: ${body.error_description}` : ""}` : `HTTP ${res.status}`;
+    const err = scrubText(typeof body?.error === "string" ? `${body.error}${typeof body.error_description === "string" ? `: ${body.error_description}` : ""}` : `HTTP ${res.status}`, [], 200);
     throw new SourceError("protocol", `Automatic client registration at ${md.issuer} failed (${err})`);
   }
   const method = typeof body.token_endpoint_auth_method === "string" ? body.token_endpoint_auth_method : body.client_secret ? "client_secret_basic" : "none";
@@ -159,7 +160,7 @@ export function authorizationUrl(
 /** Errors from the token endpoint that mean the grant or client is gone: needs a human. */
 const REAUTH_ERRORS = new Set(["invalid_grant", "invalid_client", "unauthorized_client"]);
 
-async function tokenRequest(fetch: Fetch, client: StoredClient, params: Record<string, string>, signal?: AbortSignal): Promise<StoredTokens> {
+async function tokenRequest(fetch: Fetch, client: StoredClient, params: Record<string, string>, signal?: AbortSignal, clock: () => number = Date.now): Promise<StoredTokens> {
   if (!client.token_endpoint) throw new SourceError("needs_reauth", "The connection's token endpoint is unknown; reconnect it");
   const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
   const form = new URLSearchParams({ ...params, client_id: client.client_id });
@@ -182,14 +183,14 @@ async function tokenRequest(fetch: Fetch, client: StoredClient, params: Record<s
   const body = await readJson(res);
   if (!res.ok || typeof body?.access_token !== "string") {
     const code = typeof body?.error === "string" ? body.error : null;
-    const desc = typeof body?.error_description === "string" ? `: ${body.error_description}` : "";
+    const desc = typeof body?.error_description === "string" ? `: ${scrubText(body.error_description, Object.values(params).concat(client.client_secret ?? []), 200)}` : "";
     if (code && REAUTH_ERRORS.has(code)) throw new SourceError("needs_reauth", `The authorization server rejected the sign-in (${code}${desc})`);
     if (res.status === 429) throw new SourceError("rate_limited", "The token endpoint is rate limiting");
     throw new SourceError(res.status >= 500 ? "unavailable" : "protocol", `The token endpoint answered ${code ?? `HTTP ${res.status}`}${desc}`);
   }
   const type = typeof body.token_type === "string" ? body.token_type.toLowerCase() : "bearer";
   if (type !== "bearer") throw new SourceError("protocol", `Unsupported token type ${String(body.token_type)}`);
-  const now = Date.now();
+  const now = clock();
   const expiresIn = typeof body.expires_in === "number" ? body.expires_in : typeof body.expires_in === "string" ? Number(body.expires_in) : NaN;
   return {
     accessToken: body.access_token,
@@ -206,16 +207,18 @@ export function exchangeCode(
   client: StoredClient,
   p: { code: string; verifier: string; redirectUri: string; resource: string },
   signal?: AbortSignal,
+  clock: () => number = Date.now,
 ): Promise<StoredTokens> {
-  return tokenRequest(fetch, client, { grant_type: "authorization_code", code: p.code, redirect_uri: p.redirectUri, code_verifier: p.verifier, resource: p.resource }, signal);
+  return tokenRequest(fetch, client, { grant_type: "authorization_code", code: p.code, redirect_uri: p.redirectUri, code_verifier: p.verifier, resource: p.resource }, signal, clock);
 }
 
-export function refreshGrant(fetch: Fetch, client: StoredClient, current: StoredTokens, signal?: AbortSignal): Promise<StoredTokens> {
+export function refreshGrant(fetch: Fetch, client: StoredClient, current: StoredTokens, signal?: AbortSignal, clock: () => number = Date.now): Promise<StoredTokens> {
   if (!current.refreshToken) return Promise.reject(new SourceError("needs_reauth", "No refresh token"));
   return tokenRequest(
     fetch,
     client,
     { grant_type: "refresh_token", refresh_token: current.refreshToken, ...(client.resource ? { resource: client.resource } : {}) },
     signal,
+    clock,
   );
 }

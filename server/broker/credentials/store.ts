@@ -5,6 +5,7 @@ import type { Db } from "../../db/index.ts";
 import type { Logger } from "../../util/log.ts";
 import { errorMessage } from "../../util/errors.ts";
 import type { CredentialStore, StoredTokens } from "../types.ts";
+import { scrubText } from "./scrub.ts";
 
 /**
  * A connection event for the events outbox (`connection.auth_failed`, `connection.expiring`). The events
@@ -53,7 +54,23 @@ export interface PendingAuth {
   scope: string | null;
   /** The authorization server sends RFC 9207 `iss` on the redirect. */
   issParameter: boolean;
+  /** A preset reconnect cap in days (Notion: 180), applied when the sign-in completes. */
+  capDays?: number;
 }
+
+/** One authorization in flight (store.addFlow). */
+export interface PkceFlow {
+  /** Empty for flows without PKCE (a native user_app preset such as WHOOP). */
+  verifier: string;
+  redirectUri: string;
+  /** The discovery result this flow started with. */
+  pending: PendingAuth;
+  createdAt: number;
+}
+
+/** Same lifetime as Google's oauth_states rows. */
+export const FLOW_TTL_MS = 15 * 60_000;
+const MAX_FLOWS = 5;
 
 const iso = (ms: number | null | undefined): string | null => (typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 const ms = (s: string | null): number | null => (s ? Date.parse(s) : null);
@@ -168,7 +185,45 @@ export class SqliteCredentialStore implements CredentialStore {
     });
   }
 
-  /** The authorization in flight (discovery result and redirect URI); the PKCE verifier lives on its oauth_states row. */
+  /**
+   * Authorizations in flight, keyed by sha256(state), in `pkce_verifier_enc` (encrypted JSON): never in the
+   * plaintext oauth_states.code_verifier. Two concurrent Reconnects keep separate verifiers.
+   */
+  private flows(r: CredRow | undefined): Record<string, PkceFlow> {
+    if (!r?.pkce_verifier_enc) return {};
+    try {
+      return JSON.parse(this.dec(r.pkce_verifier_enc)!) as Record<string, PkceFlow>;
+    } catch {
+      return {};
+    }
+  }
+
+  addFlow(connectionId: string, state: string, flow: Omit<PkceFlow, "createdAt">): void {
+    this.deps.db.tx(() => {
+      const now = this.now();
+      const kept = Object.entries(this.flows(this.row(connectionId)))
+        .filter(([, f]) => f.createdAt + FLOW_TTL_MS >= now)
+        .sort(([, a], [, b]) => b.createdAt - a.createdAt)
+        .slice(0, MAX_FLOWS - 1);
+      const next = Object.fromEntries([...kept, [sha256(state), { ...flow, createdAt: now }]]);
+      this.patch(connectionId, { pkce_verifier_enc: this.enc(JSON.stringify(next)) });
+    });
+  }
+
+  /** Consumes the flow for `state` (single use); null when unknown or older than FLOW_TTL_MS. */
+  takeFlow(connectionId: string, state: string): PkceFlow | null {
+    return this.deps.db.tx(() => {
+      const all = this.flows(this.row(connectionId));
+      const key = sha256(state);
+      const flow = all[key] ?? null;
+      if (!flow) return null;
+      delete all[key];
+      this.patch(connectionId, { pkce_verifier_enc: Object.keys(all).length ? this.enc(JSON.stringify(all)) : null });
+      return flow.createdAt + FLOW_TTL_MS >= this.now() ? flow : null;
+    });
+  }
+
+  /** The discovery result of the latest authorization (shared by concurrent flows of one connection). */
   pending(connectionId: string): PendingAuth | null {
     const r = this.row(connectionId);
     if (!r?.discovery_enc) return null;
@@ -180,12 +235,22 @@ export class SqliteCredentialStore implements CredentialStore {
   }
 
   setPending(connectionId: string, p: PendingAuth | null): void {
-    this.patch(connectionId, { discovery_enc: p ? this.enc(JSON.stringify(p)) : null, pkce_verifier_enc: null });
+    this.patch(connectionId, { discovery_enc: p ? this.enc(JSON.stringify(p)) : null });
+  }
+
+  /** Every secret held for the connection, for scrubbing text that could echo one back. */
+  secrets(connectionId: string): string[] {
+    const r = this.row(connectionId);
+    if (!r) return [];
+    const client = this.client(connectionId);
+    return [r.header_value_enc, r.access_token_enc, r.refresh_token_enc].map((v) => this.dec(v) ?? "").concat(typeof client?.client_secret === "string" ? [client.client_secret] : []).filter(Boolean);
   }
 
   /** Sets status `needs_reauth` with the reason; the first transition emits `connection.auth_failed` and audits. */
-  markNeedsReauth(connectionId: string, reason: string): void {
+  markNeedsReauth(connectionId: string, rawReason: string): void {
     const ts = new Date(this.now()).toISOString();
+    // The reason may quote upstream text: scrub it before it's stored, emitted or audited.
+    const reason = scrubText(rawReason, this.secrets(connectionId), 300);
     const { changes } = this.deps.db.run(
       "UPDATE connections SET status = 'needs_reauth', status_reason = ?, updated_at = ? WHERE id = ? AND status IN ('active', 'error')",
       reason,

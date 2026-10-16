@@ -1,6 +1,7 @@
-import type { LookupFunction } from "node:net";
-import { Agent, fetch as undiciFetch } from "undici";
-import { type LookupFn, resolveTarget, type ResolvedTarget, SsrfError, type TargetMessages } from "../../webhooks/ssrf.ts";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP, type LookupFunction } from "node:net";
+import { Agent, buildConnector, fetch as undiciFetch } from "undici";
+import { type LookupFn, normalizeIp, resolveTarget, type ResolvedTarget, SsrfError, type TargetMessages, urlHost } from "../../webhooks/ssrf.ts";
 import { SourceError } from "../types.ts";
 
 /**
@@ -45,13 +46,64 @@ export function originKey(url: URL | string): string {
   return `${u.protocol}//${u.hostname.toLowerCase()}:${port}`;
 }
 
-/** Validates and normalises an admin-entered origin for a PrivateTargetAllow. Throws on anything else. */
-export function privateAllowFor(url: string): PrivateTargetAllow {
-  const u = new URL(url);
-  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("A private-target allow needs an http or https URL");
-  if (u.username || u.password) throw new Error("A private-target allow can't carry credentials");
-  return { origin: originKey(u) };
+/** IPv6 forms that embed an IPv4 address (mapped, compatible, NAT64, 6to4): never accepted under an allow. */
+const embedsV4 = (ip: string): boolean => isIP(ip) === 6 && isIP(normalizeIp(ip)) === 4;
+
+export class PrivateTargetError extends Error {}
+
+/**
+ * The canonical `scheme://host:port` for a private-target allow (`connections.private_target`). The input must
+ * already be exactly that form: explicit port, lowercase host, no path, query, fragment, userinfo, `\`, `%`,
+ * blanks or control characters. Numeric IPv4 spellings (hex, octal, decimal) and IPv4-embedding IPv6 are
+ * refused (the URL parser rewrites them, so they never equal their canonical form, or are caught explicitly).
+ */
+export function canonicalPrivateTarget(input: string): string {
+  const fail = (why: string): never => {
+    throw new PrivateTargetError(`The private-target allow must be exactly scheme://host:port (e.g. http://127.0.0.1:3773): ${why}`);
+  };
+  if (typeof input !== "string" || input.length > 300) fail("not a short string");
+  // oxlint-disable-next-line no-control-regex -- refusing control characters is the point here
+  if (/[\\%\s\u0000-\u001f\u007f@?#]/.test(input)) fail("it contains a character that isn't allowed");
+  let u: URL;
+  try {
+    u = new URL(input);
+  } catch {
+    return fail("it isn't a valid URL");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") fail("only http and https");
+  if (u.username || u.password) fail("no credentials");
+  if (u.pathname !== "/" || u.search || u.hash) fail("no path, query or fragment");
+  if (embedsV4(urlHost(u))) fail("IPv4-mapped IPv6 addresses aren't accepted; use the IPv4 address");
+  const canonical = originKey(u);
+  if (canonical !== input) fail(`write it as ${canonical}`);
+  return canonical;
 }
+
+/** The allow for a stored `private_target`, or null when unset (or, defensively, not canonical). */
+export function allowFromColumn(privateTarget: string | null): PrivateTargetAllow | null {
+  if (!privateTarget) return null;
+  try {
+    return { origin: canonicalPrivateTarget(privateTarget) };
+  } catch {
+    return null;
+  }
+}
+
+/** Upstream URLs as entered: http(s), no userinfo. Logs and audit name only `originKey(url)`: paths can carry tokens. */
+export function validateUpstreamUrl(input: string): URL {
+  let u: URL;
+  try {
+    u = new URL(input);
+  } catch {
+    throw new SourceError("protocol", "That isn't a valid URL");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new SourceError("blocked_target", "MCP server URLs must use https (or http on an allowed private host)");
+  if (u.username || u.password) throw new SourceError("blocked_target", "MCP server URLs can't carry a username or password; use a header or OAuth instead");
+  if (u.hash) u.hash = "";
+  return u;
+}
+
+const systemLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
 const messages = (allowed: boolean): TargetMessages => ({
   subject: "Upstream URL",
@@ -70,6 +122,11 @@ export interface GuardedFetchOptions {
   /** DNS resolver (tests). */
   lookup?: LookupFn;
   maxBytes?: number;
+  /**
+   * Tests only: where to actually connect for a checked target (e.g. a fake tailnet host listening on loopback).
+   * The guard still checks the real resolved address first.
+   */
+  dial?: (target: ResolvedTarget, url: URL) => { address: string; port: number };
 }
 
 export type GuardedFetch = ((input: string | URL, init?: RequestInit) => Promise<Response>) & {
@@ -81,8 +138,25 @@ export type GuardedFetch = ((input: string | URL, init?: RequestInit) => Promise
 export async function checkTarget(url: URL, opts: GuardedFetchOptions = {}): Promise<ResolvedTarget> {
   if (url.username || url.password) throw new SourceError("blocked_target", "Upstream URLs can't carry credentials");
   const allowed = !!opts.allow && originKey(url) === opts.allow.origin;
+  let lookup = opts.lookup ?? systemLookup;
+  const host = urlHost(url);
+  if (allowed) {
+    // Under an allow, an IPv4-embedding IPv6 answer is refused outright (it would otherwise normalise into a range).
+    if (embedsV4(host)) throw new SourceError("blocked_target", "IPv4-mapped IPv6 addresses aren't accepted for a private host");
+    if (!isIP(host)) {
+      const base = lookup;
+      let answers: { address: string; family: number }[] | null = null;
+      try {
+        answers = await base(host);
+      } catch {
+        // resolveTarget repeats the lookup and reports the failure in its own words.
+      }
+      if (answers?.some((a) => embedsV4(a.address))) throw new SourceError("blocked_target", `${host} resolves to an IPv4-mapped IPv6 address, which isn't accepted for a private host`);
+      if (answers) lookup = async () => answers;
+    }
+  }
   try {
-    return await resolveTarget(url, allowed ? PRIVATE_ALLOW_CIDRS : [], opts.lookup, messages(allowed));
+    return await resolveTarget(url, allowed ? PRIVATE_ALLOW_CIDRS : [], lookup, messages(allowed));
   } catch (err) {
     if (err instanceof SsrfError) {
       if (err.kind === "dns") throw new SourceError("unavailable", err.message);
@@ -122,7 +196,17 @@ export function guardedFetch(opts: GuardedFetchOptions = {}): GuardedFetch {
         if (options.all) cb(null, [{ address: target.address, family: target.family }]);
         else cb(null, target.address, target.family);
       };
-      agent = new Agent({ connect: { lookup }, keepAliveTimeout: 30_000 });
+      const dial = opts.dial;
+      if (dial) {
+        const connector = buildConnector({});
+        agent = new Agent({
+          connect: (o, cb) => {
+            const d = dial(target, url);
+            connector({ ...o, hostname: d.address, port: String(d.port) }, cb);
+          },
+          keepAliveTimeout: 30_000,
+        });
+      } else agent = new Agent({ connect: { lookup }, keepAliveTimeout: 30_000 });
       if (agents.size >= 16) {
         const [oldKey, old] = agents.entries().next().value as [string, Agent];
         agents.delete(oldKey);
@@ -150,8 +234,10 @@ export function guardedFetch(opts: GuardedFetchOptions = {}): GuardedFetch {
         signal: init.signal ?? undefined,
         dispatcher: agentFor(url, target),
       });
-      if (REDIRECT.has(res.status) && res.headers.get("location")) {
+      // A caller that handles redirects itself (the SDK's same-origin policy) gets the 3xx; its next hop is checked again.
+      if (REDIRECT.has(res.status) && res.headers.get("location") && init.redirect !== "manual") {
         await res.body?.cancel().catch(() => {});
+        if (init.redirect === "error") throw new SourceError("protocol", "Upstream redirected");
         if (hop >= MAX_REDIRECTS) throw new SourceError("protocol", `Upstream redirected more than ${MAX_REDIRECTS} times`);
         const next = new URL(res.headers.get("location")!, url);
         if (originKey(next) !== startOrigin) {
