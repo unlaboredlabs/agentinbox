@@ -32,3 +32,15 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - Whether enabling `pubsub.googleapis.com` needs a billing account. Step 2 enables only Gmail to stay safe, and
   step 6 warns.
 - The real unverified-app and Gmail-permission consent screens, and how Gmail labels the self-sent test email.
+
+## Calendar + listener-recipe round (Oct 2026)
+- The calendar scheduler runs two SQL queries per second, even on mail-only installs.
+- An RSVP retry after a 5xx can email the organizer twice.
+- Calendar policy retry messages have edge cases; switch them to `isOutcomeUnknown` from the Calendar client.
+- Calendar setup tests use their own fakes rather than the shared fake Calendar API in `test/fake-google.ts`.
+- Removing an account waits behind the push-channel reconcile.
+- Listener: `python3` is required, and on macOS the Xcode `python3` stub is a trap.
+- Listener: any loopback `/webhooks/<name>` path gets the wrapped body, not only Hermes routes.
+- Listener: Homebrew's `/usr/local/bin` (group-writable) is rejected as the service node.
+- Listener: Hermes plugin and native toolsets can still be added to a confined `mcp-agentinbox` route by hand.
+- The daemon's own `service install` still records the shell's node (see the service-unit item above).
