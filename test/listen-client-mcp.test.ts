@@ -11,7 +11,7 @@ import { FAKE_KEY, isolateXdg } from "./listen-client-fake.ts";
 let env: ReturnType<typeof isolateXdg>;
 let home: string;
 const saved = { HOME: process.env.HOME, PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, HERMES_HOME: process.env.HERMES_HOME };
-const target = { name: "agentinbox", url: "https://mail.example.com/mcp", key: FAKE_KEY };
+const target = { name: "xaq", url: "https://mail.example.com/mcp", key: FAKE_KEY };
 
 beforeEach(() => {
   env = isolateXdg();
@@ -30,7 +30,7 @@ afterEach(() => {
   env.restore();
 });
 
-const backups = (dir: string) => readdirSync(dir).filter((f) => f.includes(".agentinbox-backup-"));
+const backups = (dir: string) => readdirSync(dir).filter((f) => f.includes(".xaq-backup-"));
 
 describe("setup-mcp", () => {
   it("Claude Code: registers a header helper with add-json, so the key is never in argv", () => {
@@ -53,8 +53,8 @@ describe("setup-mcp", () => {
     const argvLog = readFileSync(log, "utf8");
     expect(argvLog).not.toContain(FAKE_KEY);
     const calls = argvLog.split("--\n").filter(Boolean).map((c) => c.trim().split("\n"));
-    expect(calls[1]).toEqual(["mcp", "remove", "agentinbox", "--scope", "user"]);
-    expect(calls[2]!.slice(0, 5)).toEqual(["mcp", "add-json", "--scope", "user", "agentinbox"]);
+    expect(calls[1]).toEqual(["mcp", "remove", "xaq", "--scope", "user"]);
+    expect(calls[2]!.slice(0, 5)).toEqual(["mcp", "add-json", "--scope", "user", "xaq"]);
     const entry = JSON.parse(calls[2]![5]!) as { type: string; url: string; headersHelper: string };
     expect(entry).toMatchObject({ type: "http", url: "https://mail.example.com/mcp" });
     expect(backups(home)).toHaveLength(1);
@@ -63,7 +63,7 @@ describe("setup-mcp", () => {
     const node = helperNodeChoice().path;
     expect(entry.headersHelper.startsWith(`'${node}' `)).toBe(true);
     expect(r.notes).toEqual([expect.stringContaining(`Node.js: Claude Code runs the header helper with ${node}`)]);
-    expect(r.notes![0]).toContain("run `npx agentinbox-cli setup-mcp --tool claude-code` again");
+    expect(r.notes![0]).toContain("run `npx xaq-cli setup-mcp --tool claude-code` again");
 
     // The helper prints the header from the 0600 profile (to a pipe, never a terminal).
     const helper = spawnSync("/bin/sh", ["-c", entry.headersHelper], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -81,7 +81,7 @@ describe("setup-mcp", () => {
     }
   });
 
-  it("listener service: the stable node, but only one new enough for agentinbox (22.13+); says which and why", () => {
+  it("listener service: the stable node, but only one new enough for xaq (22.13+); says which and why", () => {
     const fnm = "/Users/w/Library/Application Support/fnm/node-versions/v24.1.0/installation/bin/node";
     const fnmDefault = "/Users/w/Library/Application Support/fnm/aliases/default/bin/node";
     // Wynn's Mac: fnm v24 interactively, /usr/local/bin/node v22.20 installed too. fnm's default alias is too old here.
@@ -90,7 +90,7 @@ describe("setup-mcp", () => {
     const chosen = serviceNode(fnm, (p) => versions[p] ?? null, "24.1.0", trusted);
     expect(chosen).toMatchObject({ path: "/usr/local/bin/node", version: "22.20.0", versioned: false });
     expect(chosen.why).toBe(`a stable path that survives fnm/nvm upgrades (this shell's is ${fnm}, v24.1.0)`);
-    // Only nodes too old for agentinbox around: this shell's node, flagged as version-specific.
+    // Only nodes too old for xaq around: this shell's node, flagged as version-specific.
     const old = serviceNode(fnm, (p) => (p === "/usr/bin/node" ? "20.11.0" : null), "24.1.0", trusted);
     // A candidate someone else could replace (not root's or ours, or group/world-writable) is skipped.
     expect(serviceNode(fnm, (p) => versions[p] ?? null, "24.1.0", (p) => p !== "/usr/local/bin/node").path).toBe(fnm);
@@ -129,7 +129,7 @@ describe("setup-mcp", () => {
     process.env.PATH = "/nonexistent";
     const r = setupMcp("claude-code", target, "/p.json");
     expect(r.ok).toBe(false);
-    expect(r.manual?.join("\n")).toContain("claude mcp add-json --scope user agentinbox");
+    expect(r.manual?.join("\n")).toContain("claude mcp add-json --scope user xaq");
     expect(r.manual?.join("\n")).toContain("headersHelper");
     expect(JSON.stringify(r)).not.toContain(FAKE_KEY);
   });
@@ -140,7 +140,7 @@ describe("setup-mcp", () => {
     const file = join(dir, "config.toml");
     writeFileSync(
       file,
-      `model = "o5"\n\n[mcp_servers.agentinbox]\nurl = "https://old/mcp"\n\n[mcp_servers.agentinbox.env]\nX = "1"\n\n[mcp_servers.other]\ncommand = "x"\n`,
+      `model = "o5"\n\n[mcp_servers.xaq]\nurl = "https://old/mcp"\n\n[mcp_servers.xaq.env]\nX = "1"\n\n[mcp_servers.other]\ncommand = "x"\n`,
     );
     const r = setupMcp("codex", target, "/p.json");
     expect(r.ok).toBe(true);
@@ -148,8 +148,8 @@ describe("setup-mcp", () => {
     expect(text).toContain('model = "o5"');
     expect(text).toContain("[mcp_servers.other]");
     expect(text).not.toContain("https://old/mcp");
-    expect(text).not.toContain("[mcp_servers.agentinbox.env]");
-    expect(text.match(/\[mcp_servers\.agentinbox\]/g)).toHaveLength(1);
+    expect(text).not.toContain("[mcp_servers.xaq.env]");
+    expect(text.match(/\[mcp_servers\.xaq\]/g)).toHaveLength(1);
     expect(text).toContain(`http_headers = { Authorization = "Bearer ${FAKE_KEY}" }`);
     expect(text).toContain('default_tools_approval_mode = "approve"');
     expect(statSync(file).mode & 0o777).toBe(0o600);
@@ -158,10 +158,10 @@ describe("setup-mcp", () => {
   });
 
   it("Codex: refuses inline mcp_servers definitions", () => {
-    expect(removeTomlServer(`mcp_servers = { agentinbox = { url = "x" } }\n`, "agentinbox")).toBeNull();
-    expect(removeTomlServer(`[x]\nmcp_servers.agentinbox.url = "x"\n`, "agentinbox")).toBeNull();
-    expect(removeTomlServer(`[mcp_servers."agentinbox"]\nurl = "x"\n[y]\nz = 1\n`, "agentinbox")).toBe(`[y]\nz = 1\n`);
-    expect(codexBlock(target)).toContain("[mcp_servers.agentinbox]");
+    expect(removeTomlServer(`mcp_servers = { xaq = { url = "x" } }\n`, "xaq")).toBeNull();
+    expect(removeTomlServer(`[x]\nmcp_servers.xaq.url = "x"\n`, "xaq")).toBeNull();
+    expect(removeTomlServer(`[mcp_servers."xaq"]\nurl = "x"\n[y]\nz = 1\n`, "xaq")).toBe(`[y]\nz = 1\n`);
+    expect(codexBlock(target)).toContain("[mcp_servers.xaq]");
   });
 
   it("Cursor: merges mcp.json", () => {
@@ -172,7 +172,7 @@ describe("setup-mcp", () => {
     expect(setupMcp("cursor", target, "/p.json").ok).toBe(true);
     const doc = JSON.parse(readFileSync(file, "utf8"));
     expect(doc).toEqual({
-      mcpServers: { other: { command: "x" }, agentinbox: { url: target.url, headers: { Authorization: `Bearer ${FAKE_KEY}` } } },
+      mcpServers: { other: { command: "x" }, xaq: { url: target.url, headers: { Authorization: `Bearer ${FAKE_KEY}` } } },
       extra: true,
     });
     expect(statSync(file).mode & 0o777).toBe(0o600);
@@ -185,24 +185,24 @@ describe("setup-mcp", () => {
   it("Hermes: adds mcp_servers to config.yaml and the key to .env", () => {
     const dir = join(home, ".hermes");
     mkdirSync(dir);
-    writeFileSync(join(dir, "config.yaml"), `model: hermes-4\nmcp_servers:\n    github:\n        command: gh-mcp\n    agentinbox:\n        url: "https://old"\ntoolsets: [web]\n`);
-    writeFileSync(join(dir, ".env"), "OPENROUTER_API_KEY=x\nAGENTINBOX_API_KEY=old\n");
+    writeFileSync(join(dir, "config.yaml"), `model: hermes-4\nmcp_servers:\n    github:\n        command: gh-mcp\n    xaq:\n        url: "https://old"\ntoolsets: [web]\n`);
+    writeFileSync(join(dir, ".env"), "OPENROUTER_API_KEY=x\nXAQ_API_KEY=old\n");
     const r = setupMcp("hermes", target, "/p.json");
     expect(r.ok).toBe(true);
     const yaml = readFileSync(join(dir, "config.yaml"), "utf8");
     expect(yaml).toBe(
-      `model: hermes-4\nmcp_servers:\n    agentinbox:\n        url: "https://mail.example.com/mcp"\n        headers:\n          Authorization: "Bearer \${AGENTINBOX_API_KEY}"\n    github:\n        command: gh-mcp\ntoolsets: [web]\n`,
+      `model: hermes-4\nmcp_servers:\n    xaq:\n        url: "https://mail.example.com/mcp"\n        headers:\n          Authorization: "Bearer \${XAQ_API_KEY}"\n    github:\n        command: gh-mcp\ntoolsets: [web]\n`,
     );
-    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(`OPENROUTER_API_KEY=x\nAGENTINBOX_API_KEY=${FAKE_KEY}\n`);
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(`OPENROUTER_API_KEY=x\nXAQ_API_KEY=${FAKE_KEY}\n`);
     expect(statSync(join(dir, ".env")).mode & 0o777).toBe(0o600);
     expect(yaml).not.toContain(FAKE_KEY);
   });
 
   it("Hermes: YAML edge cases", () => {
     const entry = ['url: "u"'];
-    expect(upsertYamlServer("", "agentinbox", entry)).toBe('mcp_servers:\n  agentinbox:\n    url: "u"\n');
-    expect(upsertYamlServer("a: 1\nmcp_servers: {}\n", "agentinbox", entry)).toBe('a: 1\nmcp_servers:\n  agentinbox:\n    url: "u"\n');
-    expect(upsertYamlServer("mcp_servers: { x: 1 }\n", "agentinbox", entry)).toBeNull();
+    expect(upsertYamlServer("", "xaq", entry)).toBe('mcp_servers:\n  xaq:\n    url: "u"\n');
+    expect(upsertYamlServer("a: 1\nmcp_servers: {}\n", "xaq", entry)).toBe('a: 1\nmcp_servers:\n  xaq:\n    url: "u"\n');
+    expect(upsertYamlServer("mcp_servers: { x: 1 }\n", "xaq", entry)).toBeNull();
     expect(existsSync(join(home, ".hermes"))).toBe(false);
   });
 });

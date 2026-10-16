@@ -5,10 +5,10 @@ import type { ImportClient } from "./clients.ts";
 import { readTopMap, UNREADABLE, type YamlValue } from "./yaml.ts";
 
 /**
- * Places in a client's config that confine something to the agentinbox MCP server alone: Hermes platform toolsets,
- * webhook routes (`toolsets: ["mcp-agentinbox", …]`) and cron jobs (`enabled_toolsets: ["agentinbox"]`). Once the
- * imported servers are served through agentinbox, each of these also sees their tools, so `import` warns before
- * replacing anything (docs/listen.md: an email-triggered route confined to agentinbox).
+ * Places in a client's config that confine something to the xaq MCP server alone: Hermes platform toolsets,
+ * webhook routes (`toolsets: ["mcp-<server>", …]`) and cron jobs (`enabled_toolsets: ["<server>"]`). Once the
+ * imported servers are served through xaq, each of these also sees their tools, so `import` warns before
+ * replacing anything (docs/listen.md: an email-triggered route confined to xaq).
  */
 export function confinedRoutes(client: ImportClient, serverName: string, env: NodeJS.ProcessEnv = process.env): string[] {
   if (client !== "hermes") return [];

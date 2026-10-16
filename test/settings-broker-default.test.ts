@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 function install() {
-  const dir = mkdtempSync(join(tmpdir(), "agentinbox-settings-"));
+  const dir = mkdtempSync(join(tmpdir(), "xaq-settings-"));
   dirs.push(dir);
   const path = join(dir, "db.sqlite");
   const config = loadConfig({ dataDir: dir, host: "127.0.0.1", port: 0 }, "0.0.0-test");

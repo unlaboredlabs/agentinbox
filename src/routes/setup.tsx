@@ -116,7 +116,7 @@ function ClaimPage() {
 
   return (
     <AuthShell
-      title="Welcome to agentinbox"
+      title="Welcome to xaq"
       description="Secure this console with an admin password. Next, we'll walk through connecting Gmail and your first agent."
     >
       <Card>

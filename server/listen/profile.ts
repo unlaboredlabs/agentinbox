@@ -4,6 +4,7 @@ import type { AgentTool, ListenerConfig } from "../../shared/agent-api.ts";
 import { type EventType, isEventType } from "../../shared/types.ts";
 import { webhookFilterSchema } from "../webhooks/filter.ts";
 import { isTooOpen, writePrivateFile } from "./fsutil.ts";
+import { isServerName, mcpServerName } from "./names.ts";
 import { DEFAULT_PROFILE, profilePath, profilesDir, validProfileName } from "./paths.ts";
 import { NPX } from "./version.ts";
 
@@ -25,6 +26,11 @@ export interface Profile extends ListenerConfig {
   skipCategories?: string[];
   /** `--batch`: seconds to collect events into one --exec run. */
   batchSeconds?: number;
+  /**
+   * The MCP server name (also the Hermes route) registered for this profile: `xaq[-<profile>]`, or the
+   * pre-rename `agentinbox[-<profile>]` it was set up with. Filled in on save; see names.ts. (rename-xaq: keep)
+   */
+  mcpServer?: string;
   createdAt?: string;
 }
 
@@ -57,6 +63,7 @@ const profileSchema = z
     exclude: webhookFilterSchema.pick({ from: true, labelIds: true }).optional(),
     skipCategories: z.array(z.string().regex(/^CATEGORY_[A-Z]+$/)).max(10).optional(),
     batchSeconds: z.number().int().min(1).max(3600).optional(),
+    mcpServer: z.string().refine(isServerName, "mcpServer must be a plain name").optional(),
     createdAt: z.string().optional(),
   })
   .loose();
@@ -77,7 +84,7 @@ export function loadProfile(name: string = DEFAULT_PROFILE): Profile {
   if (!existsSync(path)) {
     const others = listProfiles();
     const hint = others.length ? ` Known profiles: ${others.join(", ")} (pick one with --profile).` : ` Run \`${NPX} connect <daemon-url>\` first.`;
-    throw new Error(`No agentinbox profile "${n}" (${path}).${hint}`);
+    throw new Error(`No xaq profile "${n}" (${path}).${hint}`);
   }
   // Someone loosened the permissions: tighten them, and say the key may have been read meanwhile.
   if (isTooOpen(path)) {
@@ -102,7 +109,10 @@ export function loadProfile(name: string = DEFAULT_PROFILE): Profile {
 
 export function saveProfile(name: string, profile: Profile): string {
   const path = profilePath(validProfileName(name));
-  const clean = Object.fromEntries(Object.entries(profile).filter(([, v]) => v !== undefined));
+  // The server name is pinned on every save: a new profile gets xaq…, one from before the rename (or one
+  // replaced by `connect --force`) keeps the name its agent tools and Hermes routes already use.
+  const withName: Profile = { ...profile, mcpServer: profile.mcpServer ?? mcpServerName(name) };
+  const clean = Object.fromEntries(Object.entries(withName).filter(([, v]) => v !== undefined));
   writePrivateFile(path, JSON.stringify(clean, null, 2) + "\n");
   return path;
 }

@@ -41,14 +41,14 @@ afterEach(() => {
   env.restore();
 });
 
-const backups = (dir: string) => readdirSync(dir).filter((f) => f.includes(".agentinbox-backup-"));
+const backups = (dir: string) => readdirSync(dir).filter((f) => f.includes(".xaq-backup-"));
 const pairHermes = (agentId: string) =>
   saveProfile("default", { url: "https://macbook.tailb10092.ts.net", apiKey: PROFILE_KEY, agentId, agentName: "Hermes", consumer: "mac-default", tool: "hermes" });
 /** Scripts allow private targets by exact origin; --yes alone never does. */
 const ALLOW = ["http://127.0.0.1:8787", "http://127.0.0.1:3000", "http://127.0.0.1:3773", "http://100.104.249.49:3773"];
 const YES = { from: "hermes", yes: true, allowPrivate: ALLOW };
-/** Hermes' telegram platform confined to agentinbox (Wynn's config) makes the replace ask a person; most tests drop it. */
-const unconfine = () => writeFileSync(join(hermes, "config.yaml"), readFileSync(join(hermes, "config.yaml"), "utf8").replace("telegram: [web, mcp-agentinbox]", "telegram: [web]"));
+/** Hermes' telegram platform confined to xaq (Wynn's config) makes the replace ask a person; most tests drop it. */
+const unconfine = () => writeFileSync(join(hermes, "config.yaml"), readFileSync(join(hermes, "config.yaml"), "utf8").replace("telegram: [web, mcp-xaq]", "telegram: [web]"));
 const deps = (daemon: Daemon, prompter: ScriptedPrompter) => ({
   prompter,
   openApi: () => daemon.api,
@@ -63,7 +63,7 @@ describe("reading client configs", () => {
   it("Hermes: mcp_servers with ${VAR} headers from ~/.hermes/.env, auth: oauth and stdio", () => {
     const c = readClientConfig("hermes", { env: process.env });
     const by = Object.fromEntries(c.entries.map((e) => [e.name, e]));
-    expect(Object.keys(by)).toEqual(["agentinbox", "whoop", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
+    expect(Object.keys(by)).toEqual(["xaq", "whoop", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
     expect(by.whoop).toMatchObject({ url: "https://whoop.weish.me/api/mcp", headers: { Authorization: "Bearer whoop-secret-111" }, headerVars: ["WHOOP_MCP_TOKEN"], oauth: false });
     expect(by.brightspace!.headers).toEqual({ Authorization: "Bearer brightspace-secret-222" });
     expect(by.hearloom!.headers).toEqual({ Authorization: "Bearer hearloom-secret-333" });
@@ -84,7 +84,7 @@ describe("reading client configs", () => {
     expect(by.stripe).toMatchObject({ scope: "user", headers: { Authorization: "Bearer sk_live_x" } });
     expect(by.sentry!.problem).toMatch(/SENTRY_TOKEN/);
     expect(by.sentry!.transport).toBe("sse");
-    expect(by.agentinbox!.problem).toMatch(/helper/);
+    expect(by.xaq!.problem).toMatch(/helper/);
     expect(by["local-db"]!.transport).toBe("stdio");
   });
 
@@ -99,7 +99,7 @@ describe("reading client configs", () => {
     mkdirSync(join(home, ".codex"));
     copyFileSync(join(FIXTURES, "codex-config.toml"), join(home, ".codex", "config.toml"));
     const cod = Object.fromEntries(readClientConfig("codex", { env: { EXAMPLE_TOKEN: "ex-tok", REGION_KEY: "rk" } }).entries.map((e) => [e.name, e]));
-    expect(cod.agentinbox!.headers).toEqual({ Authorization: "Bearer aib_CODEX_FIXTURE_KEY" });
+    expect(cod.xaq!.headers).toEqual({ Authorization: "Bearer aib_CODEX_FIXTURE_KEY" });
     expect(cod.notion).toMatchObject({ url: "https://mcp.notion.com/mcp", headers: {} });
     expect(cod.example!.headers).toEqual({ Authorization: "Bearer ex-tok" });
     expect(cod.region!.headers).toEqual({ "X-Region": "us-east-1", "X-Api-Key": "rk" });
@@ -124,11 +124,11 @@ describe("import --from hermes", () => {
       "SELECT slug, name, url, level_default, private_target FROM connections ORDER BY created_at, rowid",
     );
 
-  it("plans one connection per remote server, skipping agentinbox itself and leaving stdio for M4", async () => {
+  it("plans one connection per remote server, skipping xaq itself and leaving stdio for M4", async () => {
     const items = await planImport(readClientConfig("hermes", { env: process.env }), { lookup: publicLookup });
     const summary = items.map((i) => [i.entry.name, i.action, i.action === "create" ? [i.slug, i.auth.type, i.privateTarget] : null]);
     expect(summary).toEqual([
-      ["agentinbox", "self", null],
+      ["xaq", "self", null],
       ["whoop", "create", ["whoop", "header", null]],
       ["brightspace", "create", ["brightspace", "header", "http://127.0.0.1:8787"]],
       ["hearloom", "create", ["hearloom", "header", "http://127.0.0.1:3000"]],
@@ -147,19 +147,19 @@ describe("import --from hermes", () => {
     const out = p.text;
     for (const s of [...SECRETS, PROFILE_KEY]) expect(out).not.toContain(s);
     expect(out).toContain("Dry run: nothing is created or changed.");
-    expect(out).toMatch(/agentinbox\s+skip: this is agentinbox itself/);
+    expect(out).toMatch(/xaq\s+skip: this is xaq itself/);
     expect(out).toMatch(/whoop\s+create connection "whoop" → https:\/\/whoop\.weish\.me\/api\/mcp/);
-    expect(out).toContain("its Authorization header (from $WHOOP_MCP_TOKEN) moves into agentinbox (encrypted; never shown) and is sent to whoop.weish.me");
+    expect(out).toContain("its Authorization header (from $WHOOP_MCP_TOKEN) moves into xaq (encrypted; never shown) and is sent to whoop.weish.me");
     expect(out).toContain("private network: needs the allow for exactly http://127.0.0.1:8787");
     expect(out).toContain("private network: needs the allow for exactly http://100.104.249.49:3773");
     expect(out).toContain("OAuth: created needing Connect (Hermes keeps its own tokens)");
     expect(out).toMatch(/playwright\s+not supported yet \(M4\)/);
     expect(out).toContain("Would ask before allowing http://127.0.0.1:8787, http://127.0.0.1:3000, http://127.0.0.1:3773, http://100.104.249.49:3773 (--yes never does");
-    // The setup-mcp preview: which entries go, the single agentinbox entry (key shown as a placeholder).
+    // The setup-mcp preview: which entries go, the single xaq entry (key shown as a placeholder).
     expect(out).toContain(`remove "mcp_servers.whoop" from ${join(hermes, "config.yaml")}`);
     expect(out).toContain(`remove "mcp_servers.hearloom"`);
     expect(out).not.toContain(`remove "mcp_servers.forge"`);
-    expect(out).toContain("<the key from your agentinbox profile>");
+    expect(out).toContain("<the key from your xaq profile>");
     expect(rows()).toEqual([]);
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
     expect(backups(hermes)).toEqual([]);
@@ -198,17 +198,17 @@ describe("import --from hermes", () => {
     expect(out).toContain("Allowing http://100.104.249.49:3773 (forge): --allow-private.");
     expect(out).toContain("○ forge → \"forge\": needs Connect. Sign in (link valid 15 minutes):");
     expect(out).toContain("http://forge.example/authorize?state=s");
-    expect(out).toContain("Reconnect: npx agentinbox-cli connections reconnect forge");
+    expect(out).toContain("Reconnect: npx xaq-cli connections reconnect forge");
 
-    // Hermes now has the broker entry (same "agentinbox" name, so mcp-agentinbox routes keep working), the two
+    // Hermes now has the broker entry (same "xaq" name, so mcp-xaq routes keep working), the two
     // OAuth servers until they're reconnected, and the stdio one.
     const after = readFileSync(join(hermes, "config.yaml"), "utf8");
-    expect(Object.keys(readMcpServers(after)!)).toEqual(["agentinbox", "t3code-macbook", "forge", "playwright"]);
+    expect(Object.keys(readMcpServers(after)!)).toEqual(["xaq", "t3code-macbook", "forge", "playwright"]);
     expect(after).toContain('url: "https://macbook.tailb10092.ts.net/mcp"');
     expect(after).toContain("platform_toolsets:\n  telegram: [web]");
     expect(after).toContain("model:\n  default: anthropic/claude-sonnet");
     expect(after).not.toContain("whoop");
-    expect(readFileSync(join(hermes, ".env"), "utf8")).toContain(`AGENTINBOX_API_KEY=${PROFILE_KEY}`);
+    expect(readFileSync(join(hermes, ".env"), "utf8")).toContain(`XAQ_API_KEY=${PROFILE_KEY}`);
     const configBackup = backups(hermes).find((f) => f.startsWith("config.yaml."))!;
     expect(readFileSync(join(hermes, configBackup), "utf8")).toBe(original);
     expect(out).toContain("WHOOP_MCP_TOKEN, BRIGHTSPACE_TOKEN, HEARLOOM_TOKEN are no longer needed");
@@ -224,7 +224,7 @@ describe("import --from hermes", () => {
     expect(await runImport(YES, deps(d, p))).toBe(0);
     expect(rows()).toHaveLength(5);
     expect(p.text).toContain('already connected: "forge" (3 tools)');
-    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "playwright"]);
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["xaq", "playwright"]);
   });
 
   it("a failed connection stays in Hermes and leaves nothing behind; the rest are replaced", async () => {
@@ -236,7 +236,7 @@ describe("import --from hermes", () => {
     expect(await runImport(YES, deps(d, p))).toBe(1);
     expect(p.text).toContain("✘ hearloom: Couldn't reach http://127.0.0.1:3000/mcp (it stays in Hermes)");
     expect(rows().map((r) => r.slug)).toEqual(["whoop", "brightspace", "t3code-macbook", "forge"]);
-    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "hearloom", "t3code-macbook", "forge", "playwright"]);
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["xaq", "hearloom", "t3code-macbook", "forge", "playwright"]);
   });
 
   it("declining the private-network allow imports only the public server; declining setup-mcp changes nothing", async () => {
@@ -245,7 +245,7 @@ describe("import --from hermes", () => {
     // private allow? no · access: 3 (read) · all agents? no · Hermes? yes · Claude Code? no · create? yes · replace in Hermes? no
     const p = new ScriptedPrompter(["n", "3", "n", "y", "n", "y", "n"]);
     expect(await runImport({ from: "hermes" }, deps(d, p))).toBe(0);
-    expect(p.asked[0]).toContain("Allow agentinbox to connect to these 4?");
+    expect(p.asked[0]).toContain("Allow xaq to connect to these 4?");
     expect(p.text).toContain("  http://100.104.249.49:3773  (forge)");
     expect(rows().map((r) => [r.slug, r.level_default])).toEqual([["whoop", "read"]]);
     expect(d.h.ctx.db.all("SELECT agent_id, level FROM connection_grants")).toEqual([{ agent_id: d.agents.hermes, level: "read" }]);
@@ -278,18 +278,18 @@ describe("import --from hermes", () => {
     const p = new ScriptedPrompter([], true);
     await runImport(YES, deps(d, p));
     expect(p.text).toContain('○ whoop → "whoop": not working (active, 0 tools), so it stays in Hermes.');
-    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "whoop", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["xaq", "whoop", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
   });
 
-  it("routes confined to agentinbox: named, with the slugs they'd now see; the replace defaults to no and --yes never answers it", async () => {
+  it("routes confined to xaq: named, with the slugs they'd now see; the replace defaults to no and --yes never answers it", async () => {
     pairHermes(d.agents.hermes);
-    writeFileSync(join(hermes, "webhook_subscriptions.json"), JSON.stringify({ "agentinbox": { toolsets: ["mcp-agentinbox"] }, github: { toolsets: ["web"] } }));
+    writeFileSync(join(hermes, "webhook_subscriptions.json"), JSON.stringify({ "xaq": { toolsets: ["mcp-xaq"] }, github: { toolsets: ["web"] } }));
     mkdirSync(join(hermes, "cron"));
-    writeFileSync(join(hermes, "cron", "jobs.json"), JSON.stringify({ jobs: [{ id: "j1", name: "email-watch", enabled_toolsets: ["agentinbox"] }, { id: "j2", name: "news", enabled_toolsets: ["web"] }] }));
+    writeFileSync(join(hermes, "cron", "jobs.json"), JSON.stringify({ jobs: [{ id: "j1", name: "email-watch", enabled_toolsets: ["xaq"] }, { id: "j2", name: "news", enabled_toolsets: ["web"] }] }));
     const before = readFileSync(join(hermes, "config.yaml"), "utf8");
     const p = new ScriptedPrompter([], true);
     expect(await runImport(YES, deps(d, p))).toBe(0);
-    expect(p.text).toContain("These Hermes settings are limited to the agentinbox server only:\n  platform_toolsets.telegram (config.yaml)\n  webhook route agentinbox\n  cron job email-watch");
+    expect(p.text).toContain("These Hermes settings are limited to the xaq server only:\n  platform_toolsets.telegram (config.yaml)\n  webhook route xaq\n  cron job email-watch");
     expect(p.text).toContain('they now also see the tools of "whoop", "brightspace", "hearloom" (as <name>__<tool>)');
     expect(p.text).toContain("--yes doesn't answer this; Hermes's config wasn't changed");
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
@@ -297,20 +297,20 @@ describe("import --from hermes", () => {
     const p2 = new ScriptedPrompter(["y"]);
     expect(await runImport({ from: "hermes", allowPrivate: ALLOW }, deps(d, p2))).toBe(0);
     expect(p2.asked.at(-1)).toContain("[y/N]");
-    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "t3code-macbook", "forge", "playwright"]);
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["xaq", "t3code-macbook", "forge", "playwright"]);
   });
 
-  it("a static webhook route in config.yaml confined to agentinbox gets the warning too", async () => {
+  it("a static webhook route in config.yaml confined to xaq gets the warning too", async () => {
     pairHermes(d.agents.hermes);
     unconfine();
     const yaml = readFileSync(join(hermes, "config.yaml"), "utf8");
     writeFileSync(
       join(hermes, "config.yaml"),
-      `${yaml}platforms:\n  webhook:\n    enabled: true\n    extra:\n      routes:\n        email-triage:\n          toolsets: [mcp-agentinbox]\n        github:\n          toolsets: [web]\n`,
+      `${yaml}platforms:\n  webhook:\n    enabled: true\n    extra:\n      routes:\n        email-triage:\n          toolsets: [mcp-xaq]\n        github:\n          toolsets: [web]\n`,
     );
     const p = new ScriptedPrompter([], true);
     expect(await runImport(YES, deps(d, p))).toBe(0);
-    expect(p.text).toContain("These Hermes settings are limited to the agentinbox server only:\n  webhook route email-triage (config.yaml)\n");
+    expect(p.text).toContain("These Hermes settings are limited to the xaq server only:\n  webhook route email-triage (config.yaml)\n");
     expect(p.text).not.toContain("webhook route github");
     expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toContain("whoop");
   });
@@ -318,10 +318,10 @@ describe("import --from hermes", () => {
   it("says which client settings the broker doesn't carry: tool filters and timeouts", async () => {
     const p = new ScriptedPrompter([]);
     await runImport({ from: "hermes", dryRun: true }, { ...deps(d, p), openApi: () => { throw new Error("no daemon"); } });
-    expect(p.text).toContain("not carried over: its tool filter hides delete_recording; through agentinbox every tool is listed (subject to the access level)");
-    expect(p.text).toContain("not carried over: timeout (agentinbox uses its own 60 s per call)");
-    expect(p.text).toContain("not carried over: connect_timeout (agentinbox uses its own 60 s per call)");
-    expect(p.text).toContain("agentinbox wasn't reachable, so existing connections weren't checked");
+    expect(p.text).toContain("not carried over: its tool filter hides delete_recording; through xaq every tool is listed (subject to the access level)");
+    expect(p.text).toContain("not carried over: timeout (xaq uses its own 60 s per call)");
+    expect(p.text).toContain("not carried over: connect_timeout (xaq uses its own 60 s per call)");
+    expect(p.text).toContain("xaq wasn't reachable, so existing connections weren't checked");
   });
 
   it("a dry run on a re-run checks the existing connections and reprints the Connect step", async () => {
@@ -330,7 +330,7 @@ describe("import --from hermes", () => {
     expect(await runImport({ from: "hermes", dryRun: true }, deps(d, p))).toBe(0);
     expect(p.text).toMatch(/whoop\s+already connected: "whoop" \(3 tools\)/);
     expect(p.text).toMatch(/forge\s+already a connection: "forge", needs Connect; it stays in Hermes until it works/);
-    expect(p.text).toContain("Reconnect: npx agentinbox-cli connections reconnect forge");
+    expect(p.text).toContain("Reconnect: npx xaq-cli connections reconnect forge");
     expect(p.text).not.toContain('create connection "forge"');
     expect(p.text).toContain("Would create 0 connections");
   });
@@ -342,7 +342,7 @@ describe("import --from hermes", () => {
     expect(await runImport({ from: "hermes", yes: true }, deps(d, p))).toBe(0);
     expect(rows().map((r) => r.slug)).toEqual(["whoop"]);
     expect(p.text).toContain("--yes doesn't answer this; skipping brightspace, hearloom, t3code-macbook, forge");
-    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["xaq", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
   });
 
   it("scenario A: an existing connection Hermes' agent has no grant on is replaced only once it gets one", async () => {
@@ -385,16 +385,16 @@ describe("import --from hermes", () => {
     const p = new ScriptedPrompter([], true);
     expect(await runImport(YES, deps(d, p))).toBe(0);
     expect(rows()).toHaveLength(5);
-    expect(p.text).toContain('The agent in your "default" profile (agt_somewhere_else) isn\'t an agent of this agentinbox');
+    expect(p.text).toContain('The agent in your "default" profile (agt_somewhere_else) isn\'t an agent of this xaq');
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
     expect(backups(hermes)).toEqual([]);
   });
 
-  it("without a paired agentinbox entry it says how to finish, and leaves Hermes alone", async () => {
+  it("without a paired xaq entry it says how to finish, and leaves Hermes alone", async () => {
     const before = readFileSync(join(hermes, "config.yaml"), "utf8");
     const p = new ScriptedPrompter([], true);
     await runImport(YES, deps(d, p));
-    expect(p.text).toContain("pair it first (npx agentinbox-cli connect <agentinbox-url> --tool hermes)");
+    expect(p.text).toContain("pair it first (npx xaq-cli connect <xaq-url> --tool hermes)");
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
   });
 
@@ -451,7 +451,7 @@ describe("import --from claude-code: a hostile project .mcp.json", () => {
     claudeJson({ enabledMcpjsonServers: ["github"] });
     const p = new ScriptedPrompter([], true);
     expect(await runImport({ from: "claude-code", yes: true }, claudeDeps(p))).toBe(0);
-    expect(p.text).toContain("its Authorization header (from $GITHUB_TOKEN) moves into agentinbox (encrypted; never shown) and is sent to mcp.github.com.evil.example");
+    expect(p.text).toContain("its Authorization header (from $GITHUB_TOKEN) moves into xaq (encrypted; never shown) and is sent to mcp.github.com.evil.example");
     expect(p.text).toContain("ships with the project (anyone who can commit to it wrote them)");
     expect(p.text).toContain("--yes doesn't answer this; they stay in Claude Code");
     expect(p.text).not.toContain("ghp_REAL_SECRET_TOKEN");
@@ -467,14 +467,14 @@ describe("import --from claude-code: a hostile project .mcp.json", () => {
     const p = new ScriptedPrompter(["y", "", "y", "y"]);
     expect(await runImport({ from: "claude-code" }, claudeDeps(p))).toBe(0);
     expect(slugs().sort()).toEqual(["github", "sneaky"]);
-    expect(p.text).toContain("X-Key header (from $AWS_SECRET_ACCESS_KEY) moves into agentinbox (encrypted; never shown) and is sent to collect.evil.example");
+    expect(p.text).toContain("X-Key header (from $AWS_SECRET_ACCESS_KEY) moves into xaq (encrypted; never shown) and is sent to collect.evil.example");
     expect(p.text).toContain(`"github" stays in ${join(cwd, ".mcp.json")}: it ships with the project.`);
     expect(readFileSync(join(cwd, ".mcp.json"), "utf8")).toBe(before);
   });
 });
 
 describe("setup-mcp removing imported entries", () => {
-  const target = { name: "agentinbox", url: "https://mail.example.com/mcp", key: PROFILE_KEY };
+  const target = { name: "xaq", url: "https://mail.example.com/mcp", key: PROFILE_KEY };
 
   it("Hermes: one entry it can't cut out safely leaves config.yaml and .env untouched", () => {
     const yaml = readFileSync(join(hermes, "config.yaml"), "utf8").replace(/  whoop:\n    url: https:\/\/whoop\.weish\.me\/api\/mcp\n/, "  whoop: { url: https://whoop.weish.me/api/mcp }\n  whoop-old:\n");
@@ -498,43 +498,43 @@ describe("setup-mcp removing imported entries", () => {
     // The removed entry's own comment goes with it; the next entry keeps its own.
     expect(after).not.toContain("# T3 on this laptop");
     expect(after).toContain("      Authorization: \"Bearer ${BRIGHTSPACE_TOKEN}\"   # course tools\n\n  # forge over Tailscale\n  forge:");
-    expect(Object.keys(readMcpServers(after)!)).toEqual(["agentinbox", "whoop", "brightspace", "forge", "playwright"]);
+    expect(Object.keys(readMcpServers(after)!)).toEqual(["xaq", "whoop", "brightspace", "forge", "playwright"]);
   });
 
   describe("comments inside a removed entry never end it early (no header lands under another server)", () => {
     const write = (yaml: string) => writeFileSync(join(hermes, "config.yaml"), yaml);
     const servers = () => readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!;
     const t3 = { url: "http://127.0.0.1:3773", auth: "oauth" };
-    const ours = { url: "https://mail.example.com/mcp", headers: { Authorization: "Bearer ${AGENTINBOX_API_KEY}" } };
+    const ours = { url: "https://mail.example.com/mcp", headers: { Authorization: "Bearer ${XAQ_API_KEY}" } };
 
     it("a commented-out property at column 0", () => {
       write(['mcp_servers:', '  t3code-macbook:', '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "#    timeout: 120", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', ""].join("\n"));
       expect(setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] }).ok).toBe(true);
-      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+      expect(servers()).toEqual({ xaq: ours, "t3code-macbook": t3 });
       expect(readFileSync(join(hermes, "config.yaml"), "utf8")).not.toContain("WHOOP_MCP_TOKEN");
     });
 
     it("a note at the entries' indent", () => {
       write(['mcp_servers:', '  t3code-macbook:', '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "  # TODO rotate", "", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', "  # forge next", "  forge:", "    url: http://100.104.249.49:3773", ""].join("\n"));
       expect(setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] }).ok).toBe(true);
-      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3, forge: { url: "http://100.104.249.49:3773" } });
+      expect(servers()).toEqual({ xaq: ours, "t3code-macbook": t3, forge: { url: "http://100.104.249.49:3773" } });
       const after = readFileSync(join(hermes, "config.yaml"), "utf8");
       expect(after).not.toContain("WHOOP_MCP_TOKEN");
       expect(after).not.toContain("TODO rotate");
       expect(after).toContain("  # forge next\n  forge:");
     });
 
-    it("whoop first: its leftovers can't land under the inserted agentinbox entry", () => {
+    it("whoop first: its leftovers can't land under the inserted xaq entry", () => {
       write(["mcp_servers:", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "  # old timeout below", "#    timeout: 120", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    auth: oauth", ""].join("\n"));
       expect(setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] }).ok).toBe(true);
-      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+      expect(servers()).toEqual({ xaq: ours, "t3code-macbook": t3 });
       expect(readFileSync(join(hermes, "config.yaml"), "utf8")).not.toContain("WHOOP_MCP_TOKEN");
     });
 
-    it("the same for the agentinbox entry setup-mcp replaces", () => {
-      write(["mcp_servers:", "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  agentinbox:", "    url: https://old.example/mcp", "  # rotated 2026-10", "    headers:", '      Authorization: "Bearer ${AGENTINBOX_API_KEY}"', "      X-Old: yes", ""].join("\n"));
+    it("the same for the xaq entry setup-mcp replaces", () => {
+      write(["mcp_servers:", "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  xaq:", "    url: https://old.example/mcp", "  # rotated 2026-10", "    headers:", '      Authorization: "Bearer ${XAQ_API_KEY}"', "      X-Old: yes", ""].join("\n"));
       expect(setupMcp("hermes", target, "/p.json").ok).toBe(true);
-      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+      expect(servers()).toEqual({ xaq: ours, "t3code-macbook": t3 });
     });
 
     it("an anchor in a removed entry used by a kept one: refused, nothing changed", () => {
@@ -556,7 +556,7 @@ describe("setup-mcp removing imported entries", () => {
     it("the safety net refuses an entry it can't read (an unreadable value verifies nothing)", () => {
       const entry = { url: "u" };
       const sym = Symbol("unreadable");
-      expect(checkRewrite({ a: { url: sym }, b: { url: "y" } }, { a: { url: sym }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe(
+      expect(checkRewrite({ a: { url: sym }, b: { url: "y" } }, { a: { url: sym }, xaq: entry }, { name: "xaq", entry }, ["b"])).toBe(
         '"a" has a value this can\'t read, so the result can\'t be verified',
       );
     });
@@ -564,12 +564,12 @@ describe("setup-mcp removing imported entries", () => {
     it("the safety net refuses any rewrite that doesn't read back exactly", () => {
       const before = { a: { url: "x" }, b: { url: "y", headers: { Authorization: "Bearer s" } } };
       const entry = { url: "u" };
-      expect(checkRewrite(before, { a: { url: "x" }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBeNull();
-      expect(checkRewrite(before, { a: { url: "x", headers: { Authorization: "Bearer s" } }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe('"a" would change');
-      expect(checkRewrite(before, { a: { url: "x" }, agentinbox: { ...entry, headers: { Authorization: "Bearer s" } } }, { name: "agentinbox", entry }, ["b"])).toBe('"agentinbox" wouldn\'t be exactly the new entry');
-      expect(checkRewrite(before, { a: { url: "x" }, b: { url: "y" }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe('"b" would still be there');
-      expect(checkRewrite(before, { agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe('"a" would disappear');
-      expect(checkRewrite(before, null, { name: "agentinbox", entry }, [])).toBe("it can't be read back");
+      expect(checkRewrite(before, { a: { url: "x" }, xaq: entry }, { name: "xaq", entry }, ["b"])).toBeNull();
+      expect(checkRewrite(before, { a: { url: "x", headers: { Authorization: "Bearer s" } }, xaq: entry }, { name: "xaq", entry }, ["b"])).toBe('"a" would change');
+      expect(checkRewrite(before, { a: { url: "x" }, xaq: { ...entry, headers: { Authorization: "Bearer s" } } }, { name: "xaq", entry }, ["b"])).toBe('"xaq" wouldn\'t be exactly the new entry');
+      expect(checkRewrite(before, { a: { url: "x" }, b: { url: "y" }, xaq: entry }, { name: "xaq", entry }, ["b"])).toBe('"b" would still be there');
+      expect(checkRewrite(before, { xaq: entry }, { name: "xaq", entry }, ["b"])).toBe('"a" would disappear');
+      expect(checkRewrite(before, null, { name: "xaq", entry }, [])).toBe("it can't be read back");
     });
   });
 
@@ -580,7 +580,7 @@ describe("setup-mcp removing imported entries", () => {
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
   });
 
-  it("Codex and Cursor: the imported entries go in the same write as the agentinbox entry", () => {
+  it("Codex and Cursor: the imported entries go in the same write as the xaq entry", () => {
     mkdirSync(join(home, ".codex"));
     copyFileSync(join(FIXTURES, "codex-config.toml"), join(home, ".codex", "config.toml"));
     const codex = setupMcp("codex", target, "/p.json", { removeServers: [{ name: "example" }, { name: "region" }] });
@@ -601,10 +601,10 @@ describe("setup-mcp removing imported entries", () => {
     const ok = setupMcp("cursor", target, "/p.json", { removeServers: [{ name: "github" }] });
     expect(ok.ok).toBe(true);
     const doc = JSON.parse(readFileSync(join(home, ".cursor", "mcp.json"), "utf8")) as { mcpServers: Record<string, unknown> };
-    expect(Object.keys(doc.mcpServers).sort()).toEqual(["agentinbox", "figma", "fs"]);
+    expect(Object.keys(doc.mcpServers).sort()).toEqual(["figma", "fs", "xaq"]);
   });
 
-  it("Claude Code: removes each imported entry in its own scope after adding agentinbox", () => {
+  it("Claude Code: removes each imported entry in its own scope after adding xaq", () => {
     const bin = join(env.root, "bin");
     mkdirSync(bin);
     const log = join(env.root, "claude-args.txt");

@@ -69,7 +69,7 @@ export function nativeDepsFor(ctx: AppContext, up: UpstreamRuntime, c: Connectio
     accessToken: async (signal) => {
       const row = upstreamConnection(ctx.db, c.id);
       const refresh = row ? up.refreshFnFor(row) : null;
-      if (!refresh) throw new SourceError("needs_reauth", `The owner must reconnect ${c.name} in agentinbox (Connections → Reconnect).`);
+      if (!refresh) throw new SourceError("needs_reauth", `The owner must reconnect ${c.name} in xaq (Connections → Reconnect).`);
       return up.refresher.accessToken(c.id, refresh, signal);
     },
     fetch: globalThis.fetch,

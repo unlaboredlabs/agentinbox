@@ -60,7 +60,7 @@ function LoginPage() {
   }
 
   return (
-    <AuthShell title="Sign in to agentinbox" description="Enter the admin password you chose during setup.">
+    <AuthShell title="Sign in to xaq" description="Enter the admin password you chose during setup.">
       <Card>
         <CardContent>
           <form onSubmit={submit}>
@@ -76,7 +76,7 @@ function LoginPage() {
                   aria-invalid={!!error && !locked}
                 />
                 <FieldDescription>
-                  Forgot it? Run <code className="font-mono text-foreground">npx agentinbox-cli reset-password</code> on the server.
+                  Forgot it? Run <code className="font-mono text-foreground">npx xaq-cli reset-password</code> on the server.
                 </FieldDescription>
               </Field>
               {error && (

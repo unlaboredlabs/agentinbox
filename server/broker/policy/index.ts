@@ -167,7 +167,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
 
   async call(agentId: string, exposedName: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolResult> {
     const started = Date.now();
-    if (!this.enabled()) return text("Upstream connections are turned off on this agentinbox.", true);
+    if (!this.enabled()) return text("Upstream connections are turned off on this xaq.", true);
     const tool = this.deps.registry.resolve(agentId, exposedName);
     if (!tool) {
       this.ctx.audit.record({ actorType: "agent", actorId: agentId, action: "unknown_tool", outcome: "error", reason: "unknown_tool", detail: { broker: true, tool: cleanLine(exposedName).slice(0, 64) } });
@@ -258,7 +258,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       if (!source) throw new SourceError("unavailable", "the connection isn't set up");
       const conn = connectionInfo(this.ctx.db, connectionId);
       if (!conn || conn.status === "disabled") {
-        const failure: DescribedFailure = { reason: "connection_disabled", message: `${connectionName} was turned off in agentinbox, so the call wasn't sent.`, maybeRan: false };
+        const failure: DescribedFailure = { reason: "connection_disabled", message: `${connectionName} was turned off in xaq, so the call wasn't sent.`, maybeRan: false };
         return { result: text(failure.message, true), signals: null, failure, sourceDetail };
       }
       raw = await source.callTool(tool.def.name, args, { agentId: opts.agentId, connectionId, signal: opts.signal, auditDetail: sourceDetail });
@@ -279,7 +279,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     } catch (err) {
       // The call ran; only reading its answer failed.
       this.log.warn("Processing an upstream result failed", { connection: connectionId, tool: tool.def.name, error: this.scrubberFor(connectionId).scrub(errorMessage(err)).text });
-      const failure: DescribedFailure = { reason: "internal", message: `${connectionName} answered, but agentinbox couldn't read the answer. The call ran: check before trying again.`, maybeRan: true };
+      const failure: DescribedFailure = { reason: "internal", message: `${connectionName} answered, but xaq couldn't read the answer. The call ran: check before trying again.`, maybeRan: true };
       return { result: text(failure.message, true), signals: null, failure, sourceDetail };
     }
   }
@@ -579,7 +579,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       updateToolCall(this.ctx.db, row.id, { outcomeUnknown: true });
       this.ctx.db.run(
         "UPDATE approvals SET status = 'failed', error = ? WHERE id = ? AND status = 'approved'",
-        "The approved call was interrupted before agentinbox got an answer, so it may or may not have run. It won't be retried automatically.",
+        "The approved call was interrupted before xaq got an answer, so it may or may not have run. It won't be retried automatically.",
         row.id,
       );
       this.ctx.audit.record({ actorType: "system", action: "approval.recover", target: row.id, outcome: "ok", detail: { broker: true, connectionId: row.connection_id, outcomeUnknown: true } });
@@ -652,7 +652,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       }
       case "failed":
         if (call.outcomeUnknown) {
-          return text(`outcome unknown: the approved call to ${name} was interrupted, so it may or may not have run. agentinbox won't retry it. Check before calling it again. ${row.error ? cleanLine(row.error, 300) : ""}`.trim(), true);
+          return text(`outcome unknown: the approved call to ${name} was interrupted, so it may or may not have run. xaq won't retry it. Check before calling it again. ${row.error ? cleanLine(row.error, 300) : ""}`.trim(), true);
         }
         return text(`failed: ${row.error ? cleanLine(row.error, 300) : `${name} failed`}`, true);
       default:

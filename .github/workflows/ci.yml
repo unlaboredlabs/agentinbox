@@ -12,6 +12,8 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A hung test fails the job in minutes instead of holding a runner for 6 h (a full run takes about 2–3 min).
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

@@ -1,9 +1,10 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, type ScryptOptions, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { envVar } from "./brand.ts";
 
 /**
  * Secrets at rest (refresh tokens, webhook secrets, Google client secret) are AES-256-GCM encrypted.
- * Key source: AGENTINBOX_MASTER_KEY (base64, 32 bytes) or `<dataDir>/master.key` (generated, mode 0600).
+ * Key source: XAQ_MASTER_KEY (AGENTINBOX_MASTER_KEY before the rename; base64, 32 bytes) or `<dataDir>/master.key` (generated, mode 0600).
  * Ciphertext format: "v1:" + base64(iv[12] | tag[16] | ciphertext).
  */
 export class Crypto {
@@ -15,7 +16,7 @@ export class Crypto {
   }
 
   static load(keyFile: string): Crypto {
-    const fromEnv = process.env.AGENTINBOX_MASTER_KEY;
+    const fromEnv = envVar("MASTER_KEY");
     if (fromEnv) return new Crypto(Buffer.from(fromEnv, "base64"));
     if (!existsSync(keyFile)) {
       writeFileSync(keyFile, randomBytes(32).toString("base64") + "\n", { mode: 0o600 });

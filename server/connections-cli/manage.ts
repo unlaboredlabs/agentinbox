@@ -282,7 +282,7 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
     const origin = exactOrigin(url);
     p.print(pc.yellow(`${url.host} is on this machine or your private network.`));
     p.print(
-      "agentinbox blocks those by default: a connection to a server there can reach other services on the same machine or network. " +
+      "xaq blocks those by default: a connection to a server there can reach other services on the same machine or network. " +
         `An allow covers exactly ${origin}, for this connection only (and plain http on that host).`,
     );
     const allowed = flags.allowPrivate === origin || (await p.confirmExplicit(`Allow this connection to reach ${origin}?`, `nothing was added (pass --allow-private ${origin} to allow it)`));

@@ -292,7 +292,7 @@ describe("test email", () => {
     expect(msg.threadId).toBe(body.threadId);
     expect(msg.labelIds).toEqual(expect.arrayContaining(["SENT", "INBOX"]));
     const header = (n: string) => msg.payload!.headers!.find((h) => h.name.toLowerCase() === n.toLowerCase())?.value;
-    expect(header("Subject")).toBe("agentinbox test: your setup works");
+    expect(header("Subject")).toBe("xaq test: your setup works");
     expect(header("To")).toContain("tim@example.com");
     expect(header("From")).toContain("tim@example.com");
     expect(ctx.audit.list({ action: "account.test_email" }).items[0]).toMatchObject({ outcome: "ok", accountId: acct.id, target: body.messageId });

@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SESSION_COOKIE, CSRF_HEADER } from "../auth/index.ts";
 import { SESSION_MAX_AGE_MS } from "../auth/sessions.ts";
+import { dataFiles } from "../config.ts";
 import { sha256 } from "../crypto.ts";
 import { type InstanceInfo, runningInstance } from "../instance.ts";
 
@@ -23,7 +23,7 @@ import { type InstanceInfo, runningInstance } from "../instance.ts";
  */
 
 export const CLI_SESSION_TTL_MS = 15 * 60_000;
-export const CLI_SESSION_LABEL = "agentinbox CLI (local admin, one-time)";
+export const CLI_SESSION_LABEL = "xaq CLI (local admin, one-time)";
 
 export class AdminApiError extends Error {
   constructor(
@@ -114,15 +114,16 @@ export function createCliSession(dbPath: string, clock: () => number = Date.now)
 }
 
 export function openAdminChannel(opts: OpenAdminOptions): AdminChannel {
-  const dbPath = join(opts.dataDir, "agentinbox.db");
+  // xaq.db, or agentinbox.db in a data directory from before the rename (rename-xaq: keep).
+  const dbPath = dataFiles(opts.dataDir).db;
   if (!existsSync(dbPath)) {
     throw new Error(
-      `No agentinbox data in ${opts.dataDir}. Run this on the machine agentinbox runs on, as the user it runs as ` +
+      `No xaq data in ${opts.dataDir}. Run this on the machine xaq runs on, as the user it runs as ` +
         "(with sudo for a system service), or pass its data directory with --data.",
     );
   }
   const instance = opts.instance === undefined ? runningInstance(opts.dataDir) : opts.instance;
-  if (!instance && !opts.baseUrl) throw new Error(`agentinbox isn't running with the data directory ${opts.dataDir}. Start it first (or pass --data).`);
+  if (!instance && !opts.baseUrl) throw new Error(`xaq isn't running with the data directory ${opts.dataDir}. Start it first (or pass --data).`);
   const baseUrl = opts.baseUrl ?? daemonOrigin(instance!);
   let session: ReturnType<typeof createCliSession>;
   try {
@@ -130,7 +131,7 @@ export function openAdminChannel(opts: OpenAdminOptions): AdminChannel {
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     throw new Error(
-      `Can't open ${dbPath}${code ? ` (${code})` : ""}: ${(err as Error).message}. Run this as the user agentinbox runs as (with sudo for a system service).`,
+      `Can't open ${dbPath}${code ? ` (${code})` : ""}: ${(err as Error).message}. Run this as the user xaq runs as (with sudo for a system service).`,
     );
   }
   const onExit = () => session.remove();
@@ -155,7 +156,7 @@ export function openAdminChannel(opts: OpenAdminOptions): AdminChannel {
           res = await send(method, path, body);
         }
       } catch (err) {
-        throw new Error(`Couldn't reach agentinbox at ${baseUrl}: ${(err as Error).message}`);
+        throw new Error(`Couldn't reach xaq at ${baseUrl}: ${(err as Error).message}`);
       }
       if (res.status === 204) return undefined as T;
       const text = await res.text();

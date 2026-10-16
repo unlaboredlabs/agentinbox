@@ -37,7 +37,7 @@ function AccountsPage() {
     <>
       <PageHeader
         title="Gmail accounts"
-        description="Mailboxes (and their Google Calendars, once added) agentinbox syncs. Credentials stay here; agents get access per account through grants."
+        description="Mailboxes (and their Google Calendars, once added) xaq syncs. Credentials stay here; agents get access per account through grants."
         actions={<ConnectAccountButton />}
       />
       <LoopbackTwinHint />
@@ -59,7 +59,7 @@ function LoopbackTwinHint() {
       <AlertTitle>Google sign-in returns to {twin}</AlertTitle>
       <AlertDescription>
         <p>
-          You opened the console at {here}, and its saved address is {twin}. Both reach agentinbox on this computer and connecting works from
+          You opened the console at {here}, and its saved address is {twin}. Both reach xaq on this computer and connecting works from
           either. For the smoothest sign-in, open the console at{" "}
           <a href={`${twin}/accounts`} className="font-medium text-foreground underline underline-offset-4">
             {twin}

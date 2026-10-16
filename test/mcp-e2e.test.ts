@@ -46,7 +46,7 @@ describe("MCP end to end with the fake Google", () => {
       const http = new Hono().route("/", mcpRoutes(ctx));
       const client = new Client({ name: "e2e", version: "1" });
       await client.connect(
-        new StreamableHTTPClientTransport(new URL("http://agentinbox.test/mcp"), {
+        new StreamableHTTPClientTransport(new URL("http://xaq.test/mcp"), {
           requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
           fetch: async (url, init) => http.request(String(url), init as RequestInit),
         }),

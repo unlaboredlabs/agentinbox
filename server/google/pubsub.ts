@@ -12,6 +12,8 @@ import { PUBSUB_SCOPE } from "./oauth.ts";
 import { googleRuntime, type RequestOptions } from "./runtime.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "./types.ts";
 
+// Resource names in the user's own Google Cloud project: kept from before the rename, so existing installs
+// keep using (and re-provisioning finds) the topic and subscription their Gmail watches point at.
 export const TOPIC_ID = "agentinbox-gmail";
 export const SUBSCRIPTION_ID = "agentinbox-gmail-pull";
 export const GMAIL_PUSH_MEMBER = "serviceAccount:gmail-api-push@system.gserviceaccount.com";
@@ -59,7 +61,7 @@ export interface PubsubProblem {
 /**
  * Explanation with a remediation hint for a provisioning/test/watch/pull failure. `email` is the
  * principal account (whose token made the call). Messages for different codes are worded so they can't
- * be mistaken for each other by text: only pubsub_scope_required talks about granting agentinbox access.
+ * be mistaken for each other by text: only pubsub_scope_required talks about granting xaq access.
  */
 /** Google Cloud console flow that enables one API in the project (same links as the console's setup guide). */
 function enableApiUrl(api: string, project: string | null): string {
@@ -69,7 +71,7 @@ function enableApiUrl(api: string, project: string | null): string {
 export function explainPubsubError(err: unknown, project: string | null, email?: string): PubsubProblem {
   const p = project ?? "your project";
   const q = project ? `?project=${encodeURIComponent(project)}` : "";
-  const who = email ?? "the account agentinbox uses for Pub/Sub";
+  const who = email ?? "the account xaq uses for Pub/Sub";
   if (err instanceof AccountNeedsReauthError) {
     return { code: "needs_reauth", message: `${err.email} needs to be reconnected.`, hint: "Reconnect it on the Accounts page, then retry." };
   }
@@ -152,7 +154,7 @@ export function explainPubsubError(err: unknown, project: string | null, email?:
 function scopeRequired(email: string, project: string | null): PubsubProblem {
   return {
     code: "pubsub_scope_required",
-    message: `agentinbox needs access to Pub/Sub as ${email}.`,
+    message: `xaq needs access to Pub/Sub as ${email}.`,
     hint:
       `Grant Pub/Sub access for ${email} on Google's consent screen, then provision again. ` +
       `The account also needs Owner or Pub/Sub Admin on project ${project ?? "your project"}.`,

@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-export const SKILL_URL_PLACEHOLDER = "{{AGENTINBOX_URL}}";
-export const SKILL_NAME = "agentinbox";
+export const SKILL_URL_PLACEHOLDER = "{{XAQ_URL}}";
+export const SKILL_NAME = "xaq";
+/** The skill's name before the rename: `skill install` replaces it rather than leaving two. */
+export const LEGACY_SKILL_NAME = "agentinbox";
 
 /** Agent skill directories `skill install --target` knows by name. */
 export const SKILL_TARGETS = {
@@ -32,10 +34,39 @@ export function renderSkill(url: string): string {
   return skillTemplate().replaceAll(SKILL_URL_PLACEHOLDER, url.replace(/\/+$/, ""));
 }
 
+/** The skills directory `--target` names (a known agent name or a path). */
+const skillsDir = (target: string) => {
+  const known = SKILL_TARGETS[target as keyof typeof SKILL_TARGETS];
+  return known ? known() : resolve(target);
+};
+
 /** Resolves `--target` (a known agent name or a skills directory) to the SKILL.md path to write. */
 export function skillPath(target: string): string {
-  const known = SKILL_TARGETS[target as keyof typeof SKILL_TARGETS];
-  return join(known ? known() : resolve(target), SKILL_NAME, "SKILL.md");
+  return join(skillsDir(target), SKILL_NAME, "SKILL.md");
+}
+
+/**
+ * Removes the pre-rename `agentinbox/SKILL.md` next to the new skill, so the agent doesn't see two. Only a
+ * SKILL.md that is ours (`name: agentinbox`) goes, and the directory only if nothing else is in it.
+ * Returns the removed file, or null.
+ */
+export function removeLegacySkill(target: string): string | null {
+  const dir = join(skillsDir(target), LEGACY_SKILL_NAME);
+  const file = join(dir, "SKILL.md");
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  if (!/^---\s*\n(?:.*\n)*?name:\s*agentinbox\s*\n/.test(text)) return null;
+  rmSync(file);
+  try {
+    if (!readdirSync(dir).length) rmdirSync(dir);
+  } catch {
+    // Not ours to clean up.
+  }
+  return file;
 }
 
 export function writeSkill(path: string, content: string): void {

@@ -16,7 +16,7 @@ export function SetupChecklist() {
     return (
       <Card className="border-chart-1/30 bg-chart-1/[0.03]">
         <CardHeader>
-          <CardTitle>Finish setting up agentinbox</CardTitle>
+          <CardTitle>Finish setting up xaq</CardTitle>
           <CardDescription>
             {view === "choose" ? "Choose what to connect first: Notion, WHOOP, any MCP server, or Gmail & Calendar." : `${finished} of ${total} steps done.`}
           </CardDescription>
@@ -54,7 +54,7 @@ export function SetupChecklist() {
   return (
     <Card className="border-chart-1/30 bg-chart-1/[0.03]">
       <CardHeader>
-        <CardTitle>Finish setting up agentinbox</CardTitle>
+        <CardTitle>Finish setting up xaq</CardTitle>
         <CardDescription>
           {finished} of {total} steps done. Pick up where you left off.
         </CardDescription>

@@ -30,7 +30,7 @@ function cli(args: string[], env: Record<string, string> = {}) {
       cwd: ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1", PORT: "", HOST: "", AGENTINBOX_URL: "", ...env },
+      env: { ...process.env, NO_COLOR: "1", PORT: "", HOST: "", XAQ_URL: "", ...env },
     });
     return { code: 0, stdout, stderr: "" };
   } catch (err) {
@@ -49,7 +49,7 @@ afterEach(async () => {
 describe("1: Node version check", () => {
   it("explains a too-old Node", () => {
     expect(nodeVersionError("22.12.0")).toBe(
-      "agentinbox needs Node.js 22.13 or newer (you have v22.12.0). Install a current Node.js from https://nodejs.org and try again.",
+      "xaq needs Node.js 22.13 or newer (you have v22.12.0). Install a current Node.js from https://nodejs.org and try again.",
     );
     expect(nodeVersionError("v20.18.1")).toMatch(/you have v20\.18\.1/);
     expect(nodeVersionError("18.0.0")).not.toBeNull();
@@ -112,8 +112,8 @@ function fakeOps(
     },
     stage(dataDir) {
       const staging = join(dataDir, "app.new");
-      mkdirSync(join(staging, "node_modules/agentinbox-cli/dist"), { recursive: true });
-      writeFileSync(join(staging, "node_modules/agentinbox-cli/dist/cli.js"), "// new\n");
+      mkdirSync(join(staging, "node_modules/xaq-cli/dist"), { recursive: true });
+      writeFileSync(join(staging, "node_modules/xaq-cli/dist/cli.js"), "// new\n");
       return staging;
     },
     unitDir: () => join(dir, "units"),
@@ -138,13 +138,13 @@ describe("3: service install", () => {
     const config = setup();
     const ops = fakeOps(config.dataDir);
     await installService(config, ops);
-    const unit = readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8");
+    const unit = readFileSync(join(config.dataDir, "units/xaq.service"), "utf8");
     expect(unit).not.toContain("network-online");
     expect(unit).toContain("WantedBy=default.target");
-    expect(existsSync(join(config.dataDir, "app/node_modules/agentinbox-cli/dist/cli.js"))).toBe(true);
+    expect(existsSync(join(config.dataDir, "app/node_modules/xaq-cli/dist/cli.js"))).toBe(true);
     expect(existsSync(join(config.dataDir, "app.new"))).toBe(false);
     expect(existsSync(join(config.dataDir, "app.old"))).toBe(false);
-    expect(ops.calls).toContain("systemctl --user enable --now agentinbox");
+    expect(ops.calls).toContain("systemctl --user enable --now xaq");
     expect(ops.calls).toContain("loginctl enable-linger me");
   });
 
@@ -156,8 +156,8 @@ describe("3: service install", () => {
       (e: Error) => e,
     );
     expect(err?.message).toMatch(/Starting the service failed .*Rolled back to no service/s);
-    expect(err?.message).toContain("journalctl --user -u agentinbox -e");
-    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(err?.message).toContain("journalctl --user -u xaq -e");
+    expect(existsSync(join(config.dataDir, "units/xaq.service"))).toBe(false);
     expect(existsSync(join(config.dataDir, "app"))).toBe(false);
     expect(ops.calls.filter((c) => c === "systemctl --user daemon-reload").length).toBeGreaterThanOrEqual(2);
   });
@@ -165,7 +165,7 @@ describe("3: service install", () => {
   it("restores the previous install when an update can't start", async () => {
     const config = setup();
     mkdirSync(join(config.dataDir, "units"), { recursive: true });
-    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "previous unit\n");
+    writeFileSync(join(config.dataDir, "units/xaq.service"), "previous unit\n");
     mkdirSync(join(config.dataDir, "app"), { recursive: true });
     writeFileSync(join(config.dataDir, "app/marker"), "old app");
     writeFileSync(join(config.dataDir, "service.env"), "TRUST_PROXY=1\n");
@@ -173,7 +173,7 @@ describe("3: service install", () => {
     // The new unit fails to start; re-enabling the restored one works.
     const ops = fakeOps(config.dataDir, (cmd, args) => enableFails(cmd, args) && ++attempts === 1);
     await expect(installService(config, ops)).rejects.toThrow(/Rolled back to the previous install/);
-    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("previous unit\n");
+    expect(readFileSync(join(config.dataDir, "units/xaq.service"), "utf8")).toBe("previous unit\n");
     expect(existsSync(join(config.dataDir, "app.new"))).toBe(false);
     expect(readFileSync(join(config.dataDir, "app/marker"), "utf8")).toBe("old app");
     expect(readFileSync(join(config.dataDir, "service.env"), "utf8")).toBe("TRUST_PROXY=1\n");
@@ -183,8 +183,8 @@ describe("3: service install", () => {
   it("changes nothing when systemd can't be reached (no user bus)", async () => {
     const config = setup();
     mkdirSync(join(config.dataDir, "units"), { recursive: true });
-    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "working unit\n");
-    mkdirSync(join(config.dataDir, "app/node_modules/agentinbox-cli"), { recursive: true });
+    writeFileSync(join(config.dataDir, "units/xaq.service"), "working unit\n");
+    mkdirSync(join(config.dataDir, "app/node_modules/xaq-cli"), { recursive: true });
     const ops = fakeOps(config.dataDir, (cmd) => cmd === "systemctl");
     let staged = false;
     ops.stage = () => {
@@ -193,8 +193,8 @@ describe("3: service install", () => {
     };
     await expect(installService(config, ops)).rejects.toThrow(/Can't talk to systemd \(user session\): Command failed.*Nothing was changed/s);
     expect(staged).toBe(false);
-    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("working unit\n");
-    expect(existsSync(join(config.dataDir, "app/node_modules/agentinbox-cli"))).toBe(true);
+    expect(readFileSync(join(config.dataDir, "units/xaq.service"), "utf8")).toBe("working unit\n");
+    expect(existsSync(join(config.dataDir, "app/node_modules/xaq-cli"))).toBe(true);
     expect(ops.calls).toEqual(["systemctl --user daemon-reload"]);
   });
 
@@ -202,12 +202,12 @@ describe("3: service install", () => {
     const config = setup();
     const ops = fakeOps(config.dataDir, undefined, false);
     await expect(installService(config, ops)).rejects.toThrow(/did not answer on port .*Rolled back to no service/s);
-    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(existsSync(join(config.dataDir, "units/xaq.service"))).toBe(false);
     expect(existsSync(join(config.dataDir, "app"))).toBe(false);
-    expect(ops.calls).toContain("systemctl --user disable --now agentinbox");
+    expect(ops.calls).toContain("systemctl --user disable --now xaq");
   });
 
-  it("refuses while agentinbox runs in a terminal on the same data directory, and changes nothing", async () => {
+  it("refuses while xaq runs in a terminal on the same data directory, and changes nothing", async () => {
     const config = setup();
     const ops = fakeOps(config.dataDir);
     ops.owner = { pid: 777, host: "0.0.0.0", port: 8425, startedAt: "x", service: false };
@@ -217,10 +217,10 @@ describe("3: service install", () => {
       return "";
     };
     await expect(installService(config, ops)).rejects.toThrow(
-      "agentinbox is already running in a terminal (pid 777, port 8425): stop it with Ctrl-C, then run this again.",
+      "xaq is already running in a terminal (pid 777, port 8425): stop it with Ctrl-C, then run this again.",
     );
     expect(staged).toBe(false);
-    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(existsSync(join(config.dataDir, "units/xaq.service"))).toBe(false);
     expect(ops.calls).toEqual(["systemctl --user daemon-reload"]);
   });
 
@@ -241,7 +241,7 @@ describe("3: service install", () => {
     expect(ops.owner).toMatchObject({ service: true, startedAt: "start-2" });
   });
 
-  it("rolls back when a foreground agentinbox answers instead of the service", async () => {
+  it("rolls back when a foreground xaq answers instead of the service", async () => {
     const config = setup();
     const ops = fakeOps(config.dataDir);
     const log = vi.spyOn(console, "log");
@@ -251,14 +251,14 @@ describe("3: service install", () => {
       if (cmd === "systemctl" && args.includes("enable")) ops.owner = { pid: 999, host: "127.0.0.1", port: 0, startedAt: "fg", service: false };
     };
     await expect(installService(config, ops)).rejects.toThrow(/data directory \(pid 999\) is not the service.*Rolled back to no service/s);
-    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(existsSync(join(config.dataDir, "units/xaq.service"))).toBe(false);
     expect(log.mock.calls.flat().join("\n")).not.toMatch(/Installed|Running at/);
   });
 
   it("treats an unflagged lock holder as the service when it is systemd's main process (early nightlies)", async () => {
     const config = setup();
     mkdirSync(join(config.dataDir, "units"), { recursive: true });
-    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "old unit\n");
+    writeFileSync(join(config.dataDir, "units/xaq.service"), "old unit\n");
     const ops = fakeOps(config.dataDir);
     ops.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: "old" };
     ops.mainPid = SERVICE_PID;
@@ -283,12 +283,12 @@ describe("3: service install", () => {
     // A unit is installed but its service isn't running: whatever holds the port isn't it.
     const config = setup();
     mkdirSync(join(config.dataDir, "units"), { recursive: true });
-    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "stopped unit\n");
+    writeFileSync(join(config.dataDir, "units/xaq.service"), "stopped unit\n");
     const ops = fakeOps(config.dataDir);
     ops.busyPort = true;
     ops.mainPid = null;
     await expect(installService(config, ops)).rejects.toThrow(/Port \d+ is already in use/);
-    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("stopped unit\n");
+    expect(readFileSync(join(config.dataDir, "units/xaq.service"), "utf8")).toBe("stopped unit\n");
     // Running (on another data directory, say): it holds the port, and reinstalling stops it first.
     const running = fakeOps(config.dataDir);
     running.busyPort = true;
@@ -301,7 +301,7 @@ describe("3: service install", () => {
   it("rolls a reinstall back to the previous unit, re-enabled, when someone else holds the data directory", async () => {
     const config = setup();
     mkdirSync(join(config.dataDir, "units"), { recursive: true });
-    writeFileSync(join(config.dataDir, "units/agentinbox.service"), "previous unit\n");
+    writeFileSync(join(config.dataDir, "units/xaq.service"), "previous unit\n");
     mkdirSync(join(config.dataDir, "app"), { recursive: true });
     writeFileSync(join(config.dataDir, "app/marker"), "old app");
     const ops = fakeOps(config.dataDir);
@@ -318,16 +318,16 @@ describe("3: service install", () => {
     };
     const log = vi.spyOn(console, "log");
     await expect(installService(config, ops)).rejects.toThrow(/\(pid 999\) is not the service.*Rolled back to the previous install/s);
-    expect(readFileSync(join(config.dataDir, "units/agentinbox.service"), "utf8")).toBe("previous unit\n");
+    expect(readFileSync(join(config.dataDir, "units/xaq.service"), "utf8")).toBe("previous unit\n");
     expect(readFileSync(join(config.dataDir, "app/marker"), "utf8")).toBe("old app");
     expect(enables).toBe(2);
-    expect(ops.calls.filter((c) => c === "systemctl --user enable --now agentinbox")).toHaveLength(2);
+    expect(ops.calls.filter((c) => c === "systemctl --user enable --now xaq")).toHaveLength(2);
     expect(log.mock.calls.flat().join("\n")).not.toMatch(/Installed|Running at/);
   });
 
   it("reads the service's main pid from systemd and launchd", () => {
     const ops = fakeOps("/tmp/x");
-    ops.capture = (cmd, args) => (cmd === "systemctl" && args.join(" ") === "--user show -p MainPID --value agentinbox" ? "1234\n" : "");
+    ops.capture = (cmd, args) => (cmd === "systemctl" && args.join(" ") === "--user show -p MainPID --value xaq" ? "1234\n" : "");
     expect(serviceMainPid(ops)).toBe(1234);
     ops.capture = () => "0\n";
     expect(serviceMainPid(ops)).toBeNull();
@@ -335,11 +335,11 @@ describe("3: service install", () => {
     const seen: string[][] = [];
     mac.capture = (cmd, args) => {
       seen.push([cmd, ...args]);
-      return `gui/501/com.unlaboredlabs.agentinbox = {\n\tactive count = 1\n\tpath = /Users/me/Library/LaunchAgents/com.unlaboredlabs.agentinbox.plist\n\tstate = running\n\tprogram = /usr/local/bin/node\n\tpid = 8123\n\timmediate reason = speculative\n}\n`;
+      return `gui/501/sh.xaq.daemon = {\n\tactive count = 1\n\tpath = /Users/me/Library/LaunchAgents/sh.xaq.daemon.plist\n\tstate = running\n\tprogram = /usr/local/bin/node\n\tpid = 8123\n\timmediate reason = speculative\n}\n`;
     };
     expect(serviceMainPid(mac)).toBe(8123);
-    expect(seen).toEqual([["launchctl", "print", "gui/501/com.unlaboredlabs.agentinbox"]]);
-    mac.capture = () => "gui/501/com.unlaboredlabs.agentinbox = {\n\tstate = not running\n}\n";
+    expect(seen).toEqual([["launchctl", "print", "gui/501/sh.xaq.daemon"]]);
+    mac.capture = () => "gui/501/sh.xaq.daemon = {\n\tstate = not running\n}\n";
     expect(serviceMainPid(mac)).toBeNull();
     mac.capture = () => {
       throw new Error("Could not find service");
@@ -351,9 +351,9 @@ describe("3: service install", () => {
     const svc = (pid: number, startedAt = "a"): InstanceInfo => ({ pid, host: "h", port: 1, startedAt, service: true });
     expect(notTheService(svc(10), null, 10)).toBeNull();
     expect(notTheService(svc(10), null, null)).toBeNull();
-    expect(notTheService(null, null, 10)).toMatch(/no agentinbox holds the data directory/);
+    expect(notTheService(null, null, 10)).toMatch(/no xaq holds the data directory/);
     expect(notTheService({ ...svc(11), service: false }, null, null)).toMatch(/pid 11\) is not the service/);
-    expect(notTheService(svc(11), null, 10)).toBe("the agentinbox holding the data directory (pid 11) is not the service (pid 10)");
+    expect(notTheService(svc(11), null, 10)).toBe("the xaq holding the data directory (pid 11) is not the service (pid 10)");
     // The service manager's own process counts, even from a build that didn't flag its lock.
     expect(notTheService({ ...svc(10), service: false }, null, 10)).toBeNull();
     // The previous service's process still holding the lock: the new one didn't take over.
@@ -384,7 +384,7 @@ describe("3: service install", () => {
     const ops = fakeOps("/tmp/x");
     expect(serviceHints(ops, {}).join("\n")).toMatch(/XDG_RUNTIME_DIR is not set.*enable-linger me.*\/run\/user\/1000/s);
     expect(serviceHints(ops, { XDG_RUNTIME_DIR: "/run/user/1000" })).toHaveLength(2);
-    expect(serviceHints({ ...ops, root: true }, {})).toEqual(["systemctl status agentinbox", "journalctl -u agentinbox -e"]);
+    expect(serviceHints({ ...ops, root: true }, {})).toEqual(["systemctl status xaq", "journalctl -u xaq -e"]);
   });
 
   it("uninstall removes the service's app; status says when nothing is installed", async () => {
@@ -394,11 +394,11 @@ describe("3: service install", () => {
     writeFileSync(config.dbPath, "data");
     mkdirSync(join(config.dataDir, "app.old"));
     writeFileSync(join(config.dataDir, "app.old/mine"), "not the service's");
-    // A wrong --data is ignored in favor of the installed unit's AGENTINBOX_DATA, and never created.
-    const wrong = join(config.dataDir, "..", "agentinbox-wrong-data");
+    // A wrong --data is ignored in favor of the installed unit's XAQ_DATA, and never created.
+    const wrong = join(config.dataDir, "..", "xaq-wrong-data");
     uninstallService({ dataDir: wrong }, ops);
     expect(existsSync(wrong)).toBe(false);
-    expect(existsSync(join(config.dataDir, "units/agentinbox.service"))).toBe(false);
+    expect(existsSync(join(config.dataDir, "units/xaq.service"))).toBe(false);
     expect(existsSync(join(config.dataDir, "app"))).toBe(false);
     expect(readFileSync(config.dbPath, "utf8")).toBe("data");
     expect(readFileSync(join(config.dataDir, "app.old/mine"), "utf8")).toBe("not the service's");
@@ -410,10 +410,10 @@ describe("3: service install", () => {
 });
 
 describe("3/5: unit parsing and health detection", () => {
-  it("reads AGENTINBOX_DATA back from a unit and a plist", () => {
+  it("reads XAQ_DATA back from a unit and a plist", () => {
     const unit = renderSystemdUnit({ execPath: "/n", entry: "/e", dataDir: '/srv/a%b"c', port: 1, host: "h", extraEnv: {} });
     expect(unitDataDir(unit)).toBe('/srv/a%b"c');
-    expect(unitDataDir("<key>AGENTINBOX_DATA</key><string>/Users/me/a&amp;b</string>")).toBe("/Users/me/a&b");
+    expect(unitDataDir("<key>XAQ_DATA</key><string>/Users/me/a&amp;b</string>")).toBe("/Users/me/a&b");
     expect(unitDataDir("[Service]\n")).toBeNull();
   });
 
@@ -466,17 +466,17 @@ describe("5: CLI commands", () => {
 
 describe("7/8: skill commands", () => {
   it("defaults the URL to the running instance, else localhost:8425", () => {
-    const data = mkdtempSync(join(tmpdir(), "agentinbox-skill-"));
+    const data = mkdtempSync(join(tmpdir(), "xaq-skill-"));
     cleanup.push(() => rmSync(data, { recursive: true, force: true }));
-    expect(cli(["skill", "print"], { AGENTINBOX_DATA: data }).stdout).toContain("http://localhost:8425/mcp");
+    expect(cli(["skill", "print"], { XAQ_DATA: data }).stdout).toContain("http://localhost:8425/mcp");
     writeFileSync(lockPath(data), JSON.stringify({ pid: process.pid, host: "0.0.0.0", port: 9234, startedAt: "" }));
-    expect(cli(["skill", "print"], { AGENTINBOX_DATA: data }).stdout).toContain("http://localhost:9234/mcp");
+    expect(cli(["skill", "print"], { XAQ_DATA: data }).stdout).toContain("http://localhost:9234/mcp");
     writeFileSync(lockPath(data), JSON.stringify({ pid: process.pid, host: "192.168.7.7", port: 9235, startedAt: "" }));
-    expect(cli(["skill", "print"], { AGENTINBOX_DATA: data }).stdout).toContain("http://192.168.7.7:9235/mcp");
+    expect(cli(["skill", "print"], { XAQ_DATA: data }).stdout).toContain("http://192.168.7.7:9235/mcp");
   });
 
   it("accepts known targets and paths, and refuses typos", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agentinbox-skills-"));
+    const dir = mkdtempSync(join(tmpdir(), "xaq-skills-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
     let r = cli(["skill", "install", "-t", "claud", "--url", "http://x.test"]);
     expect(r.code).toBe(1);
@@ -485,7 +485,7 @@ describe("7/8: skill commands", () => {
     expect(r.stderr).toContain("directory path such as ./skills");
     r = cli(["skill", "install", "-t", join(dir, "skills"), "--url", "http://x.test"]);
     expect(r.code).toBe(0);
-    expect(readFileSync(join(dir, "skills/agentinbox/SKILL.md"), "utf8")).toContain("http://x.test/mcp");
+    expect(readFileSync(join(dir, "skills/xaq/SKILL.md"), "utf8")).toContain("http://x.test/mcp");
   });
 });
 
@@ -519,7 +519,7 @@ describe("16: account connect options", () => {
 
 // ───────────── 3b: service install on launchd ─────────────
 
-const PLIST = "units/com.unlaboredlabs.agentinbox.plist";
+const PLIST = "units/sh.xaq.daemon.plist";
 
 /**
  * Fake launchd. `bootout` returns at once but the old job stays loaded for `lingers` more `launchctl print`
@@ -562,7 +562,7 @@ function fakeLaunchdOps(dir: string, opts: { lingers?: number; bootstrapFailures
           if (--linger === 0) ops.loaded = false;
           return "state = stopping\n";
         }
-        if (!ops.loaded) throw new Error('Could not find service "com.unlaboredlabs.agentinbox" in domain for port');
+        if (!ops.loaded) throw new Error('Could not find service "sh.xaq.daemon" in domain for port');
         return ops.owner?.service ? `state = running\n\tpid = ${SERVICE_PID}\n` : "state = waiting\n";
       }
       if (args[0] === "bootstrap") bootstrap();
@@ -598,7 +598,7 @@ describe("3b: service install on launchd", () => {
     expect(ops.calls.slice(0, first).filter((c) => c.startsWith("launchctl print")).length).toBeGreaterThanOrEqual(3);
     expect(bootstraps(ops)).toEqual([`launchctl bootstrap gui/501 ${join(config.dataDir, PLIST)}`]);
     expect(readFileSync(join(config.dataDir, PLIST), "utf8")).not.toBe("previous plist\n");
-    expect(existsSync(join(config.dataDir, "app/node_modules/agentinbox-cli/dist/cli.js"))).toBe(true);
+    expect(existsSync(join(config.dataDir, "app/node_modules/xaq-cli/dist/cli.js"))).toBe(true);
   });
 
   it("retries a bootstrap that fails with launchd's error 5, then succeeds", async () => {

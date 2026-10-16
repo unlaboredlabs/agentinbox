@@ -66,7 +66,7 @@ export function createBrokerPolicy(deps: { db: Db; settings: SettingsStore }): B
     const conn = connectionInfo(db, tool.connectionId);
     if (!conn) return deny("unknown_connection", `${tool.exposedName} is no longer available: its connection was removed.`);
     if (conn.status === "disabled") {
-      return deny("connection_disabled", `${conn.name} is turned off in agentinbox, so its tools can't be used. Nothing was sent. Only the owner can turn it back on.`);
+      return deny("connection_disabled", `${conn.name} is turned off in xaq, so its tools can't be used. Nothing was sent. Only the owner can turn it back on.`);
     }
     if (conn.status === "needs_reauth") return deny("needs_reauth", reconnectMessage(conn.name));
 

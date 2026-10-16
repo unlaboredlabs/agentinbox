@@ -40,7 +40,7 @@ export function AccountRow({ account: a, showWatch }: { account: Account; showWa
       confirmLabel: "Remove account",
       description: (
         <>
-          <p>agentinbox stops syncing this mailbox, revokes its Google token and deletes every agent grant for it. Agents lose access immediately.</p>
+          <p>xaq stops syncing this mailbox, revokes its Google token and deletes every agent grant for it. Agents lose access immediately.</p>
           <p>Mail in Gmail isn't touched. You can connect the account again later, but you'll need to recreate its grants.</p>
         </>
       ),

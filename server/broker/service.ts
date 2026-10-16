@@ -159,7 +159,7 @@ export interface BrokerService extends Lifecycle {
   pollEvents(at?: number): Promise<number>;
 }
 
-const UNAVAILABLE = "Integrations aren't available in this build of agentinbox yet.";
+const UNAVAILABLE = "Integrations aren't available in this build of xaq yet.";
 const unavailable = (): ToolResult => ({ isError: true, content: [{ type: "text", text: UNAVAILABLE }] });
 
 /** Inert parts, for tests that don't want the catalog or the upstream runtime. */
@@ -425,7 +425,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     canRunApprovedCalls: () => !!parts.runApprovedCall,
 
     async runApprovedCall(approval) {
-      if (!parts.runApprovedCall) throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
+      if (!parts.runApprovedCall) throw conflict("Tool call requests can't be approved by this version.", "Update xaq, or reject the request.");
       return parts.runApprovedCall(approval);
     },
 

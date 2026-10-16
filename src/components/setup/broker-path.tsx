@@ -63,7 +63,7 @@ export function StepFirstConnection({ choice, onNext }: { choice: Exclude<FirstC
       index={0}
       total={2}
       title={choice === "custom" ? "Add your MCP server" : `Connect ${info.title}`}
-      description="agentinbox keeps the sign-in. You choose what agents may do with it; risky actions ask you first by default."
+      description="xaq keeps the sign-in. You choose what agents may do with it; risky actions ask you first by default."
       footer={
         <StepFooter
           onNext={onNext}

@@ -136,7 +136,7 @@ function setStatus(ctx: AppContext, row: AccountRow, status: AccountRow["calenda
 const API_DISABLED = "The Google Calendar API is turned off in your Google Cloud project.";
 
 const needsReauth = (row: AccountRow) =>
-  new HttpError(409, "needs_reauth", `${row.email} needs to be reconnected before agentinbox can read its calendars.`, `Accounts → ${row.email} → Reconnect.`);
+  new HttpError(409, "needs_reauth", `${row.email} needs to be reconnected before xaq can read its calendars.`, `Accounts → ${row.email} → Reconnect.`);
 
 const notGranted = (row: AccountRow, missing: string[]) =>
   new HttpError(
@@ -247,7 +247,7 @@ export function createCalendarSetup(ctx: AppContext): CalendarSetup {
     async check() {
       for (const row of allRows(ctx)) {
         if (row.status === "needs_reauth") continue;
-        // Calendar may have been granted (or revoked) outside agentinbox since the last refresh.
+        // Calendar may have been granted (or revoked) outside xaq since the last refresh.
         if (!hasScopes(accountScopes(row), CALENDAR_SCOPES)) await backfillScopes(ctx, row);
         await probeCalendar(ctx, row.id);
       }

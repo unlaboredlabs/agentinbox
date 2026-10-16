@@ -36,14 +36,14 @@ function resolveLink(path: string): string {
   }
 }
 
-/** Copies `path` next to itself as `<path>.agentinbox-backup-<timestamp>` (0600). Returns the copy, or null if there was nothing to back up. */
+/** Copies `path` next to itself as `<path>.xaq-backup-<timestamp>` (0600). Returns the copy, or null if there was nothing to back up. */
 export function backupFile(path: string): string | null {
   if (!existsSync(path)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const content = readFileSync(path);
   // Created 0600 and exclusively (never through an existing file or symlink), then filled.
   for (let n = 0; ; n++) {
-    const backup = `${path}.agentinbox-backup-${stamp}${n ? `-${n}` : ""}`;
+    const backup = `${path}.xaq-backup-${stamp}${n ? `-${n}` : ""}`;
     try {
       writeFileSync(backup, content, { mode: 0o600, flag: "wx" });
       return backup;

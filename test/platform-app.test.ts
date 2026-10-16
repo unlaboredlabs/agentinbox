@@ -20,7 +20,7 @@ afterEach(async () => {
 const THEME_SCRIPT = "document.documentElement.classList.add('dark')";
 let webDir: string;
 beforeAll(() => {
-  webDir = mkdtempSync(join(tmpdir(), "agentinbox-web-"));
+  webDir = mkdtempSync(join(tmpdir(), "xaq-web-"));
   mkdirSync(join(webDir, "assets"));
   writeFileSync(join(webDir, "index.html"), `<!doctype html><title>console</title><script>${THEME_SCRIPT}</script><script type="module" src="/assets/app-abc123.js"></script>`);
   writeFileSync(join(webDir, "assets", "app-abc123.js"), "console.log(1)");
@@ -195,10 +195,10 @@ describe("system API", () => {
   });
 
   it("builds the upgrade command and compares versions", () => {
-    const base = { service: false, dataDir: join(process.env.HOME ?? "", ".agentinbox"), port: 8425, host: "0.0.0.0", trustProxy: false };
-    expect(upgradeCommand(base)).toBe("npx -y agentinbox-cli");
+    const base = { service: false, dataDir: join(process.env.HOME ?? "", ".xaq"), port: 8425, host: "0.0.0.0", trustProxy: false };
+    expect(upgradeCommand(base)).toBe("npx -y xaq-cli");
     expect(upgradeCommand({ ...base, service: true, port: 9000, dataDir: "/srv/my data" })).toBe(
-      "npx -y agentinbox-cli service install --data '/srv/my data' --port 9000",
+      "npx -y xaq-cli service install --data '/srv/my data' --port 9000",
     );
     expect(compareVersions("0.2.0", "0.1.9")).toBe(1);
     expect(compareVersions("0.1.0", "0.1.0")).toBe(0);
@@ -208,9 +208,9 @@ describe("system API", () => {
     expect(compareVersions("0.2.0-nightly.2", "0.2.0-nightly.2")).toBe(0);
     expect(compareVersions("0.2.0-alpha", "0.2.0-alpha.1")).toBe(-1);
     expect(compareVersions("0.2.0-1", "0.2.0-alpha")).toBe(-1);
-    expect(upgradeCommand({ ...base, trustProxy: true }, {})).toBe("TRUST_PROXY=1 npx -y agentinbox-cli");
+    expect(upgradeCommand({ ...base, trustProxy: true }, {})).toBe("TRUST_PROXY=1 npx -y xaq-cli");
     expect(upgradeCommand({ ...base, trustProxy: true }, { TRUST_PROXY_FROM: "10.0.0.0/8, fd00::/8", TRUST_PROXY_HOPS: "2" })).toBe(
-      "TRUST_PROXY=1 TRUST_PROXY_HOPS=2 TRUST_PROXY_FROM='10.0.0.0/8, fd00::/8' npx -y agentinbox-cli",
+      "TRUST_PROXY=1 TRUST_PROXY_HOPS=2 TRUST_PROXY_FROM='10.0.0.0/8, fd00::/8' npx -y xaq-cli",
     );
   });
 });
@@ -223,15 +223,15 @@ describe("skill", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/^text\/markdown/);
     const text = await res.text();
-    expect(text).toMatch(/^---\nname: agentinbox\ndescription: /);
+    expect(text).toMatch(/^---\nname: xaq\ndescription: /);
     expect(text).toContain("https://mail.example.com/mcp");
     expect(text).not.toContain(SKILL_URL_PLACEHOLDER);
   });
 
   it("renders and resolves install targets", () => {
     expect(renderSkill("http://x.test/")).toContain("http://x.test/mcp");
-    expect(skillPath("/tmp/skills")).toBe("/tmp/skills/agentinbox/SKILL.md");
-    expect(skillPath("codex")).toMatch(/skills\/agentinbox\/SKILL\.md$/);
+    expect(skillPath("/tmp/skills")).toBe("/tmp/skills/xaq/SKILL.md");
+    expect(skillPath("codex")).toMatch(/skills\/xaq\/SKILL\.md$/);
   });
 });
 

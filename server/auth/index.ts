@@ -11,6 +11,7 @@ import { SESSION_TTL_MS, SessionStore } from "./sessions.ts";
 import { ensureSetupToken, regenerateSetupToken } from "./setup-token.ts";
 
 export const SESSION_COOKIE = "aib_session";
+// Header names keep the pre-rename spelling: a console tab or script from before the rename still sends it.
 export const CSRF_HEADER = "x-agentinbox-csrf";
 export const MIN_PASSWORD_LENGTH = 10;
 export const MAX_PASSWORD_LENGTH = 1024;
@@ -76,7 +77,7 @@ export function currentSetupToken(ctx: AuthCore): string | null {
   return isClaimed(ctx) ? null : ensureSetupToken(ctx.config.dataDir);
 }
 
-/** `agentinbox reset-password`: back to the unclaimed state with a fresh setup link. */
+/** `xaq reset-password`: back to the unclaimed state with a fresh setup link. */
 export function resetAdminPassword(ctx: AuthCore): string {
   const auth = adminAuth(ctx);
   ctx.db.tx(() => {
@@ -101,7 +102,7 @@ function socketAddress(c: Context): string | null {
  * The client address. X-Forwarded-For is honored only with TRUST_PROXY and only when the
  * connection comes from a trusted proxy (loopback, or TRUST_PROXY_FROM); it is read from the
  * right, since proxies append the address they saw and entries further left are client-controlled.
- * TRUST_PROXY_HOPS (default 1) is the number of proxies in front of agentinbox.
+ * TRUST_PROXY_HOPS (default 1) is the number of proxies in front of xaq.
  */
 /** Some proxies (Azure, IIS) append ":port" to X-Forwarded-For entries. */
 function stripPort(entry: string): string {
@@ -118,7 +119,7 @@ function warnUntrustedProxy(peer: string): void {
   if (warnedUntrustedProxy) return;
   warnedUntrustedProxy = true;
   process.stderr.write(
-    `agentinbox: ignoring X-Forwarded-For from ${peer}: TRUST_PROXY only trusts loopback proxies unless TRUST_PROXY_FROM lists them (e.g. TRUST_PROXY_FROM=${peer}).\n`,
+    `xaq: ignoring X-Forwarded-For from ${peer}: TRUST_PROXY only trusts loopback proxies unless TRUST_PROXY_FROM lists them (e.g. TRUST_PROXY_FROM=${peer}).\n`,
   );
 }
 
@@ -182,7 +183,7 @@ export function requireAdmin(ctx: AuthCore): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     if (!hasSession(c, ctx)) {
       if (!isClaimed(ctx)) {
-        throw new HttpError(401, "setup_required", "This instance has not been claimed yet", "Open the setup link printed by agentinbox on startup.");
+        throw new HttpError(401, "setup_required", "This instance has not been claimed yet", "Open the setup link printed by xaq on startup.");
       }
       throw new HttpError(401, "unauthorized", "Sign in to continue");
     }

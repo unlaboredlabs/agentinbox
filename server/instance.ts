@@ -1,19 +1,20 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { NPM_PACKAGE } from "../shared/types.ts";
-import { type Config, DEFAULT_PORT } from "./config.ts";
+import { CLI_NAME, NPM_PACKAGE } from "../shared/types.ts";
+import { envVar, underService } from "./brand.ts";
+import { type Config, dataFiles, DEFAULT_PORT, defaultDataDir } from "./config.ts";
 import { Crypto } from "./crypto.ts";
 
 /**
- * How to run this CLI in printed hints: `npx agentinbox-cli` when run through npx (and in service
- * logs, read by someone who most likely installed that way), else the installed `agentinbox`.
+ * How to run this CLI in printed hints: `npx xaq-cli` when run through npx (and in service logs, read
+ * by someone who most likely installed that way: the service's own copy isn't on their PATH), else the
+ * installed `xaq`.
  */
 export function cliCommand(args: string): string {
-  const viaNpx = process.env.npm_command === "exec" || /[\\/]_npx[\\/]/.test(process.argv[1] ?? "") || process.env.AGENTINBOX_SERVICE === "1";
-  return `${viaNpx ? `npx ${NPM_PACKAGE}` : "agentinbox"} ${args}`;
+  const viaNpx = process.env.npm_command === "exec" || /[\\/]_npx[\\/]/.test(process.argv[1] ?? "") || underService();
+  return `${viaNpx ? `npx ${NPM_PACKAGE}` : CLI_NAME} ${args}`;
 }
 
 /**
@@ -22,7 +23,7 @@ export function cliCommand(args: string): string {
  */
 export function serviceInstallCommand(config: Pick<Config, "dataDir" | "host" | "port">): string {
   const flags: string[] = [];
-  if (config.dataDir !== resolve(join(homedir(), ".agentinbox"))) flags.push(`--data ${quoteArg(config.dataDir)}`);
+  if (resolve(config.dataDir) !== defaultDataDir()) flags.push(`--data ${quoteArg(config.dataDir)}`);
   if (config.host !== "0.0.0.0") flags.push(`--host ${quoteArg(config.host)}`);
   if (config.port !== DEFAULT_PORT) flags.push(`--port ${config.port}`);
   return cliCommand(["service install", ...flags].join(" "));
@@ -32,7 +33,7 @@ const quoteArg = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(
 
 /** `reset-password`, with `--data <dir>` when the data directory isn't the default one. */
 export function resetPasswordCommand(dataDir: string): string {
-  const custom = resolve(dataDir) !== resolve(join(homedir(), ".agentinbox"));
+  const custom = resolve(dataDir) !== defaultDataDir();
   return cliCommand(custom ? `reset-password --data ${quoteArg(dataDir)}` : "reset-password");
 }
 
@@ -47,11 +48,12 @@ export interface InstanceInfo {
   bootId?: string | null;
   /** The process's own start time as the OS reports it, so a reused pid doesn't look alive. */
   processStart?: string | null;
-  /** Started by the background service (AGENTINBOX_SERVICE=1). */
+  /** Started by the background service (XAQ_SERVICE=1). */
   service?: boolean;
 }
 
-export const lockPath = (dataDir: string) => join(dataDir, "agentinbox.lock");
+/** `<data>/xaq.lock` (`agentinbox.lock` in a data directory from before the rename: see dataFiles). */
+export const lockPath = (dataDir: string) => dataFiles(dataDir).lock;
 
 /** Data dirs locked by this process: a lock naming our own pid is live only if it's in here. */
 const heldByUs = new Set<string>();
@@ -129,7 +131,7 @@ export interface InstanceLock {
 }
 
 /**
- * Takes `<data>/agentinbox.lock`. Two processes on one data directory would both run ingest and
+ * Takes `<data>/xaq.lock`. Two processes on one data directory would both run ingest and
  * deliver every webhook twice, even on different ports. A lock whose process is gone (dead,
  * rebooted, or its pid reused by something else) is replaced.
  */
@@ -143,7 +145,7 @@ export function acquireInstanceLock(config: Pick<Config, "dataDir" | "host" | "p
     startedAt: new Date().toISOString(),
     bootId: bootId(),
     processStart: processStartTime(process.pid),
-    service: process.env.AGENTINBOX_SERVICE === "1",
+    service: underService(),
   };
   for (let attempt = 0; ; attempt++) {
     try {
@@ -156,9 +158,9 @@ export function acquireInstanceLock(config: Pick<Config, "dataDir" | "host" | "p
         const where = `(pid ${other.pid}${other.port ? `, port ${other.port}` : ""})`;
         throw new Error(
           other.service
-            ? `agentinbox is already running as a background service with the data directory ${dataDir} ${where}. ` +
+            ? `xaq is already running as a background service with the data directory ${dataDir} ${where}. ` +
                 `Use that one, stop it (\`${cliCommand("service uninstall")}\` keeps your data), or use another --data directory.`
-            : `agentinbox is already running with the data directory ${dataDir} ${where}. ` +
+            : `xaq is already running with the data directory ${dataDir} ${where}. ` +
                 `Stop it first, or use another --data directory. If no such process exists, delete ${file}.` +
                 (existsSync(join(dataDir, "setup-token")) ? ` Lost its setup link? \`${resetPasswordCommand(dataDir)}\` prints it again.` : ""),
         );
@@ -212,19 +214,19 @@ function sampleCiphertext(dbPath: string): string | null {
 /**
  * Refuses to start with a master key that can't read the stored secrets: a missing master.key would
  * otherwise be regenerated, silently making every refresh token and webhook secret unreadable.
- * `envKey` overrides AGENTINBOX_MASTER_KEY (used by `service install` to check the key it will install).
+ * `envKey` overrides XAQ_MASTER_KEY (or AGENTINBOX_MASTER_KEY; used by `service install` to check the key it will install).
  */
-export function assertMasterKeyUsable(config: Pick<Config, "dbPath" | "masterKeyPath">, envKey = process.env.AGENTINBOX_MASTER_KEY): void {
+export function assertMasterKeyUsable(config: Pick<Config, "dbPath" | "masterKeyPath">, envKey = envVar("MASTER_KEY")): void {
   const sample = sampleCiphertext(config.dbPath);
   if (!sample) return;
   let raw: string | null = envKey || null;
-  const source = raw ? "AGENTINBOX_MASTER_KEY" : config.masterKeyPath;
+  const source = raw ? "XAQ_MASTER_KEY" : config.masterKeyPath;
   if (!raw && existsSync(config.masterKeyPath)) raw = readFileSync(config.masterKeyPath, "utf8").trim();
   if (!raw) {
     throw new Error(
-      `${config.dbPath} holds encrypted secrets, but there is no master key: ${config.masterKeyPath} is missing and AGENTINBOX_MASTER_KEY is not set. ` +
-        "Restore master.key from your backup (or set AGENTINBOX_MASTER_KEY to the key used before). " +
-        "agentinbox won't create a new key, because the stored Google tokens and secrets could never be read again.",
+      `${config.dbPath} holds encrypted secrets, but there is no master key: ${config.masterKeyPath} is missing and XAQ_MASTER_KEY is not set. ` +
+        "Restore master.key from your backup (or set XAQ_MASTER_KEY to the key used before). " +
+        "xaq won't create a new key, because the stored Google tokens and secrets could never be read again.",
     );
   }
   try {
@@ -232,7 +234,7 @@ export function assertMasterKeyUsable(config: Pick<Config, "dbPath" | "masterKey
   } catch {
     throw new Error(
       `The master key from ${source} can't decrypt the secrets stored in ${config.dbPath}. ` +
-        "Use the key this data directory was created with (master.key from your backup, or the previous AGENTINBOX_MASTER_KEY).",
+        "Use the key this data directory was created with (master.key from your backup, or the previous XAQ_MASTER_KEY or AGENTINBOX_MASTER_KEY).",
     );
   }
 }

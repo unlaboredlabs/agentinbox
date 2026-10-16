@@ -301,7 +301,7 @@ describe("connectCommands matches what `connect` prints", () => {
 
   it.each(["https://mail.example.com/it's", "https://mail.example.com/a b", "http://127.0.0.1:8712"])("quotes the URL %s so the shell passes it unchanged", (url) => {
     const c = connectCommands(url, "claude-code");
-    expect(words(c.connect)).toEqual(["npx", "agentinbox-cli", "connect", url, "--tool", "claude-code", "--setup-mcp"]);
+    expect(words(c.connect)).toEqual(["npx", "xaq-cli", "connect", url, "--tool", "claude-code", "--setup-mcp"]);
     expect(words(c.skillInstall).at(-1)).toBe(url);
   });
 

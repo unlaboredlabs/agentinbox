@@ -87,7 +87,7 @@ function describe(v: ValidateFunction): string {
 
 export function validateArgs(pinHash: string, schema: Record<string, unknown>, args: unknown): ValidationResult {
   const v = compile(`in:${pinHash}`, schema);
-  if (v instanceof Error) return { ok: false, message: "The tool's input schema can't be checked, so agentinbox won't forward calls to it. Ask the owner to look at the connection." };
+  if (v instanceof Error) return { ok: false, message: "The tool's input schema can't be checked, so xaq won't forward calls to it. Ask the owner to look at the connection." };
   return v(args) ? { ok: true } : { ok: false, message: describe(v) };
 }
 

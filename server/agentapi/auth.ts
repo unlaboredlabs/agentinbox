@@ -30,7 +30,7 @@ export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): Middl
     const principal = key ? ctx.policy.authenticate(key) : null;
     if (!principal && key && disabledAgentKey(ctx, key)) {
       // A real key of a disabled agent: no access, but tell the listener so it can wait for re-enable.
-      return c.json({ error: { code: "agent_disabled", message: "This agent is disabled", hint: "An admin can enable it in the agentinbox console under Agents." } }, 403);
+      return c.json({ error: { code: "agent_disabled", message: "This agent is disabled", hint: "An admin can enable it in the xaq console under Agents." } }, 403);
     }
     if (!principal) {
       const limiter = limiterOf();
@@ -47,13 +47,13 @@ export function agentAuth(ctx: AppContext, limiterOf: () => LoginLimiter): Middl
           detail: { ip, path: c.req.path, minutes: BAN_MS / 60_000 },
         });
       }
-      c.header("WWW-Authenticate", 'Bearer realm="agentinbox"');
+      c.header("WWW-Authenticate", 'Bearer realm="xaq"');
       return c.json(
         {
           error: {
             code: "unauthorized",
             message: key ? "Invalid or disabled agent API key." : "Missing agent API key.",
-            hint: "Send the agent's key as `Authorization: Bearer aib_…`, or pair again with `npx agentinbox-cli connect`.",
+            hint: "Send the agent's key as `Authorization: Bearer aib_…`, or pair again with `npx xaq-cli connect`.",
           },
         },
         401,

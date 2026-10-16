@@ -12,7 +12,7 @@ export function ConsoleVersion({ version, service }: { version?: string; service
     return (
       <span className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
         <InboxIcon className="size-3.5" />
-        agentinbox {version ?? data?.current ?? ""}
+        xaq {version ?? data?.current ?? ""}
       </span>
     );
   }
@@ -35,12 +35,12 @@ export function UpdateDialogContent({ current, latest, command, service }: { cur
   return (
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>Update agentinbox</DialogTitle>
+        <DialogTitle>Update xaq</DialogTitle>
         <DialogDescription>
           You're on {current}; the latest release is {latest}.{" "}
           {service
             ? "Run this on the server. It reinstalls the service with the latest version and keeps your data, accounts and agents."
-            : "Stop agentinbox, then run this on the server to start the latest version. Your data is kept."}
+            : "Stop xaq, then run this on the server to start the latest version. Your data is kept."}
         </DialogDescription>
       </DialogHeader>
       <CodeBlock code={command} />

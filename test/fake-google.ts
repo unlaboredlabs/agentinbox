@@ -1,5 +1,5 @@
 /**
- * In-memory fake of every Google endpoint agentinbox calls (OAuth, Gmail REST, Pub/Sub REST), served by
+ * In-memory fake of every Google endpoint xaq calls (OAuth, Gmail REST, Pub/Sub REST), served by
  * node:http on 127.0.0.1:<random port>. Deterministic and fast; used by unit tests and the end-to-end test.
  *
  *   const g = await startFakeGoogle();
@@ -44,7 +44,7 @@
  *
  * Consent screen like Google's for a signed-out browser: an unknown client_id or unregistered redirect URI
  * redirects to /signin/oauth/error/v2?authError=<base64 "Error 401: invalid_client" / "Error 400: redirect_uri_mismatch">;
- * a request without PKCE (not agentinbox's connect flow, e.g. the client check) redirects to /v3/signin/identifier.
+ * a request without PKCE (not xaq's connect flow, e.g. the client check) redirects to /v3/signin/identifier.
  * The token endpoint answers invalid_client for a wrong client id or secret before looking at the code.
  *
  * OAuth grants are per user (like Google): revoking any token of a user revokes all of that user's tokens, and
@@ -921,7 +921,7 @@ export async function startFakeGoogle(): Promise<FakeGoogle> {
       return errorPage(`Error 400: redirect_uri_mismatch\nYou can't sign in because this app sent an invalid request. redirect_uri=${redirect}`);
     }
     if (!q.get("code_challenge")) {
-      // Not agentinbox's connect flow (it always uses PKCE): behave like a signed-out browser.
+      // Not xaq's connect flow (it always uses PKCE): behave like a signed-out browser.
       const target = new URL("/v3/signin/identifier", url);
       target.searchParams.set("continue", `${url.pathname}${url.search}`);
       res.writeHead(302, { location: `${target.pathname}${target.search}` }).end();

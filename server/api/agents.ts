@@ -29,7 +29,7 @@ export async function testAgentConnection(ctx: AppContext, agentId: string): Pro
   if (!agent) throw notFound("Agent");
   if (agent.disabled) return { ok: false, tools: [], message: "This agent is disabled; enable it to let it connect." };
   const server = buildMcpServer(ctx, { agentId: agent.id, name: agent.name });
-  const client = new Client({ name: "agentinbox-console-test", version: ctx.config.version });
+  const client = new Client({ name: "xaq-console-test", version: ctx.config.version });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await server.connect(serverTransport);

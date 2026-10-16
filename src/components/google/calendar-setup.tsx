@@ -270,7 +270,7 @@ function ApiPage({
           <p>Or run this in Cloud Shell:</p>
           <CodeBlock code={command} wrap copyLabel="Copy command" />
           {s.api === "unknown" && (
-            <p className="text-xs">agentinbox can only confirm this once an account has Calendar access (step 3), so continue once it's enabled.</p>
+            <p className="text-xs">xaq can only confirm this once an account has Calendar access (step 3), so continue once it's enabled.</p>
           )}
         </GuideStep>
       </Guide>
@@ -300,7 +300,7 @@ function ScopesPage({ s, appType, project }: { s: CalendarSetupState; appType: "
         </GuideStep>
       </Guide>
       <p className="text-xs text-muted-foreground">
-        Google doesn't tell agentinbox whether this was done. Continue turns Calendar on: from then on, connecting or reconnecting an account
+        Google doesn't tell xaq whether this was done. Continue turns Calendar on: from then on, connecting or reconnecting an account
         asks for Calendar too.
       </p>
     </div>

@@ -76,7 +76,7 @@ export function McpCallBody({ view: v, showReason = true, uncapped }: { view: Mc
         <Alert variant="warning">
           <AlertTriangleIcon />
           <AlertTitle>May have run: outcome unknown</AlertTitle>
-          <AlertDescription>The approved call was interrupted, so it may or may not have run. agentinbox won't retry it.</AlertDescription>
+          <AlertDescription>The approved call was interrupted, so it may or may not have run. xaq won't retry it.</AlertDescription>
         </Alert>
       )}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">

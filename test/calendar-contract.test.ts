@@ -73,7 +73,7 @@ function preCalendarDb(dir: string, withAccounts = true): string {
 
 describe("migration 7 (Google Calendar)", () => {
   it("keeps accounts, grants, approvals and events intact and leaves existing grants mail-only", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agentinbox-mig-"));
+    const dir = mkdtempSync(join(tmpdir(), "xaq-mig-"));
     try {
       const db = new Db(preCalendarDb(dir));
       expect(db.get<{ v: number }>("SELECT MAX(version) AS v FROM _migrations")!.v).toBe(MIGRATIONS.length);
@@ -119,7 +119,7 @@ describe("migration 7 (Google Calendar)", () => {
   });
 
   it("leaves Calendar on by default for an install without accounts", () => {
-    const dir = mkdtempSync(join(tmpdir(), "agentinbox-mig-"));
+    const dir = mkdtempSync(join(tmpdir(), "xaq-mig-"));
     try {
       const db = new Db(preCalendarDb(dir, false));
       expect(db.get("SELECT 1 FROM settings WHERE key = 'calendar.setup'")).toBeUndefined();

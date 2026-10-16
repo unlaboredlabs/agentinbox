@@ -1,7 +1,7 @@
 {
   "numStartups": 12,
   "mcpServers": {
-    "agentinbox": { "type": "http", "url": "https://mail.example.com/mcp", "headersHelper": "node ~/.config/agentinbox/bin/mcp-header.mjs" },
+    "xaq": { "type": "http", "url": "https://mail.example.com/mcp", "headersHelper": "node ~/.config/xaq/bin/mcp-header.mjs" },
     "linear": { "type": "http", "url": "https://mcp.linear.app/mcp" },
     "stripe": { "type": "http", "url": "https://mcp.stripe.com", "headers": { "Authorization": "Bearer ${STRIPE_KEY}" } },
     "sentry": { "type": "sse", "url": "https://mcp.sentry.dev/sse", "headers": { "Authorization": "Bearer ${SENTRY_TOKEN}" } },

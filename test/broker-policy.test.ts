@@ -593,7 +593,7 @@ describe("SourceError → plain words", () => {
   };
 
   it.each([
-    [new SourceError("needs_reauth", "x"), /The owner must reconnect Notion in agentinbox \(Connections → Reconnect\)/, "needs_reauth"],
+    [new SourceError("needs_reauth", "x"), /The owner must reconnect Notion in xaq \(Connections → Reconnect\)/, "needs_reauth"],
     [new SourceError("timeout", "x"), /Notion didn't answer in time\. The call may or may not have run/, "timeout"],
     [new SourceError("rate_limited", "x", 30_000), /limiting requests right now\. Try again in 30 seconds\./, "rate_limited"],
     [new SourceError("rate_limited", "x"), /Try again in a minute\./, "rate_limited"],

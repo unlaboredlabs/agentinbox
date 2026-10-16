@@ -70,7 +70,7 @@ function WebhooksPage() {
               <EmptyDescription>
                 {noAgents
                   ? "Webhooks deliver events to an agent. Create an agent first."
-                  : "Add one to have agentinbox call your agent (n8n, a serverless function, your own service) when matching mail arrives."}
+                  : "Add one to have xaq call your agent (n8n, a serverless function, your own service) when matching mail arrives."}
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
@@ -101,7 +101,7 @@ function WebhooksPage() {
       <SecretDialog
         secret={created?.secret}
         title={`${created?.webhook.name ?? "Webhook"} created`}
-        description="Use this secret to verify that requests really come from agentinbox."
+        description="Use this secret to verify that requests really come from xaq."
         onClose={() => {
           const id = created?.webhook.id;
           setCreated(undefined);

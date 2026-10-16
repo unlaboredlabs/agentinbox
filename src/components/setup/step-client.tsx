@@ -33,7 +33,7 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
     <StepCard
       index={index}
       title={STEP_META.client.title}
-      description="The OAuth client is agentinbox's ID card at Google: it's what you sign in through when you connect Gmail."
+      description="The OAuth client is xaq's ID card at Google: it's what you sign in through when you connect Gmail."
       footer={<StepFooter onBack={onBack} onNext={onNext} nextDisabled={!configured} hint={!configured ? "Import the client JSON first" : undefined} />}
     >
       {client.isPending ? (
@@ -69,7 +69,7 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
               <FormValues
                 rows={[
                   { label: "Application type", note: <strong className="text-foreground">Web application</strong> },
-                  { label: "Name", value: "agentinbox", copyLabel: "Copy client name" },
+                  { label: "Name", value: "xaq", copyLabel: "Copy client name" },
                   { label: "Authorized JavaScript origins", note: "Leave empty." },
                   {
                     label: "Authorized redirect URIs",
@@ -79,7 +79,7 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
                   },
                   {
                     label: "“Use this client for an AI-powered agent”",
-                    note: "Leave it unticked: agentinbox calls Gmail itself.",
+                    note: "Leave it unticked: xaq calls Gmail itself.",
                   },
                 ]}
               />
@@ -88,7 +88,7 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
                   <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />
                   <span>
                     Why localhost? Your address is plain http, and Google only returns to https or localhost. After you sign in, the browser lands
-                    on this localhost address and you paste it back into agentinbox.
+                    on this localhost address and you paste it back into xaq.
                   </span>
                 </p>
               )}
@@ -102,7 +102,7 @@ export function StepClient({ index, onBack, onNext }: StepProps) {
                 <span className="font-mono text-xs text-foreground">client_secret_….json</span> (in your Downloads folder).
               </p>
             </GuideStep>
-            <GuideStep title="Give agentinbox the JSON file" done={configured}>
+            <GuideStep title="Give xaq the JSON file" done={configured}>
               {configured && (
                 <p className="flex items-start gap-1.5 text-foreground">
                   <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />

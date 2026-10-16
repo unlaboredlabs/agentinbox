@@ -29,7 +29,7 @@ export function requireRemote(db: Db, id: string): ConnectionRow & { url: string
   if (c.kind !== "remote_http" || !c.url) throw new SourceError("unavailable", `${c.name} isn't a remote MCP connection`);
   if (c.status === "disabled") throw new SourceError("unavailable", `${c.name} is disabled`);
   if (c.status === "needs_reauth") {
-    throw new SourceError("needs_reauth", `The owner must reconnect ${c.name} in agentinbox (Connections → Reconnect)${c.status_reason ? `: ${c.status_reason}` : ""}`);
+    throw new SourceError("needs_reauth", `The owner must reconnect ${c.name} in xaq (Connections → Reconnect)${c.status_reason ? `: ${c.status_reason}` : ""}`);
   }
   return c as ConnectionRow & { url: string };
 }

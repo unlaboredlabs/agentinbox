@@ -45,7 +45,7 @@ export function connectionOAuthRoutes(ctx: AppContext) {
           connection: { id: null, name: null },
           title: known && err.code === "oauth_access_denied" ? "Connection cancelled" : "Couldn't connect",
           message,
-          hint: known ? (err.hint ?? null) : "Try again from Connections in the console. If it keeps failing, check the agentinbox server log.",
+          hint: known ? (err.hint ?? null) : "Try again from Connections in the console. If it keeps failing, check the xaq server log.",
           code: known ? err.code : source ? `connection_${source.code}` : "internal",
           targetOrigin,
         }),

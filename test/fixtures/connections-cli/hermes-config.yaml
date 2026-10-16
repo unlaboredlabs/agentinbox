@@ -4,10 +4,10 @@ model:
   provider: openrouter
 
 mcp_servers:
-  agentinbox:
+  xaq:
     url: "https://macbook.tailb10092.ts.net/mcp"
     headers:
-      Authorization: "Bearer ${AGENTINBOX_API_KEY}"
+      Authorization: "Bearer ${XAQ_API_KEY}"
   whoop:
     url: https://whoop.weish.me/api/mcp
     headers:
@@ -35,4 +35,4 @@ mcp_servers:
     args: ["-y", "@playwright/mcp@0.0.41", "--headless"]
 
 platform_toolsets:
-  telegram: [web, mcp-agentinbox]
+  telegram: [web, mcp-xaq]

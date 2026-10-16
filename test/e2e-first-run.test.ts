@@ -115,7 +115,7 @@ describe("first run", () => {
     expect(skill.headers.get("content-type")).toMatch(/text\/markdown/);
     const md = await skill.text();
     expect(md).toContain(`${s.url}/mcp`);
-    expect(md).not.toContain("{{AGENTINBOX_URL}}");
+    expect(md).not.toContain("{{XAQ_URL}}");
 
     // Signing out invalidates the session server-side.
     const other = new AdminClient(() => s.url);

@@ -1,5 +1,5 @@
 // E2E: device-flow pairing + the /agent/v1 listener stream (feat/listen-server) and the
-// `agentinbox connect` / `listen` CLI end to end (feat/listen-client). Each part switches on when its
+// `xaq connect` / `listen` CLI end to end (feat/listen-client). Each part switches on when its
 // code is present (test/e2e/features.ts); contract: shared/agent-api.ts, docs/listen.md.
 
 import { execFileSync } from "node:child_process";
@@ -49,7 +49,7 @@ async function setup() {
   email = mailbox("listen");
   other = mailbox("listen-other");
   [account, otherAccount] = (await s.bootstrap({ accounts: [email, other], pubsub: true })) as [Account, Account];
-  scopeLabel = s.fake.addLabel(email, "AgentInbox");
+  scopeLabel = s.fake.addLabel(email, "xaq");
   // Fast polling for the tests (the server exposes this for tests; production default is 3 s).
   await setAgentApiOptions(s, { intervalSeconds: 1 });
 }
@@ -283,7 +283,7 @@ describe.runIf(HAS_AGENT_API)("listener stream (/agent/v1/events/stream)", () =>
   });
 });
 
-describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen (CLI end to end)", () => {
+describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("xaq connect + listen (CLI end to end)", () => {
   beforeAll(async () => {
     buildCli();
     await setup();
@@ -302,7 +302,7 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     const req = await findPairing(s.admin, code);
     const agent = await approvePairing(s.admin, req.id, code, [grant(account.id)]);
     expect(await connect.exited).toBe(0);
-    const profile = join(home.configDir, "agentinbox", "profiles", "default.json");
+    const profile = join(home.configDir, "xaq", "profiles", "default.json");
     expect(existsSync(profile)).toBe(true);
     expect(statSync(profile).mode & 0o777).toBe(0o600);
     expect(connect.output()).not.toMatch(/aib_[A-Za-z0-9]{20,}/); // the key is never printed
@@ -317,8 +317,8 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     execFileSync("sh", ["-c", `echo Invoice ${evilFor(control)}`], { stdio: "ignore" });
     expect(existsSync(control)).toBe(true);
     const listenArgs = ["listen", "--exec", rec.command, "--include-body", "--consumer", "e2e"];
-    // A secret-looking AGENTINBOX_* variable in the listener's environment must not reach the command.
-    const plant = { AGENTINBOX_PLANTED: "do-not-leak" };
+    // A secret-looking XAQ_* variable in the listener's environment must not reach the command.
+    const plant = { XAQ_PLANTED: "do-not-leak" };
     let listener = spawnCli(listenArgs, home, plant);
     const connected = async () =>
       waitFor(async () => (await s.admin.get<{ listeners?: { consumer: string; connected: boolean }[] }>(`/api/agents/${agent.id}`)).listeners?.find((l) => l.consumer === "e2e" && l.connected), {
@@ -346,12 +346,12 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     expect(content!.body).toMatch(/^<email_content from="attacker@evil\.test" untrusted>/);
 
     // Environment: only safe ids (plus the event file path), never text, never the planted variable.
-    const allowed = ["AGENTINBOX_EVENT_ID", "AGENTINBOX_EVENT_TYPE", "AGENTINBOX_EVENT_SEQ", "AGENTINBOX_ACCOUNT", "AGENTINBOX_THREAD_ID", "AGENTINBOX_MESSAGE_ID", "AGENTINBOX_EVENT_FILE", "AGENTINBOX_EVENT_COUNT"];
+    const allowed = ["XAQ_EVENT_ID", "XAQ_EVENT_TYPE", "XAQ_EVENT_SEQ", "XAQ_ACCOUNT", "XAQ_THREAD_ID", "XAQ_MESSAGE_ID", "XAQ_EVENT_FILE", "XAQ_EVENT_COUNT"];
     expect(Object.keys(call1.env).filter((k) => !allowed.includes(k))).toEqual([]);
-    expect(call1.env).toMatchObject({ AGENTINBOX_EVENT_ID: ev.id, AGENTINBOX_EVENT_TYPE: "message.received", AGENTINBOX_EVENT_SEQ: String(ev.seq), AGENTINBOX_MESSAGE_ID: msg.id });
+    expect(call1.env).toMatchObject({ XAQ_EVENT_ID: ev.id, XAQ_EVENT_TYPE: "message.received", XAQ_EVENT_SEQ: String(ev.seq), XAQ_MESSAGE_ID: msg.id });
     for (const v of Object.values(call1.env)) expect(v).not.toMatch(/touch|\$\(|`/);
     expect(call1.argv).toEqual([]);
-    // $AGENTINBOX_EVENT_FILE holds the same JSON as stdin, readable only by the user.
+    // $XAQ_EVENT_FILE holds the same JSON as stdin, readable only by the user.
     expect(call1.eventFile).toEqual({ content: call1.stdin, mode: 0o600 });
     await stays(() => existsSync(canary), 300, "the canary file");
 
@@ -397,6 +397,6 @@ describe.runIf(HAS_AGENT_API && HAS_LISTEN_CLIENT)("agentinbox connect + listen 
     const code = (await connect.waitForOutput(/Code:\s+([A-Z2-9]{4}-[A-Z2-9]{4})/))[1]!;
     await denyPairing(s.admin, (await findPairing(s.admin, code)).id, "nope");
     expect(await connect.exited).toBe(2);
-    expect(existsSync(join(home.configDir, "agentinbox", "profiles", "default.json"))).toBe(false);
+    expect(existsSync(join(home.configDir, "xaq", "profiles", "default.json"))).toBe(false);
   }, 30_000);
 });

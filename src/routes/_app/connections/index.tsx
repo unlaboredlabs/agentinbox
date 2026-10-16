@@ -26,7 +26,7 @@ function ConnectionsPage() {
     <>
       <PageHeader
         title="Connections"
-        description="MCP servers and apps your agents use through agentinbox, like Notion. agentinbox holds every sign-in; agents get the tools you allow."
+        description="MCP servers and apps your agents use through xaq, like Notion. xaq holds every sign-in; agents get the tools you allow."
         actions={<AddButton />}
       />
       {list.isPending ? (
@@ -41,7 +41,7 @@ function ConnectionsPage() {
                 <PlugIcon />
               </EmptyMedia>
               <EmptyTitle>No connections yet</EmptyTitle>
-              <EmptyDescription>Add Notion, WHOOP or any MCP server. Every agent then reaches it through its one agentinbox connection.</EmptyDescription>
+              <EmptyDescription>Add Notion, WHOOP or any MCP server. Every agent then reaches it through its one xaq connection.</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
               <AddButton variant="outline" />

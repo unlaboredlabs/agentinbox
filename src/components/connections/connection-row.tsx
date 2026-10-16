@@ -120,7 +120,7 @@ export function useConnectionActions() {
       confirmLabel: "Disable now",
       description: (
         <>
-          <p>This is the kill switch. Right away, agentinbox:</p>
+          <p>This is the kill switch. Right away, xaq:</p>
           {killList(c)}
           <p>The connection, its access settings and the audit log stay. Reconnect to use it again.</p>
         </>
@@ -134,7 +134,7 @@ export function useConnectionActions() {
       confirmLabel: "Remove now",
       description: (
         <>
-          <p>Right away, agentinbox:</p>
+          <p>Right away, xaq:</p>
           {killList(c)}
           <p>Then the connection and its access settings are deleted. The audit log keeps what happened.</p>
         </>

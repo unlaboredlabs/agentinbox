@@ -264,7 +264,7 @@ export function hostPort(url: string): string {
 /** The private-network explanation shown with "Allow host:port". */
 export function privateExplanation(url: string): string {
   return (
-    `Allowing ${hostPort(url)} lets agentinbox connect to a server on this computer or your private network (like Tailscale). ` +
+    `Allowing ${hostPort(url)} lets xaq connect to a server on this computer or your private network (like Tailscale). ` +
     "Only this connection gets it, only at this exact address, and only you can turn it on. " +
     "A server there can reach other services on that machine or network, so allow only servers you run or trust."
   );
@@ -272,16 +272,16 @@ export function privateExplanation(url: string): string {
 
 /** One or two sentences about what the probe found (the server's words, with ours for the common cases). */
 export function probeSummary(p: ConnectionProbe): string {
-  if (p.blocked === "private_target") return "This server is on this computer or your private network. agentinbox blocks those addresses unless you allow one.";
-  if (p.blocked === "ssrf") return p.message || "agentinbox can't connect to this address.";
-  if (!p.reachable) return p.message || "agentinbox couldn't reach this server.";
+  if (p.blocked === "private_target") return "This server is on this computer or your private network. xaq blocks those addresses unless you allow one.";
+  if (p.blocked === "ssrf") return p.message || "xaq can't connect to this address.";
+  if (!p.reachable) return p.message || "xaq couldn't reach this server.";
   if (p.auth === "oauth") {
     const host = p.issuer ? hostPort(p.issuer).replace(/:443$/, "") : "its own sign-in";
     return p.registration === "manual"
       ? `Signs in with ${host}, which doesn't register apps automatically. ${p.message}`.trim()
-      : `Signs in with ${host}. agentinbox registers itself automatically, so there's nothing to set up there.`;
+      : `Signs in with ${host}. xaq registers itself automatically, so there's nothing to set up there.`;
   }
-  if (p.auth === "header") return "Needs an API key or token. agentinbox keeps it encrypted and sends it with every request; agents never see it.";
+  if (p.auth === "header") return "Needs an API key or token. xaq keeps it encrypted and sends it with every request; agents never see it.";
   if (p.auth === "none") return "An MCP server that needs no sign-in.";
   return p.message;
 }
@@ -329,8 +329,8 @@ export function draftProblems(d: ConnectionDraft, taken: readonly string[]): str
   if (!d.preset && !d.probe) out.push("Check the address first.");
   const control = draftControl(d);
   if (control?.kind === "private") out.push("Allow the private-network address, or use another one.");
-  if (!d.preset && d.probe && !d.probe.reachable && !d.probe.blocked) out.push("agentinbox couldn't reach this server.");
-  if (d.probe?.blocked === "ssrf") out.push("agentinbox can't connect to this address.");
+  if (!d.preset && d.probe && !d.probe.reachable && !d.probe.blocked) out.push("xaq couldn't reach this server.");
+  if (d.probe?.blocked === "ssrf") out.push("xaq can't connect to this address.");
   // Created early for the allow: its own slug isn't a clash.
   const slug = slugProblem(d.slug, d.createdId ? taken.filter((s) => s !== d.slug) : taken);
   if (slug) out.push(slug);

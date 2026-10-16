@@ -14,9 +14,9 @@ export interface SetupDraft {
   /** First run's "what do you want to connect?" answer (first-run.ts). Unset: not asked yet. */
   firstConnect?: "notion" | "whoop" | "custom" | "google";
   urlConfirmed?: boolean;
-  /** "new" (default): a dedicated project created for agentinbox; "existing": reuse one (advanced). */
+  /** "new" (default): a dedicated project created for xaq; "existing": reuse one (advanced). */
   projectMode?: "new" | "existing";
-  /** Pre-generated ID for the new project (agentinbox-123456), editable. Kept so the command stays the same. */
+  /** Pre-generated ID for the new project (xaq-123456), editable. Kept so the command stays the same. */
   newProjectId?: string;
   /** The ID typed for an existing project. */
   existingProjectId?: string;
@@ -46,7 +46,7 @@ export type StepId = (typeof STEP_IDS)[number];
 export type StepStatus = "done" | "skipped" | "todo";
 
 export const STEP_META: Record<StepId, { title: string; short: string; optional?: boolean }> = {
-  url: { title: "Choose the address of agentinbox", short: "Address" },
+  url: { title: "Choose the address of xaq", short: "Address" },
   project: { title: "Create a Google Cloud project", short: "Google Cloud project" },
   consent: { title: "Set up the Google sign-in screen", short: "Sign-in screen" },
   client: { title: "Create the OAuth client", short: "OAuth client" },

@@ -11,7 +11,7 @@ export type FirstChoice = (typeof FIRST_CHOICES)[number];
 export const FIRST_CHOICE_INFO: Record<FirstChoice, { title: string; description: string; presetId: string | null }> = {
   notion: { title: "Notion", description: "Pages and databases in your workspace. About 2 minutes.", presetId: "notion" },
   whoop: { title: "WHOOP", description: "Recovery, sleep and workouts. About 5 minutes, with your own WHOOP app.", presetId: "whoop" },
-  custom: { title: "Another MCP server", description: "Paste its address. agentinbox finds out how it signs in.", presetId: null },
+  custom: { title: "Another MCP server", description: "Paste its address. xaq finds out how it signs in.", presetId: null },
   google: { title: "Gmail & Calendar", description: "Mail and calendars of your Google accounts. About 10 minutes in Google Cloud.", presetId: null },
 };
 

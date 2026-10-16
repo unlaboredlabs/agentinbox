@@ -56,7 +56,7 @@ export async function api<T = void>(path: string, opts: RequestOptions = {}): Pr
     res = await fetch(url, { method, headers, body, credentials: "same-origin", signal: opts.signal });
   } catch (err) {
     if ((err as Error).name === "AbortError") throw err;
-    throw new ApiError(0, "network", "Can't reach the agentinbox server", "Check that the daemon is running, then try again.");
+    throw new ApiError(0, "network", "Can't reach the xaq server", "Check that the daemon is running, then try again.");
   }
 
   if (res.status === 204) return undefined as T;

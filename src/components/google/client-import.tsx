@@ -164,7 +164,7 @@ export function ClientImport({
           <Alert variant="info">
             <InfoIcon />
             <AlertDescription>
-              This client belongs to project <span className="font-mono">{result.projectId}</span>, not {expectedProjectId}. agentinbox uses{" "}
+              This client belongs to project <span className="font-mono">{result.projectId}</span>, not {expectedProjectId}. xaq uses{" "}
               {result.projectId} from now on; if that's wrong, create the client in the right project and import that one.
             </AlertDescription>
           </Alert>

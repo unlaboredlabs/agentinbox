@@ -1,8 +1,7 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { Context } from "hono";
 import { type HealthResponse, type IngestStatus, NPM_PACKAGE, type SystemInfo, type UpdateInfo } from "../../shared/types.ts";
-import { type Config, DEFAULT_PORT } from "../config.ts";
+import { type Config, DEFAULT_PORT, defaultDataDir } from "../config.ts";
 import type { AppContext } from "../context.ts";
 import { serviceInstallCommand } from "../instance.ts";
 import { consoleUrls } from "../urls.ts";
@@ -142,7 +141,6 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-const DEFAULT_DATA_DIR = () => resolve(join(homedir(), ".agentinbox"));
 
 /** Runs, or reinstalls as a service, the latest version with this instance's options. */
 export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "port" | "host" | "trustProxy">, env: NodeJS.ProcessEnv = process.env): string {
@@ -153,7 +151,8 @@ export function upgradeCommand(config: Pick<Config, "service" | "dataDir" | "por
   // Assignments are quoted per value above: quoting the whole `KEY=value` word would turn it into a command.
   const args = ["npx", "-y", NPM_PACKAGE];
   if (config.service) args.push("service", "install");
-  if (config.dataDir !== DEFAULT_DATA_DIR()) args.push("--data", config.dataDir);
+  // An install from before the rename on ~/.xaq needs no --data: it stays the default while ~/.xaq doesn't exist.
+  if (resolve(config.dataDir) !== defaultDataDir()) args.push("--data", config.dataDir);
   if (config.port !== DEFAULT_PORT) args.push("--port", String(config.port));
   if (config.host !== DEFAULT_HOST) args.push("--host", config.host);
   return [...proxyEnv, ...args.map(shellQuote)].join(" ");

@@ -38,7 +38,7 @@ export function whoopSetupSteps(ctx: SetupContext): SetupStep[] {
     steps.push({
       id: "webhook",
       title: "Turn on webhooks",
-      body: "On the same app, paste the address below as the Webhook URL and choose the v2 webhook model if WHOOP asks. Then save the app. New recoveries, sleeps and workouts then arrive within seconds; without this, agentinbox checks every 15 minutes.",
+      body: "On the same app, paste the address below as the Webhook URL and choose the v2 webhook model if WHOOP asks. Then save the app. New recoveries, sleeps and workouts then arrive within seconds; without this, xaq checks every 15 minutes.",
       copy: { label: "Webhook URL", value: ctx.webhookUrl },
     });
   }
@@ -52,13 +52,13 @@ export function whoopSetupSteps(ctx: SetupContext): SetupStep[] {
     {
       id: "client-secret",
       title: "Paste the client secret",
-      body: "Copy the Client Secret here. agentinbox stores it encrypted and never shows it again. It's checked with WHOOP right away.",
+      body: "Copy the Client Secret here. xaq stores it encrypted and never shows it again. It's checked with WHOOP right away.",
       input: { key: CLIENT_SECRET_INPUT, label: "Client Secret", secret: true, pattern: "^\\S{8,500}$" },
     },
     {
       id: "connect",
       title: "Connect and approve",
-      body: "Click Connect. WHOOP asks you to sign in and approve access to your recovery, sleep, cycles, workouts, profile and body measurements. Approve everything: agentinbox only reads, and keeps the connection alive on its own.",
+      body: "Click Connect. WHOOP asks you to sign in and approve access to your recovery, sleep, cycles, workouts, profile and body measurements. Approve everything: xaq only reads, and keeps the connection alive on its own.",
     },
   );
   return steps;

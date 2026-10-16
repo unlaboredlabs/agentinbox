@@ -10,14 +10,15 @@ import { googleRuntime } from "./runtime.ts";
  * only; for this one it also emits message.received, so webhooks and listeners left on the default
  * "message.received" filter see the test arrive too.
  */
+// Kept from before the rename (a header name, not shown to anyone).
 export const TEST_EMAIL_HEADER = "X-Agentinbox-Test";
-export const TEST_EMAIL_SUBJECT = "agentinbox test: your setup works";
+export const TEST_EMAIL_SUBJECT = "xaq test: your setup works";
 
 const LIMIT = 5;
 const WINDOW_MS = 10 * 60_000;
 
-const BODY = `This message was sent by agentinbox to check that mail delivery works end to end: \
-agentinbox sent it from this account to itself through the Gmail API, and should report it as a new \
+const BODY = `This message was sent by xaq to check that mail delivery works end to end: \
+xaq sent it from this account to itself through the Gmail API, and should report it as a new \
 event within moments.
 
 Nobody else received it. It's safe to delete.

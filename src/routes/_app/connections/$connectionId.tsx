@@ -111,7 +111,7 @@ function ConnectionPage() {
             Changed tools
           </h2>
           <p className="text-sm text-muted-foreground">
-            agentinbox pinned every tool when you connected. A tool whose definition changes, or a new one, is held: agents can't call it until you
+            xaq pinned every tool when you connected. A tool whose definition changes, or a new one, is held: agents can't call it until you
             accept. The other tools keep working.
           </p>
         </div>

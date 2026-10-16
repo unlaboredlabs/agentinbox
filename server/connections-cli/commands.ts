@@ -1,7 +1,7 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
 import type { Command } from "commander";
 import { NPX } from "../listen/version.ts";
+import { LEGACY_PRODUCT } from "../brand.ts";
+import { resolveDataDir } from "../config.ts";
 
 /**
  * `connections …` and `import --from …`: run on the daemon's machine, talking to its admin API through the
@@ -9,11 +9,12 @@ import { NPX } from "../listen/version.ts";
  * `brokerUpstreams` setting is off they say so (CONNECTIONS_VISIBLE).
  */
 export const CONNECTIONS_VISIBLE = true;
-const GROUP = "MCP connections (on agentinbox's machine):";
+const GROUP = "MCP connections (on xaq's machine):";
 
 const collect = (value: string, previous: string[] | undefined) => [...(previous ?? []), value];
-const dataDirOf = (o: { data?: string }) => resolve(o.data ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
-const dataOption = (cmd: Command) => cmd.option("-d, --data <dir>", "agentinbox's data directory (default ~/.agentinbox, env AGENTINBOX_DATA)");
+// --data, else XAQ_DATA (AGENTINBOX_DATA), else ~/.xaq or an existing pre-rename ~/.agentinbox (config.ts; rename-xaq: keep).
+const dataDirOf = (o: { data?: string }) => resolveDataDir(o.data, { quiet: true });
+const dataOption = (cmd: Command) => cmd.option("-d, --data <dir>", `xaq's data directory (default ~/.xaq, or an existing ~/.${LEGACY_PRODUCT}; env XAQ_DATA)`);
 
 async function withApi<T>(o: { data?: string; yes?: boolean }, run: (deps: { api: import("./api.ts").ConnectionsApi; prompter: import("./prompt.ts").Prompter }) => Promise<T>): Promise<T> {
   const { CLEANUP_SIGNALS, openAdminChannel } = await import("./admin.ts");
@@ -36,7 +37,7 @@ async function withApi<T>(o: { data?: string; yes?: boolean }, run: (deps: { api
   }
 }
 
-/** This agentinbox's own MCP origins, so `import` never imports its own entry. */
+/** This xaq's own MCP origins, so `import` never imports its own entry. */
 async function selfOrigins(dataDir: string): Promise<string[]> {
   const { runningInstance } = await import("../instance.ts");
   const { daemonOrigin } = await import("./admin.ts");
@@ -48,7 +49,7 @@ async function selfOrigins(dataDir: string): Promise<string[]> {
 export function registerConnectionsCommands(program: Command): void {
   const connections = program
     .command("connections", { hidden: !CONNECTIONS_VISIBLE })
-    .description("the MCP servers agentinbox connects agents to (Notion, WHOOP, any MCP URL); run on agentinbox's machine")
+    .description("the MCP servers xaq connects agents to (Notion, WHOOP, any MCP URL); run on xaq's machine")
     .summary("add, list, reconnect or remove connected MCP servers")
     .helpGroup(GROUP);
 
@@ -108,7 +109,7 @@ Examples:
   dataOption(
     program
       .command("import", { hidden: !CONNECTIONS_VISIBLE })
-      .description("move an agent tool's MCP servers into agentinbox: one connection each, credentials moved into agentinbox")
+      .description("move an agent tool's MCP servers into xaq: one connection each, credentials moved into xaq")
       .summary("import MCP servers from Hermes, Claude Code, Cursor or Codex")
       .helpGroup(GROUP)
       .requiredOption("--from <client>", "hermes, claude-code, cursor or codex"),
@@ -116,18 +117,19 @@ Examples:
     .option("--dry-run", "print exactly what would be created and changed, and change nothing")
     .option("--access <level>", "for every imported connection: full, ask (the default) or read")
     .option("--agent <name>", 'an agent that gets them (repeatable; default: all agents; "all")', collect)
-    .option("--profile <name>", "the agent profile setup-mcp uses for the single agentinbox entry (default \"default\")")
+    .option("--profile <name>", "the agent profile setup-mcp uses for the single xaq entry (default \"default\")")
     .option("--allow-private <origin>", "allow this exact scheme://host:port on this machine or a private network without asking (repeatable; --yes never does)", collect)
     .option("-y, --yes", "answer yes to the confirmations (scripts); never to a private-network allow or a project's .mcp.json servers")
     .addHelpText(
       "after",
       `
 Reads: hermes ~/.hermes/config.yaml mcp_servers (+ ~/.hermes/.env) · claude-code ~/.claude.json and ./.mcp.json ·
-cursor ~/.cursor/mcp.json · codex ~/.codex/config.toml. Static headers move into agentinbox (encrypted); OAuth
+cursor ~/.cursor/mcp.json · codex ~/.codex/config.toml. Static headers move into xaq (encrypted); OAuth
 servers are created needing Connect (their tokens stay in the client); local (stdio) servers aren't supported yet
 and stay where they are. Servers on this machine or a private network are created only after you confirm the exact
-host:port. Then it offers setup-mcp --tool <client>, which replaces the entries that now work through agentinbox
-with the single agentinbox entry, after a timestamped backup. Hermes keeps the "agentinbox" server name.
+host:port. Then it offers setup-mcp --tool <client>, which replaces the entries that now work through xaq
+with the single xaq entry, after a timestamped backup. The entry keeps the name the profile already uses ("xaq", or
+"${LEGACY_PRODUCT}" for a profile set up before the rename), so Hermes routes and cron jobs confined to it keep working.
 
 Examples:
   ${NPX} import --from hermes --dry-run

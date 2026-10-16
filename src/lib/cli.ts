@@ -4,8 +4,8 @@
 // Relative (not @shared): the setup-logic unit tests type-check this file under the server config.
 import type { AgentTool } from "../../shared/agent-api.ts";
 
-/** The npm package; the command it installs is `agentinbox`. Swap for NPM_PACKAGE from @shared/types once it exists. */
-export const NPM_PACKAGE = "agentinbox-cli";
+/** The npm package; the command it installs is `xaq`. Swap for NPM_PACKAGE from @shared/types once it exists. */
+export const NPM_PACKAGE = "xaq-cli";
 export const NPX = `npx ${NPM_PACKAGE}`;
 
 export const TOOLS: AgentTool[] = ["claude-code", "codex", "cursor", "hermes", "other"];
@@ -30,7 +30,7 @@ export interface Recipe {
  */
 export const RECIPES: Record<AgentTool, Recipe> = {
   "claude-code": {
-    note: "Claude triages each email with its built-in tools turned off, only the agentinbox MCP server loaded and project settings ignored. Its reply is only logged on that machine: it can't notify you by itself.",
+    note: "Claude triages each email with its built-in tools turned off, only the xaq MCP server loaded and project settings ignored. Its reply is only logged on that machine: it can't notify you by itself.",
   },
   codex: {
     note: "Codex triages each email in a read-only sandbox with its shell tool off. Other MCP servers you configured stay available, so give listener agents draft-only access. Its reply is only logged.",
@@ -39,10 +39,10 @@ export const RECIPES: Record<AgentTool, Recipe> = {
     note: "Cursor's CLI can't be confined by flags: deny other tools in its permissions config (see docs/listen.md) and give listener agents draft-only access. Its reply is only logged.",
   },
   hermes: {
-    note: "Each email goes to your running Hermes gateway, which triages it with only the agentinbox tools and tells you where the route says (Telegram, Discord…) only when it matters.",
+    note: "Each email goes to your running Hermes gateway, which triages it with only the xaq tools and tells you where the route says (Telegram, Discord…) only when it matters.",
   },
   other: {
-    note: "Your command gets the event as JSON on stdin (also in $AGENTINBOX_EVENT_FILE). Exit 0 when done; anything else is retried.",
+    note: "Your command gets the event as JSON on stdin (also in $XAQ_EVENT_FILE). Exit 0 when done; anything else is retried.",
   },
 };
 
@@ -93,7 +93,7 @@ export interface ConnectCommands {
   setupMcp: string;
   /** How to see that the tool has the server, when it has a command for that. */
   mcpCheck: string | null;
-  /** Install the agentinbox skill for this tool. */
+  /** Install the xaq skill for this tool. */
   skillInstall: string;
   /** Try the listener in the foreground first (Ctrl-C stops it). `--save` keeps the command for the service. */
   listenTry: string;
@@ -121,7 +121,7 @@ const SKILL_TARGET: Record<AgentTool, string> = {
 const MCP_CHECK: Partial<Record<AgentTool, string>> = {
   "claude-code": "claude mcp list",
   codex: "codex mcp list",
-  hermes: "hermes mcp test agentinbox",
+  hermes: "hermes mcp test xaq",
 };
 
 /**
@@ -145,7 +145,7 @@ export function connectCommands(publicUrl: string, tool: AgentTool, acceptInsecu
     listenTry: tool === "other" ? `${NPX} listen --exec ${shellQuote(LISTEN_TEST_EXEC)}${flag}` : `${NPX} listen --save ${target}${flag}`,
     listenService: `${NPX} listen service install ${target}${flag}`,
     hermesRoute: tool === "hermes" ? `${NPX} listen hermes --deliver telegram --run` : null,
-    selfSetup: `${fetchSkill} to set yourself up with agentinbox.`,
+    selfSetup: `${fetchSkill} to set yourself up with xaq.`,
     insecure,
   };
 }

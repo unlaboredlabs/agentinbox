@@ -140,7 +140,7 @@ describe("GET /agent/v1/events/stream", () => {
 
   it("tracks listeners on the agent while connected", async () => {
     const s = await setup();
-    const r = await s.open("?consumer=laptop", { "user-agent": "agentinbox-listen/1.2.3", "x-agentinbox-client": JSON.stringify({ hostname: "wynn-mbp", platform: "darwin" }) });
+    const r = await s.open("?consumer=laptop", { "user-agent": "xaq-listen/1.2.3", "x-agentinbox-client": JSON.stringify({ hostname: "wynn-mbp", platform: "darwin" }) });
     const listeners = s.ctx.policy.getAgent(s.agent.id)!.listeners;
     expect(listeners).toEqual([
       {

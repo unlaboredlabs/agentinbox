@@ -5,7 +5,7 @@ Taken from demos against a fake Google (`scripts/demo/seed.ts`) by `scripts/demo
 
 | File | What it shows |
 |---|---|
-| `wizard-1-address.png` | Setup wizard, step 1: the address of agentinbox, with the "All on this computer" advice open |
+| `wizard-1-address.png` | Setup wizard, step 1: the address of xaq, with the "All on this computer" advice open |
 | `wizard-2-project.png` | Step 2: a new Google Cloud project, created with one Cloud Shell command |
 | `wizard-3-signin-screen.png` | Step 3: the Google sign-in screen, External chosen, with the "publish the app" step |
 | `wizard-4-oauth-client.png` | Step 4: OAuth client form values, the imported client JSON, and Google's client check (all green) |

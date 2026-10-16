@@ -207,7 +207,7 @@ const calendarBlocked = (ctx: AppContext, email: string) =>
   new HttpError(
     400,
     "oauth_admin_policy_enforced",
-    `Your Google Workspace admin doesn't allow agentinbox to use Google Calendar, so nothing changed for ${email}: its mail is unaffected.`,
+    `Your Google Workspace admin doesn't allow xaq to use Google Calendar, so nothing changed for ${email}: its mail is unaffected.`,
     `Ask your admin to trust the app: Admin console → Security → API controls → App access control → trust the OAuth client ID ${clientCredentials(ctx).clientId}. Then click Add Calendar for ${email} again.`,
   );
 
@@ -276,7 +276,7 @@ export function storedFailure(err: unknown): { code: string; error: string; hint
     return { code: `oauth_${e.googleCode}`, error: message, hint };
   }
   if (e instanceof HttpError) return { code: cap(e.code, 64), error: cap(e.message, 500), hint: e.hint ? cap(e.hint, 1000) : null };
-  return { code: "internal", error: "Something went wrong while finishing the connection.", hint: "Check the agentinbox server log, then try again." };
+  return { code: "internal", error: "Something went wrong while finishing the connection.", hint: "Check the xaq server log, then try again." };
 }
 
 /** Records how a pending state failed (exported for tests). Never replaces a success for the same state. */
@@ -514,15 +514,15 @@ async function exchange(ctx: AppContext, st: StateRow, code: string, state: stri
       } else await discardTokens(ctx, tokens, email);
       // What happened to the account they did sign in as.
       const other = keptForOther
-        ? ` ${email} is also connected here, so agentinbox saved that new sign-in for ${email}${addsCalendar ? ", which adds Google Calendar to it" : "; nothing else changed"}.`
+        ? ` ${email} is also connected here, so xaq saved that new sign-in for ${email}${addsCalendar ? ", which adds Google Calendar to it" : "; nothing else changed"}.`
         : existing
           ? ` ${email} is also connected here and wasn't changed.`
-          : ` agentinbox didn't keep the sign-in for ${email}.`;
+          : ` xaq didn't keep the sign-in for ${email}.`;
       if (!target) {
         throw new HttpError(
           400,
           "oauth_account_removed",
-          `The account you were reconnecting was removed from agentinbox in the meantime.${other}`,
+          `The account you were reconnecting was removed from xaq in the meantime.${other}`,
           "To add it back, use Connect account and sign in with it.",
         );
       }
@@ -541,8 +541,8 @@ async function exchange(ctx: AppContext, st: StateRow, code: string, state: stri
     throw new HttpError(
       400,
       "oauth_no_refresh_token",
-      "Google didn't return a refresh token, so agentinbox can't stay connected.",
-      "Remove agentinbox's access at https://myaccount.google.com/permissions, then connect again.",
+      "Google didn't return a refresh token, so xaq can't stay connected.",
+      "Remove xaq's access at https://myaccount.google.com/permissions, then connect again.",
     );
   }
 

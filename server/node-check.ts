@@ -1,4 +1,4 @@
-/** The oldest Node.js agentinbox runs on (node:sqlite unflagged, import.meta.dirname). Keep in sync with package.json engines. */
+/** The oldest Node.js xaq runs on (node:sqlite unflagged, import.meta.dirname). Keep in sync with package.json engines. */
 export const MIN_NODE = "22.13.0";
 
 /** An explanation when `version` (e.g. process.versions.node) is too old, else null. */
@@ -8,7 +8,7 @@ export function nodeVersionError(version: string): string | null {
   const need = parse(MIN_NODE);
   for (let i = 0; i < 3; i++) {
     if ((have[i] ?? 0) > need[i]!) return null;
-    if ((have[i] ?? 0) < need[i]!) return `agentinbox needs Node.js 22.13 or newer (you have ${version.replace(/^v?/, "v")}). Install a current Node.js from https://nodejs.org and try again.`;
+    if ((have[i] ?? 0) < need[i]!) return `xaq needs Node.js 22.13 or newer (you have ${version.replace(/^v?/, "v")}). Install a current Node.js from https://nodejs.org and try again.`;
   }
   return null;
 }

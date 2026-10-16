@@ -137,7 +137,7 @@ export const CONSENT_OUTCOME: Record<ConsentOutcome, { title: (email: string) =>
   error: {
     title: (e) => `Calendar is added to ${e}, but Google answered with an error`,
     tone: "bad",
-    body: "agentinbox retries on the next poll. Mail works as usual.",
+    body: "xaq retries on the next poll. Mail works as usual.",
   },
 };
 

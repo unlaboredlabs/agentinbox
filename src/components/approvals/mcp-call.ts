@@ -162,7 +162,7 @@ export function doneState(
       return a.call.outcomeUnknown
         ? {
             title: "Approved: outcome unknown",
-            description: "The call was interrupted, so it may or may not have run. agentinbox won't retry it. Check before the agent tries again.",
+            description: "The call was interrupted, so it may or may not have run. xaq won't retry it. Check before the agent tries again.",
             tone: "bad",
           }
         : { title: "Approved, but the call failed", description: `${a.error ?? "The upstream returned an error."} The agent is told it failed.`, tone: "bad" };

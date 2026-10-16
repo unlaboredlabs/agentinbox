@@ -48,7 +48,7 @@ interface VerifyState {
   test?: VerifyTest;
 }
 
-const KEY = `agentinbox.verify:${typeof window === "undefined" ? "" : window.location.host}`;
+const KEY = `xaq.verify:${typeof window === "undefined" ? "" : window.location.host}`;
 const subs = new Set<() => void>();
 let cache: VerifyState | null = null;
 
@@ -328,7 +328,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
   useEffect(() => {
     const p = prev.current;
     const msg = [
-      !p.mcpDone && mcpDone && `${Label} called agentinbox.`,
+      !p.mcpDone && mcpDone && `${Label} called xaq.`,
       !p.listenDone && listenDone && "The listener is connected.",
       !p.receivedDone && receivedDone && "The test email arrived.",
       !p.delivered && delivered && "The listener handled the test email.",
@@ -387,7 +387,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
 
         <Item
           state={st("mcp", mcpDone)}
-          title={mcpDone ? `${Label} is connected to agentinbox` : `Waiting for ${label} to call agentinbox`}
+          title={mcpDone ? `${Label} is connected to xaq` : `Waiting for ${label} to call xaq`}
           detail={
             mcpDone ? (
               lastCall ? (
@@ -459,7 +459,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
                     <>
                       {tool === "hermes"
                         ? `Forwards each new email you receive (not mail you send) to ${label}, which triages it.`
-                        : `Starts ${label} for each new email you receive (not mail you send), with only the agentinbox tools.`}{" "}
+                        : `Starts ${label} for each new email you receive (not mail you send), with only the xaq tools.`}{" "}
                       Add{" "}
                       <code className="font-mono whitespace-nowrap text-foreground">--types</code> to wake it for other events too. Just testing delivery?{" "}
                       <code className="font-mono whitespace-nowrap text-foreground">--exec {shellQuote(LISTEN_TEST_EXEC)}</code> only confirms each email.
@@ -483,7 +483,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
               </>
             ) : (
               <>
-                agentinbox sends <span className="text-foreground">“{TEST_SUBJECT}”</span> from your Gmail account to itself. Nobody else gets it.
+                xaq sends <span className="text-foreground">“{TEST_SUBJECT}”</span> from your Gmail account to itself. Nobody else gets it.
               </>
             )
           }
@@ -493,7 +493,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
 
         <Item
           state={st("received", receivedDone)}
-          title={receivedDone ? "agentinbox saw it arrive" : current === "received" ? "Waiting for the test email to arrive" : "agentinbox sees it arrive"}
+          title={receivedDone ? "xaq saw it arrive" : current === "received" ? "Waiting for the test email to arrive" : "xaq sees it arrive"}
           detail={
             receivedDone ? (
               <>
@@ -539,7 +539,7 @@ function Checklist({ agent, state, severalAgents }: { agent: Agent; state: Verif
         />
 
         <Item state={readIt ? "done" : "todo"} optional title={readIt ? `${Label} read your mail` : `Ask ${label} to read it`}>
-          {!readIt && receivedDone && <Prompt text="Use agentinbox to summarize my latest email." label="prompt" />}
+          {!readIt && receivedDone && <Prompt text="Use xaq to summarize my latest email." label="prompt" />}
         </Item>
       </ol>
     </div>
@@ -577,7 +577,7 @@ function McpHelp({
           <Command code={c.setupMcp} label="setup-mcp command" />
           {c.mcpCheck && (
             <p>
-              To check: <code className="font-mono text-foreground">{c.mcpCheck}</code> should list agentinbox.
+              To check: <code className="font-mono text-foreground">{c.mcpCheck}</code> should list xaq.
             </p>
           )}
         </>
@@ -585,11 +585,11 @@ function McpHelp({
         <p>
           Point your agent's MCP client at <code className="font-mono break-all text-foreground">{publicUrl}/mcp</code> with the header{" "}
           <code className="font-mono text-foreground">Authorization: Bearer &lt;key&gt;</code>. The key is the "apiKey" field in{" "}
-          <code className="font-mono break-all text-foreground">~/.config/agentinbox/profiles/default.json</code> on the machine where you ran connect.
+          <code className="font-mono break-all text-foreground">~/.config/xaq/profiles/default.json</code> on the machine where you ran connect.
         </p>
       ) : (
         <p>
-          Add agentinbox to your agent with the snippet from the previous step, or from{" "}
+          Add xaq to your agent with the snippet from the previous step, or from{" "}
           <Link to="/agents/$agentId" params={{ agentId }} className="font-medium text-foreground underline underline-offset-4">
             the agent's page
           </Link>
@@ -597,8 +597,8 @@ function McpHelp({
         </p>
       )}
       <p>Then ask {label}:</p>
-      <Prompt text="Use agentinbox to list my email accounts." label="prompt" />
-      <p>Also teach it the rules once, with the agentinbox skill:</p>
+      <Prompt text="Use xaq to list my email accounts." label="prompt" />
+      <p>Also teach it the rules once, with the xaq skill:</p>
       <Command code={c.skillInstall} label="skill install command" />
     </div>
   );
@@ -767,7 +767,7 @@ function DoneSummaryLine({ line: l, Label }: { line: DoneLine; Label: string }) 
     case "mcp":
       return (
         <DoneItem ok>
-          {Label} reached agentinbox{" "}
+          {Label} reached xaq{" "}
           <span className="text-muted-foreground">
             ({l.action ? <>last tool call {l.action}, </> : <>connected </>}
             <TimeAgo date={l.at} />)
@@ -811,7 +811,7 @@ function DoneSummaryLine({ line: l, Label }: { line: DoneLine; Label: string }) 
     case "unchecked":
       return (
         <DoneItem ok={false}>
-          <span className="text-muted-foreground">Finished without every check: agentinbox hasn't seen a successful tool call yet.</span>
+          <span className="text-muted-foreground">Finished without every check: xaq hasn't seen a successful tool call yet.</span>
         </DoneItem>
       );
   }
@@ -822,10 +822,10 @@ function DaemonServiceItem({ command }: { command: string }) {
   return (
     <li className="space-y-1.5">
       <p>
-        <span className="font-medium">Keep agentinbox itself running.</span>{" "}
-        <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On the computer running agentinbox, run:</span>
+        <span className="font-medium">Keep xaq itself running.</span>{" "}
+        <span className="text-muted-foreground">It runs in a terminal now: closing that stops everything. On the computer running xaq, run:</span>
       </p>
-      <Command code={command} label="agentinbox service command" />
+      <Command code={command} label="xaq service command" />
       <p className="text-xs text-muted-foreground">
         Stop the one in your terminal first (Ctrl-C): the service can't start while it runs. This page reconnects once the service is up.
       </p>
@@ -907,7 +907,7 @@ function SuccessPanel({
         {system.data?.service === false && <DaemonServiceItem command={system.data.serviceCommand} />}
         {!readIt && (
           <li className="text-muted-foreground">
-            Try it: ask {label} to <span className="text-foreground">“use agentinbox to summarize my latest email.”</span>
+            Try it: ask {label} to <span className="text-foreground">“use xaq to summarize my latest email.”</span>
           </li>
         )}
         <li className="text-muted-foreground">

@@ -177,12 +177,12 @@ export function AddConnectionHost() {
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
             {page === "pick"
-              ? "agentinbox keeps the sign-in. Agents get its tools through their one agentinbox connection, never the credentials."
+              ? "xaq keeps the sign-in. Agents get its tools through their one xaq connection, never the credentials."
               : page === "access"
                 ? "You can change this later, for all agents or one at a time on an agent's page."
                 : draft.preset
                   ? `Gives your agents ${draft.preset.displayName}'s tools.`
-                  : "Paste the server's address. agentinbox checks how it signs in."}
+                  : "Paste the server's address. xaq checks how it signs in."}
           </DialogDescription>
         </DialogHeader>
 

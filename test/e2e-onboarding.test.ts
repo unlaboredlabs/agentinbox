@@ -95,7 +95,7 @@ describe("onboarding wizard", () => {
     const sent = await s.admin.post<TestEmailResult>(`/api/accounts/${account.id}/test-email`);
     expect(sent.messageId).toBeTruthy();
     const received = await s.waitForEvent((e) => e.type === "message.received" && e.message?.id === sent.messageId);
-    expect(received.message).toMatchObject({ subject: "agentinbox test: your setup works", from: { email: account.email } });
+    expect(received.message).toMatchObject({ subject: "xaq test: your setup works", from: { email: account.email } });
     expect((await s.events({ accountId: account.id })).some((e) => e.type === "message.sent" && e.message?.id === sent.messageId)).toBe(true);
     const hook = await waitFor(() => rx.at("/first").find((h) => h.json?.data.message?.id === sent.messageId), { what: "test email webhook" });
     expect(hook.json!.type).toBe("message.received");

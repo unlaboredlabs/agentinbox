@@ -223,7 +223,7 @@ export function redirectWarning(ctx: Ctx): SetupWarning | null {
       code: "redirect_uri_changed",
       severity: "error",
       message:
-        `agentinbox's address changed, so its redirect URI is now ${uri} (it was ${saved} when you saved the OAuth client). ` +
+        `xaq's address changed, so its redirect URI is now ${uri} (it was ${saved} when you saved the OAuth client). ` +
         'Until the new one is added to the client, Google refuses to connect accounts ("Error 400: redirect_uri_mismatch").',
       hint:
         `In Google Cloud → Google Auth Platform → Clients → your client → Authorized redirect URIs, click Add URI, enter ${uri} exactly ` +

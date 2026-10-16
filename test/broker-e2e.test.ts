@@ -74,7 +74,7 @@ describe("broker end to end (fake upstream, OAuth + DCR)", () => {
     const client = new Client({ name: "e2e", version: "1" });
     const app = h.app;
     await client.connect(
-      new StreamableHTTPClientTransport(new URL("http://agentinbox.test/mcp"), {
+      new StreamableHTTPClientTransport(new URL("http://xaq.test/mcp"), {
         requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
         fetch: async (url, init) => app.request(String(url), init as RequestInit, { incoming: { socket: { remoteAddress: "127.0.0.1" } } }),
       }),

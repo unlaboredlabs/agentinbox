@@ -83,7 +83,7 @@ export function safeResult(result: ToolResult): CallToolResult {
   if (CallToolResultSchema.safeParse(rest).success) return rest as CallToolResult;
   return {
     isError: true,
-    content: [{ type: "text", text: "The integration returned a result agentinbox can't pass on (it isn't a valid MCP tool result). The call itself ran; don't retry it blindly." }],
+    content: [{ type: "text", text: "The integration returned a result xaq can't pass on (it isn't a valid MCP tool result). The call itself ran; don't retry it blindly." }],
   };
 }
 

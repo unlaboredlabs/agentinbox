@@ -1,7 +1,7 @@
 import { ThemeToggle } from "@/components/theme";
 import { cn } from "@/lib/utils";
 
-/** agentinbox mark: an envelope with an agent "presence" dot. */
+/** xaq mark: an envelope with an agent "presence" dot. */
 export function Logo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" fill="none" className={className} aria-hidden>

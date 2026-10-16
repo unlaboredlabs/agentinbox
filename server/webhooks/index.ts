@@ -270,8 +270,8 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
         from: { name: "Ada Lovelace (test)", email: "ada@example.com" },
         to: [{ name: null, email: TEST_ACCOUNT_EMAIL }],
         cc: [],
-        subject: "Test event from agentinbox",
-        snippet: "This is a test delivery sent from the agentinbox console. It is not a real email.",
+        subject: "Test event from xaq",
+        snippet: "This is a test delivery sent from the xaq console. It is not a real email.",
         date: ts,
         labelIds: ["INBOX", "UNREAD"],
         hasAttachments: false,
@@ -447,7 +447,7 @@ export function createWebhooksService(ctx: AppContext, options: WebhooksOptions 
     const timestamp = Math.floor(Date.now() / 1000);
     const headers = {
       "content-type": "application/json",
-      "user-agent": `agentinbox/${ctx.config.version}`,
+      "user-agent": `xaq/${ctx.config.version}`,
       "webhook-id": d.id,
       "webhook-timestamp": String(timestamp),
       "webhook-signature": sign(ctx.crypto.decrypt(d.secret_enc), d.id, timestamp, body),

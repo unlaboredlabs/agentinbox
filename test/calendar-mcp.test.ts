@@ -451,7 +451,7 @@ describe("approvals and accounts", () => {
     const text = (await t.mcp.call("list_accounts")).text;
     expect(text).toContain("  can: read, calendar.read, calendar.write");
     expect(text).toContain(
-      "  calendar: calendars me@acme.com only; changes are queued for human approval before they reach Google Calendar; attendees limited to *@acme.com; Google Calendar isn't added to this account yet (ask the operator to add it in the agentinbox console)",
+      "  calendar: calendars me@acme.com only; changes are queued for human approval before they reach Google Calendar; attendees limited to *@acme.com; Google Calendar isn't added to this account yet (ask the operator to add it in the xaq console)",
     );
     const grant = { ...t.ctx.policy.grants(t.agent.id)[0]!, calendarScope: null, calendarWriteMode: "direct" as const, allowTo: [] };
     const active = { ...t.account, calendar: { status: "active" as const, missingScopes: [], syncedAt: null, error: null } };

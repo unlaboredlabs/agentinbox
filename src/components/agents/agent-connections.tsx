@@ -27,7 +27,7 @@ export function AgentConnections({ agentId }: { agentId: string }) {
           <h2 id="connections-heading" className="text-lg font-semibold tracking-tight">
             Connections
           </h2>
-          <p className="text-sm text-muted-foreground">What this agent may do with each connection. agentinbox enforces it on every call.</p>
+          <p className="text-sm text-muted-foreground">What this agent may do with each connection. xaq enforces it on every call.</p>
         </div>
       </div>
       {list.isPending ? (

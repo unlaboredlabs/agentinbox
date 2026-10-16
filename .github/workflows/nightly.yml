@@ -1,12 +1,14 @@
 name: Nightly
 
-# Every push to main publishes `<version>-nightly.<run number>` to npm under the
-# `latest` dist-tag, using npm trusted publishing (OIDC): no npm token is stored
+# Every push to main publishes xaq-cli `<version>-nightly.<run number>` to npm under
+# the `latest` dist-tag, using npm trusted publishing (OIDC): no npm token is stored
 # anywhere, and npm attaches provenance automatically.
 #
-# The trusted publisher on npmjs.com is registered for wynn-dev/agentinbox,
-# workflow `nightly.yml`, no environment. npm matches this file by name: renaming it breaks publishing until the
-# trusted publisher on npmjs.com is recreated with the new filename.
+# The trusted publisher for xaq-cli on npmjs.com is registered for wynn-dev/xaq,
+# workflow `nightly.yml`, no environment. npm matches the repository and this file by name: publishing fails
+# from any other repository name (the repo must be renamed from wynn-dev/agentinbox first), and renaming this
+# file breaks publishing until the trusted publisher on npmjs.com is recreated with the new filename.
+# (agentinbox-cli, the old package, is published only by shim.yml.)
 on:
   push:
     branches: [main]
@@ -25,7 +27,7 @@ jobs:
     # Never publish from a manual dispatch on a branch other than main.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest # trusted publishing needs a GitHub-hosted runner
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -66,4 +68,4 @@ jobs:
           version="${base}-nightly.${{ github.run_number }}"
           npm version "$version" --no-git-tag-version
           npm publish --tag latest --access public
-          echo "Published agentinbox-cli@${version}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published xaq-cli@${version}" >> "$GITHUB_STEP_SUMMARY"

@@ -5,13 +5,13 @@ import { safeText } from "./ui.ts";
 import { version } from "./version.ts";
 
 /** Identifies the client to the daemon (shown on the agent's Listeners list). Never includes the key. */
-export const userAgent = () => `agentinbox/${version} (${process.platform}; ${hostname()})`;
+export const userAgent = () => `xaq/${version} (${process.platform}; ${hostname()})`;
 
 /** What the daemon shows on the agent's Listeners list. Never includes the key. */
 export const clientInfo = () => ({ hostname: hostname(), platform: process.platform, version });
 
 /**
- * `x-agentinbox-client` header: clientInfo as JSON. Non-ASCII is \u-escaped so the value is always a
+ * `x-agentinbox-client` header (the pre-rename name, which every daemon version reads): clientInfo as JSON. Non-ASCII is \u-escaped so the value is always a
  * legal header (a hostname with an accent must not break the request).
  */
 export const clientHeader = () => JSON.stringify(clientInfo()).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);

@@ -281,7 +281,7 @@ export function ConnectionAuthHost() {
               {phase.connection.tools.total > 0
                 ? `${phase.connection.tools.total} tool${phase.connection.tools.total === 1 ? "" : "s"} found and pinned.`
                 : "Its tools are being listed now."}{" "}
-              If a tool's definition changes later, agentinbox holds that tool until you accept the change.
+              If a tool's definition changes later, xaq holds that tool until you accept the change.
             </p>
           </div>
         )}

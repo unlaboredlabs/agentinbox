@@ -122,7 +122,7 @@ function preBrokerDb(path: string): void {
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "agentinbox-broker-mig-"));
+  dir = mkdtempSync(join(tmpdir(), "xaq-broker-mig-"));
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

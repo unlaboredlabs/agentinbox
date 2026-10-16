@@ -1,6 +1,6 @@
 // Upstream output is untrusted (docs/MCP-BROKER.md "Upstream output is untrusted"): every text block is cleaned
 // (ANSI, invisible characters), scrubbed of this connection's secrets, truncated and nonce-wrapped, with every
-// agentinbox delimiter escaped inside. structuredContent is validated against the pinned outputSchema.
+// xaq delimiter escaped inside. structuredContent is validated against the pinned outputSchema.
 
 import { escapeDelimiters, stripInvisible, truncateText } from "../../mail/content.ts";
 import { randomToken } from "../../util/ids.ts";

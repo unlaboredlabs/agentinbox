@@ -92,7 +92,7 @@ describe("the local admin channel", () => {
   });
 
   it("refuses without a data directory or a running daemon", () => {
-    expect(() => openAdminChannel({ dataDir: "/nonexistent/agentinbox" })).toThrow(/No agentinbox data/);
+    expect(() => openAdminChannel({ dataDir: "/nonexistent/xaq" })).toThrow(/No xaq data/);
     expect(daemonOrigin({ host: "::", port: 9 })).toBe("http://127.0.0.1:9");
     expect(daemonOrigin({ host: "100.64.1.2", port: 9 })).toBe("http://100.64.1.2:9");
   });
@@ -211,7 +211,7 @@ describe("connections add", () => {
     const p = new ScriptedPrompter(["", "", "y", "y", "https://localhost/oauth/connections/callback?code=x&state=nope"]);
     expect(await addConnection("https://mcp.linear.app/mcp", {}, deps(p))).toBe(1);
     expect(p.text).toContain("isn't connected: This sign-in link has expired or was already used.");
-    expect(p.text).toContain("Reconnect: npx agentinbox-cli connections reconnect linear");
+    expect(p.text).toContain("Reconnect: npx xaq-cli connections reconnect linear");
   });
 
   it("OAuth on the desktop: opens the browser and waits for the callback to mark it active", async () => {

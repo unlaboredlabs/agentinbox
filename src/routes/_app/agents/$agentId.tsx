@@ -70,7 +70,7 @@ function AgentPage() {
             Mailbox access
           </h2>
           <p className="text-sm text-muted-foreground">
-            What this agent may do in each Gmail account. Guardrails are enforced by agentinbox; the agent can't bypass them.
+            What this agent may do in each Gmail account. Guardrails are enforced by xaq; the agent can't bypass them.
           </p>
         </div>
         {accounts.isPending ? (

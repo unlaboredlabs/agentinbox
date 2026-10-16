@@ -282,7 +282,7 @@ export function ConnectAccountHost() {
     if (step.kind === "stop") return;
     if (step.kind === "note") return setCheckNote(step.note);
     if (step.kind === "finish-unconfirmed") return finish(req.email ?? "Your account", false);
-    // The server forgot the attempt (it expired, or agentinbox restarted): the account list may still show it.
+    // The server forgot the attempt (it expired, or xaq restarted): the account list may still show it.
     const state = before.res.state;
     try {
       const accounts = await qc.fetchQuery({ ...queries.accounts(), staleTime: 0 });
@@ -343,14 +343,14 @@ export function ConnectAccountHost() {
             {phase?.kind === "waiting" && phase.res.callbackMode === "paste"
               ? "Sign in with Google in a new tab, then paste back the address you land on."
               : pubsub
-                ? `Sign in as ${req.email ?? "the account agentinbox sets up Pub/Sub with"} (another account won't work) and tick the Pub/Sub box. agentinbox only uses it for its own topic and subscription in ${client.data?.projectId ?? "your project"}.`
+                ? `Sign in as ${req.email ?? "the account xaq sets up Pub/Sub with"} (another account won't work) and tick the Pub/Sub box. xaq only uses it for its own topic and subscription in ${client.data?.projectId ?? "your project"}.`
                 : calendar
                   ? `Sign in as ${req.email ?? "the account"} (another account won't work). Gmail stays connected and keeps working while you do this.`
                   : reauthEmail
                   ? `Sign in as ${reauthEmail} and allow access again.`
                   : calendarOn
-                    ? "Sign in with Google and allow agentinbox to manage the mailbox and calendar."
-                    : "Sign in with Google and allow agentinbox to manage the mailbox."}
+                    ? "Sign in with Google and allow xaq to manage the mailbox and calendar."
+                    : "Sign in with Google and allow xaq to manage the mailbox."}
           </DialogDescription>
         </DialogHeader>
 
@@ -365,7 +365,7 @@ export function ConnectAccountHost() {
             <InfoIcon />
             <AlertTitle>Set up the Google OAuth client first</AlertTitle>
             <AlertDescription>
-              agentinbox signs in to Gmail through your own Google OAuth client. Import its JSON (step 4 of Get started), then come back here.
+              xaq signs in to Gmail through your own Google OAuth client. Import its JSON (step 4 of Get started), then come back here.
             </AlertDescription>
           </Alert>
         )}
@@ -525,7 +525,7 @@ function CalendarConsentSteps({ email, external }: { email?: string; external: b
       <li>Choose {email ?? "the account"}.</li>
       {external && (
         <li>
-          “Google hasn't verified this app”: expected for your own app. Click <Path items={["Advanced", "Go to agentinbox (unsafe)"]} />.
+          “Google hasn't verified this app”: expected for your own app. Click <Path items={["Advanced", "Go to xaq (unsafe)"]} />.
         </li>
       )}
       <li>

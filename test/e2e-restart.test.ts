@@ -103,7 +103,7 @@ describe("restart durability", () => {
 
   it("ingests mail that arrived while the server was down exactly once, and resyncs don't duplicate events", async () => {
     await s.stopServer();
-    // Gmail keeps publishing notifications to the subscription while agentinbox is down.
+    // Gmail keeps publishing notifications to the subscription while xaq is down.
     const down1 = s.fake.deliver(email, { from: "a@vendor.test", subject: "While down 1", text: "1" });
     const down2 = s.fake.deliver(email, { from: "b@vendor.test", subject: "While down 2", text: "2" });
     await s.restart(fastRetries);

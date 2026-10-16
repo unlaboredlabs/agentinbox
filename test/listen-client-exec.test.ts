@@ -8,7 +8,7 @@ import { makeEvent } from "./listen-client-fake.ts";
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "agentinbox-exec-test-"));
+  dir = mkdtempSync(join(tmpdir(), "xaq-exec-test-"));
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -44,7 +44,7 @@ describe("command mode", () => {
     const out = join(dir, "stdin.json");
     const envOut = join(dir, "env.txt");
     // A deliberately careless command: it interpolates every variable it was given.
-    const cmd = `cat > ${out}; env > ${envOut}; echo "$AGENTINBOX_EVENT_ID $AGENTINBOX_ACCOUNT $AGENTINBOX_THREAD_ID $AGENTINBOX_MESSAGE_ID" >/dev/null; eval "echo $AGENTINBOX_EVENT_TYPE" >/dev/null`;
+    const cmd = `cat > ${out}; env > ${envOut}; echo "$XAQ_EVENT_ID $XAQ_ACCOUNT $XAQ_THREAD_ID $XAQ_MESSAGE_ID" >/dev/null; eval "echo $XAQ_EVENT_TYPE" >/dev/null`;
     const r = await runCommand(cmd, event, { timeoutMs: 10_000 });
     expect(r.error).toBeNull();
     expect(r.ok).toBe(true);
@@ -68,31 +68,31 @@ describe("command mode", () => {
     const env = readFileSync(envOut, "utf8");
     const ours = env
       .split("\n")
-      .filter((l) => l.startsWith("AGENTINBOX_"))
+      .filter((l) => l.startsWith("XAQ_"))
       .map((l) => l.split("=")[0])
       .sort();
-    expect(ours).toEqual(["AGENTINBOX_ACCOUNT", "AGENTINBOX_EVENT_COUNT", "AGENTINBOX_EVENT_FILE", "AGENTINBOX_EVENT_ID", "AGENTINBOX_EVENT_SEQ", "AGENTINBOX_EVENT_TYPE", "AGENTINBOX_MESSAGE_ID", "AGENTINBOX_THREAD_ID"]);
+    expect(ours).toEqual(["XAQ_ACCOUNT", "XAQ_EVENT_COUNT", "XAQ_EVENT_FILE", "XAQ_EVENT_ID", "XAQ_EVENT_SEQ", "XAQ_EVENT_TYPE", "XAQ_MESSAGE_ID", "XAQ_THREAD_ID"]);
     expect(env).not.toContain("touch");
     expect(env).not.toContain("Hello");
-    expect(env).toContain("AGENTINBOX_EVENT_ID=evt_7\n");
-    expect(env).toContain("AGENTINBOX_EVENT_SEQ=7\n");
-    expect(env).toContain("AGENTINBOX_ACCOUNT=me@example.com\n");
+    expect(env).toContain("XAQ_EVENT_ID=evt_7\n");
+    expect(env).toContain("XAQ_EVENT_SEQ=7\n");
+    expect(env).toContain("XAQ_ACCOUNT=me@example.com\n");
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("drops ids that aren't plain tokens and strips inherited AGENTINBOX_* variables", async () => {
-    process.env.AGENTINBOX_MASTER_KEY = "should-not-leak";
+  it("drops ids that aren't plain tokens and strips inherited XAQ_* variables", async () => {
+    process.env.XAQ_MASTER_KEY = "should-not-leak";
     try {
       const event = makeEvent(8, { message: { threadId: "abc$(id)", id: "m 1" } });
       const envOut = join(dir, "env.txt");
       const r = await runCommand(`env > ${envOut}`, event, { timeoutMs: 10_000 });
       expect(r.ok).toBe(true);
       const env = readFileSync(envOut, "utf8");
-      expect(env).not.toContain("AGENTINBOX_THREAD_ID");
-      expect(env).not.toContain("AGENTINBOX_MESSAGE_ID");
+      expect(env).not.toContain("XAQ_THREAD_ID");
+      expect(env).not.toContain("XAQ_MESSAGE_ID");
       expect(env).not.toContain("should-not-leak");
     } finally {
-      delete process.env.AGENTINBOX_MASTER_KEY;
+      delete process.env.XAQ_MASTER_KEY;
     }
   });
 
@@ -100,7 +100,7 @@ describe("command mode", () => {
     const out = join(dir, "file-info.txt");
     const copy = join(dir, "file-copy.json");
     const stdin = join(dir, "stdin-copy.json");
-    const cmd = `stat -c '%a' "$AGENTINBOX_EVENT_FILE" 2>/dev/null > ${out} || stat -f '%Lp' "$AGENTINBOX_EVENT_FILE" > ${out}; echo "$AGENTINBOX_EVENT_FILE" >> ${out}; cp "$AGENTINBOX_EVENT_FILE" ${copy}; cat > ${stdin}`;
+    const cmd = `stat -c '%a' "$XAQ_EVENT_FILE" 2>/dev/null > ${out} || stat -f '%Lp' "$XAQ_EVENT_FILE" > ${out}; echo "$XAQ_EVENT_FILE" >> ${out}; cp "$XAQ_EVENT_FILE" ${copy}; cat > ${stdin}`;
     const r = await runCommand(cmd, makeEvent(9), { timeoutMs: 10_000 });
     expect(r.error).toBeNull();
     expect(readFileSync(copy, "utf8")).toBe(readFileSync(stdin, "utf8"));

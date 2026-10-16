@@ -202,7 +202,7 @@ function errorResponse(ctx: AppContext, err: Error, c: Context): Response {
   if (err instanceof HTTPException) return err.res ? err.getResponse() : apiError(c, err.status, "http_error", err.message || "Request failed");
   if (err instanceof SyntaxError && /JSON/i.test(err.message)) return apiError(c, 400, "bad_request", "Request body must be valid JSON");
   ctx.log.error(`${c.req.method} ${c.req.path} failed`, { error: err.message, stack: err.stack });
-  return apiError(c, 500, "internal", "Something went wrong. Check the agentinbox logs for details.");
+  return apiError(c, 500, "internal", "Something went wrong. Check the xaq logs for details.");
 }
 
 function apiError(c: Context, status: number, code: string, message: string): Response {
@@ -227,9 +227,9 @@ function missingBuildPage(c: Context, webDir: string): Response {
   c.header("Cache-Control", "no-store");
   return c.html(
     page(
-      "agentinbox: console not built",
+      "xaq: console not built",
       `<h1>The web console hasn't been built</h1>
-<p>agentinbox is running, but there is no console build in <code>${escapeHtml(webDir)}</code>.</p>
+<p>xaq is running, but there is no console build in <code>${escapeHtml(webDir)}</code>.</p>
 <p>From a source checkout, run <code>pnpm build</code> and restart, or use <code>pnpm dev</code> for development.</p>
 <p>The API (<code>/api</code>), MCP endpoint (<code>/mcp</code>) and <code>/health</code> work as usual.</p>`,
     ),
@@ -242,8 +242,8 @@ function devPage(c: Context): Response {
   const target = `http://localhost:5173${url.pathname}${url.search}`;
   return c.html(
     page(
-      "agentinbox (dev)",
-      `<h1>agentinbox is running in dev mode</h1>
+      "xaq (dev)",
+      `<h1>xaq is running in dev mode</h1>
 <p>The console is served by Vite: open <a href="${escapeHtml(target)}">${escapeHtml(target)}</a>.</p>`,
     ),
   );

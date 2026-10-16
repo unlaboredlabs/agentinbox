@@ -39,7 +39,7 @@ export function StepAgent({ index, onBack, onNext, total, nextLabel }: StepProps
       title={created ? `${created.agent.name} is ready` : "Connect your first agent"}
       description={
         created
-          ? "Save its key and add agentinbox to your agent with a snippet below. The next step checks that it works."
+          ? "Save its key and add xaq to your agent with a snippet below. The next step checks that it works."
           : "Your agent is the AI tool that will read your mail, like Claude Code or Codex. It asks for access from its own terminal and you approve it here. It only gets the access you choose."
       }
       footer={

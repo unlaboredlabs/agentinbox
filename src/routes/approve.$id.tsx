@@ -49,7 +49,7 @@ function ApprovePage() {
     <div className="min-h-svh bg-muted/40">
       <header className="mx-auto flex max-w-lg items-center justify-between px-4 pt-4">
         <Link to="/" className="flex items-center gap-2 text-sm font-semibold">
-          <Logo className="size-7" /> agentinbox
+          <Logo className="size-7" /> xaq
         </Link>
         <ThemeToggle />
       </header>

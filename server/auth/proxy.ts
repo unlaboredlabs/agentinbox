@@ -81,7 +81,7 @@ function trustedRanges(raw: string): Range[] {
     if (r) ranges.push(r);
     else invalid.push(entry);
   }
-  if (invalid.length) process.stderr.write(`agentinbox: ignoring invalid TRUST_PROXY_FROM entries: ${invalid.join(", ")}\n`);
+  if (invalid.length) process.stderr.write(`xaq: ignoring invalid TRUST_PROXY_FROM entries: ${invalid.join(", ")}\n`);
   cache = { raw, ranges };
   return ranges;
 }

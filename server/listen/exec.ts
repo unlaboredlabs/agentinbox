@@ -30,14 +30,16 @@ class Tail {
 }
 
 /**
- * The child's environment: ours minus anything agentinbox-specific (service flags, a master key that
- * happened to be exported…), plus the safe event ids and the event file path.
+ * The child's environment: ours minus anything xaq-specific (XAQ_* and the pre-rename AGENTINBOX_*:
+ * service flags, a master key that happened to be exported…), plus the safe event ids and the event file
+ * path. Each of those is set as XAQ_<name> and, for commands written before the rename, AGENTINBOX_<name>.
  */
 export function childEnv(input: WebhookPayload | WebhookPayload[], eventFile: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("AGENTINBOX_")) env[k] = v;
-  const ids = Array.isArray(input) ? batchEnv(input) : { ...eventEnv(input), AGENTINBOX_EVENT_COUNT: "1" };
-  return { ...env, ...ids, AGENTINBOX_EVENT_FILE: eventFile };
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("XAQ_") && !k.startsWith("AGENTINBOX_")) env[k] = v;
+  const ids: Record<string, string> = { ...(Array.isArray(input) ? batchEnv(input) : { ...eventEnv(input), XAQ_EVENT_COUNT: "1" }), XAQ_EVENT_FILE: eventFile };
+  const legacy = Object.fromEntries(Object.entries(ids).map(([k, v]) => [k.replace(/^XAQ_/, "AGENTINBOX_"), v]));
+  return { ...env, ...ids, ...legacy };
 }
 
 /** stdin for one event ({ notice, event }) or a --batch ({ notice, events: […] }, even for a batch of one). */
@@ -81,14 +83,14 @@ function killGroup(pid: number | undefined, signal: NodeJS.Signals): void {
 /**
  * Runs the configured command for one event, or for a batch (an array). The command string is fixed
  * configuration and goes to `/bin/sh -c` verbatim; it is never built from event data. The events reach
- * the command only as JSON on stdin, as a 0600 file named by AGENTINBOX_EVENT_FILE, and as a few
+ * the command only as JSON on stdin, as a 0600 file named by XAQ_EVENT_FILE, and as a few
  * validated ids in env. On timeout the whole process group gets SIGTERM, then SIGKILL after a grace period.
  */
 export function runCommand(command: string, payload: WebhookPayload | WebhookPayload[], opts: { timeoutMs: number; cwd?: string; signal?: AbortSignal }): Promise<CommandResult> {
   const started = performance.now();
   const input = commandStdin(payload);
   // mkdtemp creates the directory 0700; the file inside is 0600 on top.
-  const dir = mkdtempSync(join(tmpdir(), "agentinbox-event-"));
+  const dir = mkdtempSync(join(tmpdir(), "xaq-event-"));
   const eventFile = join(dir, "event.json");
   writeFileSync(eventFile, input, { mode: 0o600, flag: "wx" });
 

@@ -43,7 +43,7 @@ export interface ImportDeps {
   lookup?: LookupFn;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
-  /** This agentinbox's own MCP origins (loopback with its port), so its entry is never imported. */
+  /** This xaq's own MCP origins (loopback with its port), so its entry is never imported. */
   selfOrigins?: string[];
   /** How long to wait for a connected server's first tool sync (default 10 s), and how often to look. */
   verifyMs?: number;
@@ -66,7 +66,8 @@ export type PlanItem =
       privateTarget: string | null;
     };
 
-const SELF_NAME = /^agentinbox(?:-[a-z0-9][a-z0-9_-]*)?$/;
+// Our own entry under its name, or under the one a profile from before the rename registered: never imported.
+const SELF_NAME = /^(?:xaq|agentinbox)(?:-[a-z0-9][a-z0-9_-]*)?$/; // rename-xaq: keep
 
 function isSelf(e: ClientEntry, selfOrigins: string[]): boolean {
   if (SELF_NAME.test(e.name)) return true;
@@ -170,7 +171,7 @@ function headerLine(i: Extract<PlanItem, { action: "create" }>): string | null {
   if (i.auth.type !== "header") return null;
   const vars = i.entry.headerSources[i.auth.name] ?? [];
   const from = vars.length ? ` (from ${vars.map((v) => `$${v}`).join(", ")})` : "";
-  return `its ${i.auth.name} header${from} moves into agentinbox (encrypted; never shown) and is sent to ${safeText(hostOf(i.url), 120)}`;
+  return `its ${i.auth.name} header${from} moves into xaq (encrypted; never shown) and is sent to ${safeText(hostOf(i.url), 120)}`;
 }
 
 /** The plan in plain words. Never prints a header value. */
@@ -185,7 +186,7 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
     const name = `  ${pad(safeText(i.entry.name, 40))}  `;
     switch (i.action) {
       case "self":
-        out.push(`${name}${pc.dim("skip: this is agentinbox itself")}`);
+        out.push(`${name}${pc.dim("skip: this is xaq itself")}`);
         break;
       case "stdio":
         out.push(`${name}${pc.yellow("not supported yet (M4)")}: a local command (${safeText(i.entry.command ?? "", 60)}); it stays in ${label}`);
@@ -225,9 +226,9 @@ function droppedLines(e: ClientEntry, cont: string): string[] {
   if (!d) return [];
   const out: string[] = [];
   const list = (xs: string[]) => xs.map((x) => safeText(x, 64)).join(", ");
-  if (d.exclude) out.push(`${cont}${pc.yellow("not carried over")}: its tool filter hides ${list(d.exclude)}; through agentinbox every tool is listed (subject to the access level)`);
-  if (d.include) out.push(`${cont}${pc.yellow("not carried over")}: its tool filter shows only ${list(d.include)}; through agentinbox every tool is listed (subject to the access level)`);
-  if (d.settings.length) out.push(`${cont}${pc.yellow("not carried over")}: ${d.settings.join(", ")} (agentinbox uses its own 60 s per call)`);
+  if (d.exclude) out.push(`${cont}${pc.yellow("not carried over")}: its tool filter hides ${list(d.exclude)}; through xaq every tool is listed (subject to the access level)`);
+  if (d.include) out.push(`${cont}${pc.yellow("not carried over")}: its tool filter shows only ${list(d.include)}; through xaq every tool is listed (subject to the access level)`);
+  if (d.settings.length) out.push(`${cont}${pc.yellow("not carried over")}: ${d.settings.join(", ")} (xaq uses its own 60 s per call)`);
   return out;
 }
 
@@ -256,7 +257,7 @@ function setupLines(r: McpSetupResult): string[] {
 
 const toRemove = (e: ClientEntry): RemoveServer => ({ name: e.name, scope: e.scope, projectDir: e.scope === "user" ? undefined : e.projectDir });
 
-/** The agent this machine's client uses (its agentinbox profile), if that agent is on this daemon. */
+/** The agent this machine's client uses (its xaq profile), if that agent is on this daemon. */
 interface ClientAgent {
   profileName: string;
   profile: Profile | null;
@@ -291,7 +292,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     p.print("");
     p.print(`Would create ${creates.length} connection${creates.length === 1 ? "" : "s"} with ${access ? accessLabel(access) : "the access you choose (default: Ask before risky actions)"}.`);
     if (priv.length) p.print(`Would ask before allowing ${priv.map((i) => i.privateTarget).join(", ")} (--yes never does; --allow-private <origin> does for that origin).`);
-    if (!existing) p.print(pc.dim("agentinbox wasn't reachable, so existing connections weren't checked (the real run does: nothing is created twice)."));
+    if (!existing) p.print(pc.dim("xaq wasn't reachable, so existing connections weren't checked (the real run does: nothing is created twice)."));
     const removable = [
       ...items.filter((i): i is Extract<PlanItem, { action: "exists" }> => i.action === "exists" && works(i.connection)).map((i) => toRemove(i.entry)),
       ...creates.filter((i) => i.auth.type !== "oauth").map((i) => toRemove(i.entry)),
@@ -299,7 +300,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     p.print("");
     if (!removable.length) p.print(`${label}'s config isn't changed.`);
     else if (!profileExists(profileName)) {
-      p.print(`Afterwards it offers to replace the imported entries in ${label} with the single agentinbox entry, once this machine's ${label} is paired (${NPX} connect <agentinbox-url> --tool ${client}).`);
+      p.print(`Afterwards it offers to replace the imported entries in ${label} with the single xaq entry, once this machine's ${label} is paired (${NPX} connect <xaq-url> --tool ${client}).`);
     } else {
       p.print(`Afterwards it offers setup-mcp --tool ${client}, which would (for the entries whose connection works and that ${label}'s agent can use; OAuth ones after you Reconnect them):`);
       const r = setupMcp(client, mcpTarget(profileName, loadProfile(profileName)), profilePath(profileName), { dryRun: true, removeServers: removable });
@@ -321,7 +322,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   if (fromProject.length) {
     p.print(pc.yellow(`These come from ${fromProject[0]!.entry.file}, which ships with the project (anyone who can commit to it wrote them):`));
     for (const i of fromProject) p.print(`  ${safeText(i.entry.name, 40)} → ${safeText(i.url, 120)}${headerLine(i) ? `; ${headerLine(i)}` : ""}`);
-    if (!(await p.confirmExplicit(`Import ${fromProject.length === 1 ? "it" : `these ${fromProject.length}`} into agentinbox?`, "they stay in Claude Code"))) {
+    if (!(await p.confirmExplicit(`Import ${fromProject.length === 1 ? "it" : `these ${fromProject.length}`} into xaq?`, "they stay in Claude Code"))) {
       creates = creates.filter((i) => !i.entry.fromProject);
     }
   }
@@ -337,7 +338,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
       pc.dim("A connection to such a server can reach other services there too. Each allow covers exactly that scheme://host:port, for that connection only."),
     );
     const names = priv.map((i) => i.entry.name).join(", ");
-    if (!(await p.confirmExplicit(`Allow agentinbox to connect to ${priv.length === 1 ? "it" : `these ${priv.length}`}?`, `skipping ${names} (pass --allow-private <origin> to allow one)`))) {
+    if (!(await p.confirmExplicit(`Allow xaq to connect to ${priv.length === 1 ? "it" : `these ${priv.length}`}?`, `skipping ${names} (pass --allow-private <origin> to allow one)`))) {
       creates = creates.filter((i) => !priv.includes(i));
     }
   }
@@ -359,7 +360,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   const level = await chooseAccess(p, access);
   let agents = await chooseAgents(p, api, flags.agent);
   if (agents !== "all" && who.agent && !agents.includes(who.agent.id)) {
-    p.print(pc.yellow(`${safeText(who.agent.name, 60)} (the agent ${label} on this machine uses) isn't among them, so ${label} couldn't use these through agentinbox.`));
+    p.print(pc.yellow(`${safeText(who.agent.name, 60)} (the agent ${label} on this machine uses) isn't among them, so ${label} couldn't use these through xaq.`));
     if (await p.confirm(`Include ${safeText(who.agent.name, 60)}?`, true)) agents = [...agents, who.agent.id];
   }
   if (!(await p.confirm(`Create ${creates.length} connection${creates.length === 1 ? "" : "s"} (${accessLabel(level)}, ${agentsLabel(agents)})?`, true))) {
@@ -423,8 +424,8 @@ async function clientAgent(api: ConnectionsApi, profileName: string): Promise<Cl
 }
 
 /**
- * Step 2: replace the entries now served by the broker with the single agentinbox entry (setup-mcp). Only entries
- * the client's own agent can use through agentinbox go: the profile's agent must be on this daemon and have a grant
+ * Step 2: replace the entries now served by the broker with the single xaq entry (setup-mcp). Only entries
+ * the client's own agent can use through xaq go: the profile's agent must be on this daemon and have a grant
  * on the connection (offered when it has none).
  */
 async function offerSetup(
@@ -438,20 +439,20 @@ async function offerSetup(
 ): Promise<number> {
   const p = deps.prompter;
   const label = CLIENT_LABELS[client];
-  if (pending.length) p.print(pc.dim(`${pending.join(", ")} stay${pending.length === 1 ? "s" : ""} in ${label} until ${pending.length === 1 ? "it works" : "they work"} through agentinbox (Reconnect); then run this import again to replace ${pending.length === 1 ? "it" : "them"}.`));
+  if (pending.length) p.print(pc.dim(`${pending.join(", ")} stay${pending.length === 1 ? "s" : ""} in ${label} until ${pending.length === 1 ? "it works" : "they work"} through xaq (Reconnect); then run this import again to replace ${pending.length === 1 ? "it" : "them"}.`));
   if (!working.length) return code;
   if (!who.profile) {
     p.print(
-      `To replace ${working.map((w) => w.entry.name).join(", ")} in ${label} with the single agentinbox entry, pair it first ` +
-        `(${NPX} connect <agentinbox-url> --tool ${client}) and run this import again.`,
+      `To replace ${working.map((w) => w.entry.name).join(", ")} in ${label} with the single xaq entry, pair it first ` +
+        `(${NPX} connect <xaq-url> --tool ${client}) and run this import again.`,
     );
     return code;
   }
   if (!who.agent) {
     p.print(
       pc.yellow(
-        `The agent in your "${who.profileName}" profile (${safeText(who.profile.agentId, 40)}) isn't an agent of this agentinbox (or is disabled), so ${label} ` +
-          `couldn't use these through it. Not replacing anything in ${label}. Pair it with this agentinbox (${NPX} connect <agentinbox-url> --tool ${client} --force), then run this import again.`,
+        `The agent in your "${who.profileName}" profile (${safeText(who.profile.agentId, 40)}) isn't an agent of this xaq (or is disabled), so ${label} ` +
+          `couldn't use these through it. Not replacing anything in ${label}. Pair it with this xaq (${NPX} connect <xaq-url> --tool ${client} --force), then run this import again.`,
       ),
     );
     return code;
@@ -476,16 +477,16 @@ async function offerSetup(
   }
   if (!usable.length) return code;
   p.print("");
-  const question = `Replace ${usable.map((e) => `"${e.name}"`).join(", ")} in ${label} with the single agentinbox entry (setup-mcp --tool ${client}, with a backup)?`;
+  const question = `Replace ${usable.map((e) => `"${e.name}"`).join(", ")} in ${label} with the single xaq entry (setup-mcp --tool ${client}, with a backup)?`;
   const routes = confinedRoutes(client, mcpServerName(who.profileName), deps.env);
   let ok: boolean;
   if (routes.length) {
     const slugs = working.filter((w) => usable.includes(w.entry)).map((w) => w.connection.slug);
-    p.print(pc.yellow(`These ${label} settings are limited to the agentinbox server only:`));
+    p.print(pc.yellow(`These ${label} settings are limited to the xaq server only:`));
     for (const r of routes) p.print(`  ${safeText(r, 120)}`);
     p.print(
       pc.yellow(
-        `Through agentinbox they now also see the tools of ${slugs.map((s) => `"${s}"`).join(", ")} (as <name>__<tool>), which ${routes.length === 1 ? "it" : "they"} couldn't reach before. ` +
+        `Through xaq they now also see the tools of ${slugs.map((s) => `"${s}"`).join(", ")} (as <name>__<tool>), which ${routes.length === 1 ? "it" : "they"} couldn't reach before. ` +
           `If one is triggered by email or webhooks, those tools become reachable from that content. Give ${agentName} less access on those connections, or keep them out, if that's not what you want.`,
       ),
     );
@@ -499,7 +500,7 @@ async function offerSetup(
   for (const l of setupLines(r)) p.print(l);
   const vars = [...new Set(usable.flatMap((e) => ((r.removed ?? []).includes(e.name) ? e.headerVars : [])))];
   if (r.ok && vars.length) {
-    p.print(pc.dim(`  ${vars.join(", ")} ${vars.length === 1 ? "is" : "are"} no longer needed by the removed entries; delete ${vars.length === 1 ? "it" : "them"} from your environment${client === "hermes" ? " (~/.hermes/.env)" : ""} once everything works through agentinbox.`));
+    p.print(pc.dim(`  ${vars.join(", ")} ${vars.length === 1 ? "is" : "are"} no longer needed by the removed entries; delete ${vars.length === 1 ? "it" : "them"} from your environment${client === "hermes" ? " (~/.hermes/.env)" : ""} once everything works through xaq.`));
   }
   return r.ok ? code : 1;
 }

@@ -168,7 +168,7 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
     start = await startPairing(url, input);
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {
-      throw new Error(`${url} doesn't support pairing (no /agent/v1/pairings). Is this an agentinbox daemon, and is it up to date?`);
+      throw new Error(`${url} doesn't support pairing (no /agent/v1/pairings). Is this a xaq daemon, and is it up to date?`);
     }
     if (e instanceof ApiError) throw new Error(`${e.message}${e.hint ? `\n  ${e.hint}` : ""}`);
     throw e;
@@ -178,7 +178,7 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
   out();
   out(
     box([
-      pc.bold("Approve this agent in the agentinbox console"),
+      pc.bold("Approve this agent in the xaq console"),
       "",
       `Code:   ${pc.bold(pc.yellow(safeText(start.userCode, 40)))}`,
       `Open:   ${pc.cyan(safeText(links.primary, 300))}`,
@@ -320,7 +320,7 @@ async function connect(rawUrl: string, flags: ConnectFlags, opts: ConnectOptions
   if (replacing && replacing.agentId !== profile.agentId) {
     err(
       pc.yellow(
-        `! Replaced profile "${profileName}" (agent "${safeText(replacing.agentName)}", ${replacing.agentId}). Its key still works until you rotate it or delete that agent in the console; config backups made by setup-mcp (*.agentinbox-backup-*) may contain it.`,
+        `! Replaced profile "${profileName}" (agent "${safeText(replacing.agentName)}", ${replacing.agentId}). Its key still works until you rotate it or delete that agent in the console; config backups made by setup-mcp (*.xaq-backup-*, or *.agentinbox-backup-* from before the rename) may contain it.`, // rename-xaq: keep
       ),
     );
   }
@@ -417,20 +417,20 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
   out(pc.bold("Next steps"));
   let n = 1;
   if (mcp?.ok) {
-    out(`  ${n++}. ${label} has the agentinbox MCP tools ${pc.gray(`(restart it if it's running)`)}.`);
+    out(`  ${n++}. ${label} has the xaq MCP tools ${pc.gray(`(restart it if it's running)`)}.`);
   } else if (tool === "other") {
     out(`  ${n++}. Point your agent's MCP client at ${pc.cyan(profile.mcpUrl ?? `${profile.url}/mcp`)} with header Authorization: Bearer <key>`);
     out(pc.gray(`     The key is the "apiKey" field in ${profilePath(profileName)}.`));
   } else {
-    out(`  ${n++}. Give ${label} the agentinbox MCP tools without ever seeing the key:`);
+    out(`  ${n++}. Give ${label} the xaq MCP tools without ever seeing the key:`);
     out(`       ${pc.cyan(`${NPX} setup-mcp --tool ${tool}${p}`)}  ${pc.gray("(add --dry-run to see exactly what it changes first)")}`);
   }
-  out(`  ${n++}. Install the agentinbox skill so ${label} knows the rules:`);
+  out(`  ${n++}. Install the xaq skill so ${label} knows the rules:`);
   out(`       ${pc.cyan(skillCommand(tool, profile.url))}`);
   if (tool === "hermes") {
     out(`  ${n++}. Create the Hermes gateway route the listener forwards to, saying where Hermes should tell you (once; needs the gateway's webhook platform on):`);
     out(`       ${pc.cyan(hermesRouteCommand(profileName))}`);
-    out(pc.gray(`     Or --deliver discord|slack|…, or --deliver-chat-id <id>. It sets the listener's secret without showing it and limits the route to the agentinbox tools.`));
+    out(pc.gray(`     Or --deliver discord|slack|…, or --deliver-chat-id <id>. It sets the listener's secret without showing it and limits the route to the xaq tools.`));
   }
   if (mail) {
     out(`  ${n++}. Wake ${label} when mail arrives. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);

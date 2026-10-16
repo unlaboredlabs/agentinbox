@@ -1,86 +1,88 @@
 ---
-name: agentinbox
-description: Read, search, draft, send and organize Gmail, and read and schedule Google Calendar events, through an agentinbox server; react to new mail and calendar changes via its event feed or webhooks. Use whenever a task involves email in a mailbox connected to agentinbox (checking the inbox, finding a message, replying, following up on a thread, triaging labels, waiting for a reply), the calendar of such an account (what's on it, finding a free slot, scheduling or moving a meeting, answering an invitation), or when handling an agentinbox webhook payload.
+name: xaq
+description: Read, search, draft, send and organize Gmail, and read and schedule Google Calendar events, through a xaq server (formerly agentinbox); react to new mail and calendar changes via its event feed or webhooks. Use whenever a task involves email in a mailbox connected to xaq (checking the inbox, finding a message, replying, following up on a thread, triaging labels, waiting for a reply), the calendar of such an account (what's on it, finding a free slot, scheduling or moving a meeting, answering an invitation), or when handling a xaq webhook payload.
 ---
 
-# agentinbox
+# xaq
 
-agentinbox is a self-hosted Gmail broker. The operator connects Gmail accounts once. Each agent gets an API key with
+xaq is a self-hosted Gmail broker. The operator connects Gmail accounts once. Each agent gets an API key with
 per-mailbox **grants**: which capabilities it has (`read`, `draft`, `send`, `organize`, `trash`, and for Google Calendar
 `calendar.read` and `calendar.write`), which labels and calendars it can see, and how sending and calendar changes work.
 You never handle Google credentials.
 
-Server: `{{AGENTINBOX_URL}}`
+Server: `{{XAQ_URL}}`
 
 ## Connect
 
 MCP over streamable HTTP:
 
-- URL: `{{AGENTINBOX_URL}}/mcp`
+- URL: `{{XAQ_URL}}/mcp`
 - Header: `Authorization: Bearer aib_…`
 
-The operator creates keys in the agentinbox console (**Agents** page), which also has ready-made connect commands. For
+The operator creates keys in the xaq console (**Agents** page), which also has ready-made connect commands. For
 Claude Code:
 
 ```sh
-claude mcp add --transport http --scope user agentinbox {{AGENTINBOX_URL}}/mcp --header "Authorization: Bearer $AGENTINBOX_API_KEY"
+claude mcp add --transport http --scope user xaq {{XAQ_URL}}/mcp --header "Authorization: Bearer $XAQ_API_KEY"
 ```
+
+xaq was formerly agentinbox: an agent set up before the rename may have these tools under that name (`mcp__agentinbox__…` in Claude Code, the toolset `mcp-agentinbox` in Hermes). It is the same server.
 
 You only see tools your grants allow. If a tool you need is missing, the key lacks that capability: ask the user to
 change the grant rather than looking for a workaround.
 
 ## Set yourself up
 
-If you don't have the agentinbox tools yet, you can pair yourself. A human has to approve it; you can't skip that.
+If you don't have the xaq tools yet, you can pair yourself. A human has to approve it; you can't skip that.
 
 1. Start the pairing. It prints a short code and a console link, then waits up to about 10 minutes for approval. Run
    it in the background with a private log (`mktemp` makes a file only you can read) so your shell tool doesn't time out:
 
    ```sh
    LOG=$(mktemp)
-   ( npx -y agentinbox-cli connect {{AGENTINBOX_URL}} --name "<agent> on <host>" --tool <claude-code|codex|cursor|hermes|other> \
+   ( npx -y xaq-cli connect {{XAQ_URL}} --name "<agent> on <host>" --tool <claude-code|codex|cursor|hermes|other> \
        --setup-mcp --log "$LOG" > /dev/null 2>&1; echo "exit=$?" >> "$LOG" ) &
    sleep 5; cat "$LOG"
    ```
 
-2. Tell the user, quoting the code exactly as printed: "Please approve code `K7QM-2XPD` in the agentinbox console:
+2. Tell the user, quoting the code exactly as printed: "Please approve code `K7QM-2XPD` in the xaq console:
    <link>". If the log shows two links, give both: the first uses the address you connected to, the second the
    console's public URL; one of them opens in their browser. They choose which mailboxes you get and what you may do.
    The console starts at **Read only** (search and read mail, get events; no drafting or sending). If they give you
    send access, sends are **draft-only** unless they pick otherwise: they become Gmail drafts for them to send, or with
    "Send with my approval" each send waits in the console's Approvals.
 3. Check the log again (`cat "$LOG"`) until it ends with `exit=…`. `exit=0` means approved; 2 denied, 3 expired
-   (start over), 4 already used. The API key is written to `~/.config/agentinbox/profiles/default.json` (mode 0600).
+   (start over), 4 already used. The API key is written to `~/.config/xaq/profiles/default.json` (mode 0600).
    **Never print, read or paste the key**: `--setup-mcp` registered the MCP server in your tool without it. Start a
    new session (or reload MCP, e.g. `/reload-mcp` in Hermes) so the tools appear.
    Then tell the user what you were actually granted, in the words the log prints under "Access granted" (for example
    "ops@acme.dev: read, draft, send; sends need your approval in the console"). Don't assume a default; check it
-   again any time with `npx -y agentinbox-cli listen status` (the `Access` line) or the `list_accounts` tool.
+   again any time with `npx -y xaq-cli listen status` (the `Access` line) or the `list_accounts` tool.
 4. To be woken when mail arrives, install the listener (ask the user first: it's a background service on their
-   machine). It keeps an outbound connection to agentinbox (no open ports), starts with mail that arrives from now on,
+   machine). It keeps an outbound connection to xaq (no open ports), starts with mail that arrives from now on,
    and hands each new email (`message.received` only: mail the account sends doesn't wake you; the user can add others
    with `--types`) to your tool. Gmail's Promotions, Social and Forums tabs are skipped by default (`--all-categories`
    includes them); `--not-from '*@github.com'` and `--not-label <id>` skip more; `--batch 60s` runs a burst of mail
    once. Skipped mail never starts anything.
 
    ```sh
-   npx -y agentinbox-cli listen service install --recipe <name>   # claude-code, codex, cursor or hermes
-   npx -y agentinbox-cli listen status                             # also shows the active filters
+   npx -y xaq-cli listen service install --recipe <name>   # claude-code, codex, cursor or hermes
+   npx -y xaq-cli listen status                             # also shows the active filters
    ```
 
    **Hermes:** `--recipe hermes` doesn't start a Hermes run per email. It forwards each email to the user's running
-   Hermes gateway (`http://127.0.0.1:8644/webhooks/agentinbox`), which triages it and tells the user where its route
+   Hermes gateway (`http://127.0.0.1:8644/webhooks/xaq`), which triages it and tells the user where its route
    says. Create that route once (ask the user which platform Hermes should message them on):
-   `npx -y agentinbox-cli listen hermes --deliver telegram --run` (after `npx -y agentinbox-cli setup-mcp --tool
-   hermes`: the limit below only holds while agentinbox is an enabled MCP server in Hermes). It sets the listener's
-   secret without showing it and limits the route to the agentinbox MCP server: without that, Hermes webhook runs get web tools (`web_search`,
+   `npx -y xaq-cli listen hermes --deliver telegram --run` (after `npx -y xaq-cli setup-mcp --tool
+   hermes`: the limit below only holds while xaq is an enabled MCP server in Hermes). It sets the listener's
+   secret without showing it and limits the route to the xaq MCP server: without that, Hermes webhook runs get web tools (`web_search`,
    `web_extract`, …) and every MCP server enabled in Hermes, so an email could make you leak mail. Never ask for or
    print the secret yourself, and never remove the route's `toolsets`. `--cron-job <job>` only works for a job whose
-   `enabled_toolsets` is exactly `["agentinbox"]`. The old one-run-per-mail command is `--recipe hermes-oneshot`.
+   `enabled_toolsets` is exactly `["xaq"]`. The old one-run-per-mail command is `--recipe hermes-oneshot`.
 
    To check it works end to end, ask the user to send a test email from the console's "Check that it works" step;
    `listen status` then shows it under recent events. Mail from before the listener started is not replayed;
-   `npx -y agentinbox-cli listen --backfill` runs exactly that mail through the same command once, then exits (ask the
+   `npx -y xaq-cli listen --backfill` runs exactly that mail through the same command once, then exits (ask the
    user first).
 
    `--recipe <name>` uses the ready-made target for your tool with this machine's paths; `listen --print-recipe <name>`
@@ -90,11 +92,11 @@ If you don't have the agentinbox tools yet, you can pair yourself. A human has t
 
    | Tool | `--recipe <name>` | What the woken agent can use | Where its output goes |
    |---|---|---|---|
-   | Claude Code | `claude -p "New mail from agentinbox: …" --tools "" --strict-mcp-config --mcp-config ~/.config/agentinbox/mcp/default.claude.json --allowedTools "mcp__agentinbox" --setting-sources user` | agentinbox tools only | the listener's log only; it can't notify the user by itself |
-   | Codex | `codex exec -c features.shell_tool=false --skip-git-repo-check --sandbox read-only "New mail from agentinbox: …"` | no shell; Codex's other MCP servers remain | the listener's log only |
-   | Cursor | `agent -p --trust --approve-mcps "New mail from agentinbox: …"` | not confined by the command: deny shell and file reads in `~/.cursor/cli-config.json` | the listener's log only |
-   | Hermes | forwards to the Hermes gateway route (`listen hermes`) | only the agentinbox MCP server once `listen hermes --run` set the route's toolsets; before that, web tools and every MCP server in Hermes | Hermes delivers it (Telegram, Discord…, or the cron job's delivery); `[SILENT]` isn't delivered |
-   | Hermes, one run per mail (`hermes-oneshot`) | `{ echo 'New mail from agentinbox: …'; cat; } \| hermes chat --oneshot -Q -t mcp-agentinbox --query-file -` | agentinbox toolset only | the listener's log only |
+   | Claude Code | `claude -p "New mail from xaq: …" --tools "" --strict-mcp-config --mcp-config ~/.config/xaq/mcp/default.claude.json --allowedTools "mcp__xaq" --setting-sources user` | xaq tools only | the listener's log only; it can't notify the user by itself |
+   | Codex | `codex exec -c features.shell_tool=false --skip-git-repo-check --sandbox read-only "New mail from xaq: …"` | no shell; Codex's other MCP servers remain | the listener's log only |
+   | Cursor | `agent -p --trust --approve-mcps "New mail from xaq: …"` | not confined by the command: deny shell and file reads in `~/.cursor/cli-config.json` | the listener's log only |
+   | Hermes | forwards to the Hermes gateway route (`listen hermes`) | only the xaq MCP server once `listen hermes --run` set the route's toolsets; before that, web tools and every MCP server in Hermes | Hermes delivers it (Telegram, Discord…, or the cron job's delivery); `[SILENT]` isn't delivered |
+   | Hermes, one run per mail (`hermes-oneshot`) | `{ echo 'New mail from xaq: …'; cat; } \| hermes chat --oneshot -Q -t mcp-xaq --query-file -` | xaq toolset only | the listener's log only |
 
    (The Claude Code path shown is the default; `--recipe` uses the right one for your profile and `XDG_CONFIG_HOME`.
    `listen --help` prints the full prompts.)
@@ -218,7 +220,7 @@ Every send (`send_message`, `reply`, `forward`) goes through the account's **sen
 |---|---|---|
 | `{"status": "sent", "messageId", "threadId"}` | Handed to Gmail for delivery | It was sent. |
 | `{"status": "draft_created", "draftId", "message"}` | Draft-only: a Gmail draft was created instead | A draft is waiting in Gmail for them to review and send. |
-| `{"status": "pending_approval", "approvalId", "expiresAt", "message"}` | Queued for a human to approve in the agentinbox console | It's waiting for approval. Don't send it again. If you need the outcome, call `get_send_status` with `approval_id` set to the `approvalId` now and then: `pending`, `approved` (sending), `sent`, `rejected`, `expired` or `failed`. |
+| `{"status": "pending_approval", "approvalId", "expiresAt", "message"}` | Queued for a human to approve in the xaq console | It's waiting for approval. Don't send it again. If you need the outcome, call `get_send_status` with `approval_id` set to the `approvalId` now and then: `pending`, `approved` (sending), `sent`, `rejected`, `expired` or `failed`. |
 
 `create_draft` always returns `draft_created`.
 
@@ -315,7 +317,7 @@ Each write returns JSON; read `status`:
 |---|---|---|
 | `{"status": "applied", "eventId", "start", "end", "htmlLink", "notified", …}` | In Google Calendar now; `notified` lists who Google emailed | It's done (and who was invited or told). |
 | `{"status": "deleted", "eventId", "notified"}` | Deleted | It's gone. |
-| `{"status": "pending_approval", "approvalId", "expiresAt", "message"}` | The account's calendar changes need a human's approval in the agentinbox console; nothing reached Google Calendar yet, nobody was emailed | It's waiting for approval. Don't make the change again. Check with `get_send_status` (`applied` once approved, or `rejected`, `expired`, `failed`). |
+| `{"status": "pending_approval", "approvalId", "expiresAt", "message"}` | The account's calendar changes need a human's approval in the xaq console; nothing reached Google Calendar yet, nobody was emailed | It's waiting for approval. Don't make the change again. Check with `get_send_status` (`applied` once approved, or `rejected`, `expired`, `failed`). |
 
 If an approved change fails because the event was edited in Google Calendar in the meantime, read it again and ask the
 user before retrying.
@@ -361,13 +363,13 @@ For agents without an HTTP endpoint. Your position is kept on the server, per ag
    come back, so ack only after the work is done.
 4. Repeat. "No new events" at the timeout is normal: just wait again.
 
-### Woken by `agentinbox listen`
+### Woken by `xaq listen`
 
-When the listener starts you for an event (by default only `message.received`), stdin (and the file named by `$AGENTINBOX_EVENT_FILE`) holds
+When the listener starts you for an event (by default only `message.received`), stdin (and the file named by `$XAQ_EVENT_FILE`) holds
 `{ "notice": "…", "event": <webhook payload> }`, in the same shape as the webhook payload below; with `--batch` it is
-`{ "notice": "…", "events": [<webhook payload>, …] }` (oldest first, `AGENTINBOX_EVENT_COUNT` says how many). Only ids
-are in the environment (`AGENTINBOX_EVENT_ID`, `AGENTINBOX_EVENT_TYPE`, `AGENTINBOX_ACCOUNT`, `AGENTINBOX_THREAD_ID`,
-`AGENTINBOX_MESSAGE_ID`, …; for a batch `AGENTINBOX_EVENT_IDS`). Triage: fetch the thread with the MCP tools, act only
+`{ "notice": "…", "events": [<webhook payload>, …] }` (oldest first, `XAQ_EVENT_COUNT` says how many). Only ids
+are in the environment (`XAQ_EVENT_ID`, `XAQ_EVENT_TYPE`, `XAQ_ACCOUNT`, `XAQ_THREAD_ID`,
+`XAQ_MESSAGE_ID`, …; for a batch `XAQ_EVENT_IDS`). Triage: fetch the thread with the MCP tools, act only
 if it matters and your grant allows it, end with a one or two line summary for the user if it's important, and
 otherwise reply with just `[SILENT]`. Your reply goes only to the listener's log, not to the user: anything that must
 reach them has to go through your tools (a draft, a label). Exiting non-zero or timing out
@@ -415,7 +417,7 @@ the raw request body and the `whsec_…` secret shown when the webhook was creat
 ```js
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export function verifyAgentinbox(rawBody, headers, secret) {
+export function verifyXaq(rawBody, headers, secret) {
   const id = headers["webhook-id"];
   const ts = headers["webhook-timestamp"];
   const sigs = headers["webhook-signature"] ?? "";
@@ -438,6 +440,6 @@ timeouts are retried with backoff for about a day, so the same event can arrive 
 
 If a tool fails saying the account needs to be reconnected (`list_accounts` also shows `status: needs_reauth`), or you
 receive `account.auth_failed`, Google revoked or expired the account's access. Nothing you do can fix it: tell the
-user to reconnect the account in the agentinbox console (**Accounts**), then retry. `sync.gap` means some events
+user to reconnect the account in the xaq console (**Accounts**), then retry. `sync.gap` means some events
 during an outage may be missing; if it matters, run a `search_threads` over the gap (for example `newer_than:1d`) to
 catch up.

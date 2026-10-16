@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const NODE = `// npm install standardwebhooks
 import { Webhook } from "standardwebhooks";
 
-const wh = new Webhook(process.env.AGENTINBOX_WEBHOOK_SECRET); // "whsec_…"
+const wh = new Webhook(process.env.XAQ_WEBHOOK_SECRET); // "whsec_…"
 
 // Verify the raw request body (before JSON parsing). Throws if invalid.
 const event = wh.verify(rawBody, {
@@ -19,7 +19,7 @@ const PYTHON = `# pip install standardwebhooks
 import os
 from standardwebhooks.webhooks import Webhook
 
-wh = Webhook(os.environ["AGENTINBOX_WEBHOOK_SECRET"])  # "whsec_…"
+wh = Webhook(os.environ["XAQ_WEBHOOK_SECRET"])  # "whsec_…"
 
 # Verify the raw request body. Raises if invalid.
 event = wh.verify(raw_body, dict(request.headers))`;
@@ -42,7 +42,7 @@ function verify(secret, headers, rawBody) {
   });
 }`;
 
-/** How receivers verify agentinbox's Standard Webhooks signatures. */
+/** How receivers verify xaq's Standard Webhooks signatures. */
 export function VerificationSnippets() {
   return (
     <div className="space-y-2">
@@ -81,7 +81,7 @@ export function SecretReveal({ secret }: { secret: string }) {
         <Alert variant="warning">
           <ShieldAlertIcon />
           <AlertTitle>Copy the secret now. It won't be shown again.</AlertTitle>
-          <AlertDescription>Store it with your receiver (e.g. as AGENTINBOX_WEBHOOK_SECRET). If it's lost, rotate it from the webhook's page.</AlertDescription>
+          <AlertDescription>Store it with your receiver (e.g. as XAQ_WEBHOOK_SECRET). If it's lost, rotate it from the webhook's page.</AlertDescription>
         </Alert>
       </div>
       <div className="space-y-2">

@@ -61,7 +61,7 @@ describe("search mode end to end (fake upstream)", () => {
     // The agent, over HTTP, without ?mode=search: more than 30 tools, so search mode is on by itself.
     const client = new Client({ name: "e2e", version: "1" });
     await client.connect(
-      new StreamableHTTPClientTransport(new URL("http://agentinbox.test/mcp"), {
+      new StreamableHTTPClientTransport(new URL("http://xaq.test/mcp"), {
         requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
         fetch: async (url, init) => h.app.request(String(url), init as RequestInit, { incoming: { socket: { remoteAddress: "127.0.0.1" } } }),
       }),

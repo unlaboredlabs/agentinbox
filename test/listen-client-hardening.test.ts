@@ -69,7 +69,7 @@ describe("starting point", () => {
     await waitFor(() => connected() === 1, 5000, "second stream");
     expect(api.streamRequests).toHaveLength(2);
     expect(output).toContain('already has a position on the daemon, so --from-start does nothing');
-    expect(output).toContain("npx agentinbox-cli listen --backfill");
+    expect(output).toContain("npx xaq-cli listen --backfill");
     expect(output).not.toContain("Processing every stored event");
     l.stop();
     await l.done;
@@ -80,7 +80,7 @@ describe("starting point", () => {
     await waitFor(() => connected() === 1, 5000, "third stream");
     expect(api.streamRequests).toHaveLength(3);
     expect(api.streamRequests[2]!.start).toBeNull();
-    expect(output).toContain("Listening for new events from now on. To also run the mail from before this listener started, once (in another terminal, while this keeps running): npx agentinbox-cli listen --backfill");
+    expect(output).toContain("Listening for new events from now on. To also run the mail from before this listener started, once (in another terminal, while this keeps running): npx xaq-cli listen --backfill");
     l.stop();
     await l.done;
   });
@@ -238,9 +238,9 @@ describe("untrusted fields and environment", () => {
 
   it("drops env values that start with a dash", () => {
     const env = eventEnv(makeEvent(2, { message: { threadId: "--help", id: "-x" } }));
-    expect(env.AGENTINBOX_THREAD_ID).toBeUndefined();
-    expect(env.AGENTINBOX_MESSAGE_ID).toBeUndefined();
-    expect(env.AGENTINBOX_EVENT_ID).toBe("evt_2");
+    expect(env.XAQ_THREAD_ID).toBeUndefined();
+    expect(env.XAQ_MESSAGE_ID).toBeUndefined();
+    expect(env.XAQ_EVENT_ID).toBe("evt_2");
   });
 });
 
@@ -331,7 +331,7 @@ describe("misc hardening", () => {
     try {
       const file = join(home, ".codex", "config.toml");
       writeFileSync(file, 'model = "o5"\n');
-      const t = { name: "agentinbox", url: "https://m/mcp", key: FAKE_KEY };
+      const t = { name: "xaq", url: "https://m/mcp", key: FAKE_KEY };
       setupMcp("codex", t, "/p");
       const once = readFileSync(file, "utf8");
       setupMcp("codex", t, "/p");

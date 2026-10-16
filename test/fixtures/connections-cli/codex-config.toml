@@ -1,6 +1,6 @@
 model = "gpt-5.5"
 
-[mcp_servers.agentinbox]
+[mcp_servers.xaq]
 url = "https://mail.example.com/mcp"
 http_headers = { Authorization = "Bearer aib_CODEX_FIXTURE_KEY" }
 default_tools_approval_mode = "approve"

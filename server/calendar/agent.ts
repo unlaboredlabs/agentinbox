@@ -202,7 +202,7 @@ export class AgentCalendar {
     } catch (err) {
       const email = this.trace.accountId ? this.ctx.accounts.get(this.trace.accountId)?.email : null;
       if (err instanceof ToolError && err.code === "needs_reauth" && email) {
-        throw new ToolError("needs_reauth", `The Google account ${email} needs to be reconnected. Ask the operator to reconnect it in the agentinbox console.`);
+        throw new ToolError("needs_reauth", `The Google account ${email} needs to be reconnected. Ask the operator to reconnect it in the xaq console.`);
       }
       throw err;
     }
@@ -513,7 +513,7 @@ export class AgentCalendar {
     if (hidden && a.grant.allowTo.length && (kind === "update" || (kind === "rsvp" && w.comment))) {
       throw new PolicyDenied(
         "allow_to",
-        `The organizer hides this event's guest list, so agentinbox can't check who would see your ${kind === "rsvp" ? "comment" : "change"} against this account's allowlist. ` +
+        `The organizer hides this event's guest list, so xaq can't check who would see your ${kind === "rsvp" ? "comment" : "change"} against this account's allowlist. ` +
           (kind === "rsvp" ? "Answer without a comment, or ask your user." : "Ask your user to change it in Google Calendar."),
       );
     }
@@ -602,7 +602,7 @@ export class AgentCalendar {
       if (e instanceof CalendarApplyError) {
         if (e.code === "write_uncertain") {
           if (counts) this.trace.detail.maybeSent = true;
-          throw new ToolError("write_uncertain", `The change may already have been applied, but the event changed since, so agentinbox can't tell. ${this.checkAdvice(a, kind, d.eventId)}`);
+          throw new ToolError("write_uncertain", `The change may already have been applied, but the event changed since, so xaq can't tell. ${this.checkAdvice(a, kind, d.eventId)}`);
         }
         if (e.code === "event_id_taken") throw new ToolError("event_id_taken", `event_id ${d.eventId} already belongs to a different event. Leave event_id out to create a new event.`);
         if (e.code === "calendar_conflict") throw translate(a, new GoogleApiError(412, "Precondition Failed"));
@@ -641,14 +641,14 @@ function ownView(eventId: string, change: CalendarEventInput): CalendarEventRaw 
 }
 
 const notGranted = (email: string) =>
-  new ToolError("calendar_not_granted", `Google Calendar isn't connected for ${email} yet. Ask the operator to add Google Calendar for ${email} in the agentinbox console.`);
+  new ToolError("calendar_not_granted", `Google Calendar isn't connected for ${email} yet. Ask the operator to add Google Calendar for ${email} in the xaq console.`);
 
 /** A Calendar API error as something the agent can act on, or the error itself. */
 function translate(a: CalendarAccess, err: unknown, missing?: string): unknown {
   if (!(err instanceof GoogleApiError)) return err;
   const kind = classifyCalendarError(err);
   if (kind === "api_disabled") {
-    return new ToolError("calendar_api_disabled", "The Google Calendar API is turned off in agentinbox's Google Cloud project. Ask the operator to turn it on (agentinbox console, Accounts).");
+    return new ToolError("calendar_api_disabled", "The Google Calendar API is turned off in xaq's Google Cloud project. Ask the operator to turn it on (xaq console, Accounts).");
   }
   if (kind === "scope_missing") return notGranted(a.account.email);
   if (err.status === 412) {

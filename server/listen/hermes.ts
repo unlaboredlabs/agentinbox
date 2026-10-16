@@ -6,11 +6,12 @@ import { hermesHome, yamlMcpServerState } from "./mcpsetup.ts";
 import { forwardSecret } from "./options.ts";
 import { DEFAULT_PROFILE, validProfileName } from "./paths.ts";
 import { loadProfile, saveProfile } from "./profile.ts";
-import { HERMES_ROUTE_PROMPT, hermesGatewayBase, hermesRoute, hermesRouteToolset, mcpServerName, shellQuote } from "./recipes.ts";
+import { profileBrand } from "./names.ts";
+import { hermesGatewayBase, hermesRoute, hermesRoutePrompt, hermesRouteToolset, mcpServerName, shellQuote } from "./recipes.ts";
 import { NPX, version } from "./version.ts";
 
 /**
- * `agentinbox listen hermes`: the Hermes gateway webhook route `--recipe hermes` forwards to, created with
+ * `xaq listen hermes`: the Hermes gateway webhook route `--recipe hermes` forwards to, created with
  * `hermes webhook subscribe` (Hermes Agent, NousResearch/hermes-agent). Facts this relies on, from Hermes'
  * docs (user-guide/messaging/webhooks) and source (hermes_cli/webhook.py, gateway/platforms/webhook.py,
  * gateway/run_turn.py, hermes_cli/tools_config.py, cron/scheduler.py):
@@ -56,7 +57,16 @@ export function subscribeArgs(profileName: string, flags: HermesFlags, secret?: 
   }
   if (flags.deliverChatId && !flags.deliver) throw new Error("--deliver-chat-id goes with --deliver.");
   if (flags.deliver && !/^[a-z0-9][a-z0-9_-]{0,40}$/i.test(flags.deliver)) throw new Error(`--deliver takes a platform name such as telegram, not "${flags.deliver}".`);
-  const args = ["webhook", "subscribe", hermesRoute(profileName), ...(secret ? ["--secret", secret] : []), "--prompt", HERMES_ROUTE_PROMPT, "--description", `agentinbox listener (profile ${profileName})`];
+  const args = [
+    "webhook",
+    "subscribe",
+    hermesRoute(profileName),
+    ...(secret ? ["--secret", secret] : []),
+    "--prompt",
+    hermesRoutePrompt(profileBrand(profileName)),
+    "--description",
+    `xaq listener (profile ${profileName})`,
+  ];
   if (flags.deliver) args.push("--deliver", flags.deliver);
   // = form: chat ids such as Telegram's -100… must not look like an option.
   if (flags.deliverChatId) args.push(`--deliver-chat-id=${flags.deliverChatId}`);
@@ -68,7 +78,7 @@ export function subscribeArgs(profileName: string, flags: HermesFlags, secret?: 
 /**
  * `toolsets ["mcp-<server>"]` (and a cron job's `["<server>"]`) only narrow Hermes' MCP servers when that
  * server is an enabled one in Hermes' config.yaml; otherwise Hermes adds every enabled MCP server. So the
- * agentinbox server must be there and on, or nothing is set up.
+ * xaq server must be there and on, or nothing is set up.
  */
 export function checkMcpServer(profileName: string, home = hermesHome()): void {
   const server = mcpServerName(profileName);
@@ -80,7 +90,7 @@ export function checkMcpServer(profileName: string, home = hermesHome()): void {
       ? `Hermes has no MCP server "${server}" (in ${file})`
       : state === "disabled"
         ? `the MCP server "${server}" is disabled in ${file}`
-        : `${file} lays out mcp_servers in a way agentinbox can't check, so it can't tell whether "${server}" is on`;
+        : `${file} lays out mcp_servers in a way xaq can't check, so it can't tell whether "${server}" is on`;
   throw new Error(
     `${why}. The route's tools are limited to that server, and Hermes only honours the limit for an enabled server (otherwise it adds every MCP server you have).
 ` +
@@ -90,13 +100,13 @@ export function checkMcpServer(profileName: string, home = hermesHome()): void {
 
 /**
  * A cron job gets the email with its OWN toolset, which may include a shell. Only a job limited to the
- * agentinbox MCP server (enabled_toolsets naming exactly the bare server name) is accepted.
+ * xaq MCP server (enabled_toolsets naming exactly the bare server name) is accepted.
  */
 export function checkCronJob(ref: string, profileName: string, home = hermesHome()): void {
   const file = join(home, "cron", "jobs.json");
   const server = mcpServerName(profileName);
   const fix =
-    `Limit the job to agentinbox first: ask Hermes to update cron job "${ref}" with enabled_toolsets ["${server}"] (its cronjob tool), ` +
+    `Limit the job to xaq first: ask Hermes to update cron job "${ref}" with enabled_toolsets ["${server}"] (its cronjob tool), ` +
     `then run this again. Or use --deliver instead. (In a cron job, "mcp-${server}" alone doesn't narrow anything: Hermes then adds every MCP server.)`;
   let data: unknown;
   try {
@@ -114,7 +124,7 @@ export function checkCronJob(ref: string, profileName: string, home = hermesHome
   const ok = Array.isArray(ts) && ts.includes(server) && ts.every((t) => t === server || t === `mcp-${server}`);
   if (!ok) {
     throw new Error(
-      `Hermes cron job "${ref}" isn't limited to agentinbox (enabled_toolsets: ${JSON.stringify(ts ?? null)}). ` +
+      `Hermes cron job "${ref}" isn't limited to xaq (enabled_toolsets: ${JSON.stringify(ts ?? null)}). ` +
         `Email would run with that job's tools (possibly a shell, web and your other MCP servers), and anyone can send email.\n  ${fix}`,
     );
   }
@@ -249,7 +259,7 @@ export function routeWarning(profileName: string, forwardUrl: string, file = sub
   if (isConfined(route, profileName)) return null;
   const prompt = typeof route.prompt === "string" ? route.prompt : "";
   if (route.cron_job || (prompt && !/\{[^{}\s]+\}/.test(prompt))) {
-    return { level: "debug", message: `Hermes route ${name} isn't limited to the agentinbox tools, but the event doesn't reach its prompt (${route.cron_job ? "it fires a cron job" : "no placeholders"})` };
+    return { level: "debug", message: `Hermes route ${name} isn't limited to the xaq tools, but the event doesn't reach its prompt (${route.cron_job ? "it fires a cron job" : "no placeholders"})` };
   }
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   const deliver = typeof route.deliver === "string" && /^[a-z0-9][a-z0-9_-]{0,40}$/i.test(route.deliver) ? route.deliver : "<platform>";
@@ -263,7 +273,7 @@ export function routeWarning(profileName: string, forwardUrl: string, file = sub
   return {
     level: "warn",
     message:
-      `The Hermes route ${name} this listener forwards to puts the email into its prompt but isn't limited to the agentinbox tools (toolsets: ${JSON.stringify(route.toolsets ?? null)}): ` +
+      `The Hermes route ${name} this listener forwards to puts the email into its prompt but isn't limited to the xaq tools (toolsets: ${JSON.stringify(route.toolsets ?? null)}): ` +
       `email-triggered runs there get Hermes' web tools and every MCP server, including any calendar access granted. ${fix}`,
   };
 }
@@ -277,7 +287,7 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
   const profileName = validProfileName(profileArg);
   const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
   const profile = loadProfile(profileName);
-  // Validates the flags, the agentinbox MCP server in Hermes and a cron job's tools before a secret is
+  // Validates the flags, the xaq MCP server in Hermes and a cron job's tools before a secret is
   // generated or anything runs.
   subscribeArgs(profileName, flags);
   const home = hermesHome();
@@ -297,11 +307,11 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
   const file = join(home, "webhook_subscriptions.json");
 
   if (!flags.run) {
-    const npx = `npx -y agentinbox-cli@${version}`;
+    const npx = `npx -y xaq-cli@${version}`;
     const shown = subscribeArgs(profileName, flags, "SECRET").map((a) => (a === "SECRET" ? `"$S"` : shellQuote(a)));
     out(`Hermes route for profile "${profileName}": ${route}`);
     out();
-    out(`Set it up with (recommended; it also limits the route to the agentinbox tools, see step 2):`);
+    out(`Set it up with (recommended; it also limits the route to the xaq tools, see step 2):`);
     out(`  ${pc.cyan(`${NPX} listen hermes${p} ${flagsText(flags)} --run`)}`);
     out();
     out(pc.gray("Or by hand, in two steps. 1. Create the route; the secret is read from the profile in a subshell as it runs (stops"));
@@ -327,7 +337,7 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
   const routes = (mode: "prepare" | "confine" | "remove"): string | null => {
     const r = spawn("python3", ["-I", "-c", ROUTES_PY, mode, file, lock, name, toolset], {
       encoding: "utf8",
-      input: JSON.stringify({ secret, description: `agentinbox listener (profile ${profileName})` }),
+      input: JSON.stringify({ secret, description: `xaq listener (profile ${profileName})` }),
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 30_000,
     });
@@ -349,7 +359,7 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
     const rm = spawn("hermes", ["webhook", "remove", name], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
     const removedByHermes = !rm.error && rm.status === 0 && /Removed webhook subscription/.test(rm.stdout ?? "");
     const ours = removedByHermes ? null : routes("remove");
-    if (removedByHermes || ours === null) out(`  Removed the route ${name} again${removedByHermes ? "" : " (hermes couldn't, so agentinbox did, under Hermes' lock)"}; nothing receives the listener's events. Fix the cause and run this again.`);
+    if (removedByHermes || ours === null) out(`  Removed the route ${name} again${removedByHermes ? "" : " (hermes couldn't, so xaq did, under Hermes' lock)"}; nothing receives the listener's events. Fix the cause and run this again.`);
     else out(pc.red(`  Removing the route failed too (${ours}). It is disabled, so it runs nothing; remove it with \`hermes webhook remove ${name}\`.`));
     return 1;
   };
@@ -370,9 +380,9 @@ export async function hermesSubscribe(profileArg: string, flags: HermesFlags, de
 
   // 3. Limit its tools and only then enable it, under the lock; 4. read it back.
   const problem = routes("confine") ?? verifyRoute(profileName, secret, file);
-  if (problem) return fail(`Couldn't limit the Hermes route to the agentinbox tools: ${problem}.`);
+  if (problem) return fail(`Couldn't limit the Hermes route to the xaq tools: ${problem}.`);
   out();
-  out(`${pc.green("✔")} Hermes route ${name} is set up with this listener's secret, limited to the toolset ${toolset} (the agentinbox MCP server; no other MCP servers or web tools).`);
+  out(`${pc.green("✔")} Hermes route ${name} is set up with this listener's secret, limited to the toolset ${toolset} (the xaq MCP server; no other MCP servers or web tools).`);
   out(pc.gray(`  Hermes may still add plugin toolsets you never configured for its webhook platform (see \`hermes tools\`).`));
   out(pc.gray(`  Running \`hermes webhook subscribe ${name}\` yourself later resets the limit; run this command again afterwards.`));
   if (await gatewayHealthy(base)) out(`  The Hermes gateway answers at ${base}.`);

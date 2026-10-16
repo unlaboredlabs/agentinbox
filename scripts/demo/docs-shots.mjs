@@ -60,7 +60,7 @@ const ERRORS = ["wizard-6-delivery-org-policy"];
 // ───────────── Child processes (demos, CLI): each in its own process group, stopped on exit ─────────────
 
 const children = [];
-const work = mkdtempSync(join(tmpdir(), "agentinbox-shots-"));
+const work = mkdtempSync(join(tmpdir(), "xaq-shots-"));
 
 function start(name, cmd, args, opts = {}) {
   const logFile = join(work, `${name}.log`);
@@ -106,7 +106,7 @@ async function waitFor(what, check, timeoutMs = 30_000, everyMs = 250) {
 
 /** Starts scripts/demo/seed.ts and waits for its state file (written once the demo is ready). */
 async function demo(name, port, extra = []) {
-  const stateFile = `/tmp/agentinbox-demo-${port}.json`;
+  const stateFile = `/tmp/xaq-demo-${port}.json`;
   rmSync(stateFile, { force: true });
   const child = start(`demo-${name}`, join(ROOT, "node_modules/.bin/tsx"), ["scripts/demo/seed.ts", "--port", String(port), ...extra]);
   await waitFor(
@@ -134,7 +134,7 @@ async function session(base, cookie, { theme = "light", width = WIDTH, height = 
     const [name, value] = cookie.split("=");
     await ctx.addCookies([{ name, value, url: base }]);
   }
-  await ctx.addInitScript((t) => localStorage.setItem("agentinbox.theme", t), theme);
+  await ctx.addInitScript((t) => localStorage.setItem("xaq.theme", t), theme);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.error("pageerror", e.message));
   const go = (path) => page.goto(base + path, { waitUntil: "networkidle" }).then(() => settle(page));
@@ -337,7 +337,7 @@ async function wizardFlow() {
 
   // 8. Check that it works: MCP call, listener, test email, the agent reading it
   await stepTitle("Check that it works");
-  const profileFile = join(cliEnv.XDG_CONFIG_HOME, "agentinbox/profiles/default.json");
+  const profileFile = join(cliEnv.XDG_CONFIG_HOME, "xaq/profiles/default.json");
   await waitFor("connect to save the key", () => existsSync(profileFile), 30_000, 500);
   await waitFor("connect to exit", () => connect.exited, 10_000);
   const profile = JSON.parse(readFileSync(profileFile, "utf8"));
@@ -347,8 +347,8 @@ async function wizardFlow() {
   const send = page.getByRole("button", { name: "Send a test email" });
   await waitFor("the listener (Send a test email enabled)", () => send.isEnabled(), 30_000, 500);
   await send.click();
-  await waitFor("the listener to handle the test email", () => existsSync(received) && readFileSync(received, "utf8").includes("agentinbox test"), 60_000, 500);
-  await mcpCall(base, profile.apiKey, "search_threads", { query: 'subject:"agentinbox test"' }).catch(async (err) => {
+  await waitFor("the listener to handle the test email", () => existsSync(received) && readFileSync(received, "utf8").includes("xaq test"), 60_000, 500);
+  await mcpCall(base, profile.apiKey, "search_threads", { query: 'subject:"xaq test"' }).catch(async (err) => {
     log(`search_threads: ${err.message}; reading with list_events instead`);
     await mcpCall(base, profile.apiKey, "list_events");
   });

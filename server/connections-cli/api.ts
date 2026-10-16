@@ -22,7 +22,7 @@ export type { ConnectionProbe, ConnectionView, PresetView, StartConnectResult };
 export class BrokerOffError extends Error {
   constructor() {
     super(
-      "This agentinbox doesn't have connections turned on yet (the brokerUpstreams setting), or is older than this CLI. " +
+      "This xaq doesn't have connections turned on yet (the brokerUpstreams setting), or is older than this CLI. " +
         "Update it, turn connections on in the console's Settings, then run this again.",
     );
     this.name = "BrokerOffError";

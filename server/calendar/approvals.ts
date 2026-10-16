@@ -39,7 +39,7 @@ export class CalendarApplyError extends Error {
 export const EVENT_CHANGED = "The event changed in Google Calendar since the change was prepared, so it was not applied.";
 export const EVENT_GONE = "The event no longer exists in Google Calendar.";
 export const MAYBE_APPLIED =
-  "The change may already have been applied, but the event has changed in Google Calendar since, so agentinbox can't tell. Check Google Calendar.";
+  "The change may already have been applied, but the event has changed in Google Calendar since, so xaq can't tell. Check Google Calendar.";
 export const ID_TAKEN = "That event id already belongs to a different event, so nothing was created.";
 
 const ALL_DAY = /^\d{4}-\d{2}-\d{2}$/;

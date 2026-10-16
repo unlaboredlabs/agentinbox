@@ -241,7 +241,7 @@ export class Approvals {
    */
   private async approveCall(current: McpCallApproval, note: string | null | undefined, started: number): Promise<Approval> {
     const id = current.id;
-    if (!this.ctx.broker.canRunApprovedCalls()) throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
+    if (!this.ctx.broker.canRunApprovedCalls()) throw conflict("Tool call requests can't be approved by this version.", "Update xaq, or reject the request.");
     if (!this.transition(id, "pending", "approved", note)) throw this.notPending(current);
     this.emit(id);
     try {
@@ -336,7 +336,7 @@ export class Approvals {
       this.ctx.db.run(
         "UPDATE approvals SET status = 'pending', decided_at = NULL, error = ? WHERE id = ? AND status = 'approved'",
         isCalendarApprovalKind(kind)
-          ? "Applying the change was interrupted before it finished. Approve again to retry: agentinbox checks Google Calendar first, so it is never applied twice."
+          ? "Applying the change was interrupted before it finished. Approve again to retry: xaq checks Google Calendar first, so it is never applied twice."
           : "Sending was interrupted before it finished. Approve again to retry (if it was actually sent, the retry fails harmlessly).",
         id,
       );

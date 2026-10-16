@@ -11,7 +11,7 @@ export type StreamEnd = { kind: "revoked"; code: string; reason: string } | { ki
  * ones (an admin disabled the agent, or took away its last read grant) keep it waiting.
  */
 export const REFUSALS: Record<string, { permanent: boolean; text: string }> = {
-  agent_deleted: { permanent: true, text: "This agent was deleted in the agentinbox console." },
+  agent_deleted: { permanent: true, text: "This agent was deleted in the xaq console." },
   key_rotated: { permanent: true, text: "This agent's API key was replaced (rotated) in the console." },
   unauthorized: { permanent: true, text: "The daemon doesn't recognize this API key (it was rotated, or the agent was deleted)." },
   agent_disabled: { permanent: false, text: "An admin disabled this agent. Waiting; it resumes on its own when the agent is re-enabled." },
@@ -200,7 +200,7 @@ export class EventStream {
         clearTimeout(stallTimer);
         const longWait = res.status === 404 ? 300_000 : null;
         if (res.status === 404) {
-          this.disconnected("This agentinbox server has no /agent/v1 event stream (upgrade the daemon). Retrying in 5 minutes", longWait!, true);
+          this.disconnected("This xaq server has no /agent/v1 event stream (upgrade the daemon). Retrying in 5 minutes", longWait!, true);
           await this.sleep(longWait!);
         } else {
           this.failures++;

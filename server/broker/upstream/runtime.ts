@@ -21,7 +21,7 @@ export const CLIENT_METADATA_PATH = "/oauth/connections/client.json";
 /** Paste-mode fallback for providers that refuse http://localhost redirects (WHOOP). */
 export const HTTPS_LOCALHOST_REDIRECT = `https://localhost${CONNECTION_CALLBACK_PATH}`;
 const STATE_TTL_MS = 15 * 60_000;
-const CLIENT_NAME = "agentinbox";
+const CLIENT_NAME = "xaq";
 
 /**
  * A native integration's own OAuth (a `user_app` preset such as WHOOP): its authorize URL and code exchange.

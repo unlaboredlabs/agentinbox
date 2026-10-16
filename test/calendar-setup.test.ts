@@ -295,7 +295,7 @@ describe("GET /accounts/:id/calendars", () => {
 
   it("re-reads the granted scopes when Google says one is missing", async () => {
     const { account } = await consent(ctx, fake, OPS, {}, { scopes: [...MAIL_ONLY, ...CALENDAR_SCOPES.slice(0, 2)] });
-    // agentinbox believes it has every scope (stale), Google knows better.
+    // xaq believes it has every scope (stale), Google knows better.
     ctx.db.run("UPDATE accounts SET scopes = ? WHERE id = ?", JSON.stringify([...MAIL_ONLY, ...CALENDAR_SCOPES]), account!.id);
     cal.scopeInsufficient(1);
     const err = await ctx.calendar.calendars(account!.id).catch((e: unknown) => e);

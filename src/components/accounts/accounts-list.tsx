@@ -49,7 +49,7 @@ export function AccountsList() {
             </EmptyMedia>
             <EmptyTitle>No Gmail accounts yet</EmptyTitle>
             <EmptyDescription>
-              Connect a mailbox to start syncing mail. agentinbox holds the credentials; agents only get the access you grant them.
+              Connect a mailbox to start syncing mail. xaq holds the credentials; agents only get the access you grant them.
             </EmptyDescription>
           </EmptyHeader>
           <EmptyContent>

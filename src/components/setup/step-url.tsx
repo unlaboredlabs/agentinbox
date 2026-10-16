@@ -121,7 +121,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
     <StepCard
       index={index}
       title={STEP_META.url.title}
-      description="Google sends you back to this address after you sign in, and your agents use it to reach agentinbox."
+      description="Google sends you back to this address after you sign in, and your agents use it to reach xaq."
       footer={
         changedRedirect ? (
           <StepFooter onNext={onNext} nextLabel={redirectProblem ? "I'll add it, continue" : "Continue"} />
@@ -138,14 +138,14 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
       {changedRedirect ? (
         <div className="space-y-3" role="status">
           <p className="text-sm">
-            Saved: agentinbox is now at <code className="font-mono">{settings.publicUrl}</code>.
+            Saved: xaq is now at <code className="font-mono">{settings.publicUrl}</code>.
           </p>
           <RedirectNotice showStatus />
         </div>
       ) : (
         <>
           <Field data-invalid={!!error}>
-            <FieldLabel htmlFor="setup-url">Address of agentinbox</FieldLabel>
+            <FieldLabel htmlFor="setup-url">Address of xaq</FieldLabel>
             <Input
               id="setup-url"
               className="font-mono"
@@ -212,13 +212,13 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
 
           <Disclosure summary="Not sure which address to use? Pick your situation" defaultOpen={browserRemote}>
             <ChoiceCards<Situation>
-              aria-label="Where agentinbox runs"
+              aria-label="Where xaq runs"
               value={situation}
               onChange={setSituation}
               columns={2}
               choices={[
-                { value: "local", icon: LaptopIcon, title: "All on this computer", description: "Your browser, agentinbox and your agents run on one machine." },
-                { value: "remote", icon: ServerIcon, title: "On a server or VM", description: "agentinbox runs on another machine you reach over SSH (a server, VM, Raspberry Pi)." },
+                { value: "local", icon: LaptopIcon, title: "All on this computer", description: "Your browser, xaq and your agents run on one machine." },
+                { value: "remote", icon: ServerIcon, title: "On a server or VM", description: "xaq runs on another machine you reach over SSH (a server, VM, Raspberry Pi)." },
                 { value: "tailscale", icon: NetworkIcon, title: "I use Tailscale", description: "The machines are on the same tailnet." },
                 { value: "public", icon: ShieldIcon, title: "Public, with a domain", description: "A server reachable from the internet, e.g. mail.example.com." },
               ]}
@@ -262,7 +262,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
                 )}
                 {situation === "tailscale" && (
                   <>
-                    <p>On the machine running agentinbox, give it an https address on your tailnet:</p>
+                    <p>On the machine running xaq, give it an https address on your tailnet:</p>
                     <CodeBlock code={`tailscale serve --bg ${port}`} wrap copyLabel="Copy Tailscale command" />
                     <p>
                       It prints an address like <span className="font-mono">https://your-machine.your-tailnet.ts.net</span>. Open that in your
@@ -278,11 +278,11 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
                 {situation === "public" && (
                   <>
                     <p>
-                      Put an https reverse proxy in front of agentinbox and keep agentinbox itself private. For example with Caddy (it gets the
+                      Put an https reverse proxy in front of xaq and keep xaq itself private. For example with Caddy (it gets the
                       certificate for you):
                     </p>
                     <CodeBlock code={`caddy reverse-proxy --from mail.example.com --to localhost:${port}`} wrap copyLabel="Copy Caddy command" />
-                    <p>Start agentinbox so only the proxy can reach it, and trust the proxy's headers:</p>
+                    <p>Start xaq so only the proxy can reach it, and trust the proxy's headers:</p>
                     <CodeBlock code={`TRUST_PROXY=1 ${NPX} --host 127.0.0.1 --port ${port}`} wrap copyLabel="Copy start command" />
                     <p>
                       Then use <span className="font-mono">https://mail.example.com</span> (your domain) here.
@@ -293,7 +293,7 @@ function UrlForm({ index, onNext, returnTo, settings, addresses }: StepProps & {
             )}
           </Disclosure>
 
-          <p className="text-xs text-muted-foreground">You can change this later in Settings; agentinbox then shows the new redirect URI to add in Google Cloud.</p>
+          <p className="text-xs text-muted-foreground">You can change this later in Settings; xaq then shows the new redirect URI to add in Google Cloud.</p>
         </>
       )}
     </StepCard>

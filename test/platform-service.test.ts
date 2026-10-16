@@ -17,8 +17,8 @@ import { testContext } from "./helpers.ts";
 const KEY = Buffer.alloc(32, 1).toString("base64");
 const spec = (patch: Partial<ServiceSpec> = {}): ServiceSpec => ({
   execPath: "/usr/bin/node",
-  entry: "/home/me/.agentinbox/app/node_modules/agentinbox-cli/dist/cli.js",
-  dataDir: "/home/me/.agentinbox",
+  entry: "/home/me/.xaq/app/node_modules/xaq-cli/dist/cli.js",
+  dataDir: "/home/me/.xaq",
   port: 8425,
   host: "0.0.0.0",
   extraEnv: {},
@@ -27,13 +27,13 @@ const spec = (patch: Partial<ServiceSpec> = {}): ServiceSpec => ({
 
 describe("systemd unit", () => {
   it("loads service.env by an unquoted absolute path and keeps secrets out of the unit", () => {
-    const unit = renderSystemdUnit(spec({ extraEnv: { AGENTINBOX_MASTER_KEY: KEY, TRUST_PROXY: "1" } }));
-    expect(unit).toContain("\nEnvironmentFile=/home/me/.agentinbox/service.env\n");
+    const unit = renderSystemdUnit(spec({ extraEnv: { XAQ_MASTER_KEY: KEY, TRUST_PROXY: "1" } }));
+    expect(unit).toContain("\nEnvironmentFile=/home/me/.xaq/service.env\n");
     expect(unit).not.toContain(KEY);
     expect(unit).not.toContain("TRUST_PROXY");
-    expect(unit).toContain('ExecStart="/usr/bin/node" "/home/me/.agentinbox/app/node_modules/agentinbox-cli/dist/cli.js" start --no-open');
-    expect(unit).toContain('Environment="AGENTINBOX_DATA=/home/me/.agentinbox"');
-    expect(unit).toContain('Environment="AGENTINBOX_SERVICE=1"');
+    expect(unit).toContain('ExecStart="/usr/bin/node" "/home/me/.xaq/app/node_modules/xaq-cli/dist/cli.js" start --no-open');
+    expect(unit).toContain('Environment="XAQ_DATA=/home/me/.xaq"');
+    expect(unit).toContain('Environment="XAQ_SERVICE=1"');
     expect(unit).toContain("WantedBy=default.target");
   });
 
@@ -47,22 +47,22 @@ describe("systemd unit", () => {
 
 describe("launchd plist", () => {
   it("carries the extra env, escaped", () => {
-    const plist = renderLaunchdPlist(spec({ dataDir: "/Users/me/a&b", extraEnv: { AGENTINBOX_MASTER_KEY: KEY, AGENTINBOX_LOG_LEVEL: "debug" } }));
-    expect(plist).toContain(`<key>AGENTINBOX_MASTER_KEY</key><string>${KEY}</string>`);
-    expect(plist).toContain("<key>AGENTINBOX_LOG_LEVEL</key><string>debug</string>");
-    expect(plist).toContain("<key>AGENTINBOX_DATA</key><string>/Users/me/a&amp;b</string>");
-    expect(plist).toContain("<string>/Users/me/a&amp;b/agentinbox.log</string>");
-    expect(plist).toContain("<key>Label</key><string>com.unlaboredlabs.agentinbox</string>");
+    const plist = renderLaunchdPlist(spec({ dataDir: "/Users/me/a&b", extraEnv: { XAQ_MASTER_KEY: KEY, XAQ_LOG_LEVEL: "debug" } }));
+    expect(plist).toContain(`<key>XAQ_MASTER_KEY</key><string>${KEY}</string>`);
+    expect(plist).toContain("<key>XAQ_LOG_LEVEL</key><string>debug</string>");
+    expect(plist).toContain("<key>XAQ_DATA</key><string>/Users/me/a&amp;b</string>");
+    expect(plist).toContain("<string>/Users/me/a&amp;b/xaq.log</string>");
+    expect(plist).toContain("<key>Label</key><string>sh.xaq.daemon</string>");
   });
 });
 
 describe("service env", () => {
   it("keeps previous values on reinstall unless the shell overrides or clears them", () => {
-    const previous = parseEnvFile(`AGENTINBOX_MASTER_KEY=${KEY}\nTRUST_PROXY=1\nAGENTINBOX_LOG_LEVEL=debug\n# comment\n`);
-    expect(mergeServiceEnv(previous, {})).toEqual({ AGENTINBOX_MASTER_KEY: KEY, TRUST_PROXY: "1", AGENTINBOX_LOG_LEVEL: "debug" });
-    expect(mergeServiceEnv(previous, { AGENTINBOX_LOG_LEVEL: "warn", TRUST_PROXY: "" })).toEqual({
-      AGENTINBOX_MASTER_KEY: KEY,
-      AGENTINBOX_LOG_LEVEL: "warn",
+    const previous = parseEnvFile(`XAQ_MASTER_KEY=${KEY}\nTRUST_PROXY=1\nXAQ_LOG_LEVEL=debug\n# comment\n`);
+    expect(mergeServiceEnv(previous, {})).toEqual({ XAQ_MASTER_KEY: KEY, TRUST_PROXY: "1", XAQ_LOG_LEVEL: "debug" });
+    expect(mergeServiceEnv(previous, { XAQ_LOG_LEVEL: "warn", TRUST_PROXY: "" })).toEqual({
+      XAQ_MASTER_KEY: KEY,
+      XAQ_LOG_LEVEL: "warn",
     });
     expect(mergeServiceEnv({}, { TRUST_PROXY: "1", PATH: "/bin" })).toEqual({ TRUST_PROXY: "1" });
     expect(mergeServiceEnv({ TRUST_PROXY_FROM: "10.0.0.0/8" }, {})).toEqual({ TRUST_PROXY_FROM: "10.0.0.0/8" });
@@ -83,7 +83,7 @@ function cli(args: string[], env: Record<string, string> = {}) {
       cwd: ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1", PORT: "", HOST: "", AGENTINBOX_DATA: "", ...env },
+      env: { ...process.env, NO_COLOR: "1", PORT: "", HOST: "", XAQ_DATA: "", ...env },
     });
     return { code: 0, stdout, stderr: "" };
   } catch (err) {
@@ -94,10 +94,10 @@ function cli(args: string[], env: Record<string, string> = {}) {
 
 describe("reset-password", () => {
   it("refuses a data directory without an instance, creating nothing", () => {
-    const dir = join(mkdtempSync(join(tmpdir(), "agentinbox-none-")), "data");
+    const dir = join(mkdtempSync(join(tmpdir(), "xaq-none-")), "data");
     const r = cli(["reset-password", "--data", dir]);
     expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/No agentinbox data in .*sudo/);
+    expect(r.stderr).toMatch(/No xaq data in .*sudo/);
     expect(existsSync(dir)).toBe(false);
   });
 
@@ -123,10 +123,10 @@ describe("reset-password", () => {
   });
 
   it("rejects an invalid PORT environment variable", () => {
-    const r = cli(["reset-password", "--data", "/nonexistent-agentinbox"], { PORT: "80a" });
+    const r = cli(["reset-password", "--data", "/nonexistent-xaq"], { PORT: "80a" });
     expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/No agentinbox data|PORT="80a"/);
-    const s = cli(["start", "--data", mkdtempSync(join(tmpdir(), "agentinbox-port-"))], { PORT: "80a" });
+    expect(r.stderr).toMatch(/No xaq data|PORT="80a"/);
+    const s = cli(["start", "--data", mkdtempSync(join(tmpdir(), "xaq-port-"))], { PORT: "80a" });
     expect(s.code).toBe(1);
     expect(s.stderr).toContain('PORT="80a" is not a valid port');
   });

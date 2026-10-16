@@ -216,7 +216,7 @@ describe("Add connection", () => {
 
   it("explains what was found in plain words, including the private-network block", () => {
     expect(probeSummary(probe({ auth: "oauth", issuer: "https://auth.example.com", registration: "dcr" }))).toBe(
-      "Signs in with auth.example.com. agentinbox registers itself automatically, so there's nothing to set up there.",
+      "Signs in with auth.example.com. xaq registers itself automatically, so there's nothing to set up there.",
     );
     expect(probeSummary(probe({ auth: "header" }))).toMatch(/^Needs an API key or token/);
     expect(probeSummary(probe({ reachable: false, auth: "unknown", message: "Connection refused." }))).toBe("Connection refused.");
@@ -252,7 +252,7 @@ describe("Add connection", () => {
     expect(connectInput({ ...ready, headerValue: "Bearer sk-123" }).header?.value).toBe("Bearer sk-123");
     expect(connectInput({ ...ready, headerName: "X-API-Key" }).header).toEqual({ name: "X-API-Key", value: "sk-123" });
     expect(draftProblems({ ...ready, agents: [] }, [])).toEqual(["Pick at least one agent, or all of them."]);
-    expect(draftProblems({ ...d, probe: probe({ reachable: false, auth: "unknown" }) }, [])).toContain("agentinbox couldn't reach this server.");
+    expect(draftProblems({ ...d, probe: probe({ reachable: false, auth: "unknown" }) }, [])).toContain("xaq couldn't reach this server.");
   });
 
   it("gives a connection created early for the allow the rest of the draft before connecting", () => {

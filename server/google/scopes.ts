@@ -1,4 +1,4 @@
-// Every OAuth scope agentinbox asks Google for, in one place (docs/calendar.md, "Google facts").
+// Every OAuth scope xaq asks Google for, in one place (docs/calendar.md, "Google facts").
 // Scopes are compared as full URLs; Google's token responses name the identity scopes as
 // "openid", ".../userinfo.email" and ".../userinfo.profile".
 
@@ -35,7 +35,7 @@ export const missingScopes = (granted: readonly string[], wanted: readonly strin
 
 export const hasScopes = (granted: readonly string[], wanted: readonly string[]): boolean => missingScopes(granted, wanted).length === 0;
 
-/** What each calendar scope lets agentinbox do, in the words used to report unticked permissions. */
+/** What each calendar scope lets xaq do, in the words used to report unticked permissions. */
 export const CALENDAR_SCOPE_WORDS: Record<string, string> = {
   [CALENDAR_EVENTS_SCOPE]: "view and edit events",
   [CALENDAR_LIST_SCOPE]: "see the list of calendars",

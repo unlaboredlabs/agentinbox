@@ -38,7 +38,7 @@ export function TestConnection({ agentId, className }: { agentId: string; classN
         </Button>
         <span id={`test-${agentId}-hint`} className="text-xs text-muted-foreground">
           Lists the tools this agent's access allows, as seen from the server. It doesn't reach your agent: that shows above once it calls
-          agentinbox.
+          xaq.
         </span>
       </div>
       {error !== undefined && <ErrorAlert error={error} title="Check failed" />}

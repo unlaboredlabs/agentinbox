@@ -202,10 +202,10 @@ describe("listener input for calendar events", () => {
 
   it("puts the calendar and event ids in the environment, never the title", () => {
     const env = eventEnv(payload());
-    expect(env).toMatchObject({ AGENTINBOX_EVENT_TYPE: "calendar.invitation_received", AGENTINBOX_CALENDAR_ID: ME, AGENTINBOX_CALENDAR_EVENT_ID: "ev1" });
-    expect(env).not.toHaveProperty("AGENTINBOX_MESSAGE_ID");
+    expect(env).toMatchObject({ XAQ_EVENT_TYPE: "calendar.invitation_received", XAQ_CALENDAR_ID: ME, XAQ_CALENDAR_EVENT_ID: "ev1" });
+    expect(env).not.toHaveProperty("XAQ_MESSAGE_ID");
     expect(JSON.stringify(env)).not.toContain("Quarterly");
-    expect(batchEnv([payload()])).toMatchObject({ AGENTINBOX_CALENDAR_EVENT_ID: "ev1", AGENTINBOX_EVENT_COUNT: "1" });
+    expect(batchEnv([payload()])).toMatchObject({ XAQ_CALENDAR_EVENT_ID: "ev1", XAQ_EVENT_COUNT: "1" });
   });
 
   it("--types takes the calendar types; mail-only skips let calendar events through", () => {

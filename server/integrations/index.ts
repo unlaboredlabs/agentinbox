@@ -4,7 +4,7 @@
 //
 // Rules for entries:
 // - `id` is stored in connections.preset (checked here, not by the schema) and names its events `<id>.<name>`;
-//   it can't be one of agentinbox's own event prefixes (message, calendar, connection, approval, …).
+//   it can't be one of xaq's own event prefixes (message, calendar, connection, approval, …).
 // - Remote presets (Notion) give `url` and `auth`; native ones (WHOOP) give `createSource` (and `events`).
 
 import type { IntegrationPreset } from "../broker/types.ts";

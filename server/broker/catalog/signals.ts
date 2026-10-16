@@ -25,7 +25,7 @@ const IMPORTANT = /<\s*\/?\s*(important|system|instructions?|secret)\b[^>]{0,40}
 const CONCEALMENT =
   /\b(?:do\s*n[o']?t|never|without)\s+(?:tell(?:ing)?|inform(?:ing)?|mention(?:ing)?|notify(?:ing)?|show(?:ing)?|alert(?:ing)?)\s+(?:this\s+(?:to\s+)?)?(?:the\s+)?user\b|\bhide\s+(?:this|it)\s+from\s+(?:the\s+)?user\b/i;
 const PATHS =
-  /(?:~\/|\$HOME\/)[\w./-]+|\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b|\bmcp\.json\b|claude_desktop_config|\.aws\/credentials|\.npmrc\b|\.netrc\b|\.env\b|\/etc\/(?:passwd|shadow)|\.cursor\/|\.codex\/|\.hermes\/|\.agentinbox\b|master\.key\b/i;
+  /(?:~\/|\$HOME\/)[\w./-]+|\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b|\bmcp\.json\b|claude_desktop_config|\.aws\/credentials|\.npmrc\b|\.netrc\b|\.env\b|\/etc\/(?:passwd|shadow)|\.cursor\/|\.codex\/|\.hermes\/|\.(?:xaq|agentinbox)\b|master\.key\b/i; // rename-xaq: keep (both data directories)
 const BASE64 = /[A-Za-z0-9+/]{80,}={0,2}|[A-Za-z0-9_-]{120,}/;
 /** Parameter names that invite the model to put conversation context in (the "sidenote" exfiltration pattern). */
 export const CATCH_ALL_PARAMS: ReadonlySet<string> = new Set(["context", "sidenote", "side_note", "notes", "note", "extra", "conversation", "history"]);

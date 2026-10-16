@@ -12,7 +12,7 @@ export type PayloadData = WebhookPayload["data"] & { contentError?: string };
 const CONTENT_TIMEOUT_MS = 20_000;
 
 const TEST_CONTENT: MessageContent = {
-  body: "This is a **test delivery** from agentinbox. It is not a real email.",
+  body: "This is a **test delivery** from xaq. It is not a real email.",
   truncated: false,
   attachments: [],
   signals: { hiddenContentRemoved: false, suspiciousInstructions: [], auth: null, external: true },
@@ -29,7 +29,7 @@ export interface PayloadOptions {
 }
 
 /**
- * The Standard Webhooks body for an event, shared by webhook deliveries and `agentinbox listen`
+ * The Standard Webhooks body for an event, shared by webhook deliveries and `xaq listen`
  * streams. With `includeBody`, message events get cleaned content (or `contentError`), and calendar
  * events other than cancellations get the cleaned description (no `content` when there is none).
  */

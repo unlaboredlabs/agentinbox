@@ -112,7 +112,7 @@ export function whoopRefreshFn(client: WhoopClient, opts: Omit<OAuthOptions, "si
 export async function checkClient(client: WhoopClient, redirectUri: string, opts: OAuthOptions = {}): Promise<"ok" | "invalid_client" | "unknown"> {
   try {
     await tokenRequest(
-      { grant_type: "authorization_code", code: "agentinbox-client-check", redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret },
+      { grant_type: "authorization_code", code: "xaq-client-check", redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret },
       opts,
     );
     return "ok";

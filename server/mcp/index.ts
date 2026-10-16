@@ -23,13 +23,13 @@ export function mcpRoutes(ctx: AppContext) {
     const key = bearer(c.req.header("authorization"));
     const principal = key ? ctx.policy.authenticate(key) : null;
     if (!principal) {
-      c.header("WWW-Authenticate", 'Bearer realm="agentinbox"');
+      c.header("WWW-Authenticate", 'Bearer realm="xaq"');
       return c.json(
         {
           error: {
             code: "unauthorized",
             message: key ? "Invalid or disabled agent API key." : "Missing agent API key.",
-            hint: "Send the agent's key as `Authorization: Bearer aib_…`. Keys are created in the agentinbox console under Agents.",
+            hint: "Send the agent's key as `Authorization: Bearer aib_…`. Keys are created in the xaq console under Agents.",
           },
         },
         401,

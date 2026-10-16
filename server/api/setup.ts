@@ -38,8 +38,8 @@ const lostLinkHint = (dataDir: string) => {
   const custom = resetPasswordCommand(dataDir) !== cliCommand("reset-password");
   return (
     `On the server, run \`${cliCommand("reset-password")}${custom ? " --data <dir>" : ""}\`` +
-    `${custom ? " (with the data directory agentinbox uses)" : ""}: it prints the setup link again (nothing is reset while the instance isn't set up yet). ` +
-    "If you started agentinbox in a terminal, restarting it prints the link too."
+    `${custom ? " (with the data directory xaq uses)" : ""}: it prints the setup link again (nothing is reset while the instance isn't set up yet). ` +
+    "If you started xaq in a terminal, restarting it prints the link too."
   );
 };
 

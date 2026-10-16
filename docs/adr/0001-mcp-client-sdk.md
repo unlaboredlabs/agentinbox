@@ -13,7 +13,7 @@ The broker is an MCP client to every upstream connection. M1 has to speak:
 It also needs OAuth with state that survives a browser redirect, refresh, cancellation from the downstream request's
 abort signal, and a custom `fetch` (the pinned, SSRF-guarded one).
 
-agentinbox pins `@modelcontextprotocol/sdk` **1.32.1** (v1), which serves `/mcp`. Its client knows protocol versions
+xaq pins `@modelcontextprotocol/sdk` **1.32.1** (v1), which serves `/mcp`. Its client knows protocol versions
 up to 2025-11-25 only. The v2 SDK splits into `@modelcontextprotocol/client` and `@modelcontextprotocol/server`. The
 latest is **2.3.1** (2026-10-05), and it negotiates both protocol generations (`versionNegotiation`).
 

@@ -2,7 +2,7 @@
 // Relative (not @shared): unit tests type-check this file under the server config.
 import type { ConnectAttempt } from "../../../shared/types.ts";
 
-/** null: the status request itself failed (agentinbox unreachable, signed out…). */
+/** null: the status request itself failed (xaq unreachable, signed out…). */
 export type AttemptStatus = ConnectAttempt["status"] | null;
 
 export type CheckNote = "pending" | "pending-reauth" | "unreachable" | "already-connected" | "expired";
@@ -10,9 +10,9 @@ export type CheckNote = "pending" | "pending-reauth" | "unreachable" | "already-
 export const CHECK_NOTES: Record<CheckNote, string> = {
   pending: "No new account yet. Finish signing in with Google, or use the paste option below if the window ended on an error page.",
   "pending-reauth": "Google hasn't sent you back yet. Finish signing in with Google, or use the paste option below if the window ended on an error page.",
-  unreachable: "Couldn't reach agentinbox to check. Make sure it's still running, then try again.",
+  unreachable: "Couldn't reach xaq to check. Make sure it's still running, then try again.",
   "already-connected": "This account was already connected, so there's nothing new to detect from here. If Google's window said it worked, close this dialog.",
-  expired: "This sign-in may have expired (links last 15 minutes) or agentinbox restarted. Open Google sign-in again to start a fresh one.",
+  expired: "This sign-in may have expired (links last 15 minutes) or xaq restarted. Open Google sign-in again to start a fresh one.",
 };
 
 export interface AttemptContext {

@@ -160,7 +160,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
       <Card>
         <CardHeader>
           <CardTitle>Mail sync</CardTitle>
-          <CardDescription>How agentinbox learns about new mail.</CardDescription>
+          <CardDescription>How xaq learns about new mail.</CardDescription>
         </CardHeader>
         <CardContent>
           <FieldGroup>
@@ -250,7 +250,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         <CardHeader>
           <CardTitle>Agent pairing</CardTitle>
           <CardDescription>
-            Lets an agent ask for access from its own terminal with <code className="font-mono text-xs">npx agentinbox-cli connect</code>, instead of you
+            Lets an agent ask for access from its own terminal with <code className="font-mono text-xs">npx xaq-cli connect</code>, instead of you
             copying an API key.
           </CardDescription>
         </CardHeader>
@@ -277,7 +277,7 @@ export function SettingsForm({ settings, system }: { settings: Settings; system:
         <CardHeader>
           <CardTitle>Connections (MCP broker)</CardTitle>
           <CardDescription>
-            Lets your agents use other MCP servers and apps, like Notion, through agentinbox. agentinbox holds every sign-in and asks you before risky
+            Lets your agents use other MCP servers and apps, like Notion, through xaq. xaq holds every sign-in and asks you before risky
             actions.
           </CardDescription>
         </CardHeader>

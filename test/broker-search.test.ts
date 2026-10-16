@@ -141,7 +141,7 @@ describe("search mode: when it applies", () => {
 
     const root = new Hono().route("/", mcpRoutes(ctx));
     const viaHttp = async (path: string) => {
-      const transport = new StreamableHTTPClientTransport(new URL(`http://agentinbox.test${path}`), {
+      const transport = new StreamableHTTPClientTransport(new URL(`http://xaq.test${path}`), {
         requestInit: { headers: { Authorization: `Bearer ${reader.apiKey}` } },
         fetch: async (url, init) => root.request(String(url), init as RequestInit),
       });

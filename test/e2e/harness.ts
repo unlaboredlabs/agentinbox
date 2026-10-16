@@ -196,7 +196,7 @@ export class Stack {
 
   static async start(opts: StackOptions = {}): Promise<Stack> {
     const fake = opts.fake ?? (await startFakeGoogle());
-    const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "agentinbox-e2e-"));
+    const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "xaq-e2e-"));
     const stack = new Stack(fake, dataDir, !opts.fake, !opts.dataDir);
     try {
       await stack.startServer(opts.overrides);

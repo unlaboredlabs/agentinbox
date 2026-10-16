@@ -41,7 +41,7 @@ export function InsecureTransportAlert({
           <code className="font-mono">--insecure</code>.
         </p>
         <p className="text-foreground/80">
-          Put agentinbox behind https (a reverse proxy or tunnel), or reach it over Tailscale, then update the{" "}
+          Put xaq behind https (a reverse proxy or tunnel), or reach it over Tailscale, then update the{" "}
           <Link to="/settings" hash="public-url" className="font-medium underline underline-offset-4">
             public URL
           </Link>
@@ -222,8 +222,8 @@ export function ConnectAgentGuide({
             <p className="text-xs text-muted-foreground">
               It prints a code like <span className="font-mono">K7QM-2XPD</span> and waits for you. Keep the terminal open.
               {tool === "other"
-                ? " It then shows how to point your agent's MCP client at agentinbox."
-                : ` --setup-mcp then adds agentinbox to ${label}; the key is saved on that machine and never shown.`}
+                ? " It then shows how to point your agent's MCP client at xaq."
+                : ` --setup-mcp then adds xaq to ${label}; the key is saved on that machine and never shown.`}
             </p>
           </Step>
           <Step n={2} icon={ShieldCheckIcon} title="Approve it here with the code from your terminal">
@@ -234,7 +234,7 @@ export function ConnectAgentGuide({
               <Step n={3} icon={BookOpenIcon} title={`Teach ${label} the rules`}>
                 <Command code={c.skillInstall} label="skill install command" />
                 <p className="text-xs text-muted-foreground">
-                  Installs the agentinbox skill: how to triage, reply in threads, wait for approvals, and treat email content as untrusted.
+                  Installs the xaq skill: how to triage, reply in threads, wait for approvals, and treat email content as untrusted.
                 </p>
               </Step>
               <Step

@@ -8,7 +8,7 @@ import type { StoredEvent } from "./types.ts";
  * can join them like any other event. Every agent- and console-facing query only reads seq > 0.
  */
 export const TEST_ACCOUNT_ID = "acc_test";
-export const TEST_ACCOUNT_EMAIL = "test@agentinbox.invalid";
+export const TEST_ACCOUNT_EMAIL = "test@xaq.invalid";
 
 export interface EventRow {
   seq: number;

@@ -180,7 +180,7 @@ export function StepFooter({
   );
 }
 
-/** Numbered instructions for things done outside agentinbox (in Google Cloud). */
+/** Numbered instructions for things done outside xaq (in Google Cloud). */
 export function Guide({ children }: { children: React.ReactNode }) {
   return <ol className="space-y-6 [counter-reset:guide]">{children}</ol>;
 }

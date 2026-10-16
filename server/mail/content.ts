@@ -113,7 +113,7 @@ const visibleText = (s: string | null) => stripInvisible(s ?? "").text.trim();
 export type UntrustedTag = "email_content" | "calendar_content";
 
 /**
- * Every delimiter agentinbox wraps untrusted text in: mail bodies, calendar descriptions and upstream MCP
+ * Every delimiter xaq wraps untrusted text in: mail bodies, calendar descriptions and upstream MCP
  * tool output (server/broker/policy/output.ts). escapeDelimiters neutralizes all of them everywhere.
  */
 export const DELIMITER_TAGS = ["email_content", "calendar_content", "tool_output"] as const;

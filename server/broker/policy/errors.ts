@@ -15,7 +15,7 @@ export interface DescribedFailure {
 const NOT_SENT = new Set<SourceErrorCode>(["needs_reauth", "blocked_target", "rate_limited"]);
 
 export const reconnectMessage = (name: string) =>
-  `The owner must reconnect ${name} in agentinbox (Connections → Reconnect) before its tools work again. Nothing was sent to ${name}.`;
+  `The owner must reconnect ${name} in xaq (Connections → Reconnect) before its tools work again. Nothing was sent to ${name}.`;
 
 export function describeFailure(err: unknown, connectionName: string, scrubber: Scrubber): DescribedFailure {
   const detail = (msg: string) => {
@@ -52,7 +52,7 @@ export function describeFailure(err: unknown, connectionName: string, scrubber: 
     case "blocked_target":
       return {
         reason: err.code,
-        message: `agentinbox blocked the connection to ${connectionName}: its address is on a private or blocked network. Nothing was sent. The owner can allow this host for the connection in agentinbox (Connections → ${connectionName}).`,
+        message: `xaq blocked the connection to ${connectionName}: its address is on a private or blocked network. Nothing was sent. The owner can allow this host for the connection in xaq (Connections → ${connectionName}).`,
         maybeRan,
       };
     case "unavailable":
@@ -64,7 +64,7 @@ export function describeFailure(err: unknown, connectionName: string, scrubber: 
     case "protocol":
       return {
         reason: err.code,
-        message: `${connectionName} sent an answer agentinbox couldn't understand${detail(err.message)}. The call may or may not have run there: check before trying again.`,
+        message: `${connectionName} sent an answer xaq couldn't understand${detail(err.message)}. The call may or may not have run there: check before trying again.`,
         maybeRan,
       };
   }

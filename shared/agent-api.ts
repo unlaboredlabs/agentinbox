@@ -1,5 +1,5 @@
-// Agent-facing HTTP API under /agent/v1. Used by `npx agentinbox-cli connect` (device-flow pairing)
-// and `npx agentinbox-cli listen` (outbound event stream that wakes local agents).
+// Agent-facing HTTP API under /agent/v1. Used by `npx xaq-cli connect` (device-flow pairing)
+// and `npx xaq-cli listen` (outbound event stream that wakes local agents).
 //
 // Routes:
 //   POST /agent/v1/pairings                  PairingStartInput → PairingStart          (public; rate-limited)

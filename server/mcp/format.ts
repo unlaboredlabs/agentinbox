@@ -33,7 +33,7 @@ const CALENDAR_WRITE_HELP: Record<Grant["calendarWriteMode"], string> = {
 
 const CALENDAR_STATUS_HELP: Record<NonNullable<Account["calendar"]>["status"], string | null> = {
   active: null,
-  not_granted: "Google Calendar isn't added to this account yet (ask the operator to add it in the agentinbox console)",
+  not_granted: "Google Calendar isn't added to this account yet (ask the operator to add it in the xaq console)",
   api_disabled: "the Google Calendar API is turned off in the Google Cloud project (ask the operator to enable it)",
   error: "calendar sync is failing (calendar tools may still work)",
 };
@@ -42,7 +42,7 @@ const CALENDAR_STATUS_HELP: Record<NonNullable<Account["calendar"]>["status"], s
 const clip = (s: string, n: number) => cleanLine(s, n);
 
 export function formatAccounts(items: { grant: Grant; account: Account; scopeNames: string[] | null }[]): string {
-  if (!items.length) return "You don't have access to any account yet. Ask the operator to grant this agent access in the agentinbox console.";
+  if (!items.length) return "You don't have access to any account yet. Ask the operator to grant this agent access in the xaq console.";
   const lines = [`You can access ${items.length} account${items.length === 1 ? "" : "s"}:`];
   for (const { grant: g, account: a, scopeNames } of items) {
     lines.push(`- ${a.email} (account id ${a.id})${a.status === "active" ? "" : ` · status: ${a.status}`}`);

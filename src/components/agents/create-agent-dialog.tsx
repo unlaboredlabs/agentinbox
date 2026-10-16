@@ -37,7 +37,7 @@ export function CreateAgentDialog({ trigger }: { trigger?: React.ReactNode }) {
           <>
             <DialogHeader>
               <DialogTitle>{created.agent.name} is ready</DialogTitle>
-              <DialogDescription>Save the key, then add agentinbox to your agent with one of the snippets below.</DialogDescription>
+              <DialogDescription>Save the key, then add xaq to your agent with one of the snippets below.</DialogDescription>
             </DialogHeader>
             <AgentCreated res={created} />
             <DialogFooter>
