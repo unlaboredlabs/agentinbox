@@ -247,12 +247,12 @@ describe("approval robustness", () => {
   it("refuses to send a draft that was edited in Gmail", async () => {
     const s = await queued();
     const a = s.ctx.mail.getApproval(s.id)!;
-    s.gmail.drafts.get(a.draftId)!.raw = Buffer.from("edited").toString("base64url");
+    s.gmail.drafts.get(a.draftId!)!.raw = Buffer.from("edited").toString("base64url");
     const r = await s.ctx.mail.approve(s.id);
     expect(r.status).toBe("failed");
     expect(r.error).toMatch(/changed in Gmail/);
     expect(s.gmail.sent).toHaveLength(0);
-    expect(s.gmail.drafts.has(a.draftId)).toBe(true);
+    expect(s.gmail.drafts.has(a.draftId!)).toBe(true);
   });
 
   it.each([
@@ -292,7 +292,7 @@ describe("approval robustness", () => {
     ["deleting the grant", (s: Awaited<ReturnType<typeof queued>>) => s.ctx.policy.deleteGrant(s.agent.id, "acc_a")],
   ])("cancels pending approvals and deletes drafts when %s", async (_name, change) => {
     const s = await queued();
-    const draftId = s.ctx.mail.getApproval(s.id)!.draftId;
+    const draftId = s.ctx.mail.getApproval(s.id)!.draftId!;
     change(s);
     await tick();
     expect(s.ctx.mail.getApproval(s.id)).toMatchObject({ status: "rejected", decisionNote: expect.stringMatching(/^cancelled: /) });
@@ -301,7 +301,7 @@ describe("approval robustness", () => {
 
   it("deleting the agent deletes its pending drafts", async () => {
     const s = await queued();
-    const draftId = s.ctx.mail.getApproval(s.id)!.draftId;
+    const draftId = s.ctx.mail.getApproval(s.id)!.draftId!;
     s.ctx.policy.deleteAgent(s.agent.id);
     await tick();
     expect(s.gmail.drafts.has(draftId)).toBe(false);
