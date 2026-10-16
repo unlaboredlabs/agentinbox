@@ -79,7 +79,8 @@ Examples:
 
   dataOption(connections.command("reconnect").description("sign in again (OAuth) or replace the key (header)").argument("<name>", "the connection's name"))
     .option("--paste", "paste the address the browser lands on (automatic over SSH)")
-    .action(async (slug: string, o: { data?: string; paste?: boolean }) => {
+    .option("--header <name>", "header connections: the header's name (default: asks, Authorization)")
+    .action(async (slug: string, o: { data?: string; paste?: boolean; header?: string }) => {
       const { reconnectConnection } = await import("./manage.ts");
       process.exitCode = await withApi(o, (deps) => reconnectConnection(slug, o, deps));
     });

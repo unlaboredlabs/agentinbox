@@ -7,7 +7,7 @@ import { safeText } from "../listen/ui.ts";
 import { NPX } from "../listen/version.ts";
 import type { LookupFn } from "../webhooks/ssrf.ts";
 import { accessLabel, agentsLabel, chooseAccess, chooseAgents, parseAccess } from "./access.ts";
-import type { ConnectionsApi, ConnectionView, CreateInput } from "./api.ts";
+import type { ConnectionsApi, ConnectionView } from "./api.ts";
 import { CLIENT_LABELS, type ClientConfig, type ClientEntry, type ImportClient, parseImportClient, readClientConfig } from "./clients.ts";
 import { checkTarget } from "./private.ts";
 import type { Prompter } from "./prompt.ts";
@@ -51,7 +51,8 @@ export type PlanItem =
       entry: ClientEntry;
       slug: string;
       url: string;
-      auth: { type: "header"; name: string; value: string } | { type: "oauth" } | { type: "probe" };
+      /** header: moved into the broker; oauth: the client says so; none: no credential (the connect finds out). */
+      auth: { type: "header"; name: string; value: string } | { type: "oauth" } | { type: "none" };
       /** The exact origin a private-target allow would cover, when the URL is on this machine or a private network. */
       privateTarget: string | null;
     };
@@ -133,7 +134,7 @@ export async function planImport(config: ClientConfig, ctx: { existing?: Connect
       ? { type: "header" as const, name: headerNames[0]!, value: entry.headers[headerNames[0]!]! }
       : entry.oauth
         ? { type: "oauth" as const }
-        : { type: "probe" as const };
+        : { type: "none" as const };
     items.push({ action: "create", entry, slug, url: entry.url!.trim(), auth, privateTarget: target.kind === "private" ? target.origin : null });
   }
   return items;
@@ -162,13 +163,13 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
         out.push(`${name}${pc.yellow("skip")}: ${i.reason}; it stays in ${label}`);
         break;
       case "exists":
-        out.push(`${name}already a connection: "${i.connection.slug}" (${i.connection.status})`);
+        out.push(`${name}already a connection: "${i.connection.slug}" (${i.connection.status}, ${i.connection.tools.total} tools)`);
         break;
       case "create": {
         out.push(`${name}${pc.green("create")} connection "${i.slug}" → ${safeText(i.url, 120)}${where(i.entry)}`);
         if (i.auth.type === "header") out.push(`${cont}its ${i.auth.name} header moves into agentinbox (encrypted; never shown)`);
-        else if (i.auth.type === "oauth") out.push(`${cont}OAuth: created needing Connect (${label} keeps its own tokens); Reconnect it once afterwards`);
-        else out.push(`${cont}no credential in ${label}: probed first (OAuth → needs Connect; none → ready)`);
+        else if (i.auth.type === "oauth") out.push(`${cont}OAuth: created needing Connect (${label} keeps its own tokens); sign in once with the link it prints`);
+        else out.push(`${cont}no credential in ${label}: connected as it is (if it turns out to use OAuth, it needs Connect)`);
         if (i.privateTarget) out.push(`${cont}${pc.yellow("private network")}: needs the allow for exactly ${i.privateTarget}`);
         break;
       }
@@ -179,9 +180,15 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
 
 interface Outcome {
   item: Extract<PlanItem, { action: "create" }>;
+  /** connected: works now; authorize: needs a sign-in (the link); failed: nothing was kept. */
+  status: "connected" | "authorize" | "failed";
   connection?: ConnectionView;
+  authorizeUrl?: string;
   error?: string;
 }
+
+/** An existing connection proves itself by having tools; a fresh custom one starts "active" with none. */
+const works = (c: ConnectionView) => c.status === "active" && c.tools.total > 0;
 
 function setupLines(r: McpSetupResult): string[] {
   const out = [r.ok ? `${r.dryRun ? pc.cyan("○") : pc.green("✔")} ${r.message}` : `${pc.yellow("!")} ${r.message}`];
@@ -217,7 +224,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     p.print(`Would create ${creates.length} connection${creates.length === 1 ? "" : "s"} with ${access ? accessLabel(access) : "the access you choose (default: Ask before risky actions)"}.`);
     if (priv.length) p.print(`Would ask before allowing ${priv.map((i) => i.privateTarget).join(", ")}.`);
     p.print(pc.dim("Existing connections are checked on the real run (a server already connected isn't created twice)."));
-    const removable = items.filter((i) => i.action === "create" && i.auth.type === "header").map((i) => toRemove(i.entry));
+    const removable = items.filter((i) => i.action === "create" && i.auth.type !== "oauth").map((i) => toRemove(i.entry));
     p.print("");
     if (!removable.length) p.print(`${label}'s config isn't changed.`);
     else if (!profileExists(profileName)) {
@@ -254,7 +261,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   }
   if (!creates.length) {
     p.print("Nothing to create.");
-    return await offerSetup(deps, client, profileName, already.filter((a) => a.connection.status === "active").map((a) => a.entry), [], 0);
+    return await offerSetup(deps, client, profileName, already.filter((a) => works(a.connection)).map((a) => a.entry), [], 0);
   }
 
   const level = await chooseAccess(p, access);
@@ -266,49 +273,35 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
 
   const outcomes: Outcome[] = [];
   for (const item of creates) {
+    let created: ConnectionView | null = null;
     try {
-      let auth: CreateInput["auth"];
-      if (item.auth.type === "probe") {
-        const probe = await api.probe({ url: item.url, privateTarget: item.privateTarget });
-        if (!probe.ok) {
-          const hint = probe.code === "private_target" ? ` Add it with \`${NPX} connections add ${item.url}\` to allow ${probe.origin}.` : "";
-          throw new Error(`${probe.message}${hint}`);
-        }
-        if (probe.auth.type === "header") throw new Error(`it asks for an API key, but ${label} sends none. Add it with \`${NPX} connections add ${item.url}\`.`);
-        auth = probe.auth.type === "oauth" ? { type: "oauth" } : { type: "none" };
-      } else auth = item.auth;
-      const connection = await api.create({
-        slug: item.slug,
-        displayName: item.entry.name,
-        url: item.url,
-        auth,
-        privateTarget: item.privateTarget,
-        level,
-        agents,
-        source: `import:${client}`,
-      });
-      outcomes.push({ item, connection });
+      created = await api.create({ slug: item.slug, name: item.entry.name, url: item.url, levelDefault: level, ...(agents === "all" ? {} : { agentIds: agents }) });
+      if (item.privateTarget) await api.allowPrivateTarget(created.id, true);
+      const r = await api.connect(created.id, item.auth.type === "header" ? { header: { name: item.auth.name, value: item.auth.value } } : {});
+      if (r.status === "connected") outcomes.push({ item, status: "connected", connection: r.connection });
+      else if (r.status === "authorize") outcomes.push({ item, status: "authorize", connection: created, authorizeUrl: r.authorizeUrl });
+      else throw new Error(r.message);
     } catch (err) {
-      outcomes.push({ item, error: err instanceof Error ? err.message : String(err) });
+      // Nothing half-made stays behind: running the import again retries it cleanly.
+      if (created) await api.remove(created.id).catch(() => {});
+      outcomes.push({ item, status: "failed", error: err instanceof Error ? err.message : String(err) });
     }
   }
 
   p.print("");
   for (const o of outcomes) {
     const name = safeText(o.item.entry.name, 40);
-    if (o.error) p.print(`${pc.red("✘")} ${name}: ${safeText(o.error, 300)} (it stays in ${label})`);
-    else if (o.connection!.status === "active") p.print(`${pc.green("✔")} ${name} → "${o.connection!.slug}"${o.connection!.toolCount !== undefined ? `, ${o.connection!.toolCount} tools` : ""}`);
+    if (o.status === "failed") p.print(`${pc.red("✘")} ${name}: ${safeText(o.error!, 300)} (it stays in ${label})`);
+    else if (o.status === "connected") p.print(`${pc.green("✔")} ${name} → "${o.connection!.slug}", ${o.connection!.tools.total} tools`);
     else {
-      p.print(`${pc.yellow("○")} ${name} → "${o.connection!.slug}": ${o.connection!.authType === "oauth" ? "needs Connect" : o.connection!.status}`);
+      p.print(`${pc.yellow("○")} ${name} → "${o.connection!.slug}": needs Connect. Sign in (link valid 15 minutes):`);
+      p.print(`    ${pc.cyan(o.authorizeUrl!)}`);
       p.print(`    ${reconnectHint(o.connection!)}`);
     }
   }
-  const failed = outcomes.filter((o) => o.error).length;
-  const working = [
-    ...already.filter((a) => a.connection.status === "active").map((a) => a.entry),
-    ...outcomes.filter((o) => o.connection?.status === "active").map((o) => o.item.entry),
-  ];
-  const pending = outcomes.filter((o) => o.connection && o.connection.status !== "active").map((o) => o.item.entry.name);
+  const failed = outcomes.filter((o) => o.status === "failed").length;
+  const working = [...already.filter((a) => works(a.connection)).map((a) => a.entry), ...outcomes.filter((o) => o.status === "connected").map((o) => o.item.entry)];
+  const pending = outcomes.filter((o) => o.status === "authorize").map((o) => o.item.entry.name);
   return offerSetup(deps, client, profileName, working, pending, failed ? 1 : 0);
 }
 

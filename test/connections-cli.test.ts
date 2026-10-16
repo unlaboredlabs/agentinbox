@@ -1,15 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { exactOrigin as serverExactOrigin } from "../server/api/connections.ts";
+import type { IntegrationPreset } from "../server/broker/types.ts";
 import { SessionStore } from "../server/auth/sessions.ts";
 import { sha256 } from "../server/crypto.ts";
 import { AdminApiError, CLI_SESSION_TTL_MS, createCliSession, daemonOrigin, openAdminChannel } from "../server/connections-cli/admin.ts";
 import { ConnectionsApi } from "../server/connections-cli/api.ts";
-import { addConnection, listConnections, reconnectConnection, removeConnection, slugFromUrl } from "../server/connections-cli/manage.ts";
-import { checkTarget } from "../server/connections-cli/private.ts";
+import { addConnection, disableConnection, listConnections, reconnectConnection, removeConnection, slugFromUrl } from "../server/connections-cli/manage.ts";
+import { checkTarget, exactOrigin } from "../server/connections-cli/private.ts";
 import { ScriptedPrompter } from "../server/connections-cli/prompt.ts";
 import { readTomlMcpServers, UNREADABLE as TOML_UNREADABLE } from "../server/connections-cli/toml.ts";
 import { readMcpServers, removeYamlServers, UNREADABLE } from "../server/connections-cli/yaml.ts";
-import { FakeConnectionsDaemon, publicLookup } from "./connections-cli-fake.ts";
+import { type Daemon, publicLookup, startDaemon } from "./connections-cli-fake.ts";
 import { harness } from "./platform-helpers.ts";
+
+const WHOOP_LIKE: IntegrationPreset = {
+  id: "whoop",
+  displayName: "WHOOP",
+  slug: "whoop",
+  kind: "native",
+  auth: { type: "user_app", authorizeUrl: "https://api.prod.whoop.com/oauth/oauth2/auth", tokenUrl: "https://api.prod.whoop.com/oauth/oauth2/token", scopes: [], clientIdInput: "clientId", clientSecretInput: "clientSecret" },
+  classify: () => null,
+  setupSteps: (ctx) => [
+    { id: "dash", title: "Open the WHOOP developer dashboard", body: "Sign in and create a team.", link: { label: "Open", url: "https://developer-dashboard.whoop.com" } },
+    { id: "app", title: "Create an app", body: "Tick the `read:recovery` scope.", copy: { label: "Redirect URI", value: ctx.redirectUri } },
+    { id: "id", title: "Paste the client ID", body: "From the app page.", input: { key: "clientId", label: "Client ID", pattern: "^[0-9a-f-]{8,}$", placeholder: "a UUID" } },
+    { id: "secret", title: "Paste the client secret", body: "Also from the app page.", input: { key: "clientSecret", label: "Client secret", secret: true } },
+  ],
+};
 
 describe("the local admin channel", () => {
   it("a one-time session works against the real admin API, can't slide past 15 minutes, and is deleted on close", async () => {
@@ -69,114 +86,126 @@ describe("the local admin channel", () => {
 });
 
 describe("connections add", () => {
-  const deps = (daemon: FakeConnectionsDaemon, p: ScriptedPrompter, env: NodeJS.ProcessEnv = {}) => ({ api: new ConnectionsApi(daemon), prompter: p, env, pollMs: 1, timeoutMs: 200 });
+  let d: Daemon;
+  beforeEach(async () => {
+    d = await startDaemon({ presets: [WHOOP_LIKE] });
+  });
+  afterEach(() => d.dispose());
+  const deps = (p: ScriptedPrompter, env: NodeJS.ProcessEnv = {}) => ({ api: d.api, prompter: p, env, pollMs: 1, timeoutMs: 2000 });
+  const row = (slug: string) =>
+    d.h.ctx.db.get<{ id: string; url: string | null; level_default: string; private_target: string | null; preset: string | null; status: string }>(
+      "SELECT id, url, level_default, private_target, preset, status FROM connections WHERE slug = ?",
+      slug,
+    );
 
   it("a URL on this machine: the private allow prompt for the exact origin, a header, the access choice and the agents", async () => {
-    const daemon = new FakeConnectionsDaemon();
     const url = "http://127.0.0.1:8787/mcp";
-    daemon.probeAnswers.set(url, (input) =>
-      input.privateTarget ? { ok: true, auth: { type: "header" } } : { ok: false, code: "private_target", origin: "http://127.0.0.1:8787", address: "127.0.0.1", message: "blocked" },
-    );
-    // allow? · header name · value · slug · access (1 = full) · all agents? no · Hermes? yes · Claude Code? no · add?
-    const p = new ScriptedPrompter(["y", "", "bs-token", "brightspace", "1", "n", "y", "n", "y"]);
-    expect(await addConnection(url, {}, deps(daemon, p))).toBe(0);
-    expect(daemon.probes).toEqual([{ url }, { url, privateTarget: "http://127.0.0.1:8787" }]);
-    expect(daemon.created).toEqual([
-      { slug: "brightspace", url, auth: { type: "header", name: "Authorization", value: "Bearer bs-token" }, privateTarget: "http://127.0.0.1:8787", level: "full", agents: ["agt_hermes"] },
+    d.upstreams.probe = (_u, allow) =>
+      allow ? { reachable: true, auth: "header", message: "401 without OAuth metadata." } : { reachable: false, auth: "unknown", blocked: "private_target", message: "blocked" };
+    // allow? · slug · access (1 = full) · all agents? no · Hermes? yes · Claude Code? no · add? · header name · value
+    const p = new ScriptedPrompter(["y", "brightspace", "1", "n", "y", "n", "y", "", "bs-token"]);
+    expect(await addConnection(url, {}, deps(p))).toBe(0);
+    const c = row("brightspace")!;
+    expect(c).toMatchObject({ url, level_default: "full", private_target: "http://127.0.0.1:8787" });
+    expect(d.upstreams.probes).toEqual([
+      { url, privateTarget: null },
+      { url, privateTarget: "http://127.0.0.1:8787" },
     ]);
+    expect(d.upstreams.connects).toEqual([{ slug: "brightspace", input: { header: { name: "Authorization", value: "Bearer bs-token" } }, privateTarget: "http://127.0.0.1:8787" }]);
+    expect(d.h.ctx.db.all("SELECT agent_id FROM connection_grants WHERE connection_id = ?", c.id)).toEqual([{ agent_id: d.agents.hermes }]);
     expect(p.text).toContain("An allow covers exactly http://127.0.0.1:8787");
     expect(p.text).not.toContain("bs-token");
-    expect(p.text).toContain('✔ Connected "brightspace": 3 tools, seen by agents as brightspace__<tool>');
+    expect(p.text).toContain('✔ Connected "brightspace": 3 tools, seen by agents as brightspace__<tool> (Full access).');
   });
 
   it("declining the allow adds nothing", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.probeAnswers.set("http://10.0.0.5/mcp", { ok: false, code: "private_target", origin: "http://10.0.0.5:80", message: "blocked" });
-    expect(await addConnection("http://10.0.0.5/mcp", {}, deps(daemon, new ScriptedPrompter(["n"])))).toBe(0);
-    expect(daemon.created).toEqual([]);
+    d.upstreams.probe = () => ({ reachable: false, auth: "unknown", blocked: "private_target", message: "blocked" });
+    expect(await addConnection("http://10.0.0.5/mcp", {}, deps(new ScriptedPrompter(["n"])))).toBe(0);
+    expect(d.h.ctx.db.get<{ n: number }>("SELECT count(*) AS n FROM connections")!.n).toBe(0);
   });
 
-  it("OAuth over SSH: paste mode, then the default access (ask) for all agents", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.authorizeMode = "direct";
+  it("OAuth over SSH: paste mode through the daemon's own callback, then the default access (ask) for all agents", async () => {
     const url = "https://mcp.example.com/mcp";
-    daemon.probeAnswers.set(url, { ok: true, auth: { type: "oauth", issuer: "https://auth.example.com", registration: "dcr" } });
+    d.upstreams.probe = () => ({ reachable: true, auth: "oauth", issuer: "https://auth.example.com", registration: "dcr", message: "OAuth" });
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://auth.example.com/authorize?state=abc&redirect_uri=http%3A%2F%2Flocalhost%3A8425%2Foauth%2Fconnections%2Fcallback" });
+    const raw = vi.spyOn(d.channel, "raw").mockResolvedValue({ status: 200, text: '<script type="application/json" id="oauth-result">{"ok":true}</script>' });
     const opened: string[] = [];
-    const p = new ScriptedPrompter(["", "", "y", "y", "not a url", "http://localhost:8425/oauth/connections/callback?code=c&state=st_con_1"]);
-    const d = { ...deps(daemon, p, { SSH_CONNECTION: "1 2 3 4" }), openBrowser: async (u: string) => opened.push(u) };
-    expect(await addConnection(url, { agent: undefined }, d)).toBe(0);
-    expect(daemon.created[0]).toMatchObject({ slug: "example", auth: { type: "oauth" }, level: "ask", agents: "all", privateTarget: null });
+    const p = new ScriptedPrompter(["", "", "y", "y", "not a url", "http://localhost:8425/oauth/connections/callback?code=c0de&state=abc&iss=https%3A%2F%2Fauth.example.com&junk=1"]);
+    const code = await addConnection(url, {}, { ...deps(p, { SSH_CONNECTION: "1 2 3 4" }), openBrowser: async (u: string) => opened.push(u) });
+    expect(code).toBe(0);
+    expect(row("example")).toMatchObject({ level_default: "ask" });
+    expect(d.h.ctx.db.get<{ n: number }>("SELECT count(*) AS n FROM connection_grants")!.n).toBe(2);
     expect(p.text).toContain("registers itself automatically (dynamic client registration)");
-    expect(p.text).toContain("https://auth.example.com/authorize?state=st_con_1");
+    expect(p.text).toContain("an address starting with http://localhost:8425/oauth/connections/callback");
     expect(p.text).toContain("That isn't the address after signing in");
+    expect(raw).toHaveBeenCalledWith("GET", "/oauth/connections/callback?code=c0de&state=abc&iss=https%3A%2F%2Fauth.example.com");
     expect(opened).toEqual([]);
-    expect(daemon.connections[0]!.status).toBe("active");
   });
 
-  it("OAuth on the desktop: opens the browser and waits for the connection to turn active", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.authorizeMode = "direct";
-    daemon.probeAnswers.set("https://mcp.linear.app/mcp", { ok: true, auth: { type: "oauth", issuer: "https://mcp.linear.app", registration: "dcr" } });
+  it("paste mode reports the callback page's error", async () => {
+    d.upstreams.probe = () => ({ reachable: true, auth: "oauth", message: "OAuth" });
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://auth.example.com/authorize?redirect_uri=https%3A%2F%2Flocalhost%2Foauth%2Fconnections%2Fcallback" });
+    // The real callback route: an unknown state is refused.
+    const p = new ScriptedPrompter(["", "", "y", "y", "https://localhost/oauth/connections/callback?code=x&state=nope"]);
+    expect(await addConnection("https://mcp.linear.app/mcp", {}, deps(p))).toBe(1);
+    expect(p.text).toContain("isn't connected: This sign-in link has expired or was already used.");
+    expect(p.text).toContain("Reconnect: npx agentinbox-cli connections reconnect linear");
+  });
+
+  it("OAuth on the desktop: opens the browser and waits for the callback to mark it active", async () => {
+    d.upstreams.probe = () => ({ reachable: true, auth: "oauth", message: "OAuth" });
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://mcp.linear.app/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A8425%2Foauth%2Fconnections%2Fcallback" });
     const opened: string[] = [];
-    const d = {
-      ...deps(daemon, new ScriptedPrompter([], true)),
+    const d2 = {
+      ...deps(new ScriptedPrompter([], true)),
       openBrowser: async (u: string) => {
         opened.push(u);
-        setTimeout(() => (daemon.connections[0]!.status = "active"), 5);
+        // What the callback does on success.
+        setTimeout(() => {
+          d.giveTools("linear");
+          d.h.ctx.db.run("UPDATE connections SET status = 'active', updated_at = ? WHERE slug = 'linear'", new Date(Date.now() + 1000).toISOString());
+        }, 5);
       },
     };
-    expect(await addConnection("https://mcp.linear.app/mcp", { yes: true }, d)).toBe(0);
-    expect(opened).toEqual(["https://auth.example.com/authorize?state=st_con_1"]);
-    expect(daemon.created[0]!.slug).toBe("linear");
+    expect(await addConnection("https://mcp.linear.app/mcp", { yes: true }, d2)).toBe(0);
+    expect(opened).toHaveLength(1);
   });
 
-  it("a preset renders its setup steps and collects their inputs", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.presetList = [
-      {
-        id: "whoop",
-        displayName: "WHOOP",
-        slug: "whoop",
-        authType: "user_app",
-        steps: [
-          { id: "dash", title: "Open the WHOOP developer dashboard", body: "Sign in and create a team.", link: { label: "Open", url: "https://developer-dashboard.whoop.com" } },
-          { id: "redirect", title: "Create an app", body: "Tick the `read:recovery` scope.", copy: { label: "Redirect URI", value: "http://localhost:8425/oauth/connections/callback" } },
-          { id: "id", title: "Paste the client ID", body: "From the app page.", input: { key: "clientId", label: "Client ID", pattern: "^[0-9a-f-]{8,}$", placeholder: "a UUID" } },
-          { id: "secret", title: "Paste the client secret", body: "Also from the app page.", input: { key: "clientSecret", label: "Client secret", secret: true } },
-        ],
-      },
-    ];
-    const p = new ScriptedPrompter(["nope", "0f8e2c1a-1111", "whsecret", "", "", "", "y", "http://localhost:8425/oauth/connections/callback?code=x&state=st_con_1"]);
-    expect(await addConnection("whoop", {}, deps(daemon, p))).toBe(0);
+  it("a preset renders its setup steps and passes their inputs to the connect", async () => {
+    d.upstreams.connect = (conn) => {
+      d.giveTools(conn.slug, 7);
+      return { status: "connected" };
+    };
+    const p = new ScriptedPrompter(["nope", "0f8e2c1a-1111", "whsecret", "", "", "", "y"]);
+    expect(await addConnection("whoop", {}, deps(p))).toBe(0);
     expect(p.text).toContain("1. Open the WHOOP developer dashboard");
     expect(p.text).toContain("   Open: https://developer-dashboard.whoop.com");
-    expect(p.text).toContain("   Redirect URI: http://localhost:8425/oauth/connections/callback");
+    expect(p.text).toMatch(/   Redirect URI: http:\/\/localhost:\d+\/oauth\/connections\/callback/);
     expect(p.text).toContain("That doesn't look right (it looks like a UUID)");
-    expect(daemon.created[0]).toMatchObject({ preset: "whoop", slug: "whoop", auth: { type: "oauth" }, inputs: { clientId: "0f8e2c1a-1111", clientSecret: "whsecret" } });
+    expect(row("whoop")).toMatchObject({ preset: "whoop" });
+    expect(d.upstreams.connects).toEqual([{ slug: "whoop", input: { inputs: { clientId: "0f8e2c1a-1111", clientSecret: "whsecret" } }, privateTarget: null }]);
     expect(p.text).not.toContain("whsecret");
+    expect(p.text).toContain('Connected "whoop": 7 tools');
   });
 
   it("an unknown integration names the presets", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.presetList = [{ id: "notion", displayName: "Notion", slug: "notion", authType: "mcp_oauth", steps: [] }];
-    await expect(addConnection("notoin", {}, deps(daemon, new ScriptedPrompter([])))).rejects.toThrow(/Use notion, <an MCP server URL>/);
+    await expect(addConnection("whop", {}, deps(new ScriptedPrompter([])))).rejects.toThrow(/Use whoop, <an MCP server URL>/);
   });
 
-  it("list, reconnect (header) and remove", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.connections = [
-      { id: "c1", slug: "notion", displayName: "Notion", kind: "notion", url: "https://mcp.notion.com/mcp", status: "active", authType: "oauth", privateTarget: null, level: "ask", expiresAt: new Date(Date.now() + 3 * 86_400_000 + 1000).toISOString() },
-      { id: "c2", slug: "hearloom", displayName: "hearloom", kind: "remote_http", url: "http://127.0.0.1:3000/mcp", status: "needs_reauth", authType: "header", headerName: "Authorization", privateTarget: "http://127.0.0.1:3000", level: "read" },
-    ];
-    const p = new ScriptedPrompter(["new-token", "y"]);
-    await listConnections(deps(daemon, p));
-    expect(p.text).toMatch(/notion\s+active\s+Ask before risky actions\s+https:\/\/mcp\.notion\.com\/mcp {2}\(expires in 3 days\)/);
-    expect(p.text).toMatch(/hearloom\s+needs_reauth\s+Read only.*\(private network, Reconnect\)/);
-    expect(await reconnectConnection("hearloom", {}, deps(daemon, p))).toBe(0);
-    expect(daemon.calls).toContain("PUT /api/connections/c2/header");
-    expect(await removeConnection("hearloom", deps(daemon, p))).toBe(0);
-    expect(daemon.connections.map((c) => c.slug)).toEqual(["notion"]);
-    await expect(reconnectConnection("nope", {}, deps(daemon, p))).rejects.toThrow(/No connection "nope". There are: notion/);
+  it("list, reconnect (header), disable and remove", async () => {
+    d.upstreams.probe = () => ({ reachable: true, auth: "header", message: "" });
+    await addConnection("https://hearloom.example.com/mcp", { yes: true, header: "Authorization" }, deps(new ScriptedPrompter(["tok-1"], true)));
+    d.h.ctx.db.run("UPDATE connections SET status = 'needs_reauth', expires_at = ?, auth_type = 'header' WHERE slug = 'hearloom'", new Date(Date.now() + 3 * 86_400_000 + 60_000).toISOString());
+    const p = new ScriptedPrompter(["", "tok-2", "y", "y"]);
+    await listConnections(deps(p));
+    expect(p.text).toMatch(/hearloom\s+needs_reauth\s+Ask before risky actions\s+3\s+https:\/\/hearloom\.example\.com\/mcp {2}\(expires in 3 days, Reconnect\)/);
+    expect(await reconnectConnection("hearloom", {}, deps(p))).toBe(0);
+    expect(d.upstreams.connects.at(-1)).toEqual({ slug: "hearloom", input: { header: { name: "Authorization", value: "Bearer tok-2" } }, privateTarget: null });
+    expect(await disableConnection("hearloom", deps(p))).toBe(0);
+    expect(row("hearloom")!.status).toBe("disabled");
+    expect(await removeConnection("hearloom", deps(p))).toBe(0);
+    expect(row("hearloom")).toBeUndefined();
+    await expect(reconnectConnection("nope", {}, deps(p))).rejects.toThrow(/No connection "nope". There are none yet/);
   });
 
   it("slugs and private targets", async () => {
@@ -187,6 +216,8 @@ describe("connections add", () => {
     expect(await checkTarget(new URL("http://169.254.169.254/latest"))).toEqual({ kind: "never", address: "169.254.169.254" });
     expect(await checkTarget(new URL("https://example.com/mcp"), publicLookup)).toEqual({ kind: "public" });
     expect(await checkTarget(new URL("https://nas.lan/mcp"), async () => [{ address: "192.168.1.9", family: 4 }])).toMatchObject({ kind: "private", origin: "https://nas.lan:443" });
+    // The CLI's exact origin is the server's.
+    for (const u of ["http://127.0.0.1:8787/mcp", "https://nas.lan/mcp", "http://100.104.249.49:3773", "https://[fd7a:115c:a1e0::1]/x"]) expect(exactOrigin(new URL(u))).toBe(serverExactOrigin(u));
   });
 });
 

@@ -1,14 +1,13 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ConnectionsApi } from "../server/connections-cli/api.ts";
 import { readClientConfig } from "../server/connections-cli/clients.ts";
 import { planImport, runImport } from "../server/connections-cli/import.ts";
 import { ScriptedPrompter } from "../server/connections-cli/prompt.ts";
 import { readMcpServers } from "../server/connections-cli/yaml.ts";
 import { setupMcp } from "../server/listen/mcpsetup.ts";
 import { saveProfile } from "../server/listen/profile.ts";
-import { FakeConnectionsDaemon, publicLookup } from "./connections-cli-fake.ts";
+import { type Daemon, publicLookup, startDaemon } from "./connections-cli-fake.ts";
 import { isolateXdg } from "./listen-client-fake.ts";
 
 const FIXTURES = join(import.meta.dirname, "fixtures", "connections-cli");
@@ -44,9 +43,9 @@ afterEach(() => {
 const backups = (dir: string) => readdirSync(dir).filter((f) => f.includes(".agentinbox-backup-"));
 const pairHermes = () =>
   saveProfile("default", { url: "https://macbook.tailb10092.ts.net", apiKey: PROFILE_KEY, agentId: "agt_hermes", agentName: "Hermes", consumer: "mac-default", tool: "hermes" });
-const deps = (daemon: FakeConnectionsDaemon, prompter: ScriptedPrompter) => ({
+const deps = (daemon: Daemon, prompter: ScriptedPrompter) => ({
   prompter,
-  openApi: () => new ConnectionsApi(daemon),
+  openApi: () => daemon.api,
   lookup: publicLookup,
   env: process.env,
   selfOrigins: ["http://127.0.0.1:8425", "http://localhost:8425"],
@@ -101,6 +100,22 @@ describe("reading client configs", () => {
 });
 
 describe("import --from hermes", () => {
+  let d: Daemon;
+  beforeEach(async () => {
+    d = await startDaemon();
+    // The T3 servers use OAuth: connecting them hands back a sign-in link.
+    d.upstreams.connect = (conn) => {
+      if (conn.slug === "t3code-macbook" || conn.slug === "forge") return { status: "authorize", authorizeUrl: `http://${conn.slug}.example/authorize?state=s` };
+      d.giveTools(conn.slug);
+      return { status: "connected" };
+    };
+  });
+  afterEach(() => d.dispose());
+  const rows = () =>
+    d.h.ctx.db.all<{ slug: string; name: string; url: string; level_default: string; private_target: string | null }>(
+      "SELECT slug, name, url, level_default, private_target FROM connections ORDER BY created_at, rowid",
+    );
+
   it("plans one connection per remote server, skipping agentinbox itself and leaving stdio for M4", async () => {
     const items = await planImport(readClientConfig("hermes", { env: process.env }), { lookup: publicLookup });
     const summary = items.map((i) => [i.entry.name, i.action, i.action === "create" ? [i.slug, i.auth.type, i.privateTarget] : null]);
@@ -118,9 +133,8 @@ describe("import --from hermes", () => {
   it("--dry-run prints the exact changes, never a secret, and writes nothing", async () => {
     pairHermes();
     const before = readFileSync(join(hermes, "config.yaml"), "utf8");
-    const daemon = new FakeConnectionsDaemon();
     const p = new ScriptedPrompter([]);
-    const code = await runImport({ from: "hermes", dryRun: true }, { ...deps(daemon, p), openApi: () => { throw new Error("dry run must not open the admin channel"); } });
+    const code = await runImport({ from: "hermes", dryRun: true }, { ...deps(d, p), openApi: () => { throw new Error("dry run must not open the admin channel"); } });
     expect(code).toBe(0);
     const out = p.text;
     for (const s of [...SECRETS, PROFILE_KEY]) expect(out).not.toContain(s);
@@ -138,7 +152,7 @@ describe("import --from hermes", () => {
     expect(out).toContain(`remove "mcp_servers.hearloom"`);
     expect(out).not.toContain(`remove "mcp_servers.forge"`);
     expect(out).toContain("<the key from your agentinbox profile>");
-    expect(daemon.calls).toEqual([]);
+    expect(rows()).toEqual([]);
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
     expect(backups(hermes)).toEqual([]);
   });
@@ -146,22 +160,36 @@ describe("import --from hermes", () => {
   it("--yes creates the connections, moves the headers, then replaces only the working entries (with a backup)", async () => {
     pairHermes();
     const original = readFileSync(join(hermes, "config.yaml"), "utf8");
-    const daemon = new FakeConnectionsDaemon();
     const p = new ScriptedPrompter([], true);
-    const code = await runImport({ from: "hermes", yes: true }, deps(daemon, p));
+    const code = await runImport({ from: "hermes", yes: true }, deps(d, p));
     expect(code).toBe(0);
 
-    expect(daemon.created.map((c) => [c.slug, c.url, c.auth, c.privateTarget, c.level, c.agents, c.source])).toEqual([
-      ["whoop", "https://whoop.weish.me/api/mcp", { type: "header", name: "Authorization", value: "Bearer whoop-secret-111" }, null, "ask", "all", "import:hermes"],
-      ["brightspace", "http://127.0.0.1:8787/mcp", { type: "header", name: "Authorization", value: "Bearer brightspace-secret-222" }, "http://127.0.0.1:8787", "ask", "all", "import:hermes"],
-      ["hearloom", "http://127.0.0.1:3000/mcp", { type: "header", name: "Authorization", value: "Bearer hearloom-secret-333" }, "http://127.0.0.1:3000", "ask", "all", "import:hermes"],
-      ["t3code-macbook", "http://127.0.0.1:3773", { type: "oauth" }, "http://127.0.0.1:3773", "ask", "all", "import:hermes"],
-      ["forge", "http://100.104.249.49:3773", { type: "oauth" }, "http://100.104.249.49:3773", "ask", "all", "import:hermes"],
+    expect(rows()).toEqual([
+      { slug: "whoop", name: "whoop", url: "https://whoop.weish.me/api/mcp", level_default: "ask", private_target: null },
+      { slug: "brightspace", name: "brightspace", url: "http://127.0.0.1:8787/mcp", level_default: "ask", private_target: "http://127.0.0.1:8787" },
+      { slug: "hearloom", name: "hearloom", url: "http://127.0.0.1:3000/mcp", level_default: "ask", private_target: "http://127.0.0.1:3000" },
+      { slug: "t3code-macbook", name: "t3code-macbook", url: "http://127.0.0.1:3773", level_default: "ask", private_target: "http://127.0.0.1:3773" },
+      { slug: "forge", name: "forge", url: "http://100.104.249.49:3773", level_default: "ask", private_target: "http://100.104.249.49:3773" },
     ]);
+    // The headers went to the connector (encrypted there), with the allow already in place; the OAuth ones sent nothing.
+    expect(d.upstreams.connects).toEqual([
+      { slug: "whoop", input: { header: { name: "Authorization", value: "Bearer whoop-secret-111" } }, privateTarget: null },
+      { slug: "brightspace", input: { header: { name: "Authorization", value: "Bearer brightspace-secret-222" } }, privateTarget: "http://127.0.0.1:8787" },
+      { slug: "hearloom", input: { header: { name: "Authorization", value: "Bearer hearloom-secret-333" } }, privateTarget: "http://127.0.0.1:3000" },
+      { slug: "t3code-macbook", input: {}, privateTarget: "http://127.0.0.1:3773" },
+      { slug: "forge", input: {}, privateTarget: "http://100.104.249.49:3773" },
+    ]);
+    // Every agent gets them (the default).
+    expect(d.h.ctx.db.get<{ n: number }>("SELECT count(*) AS n FROM connection_grants")!.n).toBe(10);
+    const audit = d.h.ctx.db.all<{ action: string; detail: string | null }>("SELECT action, detail FROM audit_log WHERE action LIKE 'connection.%'");
+    expect(audit.filter((a) => a.action === "connection.private_target.allow")).toHaveLength(4);
+    for (const s of SECRETS) expect(JSON.stringify(audit)).not.toContain(s);
     const out = p.text;
     for (const s of [...SECRETS, PROFILE_KEY]) expect(out).not.toContain(s);
     expect(out).toContain("These servers are on this machine or your private network:");
-    expect(out).toContain("Reconnect: http://localhost:8425/connections/forge  or  npx agentinbox-cli connections reconnect forge");
+    expect(out).toContain("○ forge → \"forge\": needs Connect. Sign in (link valid 15 minutes):");
+    expect(out).toContain("http://forge.example/authorize?state=s");
+    expect(out).toContain("Reconnect: npx agentinbox-cli connections reconnect forge");
 
     // Hermes now has the broker entry (same "agentinbox" name, so mcp-agentinbox routes keep working), the two
     // OAuth servers until they're reconnected, and the stdio one.
@@ -179,37 +207,37 @@ describe("import --from hermes", () => {
 
   it("re-running after Reconnect replaces the OAuth entries too, and creates nothing twice", async () => {
     pairHermes();
-    const daemon = new FakeConnectionsDaemon();
-    await runImport({ from: "hermes", yes: true }, deps(daemon, new ScriptedPrompter([], true)));
-    for (const c of daemon.connections) c.status = "active";
-    const created = daemon.created.length;
+    await runImport({ from: "hermes", yes: true }, deps(d, new ScriptedPrompter([], true)));
+    d.giveTools("t3code-macbook");
+    d.giveTools("forge");
     const p = new ScriptedPrompter([], true);
-    expect(await runImport({ from: "hermes", yes: true }, deps(daemon, p))).toBe(0);
-    expect(daemon.created.length).toBe(created);
-    expect(p.text).toContain('already a connection: "forge" (active)');
+    expect(await runImport({ from: "hermes", yes: true }, deps(d, p))).toBe(0);
+    expect(rows()).toHaveLength(5);
+    expect(p.text).toContain('already a connection: "forge" (active, 3 tools)');
     expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "playwright"]);
   });
 
-  it("a failed connection stays in Hermes; the rest are replaced", async () => {
+  it("a failed connection stays in Hermes and leaves nothing behind; the rest are replaced", async () => {
     pairHermes();
-    const daemon = new FakeConnectionsDaemon();
-    daemon.failCreate.add("hearloom");
+    const connect = d.upstreams.connect;
+    d.upstreams.connect = (conn, input) => (conn.slug === "hearloom" ? { status: "error", message: "Couldn't reach http://127.0.0.1:3000/mcp" } : connect(conn, input));
     const p = new ScriptedPrompter([], true);
-    expect(await runImport({ from: "hermes", yes: true }, deps(daemon, p))).toBe(1);
+    expect(await runImport({ from: "hermes", yes: true }, deps(d, p))).toBe(1);
     expect(p.text).toContain("✘ hearloom: Couldn't reach http://127.0.0.1:3000/mcp (it stays in Hermes)");
+    expect(rows().map((r) => r.slug)).toEqual(["whoop", "brightspace", "t3code-macbook", "forge"]);
     expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "hearloom", "t3code-macbook", "forge", "playwright"]);
   });
 
   it("declining the private-network allow imports only the public server; declining setup-mcp changes nothing", async () => {
     pairHermes();
     const before = readFileSync(join(hermes, "config.yaml"), "utf8");
-    const daemon = new FakeConnectionsDaemon();
-    // private allow? no · access: 3 (read) · all agents? yes · create? yes · replace in Hermes? no
-    const p = new ScriptedPrompter(["n", "3", "y", "y", "n"]);
-    expect(await runImport({ from: "hermes" }, deps(daemon, p))).toBe(0);
+    // private allow? no · access: 3 (read) · all agents? no · Hermes? yes · Claude Code? no · create? yes · replace in Hermes? no
+    const p = new ScriptedPrompter(["n", "3", "n", "y", "n", "y", "n"]);
+    expect(await runImport({ from: "hermes" }, deps(d, p))).toBe(0);
     expect(p.asked[0]).toContain("Allow agentinbox to connect to these 4?");
     expect(p.text).toContain("  http://100.104.249.49:3773  (forge)");
-    expect(daemon.created.map((c) => [c.slug, c.level])).toEqual([["whoop", "read"]]);
+    expect(rows().map((r) => [r.slug, r.level_default])).toEqual([["whoop", "read"]]);
+    expect(d.h.ctx.db.all("SELECT agent_id, level FROM connection_grants")).toEqual([{ agent_id: d.agents.hermes, level: "read" }]);
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
     expect(backups(hermes)).toEqual([]);
   });
@@ -217,23 +245,25 @@ describe("import --from hermes", () => {
   it("without a paired agentinbox entry it says how to finish, and leaves Hermes alone", async () => {
     const before = readFileSync(join(hermes, "config.yaml"), "utf8");
     const p = new ScriptedPrompter([], true);
-    await runImport({ from: "hermes", yes: true }, deps(new FakeConnectionsDaemon(), p));
+    await runImport({ from: "hermes", yes: true }, deps(d, p));
     expect(p.text).toContain("pair it first (npx agentinbox-cli connect <agentinbox-url> --tool hermes)");
     expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
   });
 
   it("refuses without a terminal or --yes, before creating anything", async () => {
-    const daemon = new FakeConnectionsDaemon();
     const p = new ScriptedPrompter([]);
     Object.defineProperty(p, "interactive", { value: false });
-    await expect(runImport({ from: "hermes" }, deps(daemon, p))).rejects.toThrow(/pass --yes/);
-    expect(daemon.created).toEqual([]);
+    await expect(runImport({ from: "hermes" }, deps(d, p))).rejects.toThrow(/pass --yes/);
+    expect(rows()).toEqual([]);
   });
 
   it("says when the daemon has connections turned off", async () => {
-    const daemon = new FakeConnectionsDaemon();
-    daemon.brokerOff = true;
-    await expect(runImport({ from: "hermes", yes: true }, deps(daemon, new ScriptedPrompter([], true)))).rejects.toThrow(/brokerUpstreams/);
+    const off = await startDaemon({ brokerOff: true });
+    try {
+      await expect(runImport({ from: "hermes", yes: true }, deps(off, new ScriptedPrompter([], true)))).rejects.toThrow(/brokerUpstreams/);
+    } finally {
+      await off.dispose();
+    }
   });
 });
 

@@ -1,95 +1,115 @@
-import { AdminApiError, type AdminChannel } from "../server/connections-cli/admin.ts";
-import type { AuthorizeStart, ConnectionView, CreateInput, PresetView, ProbeInput, ProbeResult } from "../server/connections-cli/api.ts";
+import type { Connection, ConnectionProbe, StartConnectInput } from "../shared/types.ts";
+import { type AdminChannel, openAdminChannel } from "../server/connections-cli/admin.ts";
+import { ConnectionsApi } from "../server/connections-cli/api.ts";
+import { type ConnectOutcome, createBrokerService, stubParts } from "../server/broker/service.ts";
+import type { IntegrationPreset } from "../server/broker/types.ts";
+import { harness, type Harness } from "./platform-helpers.ts";
 
-/** An in-memory /api/connections behind a fake admin channel, following server/connections-cli/api.ts. */
-export class FakeConnectionsDaemon implements AdminChannel {
-  readonly baseUrl = "http://127.0.0.1:8425";
-  connections: ConnectionView[] = [];
-  created: CreateInput[] = [];
-  probes: ProbeInput[] = [];
-  calls: string[] = [];
-  closed = false;
-  /** Probe answers by URL (default: no auth needed). */
-  probeAnswers = new Map<string, ProbeResult | ((input: ProbeInput) => ProbeResult)>();
-  /** Slugs whose create fails with a 500. */
-  failCreate = new Set<string>();
-  /** Status a header/none connection gets on create. */
-  createdStatus: ConnectionView["status"] = "active";
-  presetList: PresetView[] = [];
-  agentList = [
-    { id: "agt_hermes", name: "Hermes", disabled: false },
-    { id: "agt_cc", name: "Claude Code on mac", disabled: false },
-  ];
-  authorizeMode: AuthorizeStart["callbackMode"] = "paste";
-  /** Off: every /api/connections route is a 404, like a daemon with brokerUpstreams off. */
-  brokerOff = false;
-  private n = 0;
+/**
+ * A real daemon (createApp: the real /api/connections, admin auth and CSRF) with brokerUpstreams on, reached
+ * through the CLI's real admin channel (a one-time session in its DB). Only the upstream side is fake: the
+ * connector answers probes and connects from the tables below, and remembers what it was given.
+ */
+export interface FakeUpstreams {
+  /** Probe answers by URL (default: reachable, no auth). `privateTarget` is what the API passed through. */
+  probe: (url: string, privateTarget: string | null) => ConnectionProbe;
+  /** Connect outcome by connection (default: connected). */
+  connect: (conn: Connection, input: StartConnectInput) => ConnectOutcome;
+  connects: { slug: string; input: StartConnectInput; privateTarget: string | null }[];
+  probes: { url: string; privateTarget: string | null }[];
+}
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    this.calls.push(`${method} ${path}`);
-    if (this.brokerOff && path.startsWith("/api/connections")) throw new AdminApiError(404, "not_found", "No such API route");
-    const json = <R>(v: R) => structuredClone(v) as unknown as T;
-    if (method === "GET" && path === "/api/agents") return json(this.agentList);
-    if (method === "GET" && path === "/api/connections") return json(this.connections);
-    if (method === "GET" && path === "/api/connections/presets") return json(this.presetList);
-    if (method === "POST" && path === "/api/connections/probe") {
-      const input = body as ProbeInput;
-      this.probes.push(input);
-      const a = this.probeAnswers.get(input.url);
-      return json(typeof a === "function" ? a(input) : (a ?? { ok: true, auth: { type: "none" } }));
-    }
-    if (method === "POST" && path === "/api/connections") {
-      const input = body as CreateInput;
-      if (this.failCreate.has(input.slug)) throw new AdminApiError(500, "upstream_error", `Couldn't reach ${input.url}`);
-      this.created.push(input);
-      const c: ConnectionView = {
-        id: `con_${++this.n}`,
-        slug: input.slug,
-        displayName: input.displayName ?? input.slug,
-        kind: input.preset ?? "remote_http",
-        url: input.url ?? null,
-        status: input.auth.type === "oauth" ? "needs_reauth" : this.createdStatus,
-        authType: input.auth.type,
-        headerName: input.auth.type === "header" ? input.auth.name : null,
-        privateTarget: input.privateTarget ?? null,
-        level: input.level,
-        toolCount: 3,
-        reconnectUrl: `http://localhost:8425/connections/${input.slug}`,
-      };
-      this.connections.push(c);
-      return json(c);
-    }
-    const m = /^\/api\/connections\/([^/]+)(\/.*)?$/.exec(path);
-    const conn = m ? this.connections.find((c) => c.id === decodeURIComponent(m[1]!)) : undefined;
-    if (!conn) throw new AdminApiError(404, "connection_not_found", "No such connection");
-    const rest = m![2] ?? "";
-    if (method === "POST" && rest === "/authorize") {
-      return json({ authorizeUrl: `https://auth.example.com/authorize?state=st_${conn.id}`, callbackMode: this.authorizeMode, redirectUri: "http://localhost:8425/oauth/connections/callback" });
-    }
-    if (method === "POST" && rest === "/authorize/complete") {
-      const url = (body as { url: string }).url;
-      if (!url.includes(`state=st_${conn.id}`)) throw new AdminApiError(400, "oauth_state", "That sign-in doesn't match this connection.");
-      conn.status = "active";
-      return json(conn);
-    }
-    if (method === "PUT" && rest === "/header") {
-      conn.status = "active";
-      return json(conn);
-    }
-    if (method === "POST" && rest === "/disable") {
-      conn.status = "disabled";
-      return json(conn);
-    }
-    if (method === "DELETE" && rest === "") {
-      this.connections = this.connections.filter((c) => c !== conn);
-      return undefined as T;
-    }
-    throw new AdminApiError(404, "not_found", "No such API route");
-  }
+export interface Daemon {
+  h: Harness;
+  api: ConnectionsApi;
+  channel: AdminChannel;
+  upstreams: FakeUpstreams;
+  agents: { hermes: string; claude: string };
+  /** Marks a connection as having tools (what a working connect leaves behind), by slug. */
+  giveTools(slug: string, n?: number): void;
+  dispose(): Promise<void>;
+}
 
-  close(): void {
-    this.closed = true;
-  }
+const NOTION: IntegrationPreset = {
+  id: "notion",
+  displayName: "Notion",
+  slug: "notion",
+  kind: "remote_http",
+  url: "https://mcp.notion.com/mcp",
+  auth: { type: "mcp_oauth" },
+  classify: () => null,
+  setupSteps: () => [{ id: "connect", title: "Connect Notion", body: "Approve access and pick a workspace." }],
+};
+
+export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerOff?: boolean } = {}): Promise<Daemon> {
+  let giveTools: Daemon["giveTools"] = () => {};
+  const upstreams: FakeUpstreams = {
+    probe: () => ({ reachable: true, auth: "none", message: "It answered without a sign-in." }),
+    connect: (conn) => {
+      giveTools(conn.slug);
+      return { status: "connected" };
+    },
+    connects: [],
+    probes: [],
+  };
+  const h = harness({
+    broker: (ctx) =>
+      createBrokerService(ctx, {
+        presets: () => opts.presets ?? [NOTION],
+        connector: {
+          async probe(input) {
+            upstreams.probes.push(input);
+            return upstreams.probe(input.url, input.privateTarget);
+          },
+          async startConnect(conn, input) {
+            upstreams.connects.push({ slug: conn.slug, input, privateTarget: conn.privateTarget });
+            const out = upstreams.connect(conn, input);
+            // What a working connect does to the row (the credential store's markActive).
+            if (out.status === "connected") ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL WHERE id = ? AND status <> 'disabled'", conn.id);
+            return out;
+          },
+          createSource: stubParts().connector.createSource,
+        },
+      }),
+  });
+  await h.claim();
+  if (!opts.brokerOff) h.ctx.settings.update({ brokerUpstreams: true });
+  const hermes = h.ctx.policy.createAgent({ name: "Hermes", grants: [] }).agent.id;
+  const claude = h.ctx.policy.createAgent({ name: "Claude Code on mac", grants: [] }).agent.id;
+  const channel = openAdminChannel({
+    dataDir: h.ctx.config.dataDir,
+    instance: { pid: 1, host: "0.0.0.0", port: 8425, startedAt: "" },
+    fetch: ((url: string, init: RequestInit) => {
+      const u = new URL(url);
+      return h.request(`${u.pathname}${u.search}`, init);
+    }) as typeof fetch,
+  });
+  giveTools = (slug, n = 3) => {
+      const c = h.ctx.db.get<{ id: string }>("SELECT id FROM connections WHERE slug = ?", slug)!;
+      for (let i = 0; i < n; i++) {
+        h.ctx.db.run(
+          "INSERT OR IGNORE INTO upstream_tools (connection_id, name, exposed_name, definition, pin_hash, risky, read, class_source, state, first_seen_at, updated_at) VALUES (?, ?, ?, '{\"inputSchema\":{}}', ?, 0, 1, 'heuristic', 'active', ?, ?)",
+          c.id,
+          `tool${i}`,
+          `${slug}__tool${i}`,
+          `h${i}`,
+          new Date().toISOString(),
+          new Date().toISOString(),
+        );
+      }
+  };
+  return {
+    h,
+    api: new ConnectionsApi(channel),
+    channel,
+    upstreams,
+    agents: { hermes, claude },
+    giveTools,
+    async dispose() {
+      channel.close();
+      await h.dispose();
+    },
+  };
 }
 
 /** Every hostname resolves to a public address (TEST-NET-3), so tests never touch DNS. */

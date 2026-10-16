@@ -1,110 +1,20 @@
-import type { AccessLevel, SetupStep } from "../broker/types.ts";
-import type { Agent } from "../../shared/types.ts";
+import type {
+  Agent,
+  ConnectionProbe,
+  ConnectionView,
+  CreateConnectionInput,
+  PresetView,
+  StartConnectInput,
+  StartConnectResult,
+} from "../../shared/types.ts";
 import { AdminApiError, type AdminChannel } from "./admin.ts";
 
 /**
- * The admin connections API as the CLI uses it. PROVISIONAL: written against docs/MCP-BROKER.md before
- * feat/broker-endpoint (the routes) and feat/broker-schema (the shared DTOs) landed. Every path and shape the CLI
- * relies on is in this file, so adapting to the real API is a change here only.
- *
- *   GET    /api/connections                         → ConnectionView[] (or { connections })
- *   GET    /api/connections/presets                 → PresetView[]
- *   POST   /api/connections/probe   ProbeInput      → ProbeResult
- *   POST   /api/connections         CreateInput     → ConnectionView
- *   POST   /api/connections/:id/authorize           → AuthorizeStart          (OAuth: start / Reconnect)
- *   POST   /api/connections/:id/authorize/complete { url } → ConnectionView  (paste mode)
- *   PUT    /api/connections/:id/header { name, value }     → ConnectionView  (replace a static header)
- *   POST   /api/connections/:id/disable             → ConnectionView          (the kill switch)
- *   DELETE /api/connections/:id                     → 204
- *   GET    /api/agents                              → Agent[] (exists today)
- *
- * While the `brokerUpstreams` setting is off the routes answer 404 (not mounted); the CLI says so.
+ * The admin connections API (server/api/connections.ts, DTOs in shared/types.ts) as the CLI uses it. While the
+ * `brokerUpstreams` setting is off every /api/connections route answers 404; the CLI says so in plain words.
  */
 
-export type ConnectionStatus = "active" | "needs_reauth" | "error" | "disabled";
-export type ConnectionAuthType = "none" | "header" | "oauth";
-
-export interface ConnectionView {
-  id: string;
-  slug: string;
-  displayName: string;
-  kind: string;
-  url: string | null;
-  status: ConnectionStatus;
-  statusReason?: string | null;
-  authType: ConnectionAuthType;
-  /** Static-header connections: the header's name (never its value). */
-  headerName?: string | null;
-  /** The private-target allow, `scheme://host:port`, or null. */
-  privateTarget: string | null;
-  level: AccessLevel;
-  toolCount?: number;
-  /** When the credential stops working without a Reconnect (no refresh token, or a lifetime cap). */
-  expiresAt?: string | null;
-  /** Console page that reconnects it, if the API offers one. */
-  reconnectUrl?: string | null;
-}
-
-export interface PresetView {
-  id: string;
-  displayName: string;
-  slug: string;
-  url?: string | null;
-  authType: "none" | "header" | "mcp_oauth" | "user_app";
-  /** Header presets: the header to ask for. */
-  headerName?: string;
-  headerPrefix?: string;
-  /** setupSteps(ctx), rendered by the daemon for this install. */
-  steps: SetupStep[];
-}
-
-export interface ProbeInput {
-  url: string;
-  /** The private-target allow to probe with (admin-only; the same exact origin the connection would carry). */
-  privateTarget?: string | null;
-}
-
-export type ProbeResult =
-  | {
-      ok: true;
-      auth: { type: "none" } | { type: "header" } | { type: "oauth"; issuer: string; registration: "preregistered" | "metadata_document" | "dcr" | "manual" };
-      /** What the probe saw, in plain words (e.g. "401 without OAuth metadata: needs an API key"). */
-      message?: string;
-    }
-  | {
-      ok: false;
-      /** `private_target`: the SSRF guard blocked a loopback/private/CGNAT host; `origin` is what an allow would cover. */
-      code: "private_target" | (string & {});
-      message: string;
-      hint?: string;
-      /** private_target: the exact `scheme://host:port` an allow would pin, and the address it resolved to. */
-      origin?: string;
-      address?: string;
-    };
-
-export interface CreateInput {
-  slug: string;
-  displayName?: string;
-  /** A preset id (`notion`, `whoop`) instead of a URL. */
-  preset?: string;
-  url?: string;
-  auth: { type: "none" } | { type: "header"; name: string; value: string } | { type: "oauth"; clientId?: string };
-  /** Preset setup inputs (`SetupStep.input.key` → value); secrets are stored encrypted. */
-  inputs?: Record<string, string>;
-  privateTarget?: string | null;
-  level: AccessLevel;
-  /** Agent ids that get the connection at `level`, or "all". */
-  agents: string[] | "all";
-  /** Where it came from (audit), e.g. "import:hermes". */
-  source?: string;
-}
-
-export interface AuthorizeStart {
-  authorizeUrl: string;
-  /** "direct": the provider redirects to this install; "paste": the user pastes the address they land on. */
-  callbackMode: "direct" | "paste";
-  redirectUri: string;
-}
+export type { ConnectionProbe, ConnectionView, PresetView, StartConnectResult };
 
 /** The routes aren't there: an older daemon, or brokerUpstreams is off. */
 export class BrokerOffError extends Error {
@@ -116,6 +26,15 @@ export class BrokerOffError extends Error {
     this.name = "BrokerOffError";
   }
 }
+
+/** What finishing a sign-in from a pasted address gave: the callback page's own result. */
+export interface CallbackOutcome {
+  ok: boolean;
+  error: string | null;
+  hint: string | null;
+}
+
+const enc = encodeURIComponent;
 
 export class ConnectionsApi {
   constructor(readonly channel: AdminChannel) {}
@@ -129,37 +48,36 @@ export class ConnectionsApi {
     }
   }
 
-  async list(): Promise<ConnectionView[]> {
-    const r = await this.call<ConnectionView[] | { connections: ConnectionView[] }>("GET", "/api/connections");
-    return Array.isArray(r) ? r : r.connections;
+  list(): Promise<ConnectionView[]> {
+    return this.call("GET", "/api/connections");
   }
-  async presets(): Promise<PresetView[]> {
-    const r = await this.call<PresetView[] | { presets: PresetView[] }>("GET", "/api/connections/presets");
-    return Array.isArray(r) ? r : r.presets;
+  presets(): Promise<PresetView[]> {
+    return this.call("GET", "/api/connections/presets");
   }
-  probe(input: ProbeInput): Promise<ProbeResult> {
-    return this.call("POST", "/api/connections/probe", input);
+  /** With `connectionId`, the probe uses that connection's private-target allow (when it covers the URL). */
+  probe(url: string, connectionId?: string): Promise<ConnectionProbe> {
+    return this.call("POST", "/api/connections/probe", connectionId ? { url, connectionId } : { url });
   }
-  create(input: CreateInput): Promise<ConnectionView> {
+  create(input: CreateConnectionInput): Promise<ConnectionView> {
     return this.call("POST", "/api/connections", input);
   }
-  authorize(id: string): Promise<AuthorizeStart> {
-    return this.call("POST", `/api/connections/${encodeURIComponent(id)}/authorize`, {});
+  get(id: string): Promise<ConnectionView> {
+    return this.call("GET", `/api/connections/${enc(id)}`);
   }
-  completeAuthorize(id: string, url: string): Promise<ConnectionView> {
-    return this.call("POST", `/api/connections/${encodeURIComponent(id)}/authorize/complete`, { url });
+  /** Stores a static header (and connects), or starts OAuth and returns the authorize URL. */
+  connect(id: string, input: StartConnectInput = {}): Promise<StartConnectResult> {
+    return this.call("POST", `/api/connections/${enc(id)}/connect`, input);
   }
-  setHeader(id: string, name: string, value: string): Promise<ConnectionView> {
-    return this.call("PUT", `/api/connections/${encodeURIComponent(id)}/header`, { name, value });
+  /** The admin-only private-target allow, pinned server-side to the URL's exact scheme://host:port. */
+  allowPrivateTarget(id: string, allow: boolean): Promise<ConnectionView> {
+    return this.call("PUT", `/api/connections/${enc(id)}/private-target`, { allow });
   }
-  disable(id: string): Promise<ConnectionView> {
-    return this.call("POST", `/api/connections/${encodeURIComponent(id)}/disable`, {});
+  /** The kill switch: disabled at once, pending calls cancelled, credentials deleted. */
+  kill(id: string): Promise<void> {
+    return this.call("POST", `/api/connections/${enc(id)}/kill`, {});
   }
   remove(id: string): Promise<void> {
-    return this.call("DELETE", `/api/connections/${encodeURIComponent(id)}`);
-  }
-  async get(id: string): Promise<ConnectionView | null> {
-    return (await this.list()).find((c) => c.id === id) ?? null;
+    return this.call("DELETE", `/api/connections/${enc(id)}`);
   }
   async bySlug(slug: string): Promise<ConnectionView> {
     const all = await this.list();
@@ -169,5 +87,34 @@ export class ConnectionsApi {
   }
   agents(): Promise<Agent[]> {
     return this.channel.request("GET", "/api/agents");
+  }
+
+  /**
+   * Paste mode: finishes a sign-in from the address the browser landed on, by handing its query (code, state,
+   * iss) to the daemon's own /oauth/connections/callback, exactly as the redirect would have. The daemon checks
+   * the state (single use, bound to the connection) and the issuer.
+   */
+  async finishFromPastedUrl(pasted: string): Promise<CallbackOutcome> {
+    let query: URLSearchParams;
+    try {
+      query = new URL(pasted.trim()).searchParams;
+    } catch {
+      return { ok: false, error: "That isn't a full address.", hint: "Copy the whole address from the browser's address bar." };
+    }
+    const keep = new URLSearchParams();
+    for (const k of ["code", "state", "iss", "error", "error_description"]) {
+      const v = query.get(k);
+      if (v !== null) keep.set(k, v);
+    }
+    const { status, text } = await this.channel.raw("GET", `/oauth/connections/callback?${keep.toString()}`);
+    if (status === 404) throw new BrokerOffError();
+    const m = /<script type="application\/json" id="oauth-result">([\s\S]*?)<\/script>/.exec(text);
+    try {
+      const r = m ? (JSON.parse(m[1]!) as { ok?: boolean; error?: string | null; hint?: string | null }) : null;
+      if (r) return { ok: r.ok === true, error: r.error ?? null, hint: r.hint ?? null };
+    } catch {
+      // Reported below.
+    }
+    return { ok: status === 200, error: status === 200 ? null : `The sign-in failed (HTTP ${status}).`, hint: null };
   }
 }
