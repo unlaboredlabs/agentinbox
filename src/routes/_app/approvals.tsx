@@ -5,6 +5,8 @@ import { CheckCircle2Icon, HistoryIcon, InfoIcon, KeyRoundIcon, StampIcon, XCirc
 import { useState } from "react";
 import { ApprovalCard } from "@/components/approvals/approval-card";
 import { ApprovalHistory } from "@/components/approvals/approval-history";
+import { asMcpApproval } from "@/components/approvals/mcp-call";
+import { McpCallCard } from "@/components/approvals/mcp-call-card";
 import { FindByCode, PairingApproveDialog, PairingCard, RecentPairings } from "@/components/approvals/pairing";
 import { deniedDescription, linkedPairing } from "@/components/approvals/pairing-link";
 import { Visible } from "@/components/hidden-chars";
@@ -83,7 +85,7 @@ function ApprovalsPage() {
 
         <TabsContent value="messages" className="mt-4 space-y-4">
           <p className="max-w-2xl text-sm text-muted-foreground">
-            Sends and calendar changes from agents set to ask you first. Approving sends the draft or applies the change; rejecting deletes the draft
+            Sends, calendar changes and risky tool calls from agents set to ask you first. Approving sends the draft, applies the change or runs the call; rejecting deletes the draft
             or discards the change. Unanswered requests expire.
           </p>
           {pending.isPending ? (
@@ -106,7 +108,10 @@ function ApprovalsPage() {
               </Empty>
             </Card>
           ) : (
-            pending.data.map((a) => <ApprovalCard key={a.id} approval={a} />)
+            pending.data.map((a) => {
+              const mcp = asMcpApproval(a);
+              return mcp ? <McpCallCard key={a.id} approval={mcp} /> : <ApprovalCard key={a.id} approval={a} />;
+            })
           )}
         </TabsContent>
 

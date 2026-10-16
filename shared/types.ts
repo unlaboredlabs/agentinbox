@@ -304,8 +304,8 @@ export interface Settings {
   /** Accept device-flow pairing requests from `npx agentinbox-cli connect` (each still needs approval). */
   pairingEnabled: boolean;
   /**
-   * MCP broker upstream connections (docs/MCP-BROKER.md). Off by default until the console PR turns it on;
-   * while off, the broker's upstream runtime and /oauth/connections/callback refuse to run.
+   * The MCP broker's upstream connections (docs/MCP-BROKER.md): the Connections page, connection access on agents,
+   * `mcp.call` approvals and first run with Google optional. On by default since the console shipped (M1 PR 8).
    */
   brokerUpstreams: boolean;
 }

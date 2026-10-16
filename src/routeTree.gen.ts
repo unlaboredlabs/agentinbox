@@ -19,8 +19,11 @@ import { Route as AppAuditRouteImport } from './routes/_app/audit'
 import { Route as AppEventsRouteImport } from './routes/_app/events'
 import { Route as AppGetStartedRouteImport } from './routes/_app/get-started'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
+import { Route as ApproveIdRouteImport } from './routes/approve.$id'
 import { Route as AppAgentsIndexRouteImport } from './routes/_app/agents/index'
 import { Route as AppAgentsAgentIdRouteImport } from './routes/_app/agents/$agentId'
+import { Route as AppConnectionsIndexRouteImport } from './routes/_app/connections/index'
+import { Route as AppConnectionsConnectionIdRouteImport } from './routes/_app/connections/$connectionId'
 import { Route as AppWebhooksIndexRouteImport } from './routes/_app/webhooks/index'
 import { Route as AppWebhooksWebhookIdRouteImport } from './routes/_app/webhooks/$webhookId'
 
@@ -73,6 +76,11 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
+const ApproveIdRoute = ApproveIdRouteImport.update({
+  id: '/approve/$id',
+  path: '/approve/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppAgentsIndexRoute = AppAgentsIndexRouteImport.update({
   id: '/agents/',
   path: '/agents/',
@@ -83,6 +91,17 @@ const AppAgentsAgentIdRoute = AppAgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppConnectionsIndexRoute = AppConnectionsIndexRouteImport.update({
+  id: '/connections/',
+  path: '/connections/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppConnectionsConnectionIdRoute =
+  AppConnectionsConnectionIdRouteImport.update({
+    id: '/connections/$connectionId',
+    path: '/connections/$connectionId',
+    getParentRoute: () => AppRoute,
+  } as any)
 const AppWebhooksIndexRoute = AppWebhooksIndexRouteImport.update({
   id: '/webhooks/',
   path: '/webhooks/',
@@ -104,9 +123,12 @@ export interface FileRoutesByFullPath {
   '/events': typeof AppEventsRoute
   '/get-started': typeof AppGetStartedRoute
   '/settings': typeof AppSettingsRoute
+  '/approve/$id': typeof ApproveIdRoute
   '/agents/$agentId': typeof AppAgentsAgentIdRoute
+  '/connections/$connectionId': typeof AppConnectionsConnectionIdRoute
   '/webhooks/$webhookId': typeof AppWebhooksWebhookIdRoute
   '/agents/': typeof AppAgentsIndexRoute
+  '/connections/': typeof AppConnectionsIndexRoute
   '/webhooks/': typeof AppWebhooksIndexRoute
 }
 export interface FileRoutesByTo {
@@ -118,10 +140,13 @@ export interface FileRoutesByTo {
   '/events': typeof AppEventsRoute
   '/get-started': typeof AppGetStartedRoute
   '/settings': typeof AppSettingsRoute
+  '/approve/$id': typeof ApproveIdRoute
   '/': typeof AppIndexRoute
   '/agents/$agentId': typeof AppAgentsAgentIdRoute
+  '/connections/$connectionId': typeof AppConnectionsConnectionIdRoute
   '/webhooks/$webhookId': typeof AppWebhooksWebhookIdRoute
   '/agents': typeof AppAgentsIndexRoute
+  '/connections': typeof AppConnectionsIndexRoute
   '/webhooks': typeof AppWebhooksIndexRoute
 }
 export interface FileRoutesById {
@@ -135,10 +160,13 @@ export interface FileRoutesById {
   '/_app/events': typeof AppEventsRoute
   '/_app/get-started': typeof AppGetStartedRoute
   '/_app/settings': typeof AppSettingsRoute
+  '/approve/$id': typeof ApproveIdRoute
   '/_app/': typeof AppIndexRoute
   '/_app/agents/$agentId': typeof AppAgentsAgentIdRoute
+  '/_app/connections/$connectionId': typeof AppConnectionsConnectionIdRoute
   '/_app/webhooks/$webhookId': typeof AppWebhooksWebhookIdRoute
   '/_app/agents/': typeof AppAgentsIndexRoute
+  '/_app/connections/': typeof AppConnectionsIndexRoute
   '/_app/webhooks/': typeof AppWebhooksIndexRoute
 }
 export interface FileRouteTypes {
@@ -153,9 +181,12 @@ export interface FileRouteTypes {
     | '/events'
     | '/get-started'
     | '/settings'
+    | '/approve/$id'
     | '/agents/$agentId'
+    | '/connections/$connectionId'
     | '/webhooks/$webhookId'
     | '/agents/'
+    | '/connections/'
     | '/webhooks/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -167,10 +198,13 @@ export interface FileRouteTypes {
     | '/events'
     | '/get-started'
     | '/settings'
+    | '/approve/$id'
     | '/'
     | '/agents/$agentId'
+    | '/connections/$connectionId'
     | '/webhooks/$webhookId'
     | '/agents'
+    | '/connections'
     | '/webhooks'
   id:
     | '__root__'
@@ -183,10 +217,13 @@ export interface FileRouteTypes {
     | '/_app/events'
     | '/_app/get-started'
     | '/_app/settings'
+    | '/approve/$id'
     | '/_app/'
     | '/_app/agents/$agentId'
+    | '/_app/connections/$connectionId'
     | '/_app/webhooks/$webhookId'
     | '/_app/agents/'
+    | '/_app/connections/'
     | '/_app/webhooks/'
   fileRoutesById: FileRoutesById
 }
@@ -194,6 +231,7 @@ export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
   LoginRoute: typeof LoginRoute
   SetupRoute: typeof SetupRoute
+  ApproveIdRoute: typeof ApproveIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -268,6 +306,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/approve/$id': {
+      id: '/approve/$id'
+      path: '/approve/$id'
+      fullPath: '/approve/$id'
+      preLoaderRoute: typeof ApproveIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_app/agents/': {
       id: '/_app/agents/'
       path: '/agents'
@@ -280,6 +325,20 @@ declare module '@tanstack/react-router' {
       path: '/agents/$agentId'
       fullPath: '/agents/$agentId'
       preLoaderRoute: typeof AppAgentsAgentIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/connections/': {
+      id: '/_app/connections/'
+      path: '/connections'
+      fullPath: '/connections/'
+      preLoaderRoute: typeof AppConnectionsIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/connections/$connectionId': {
+      id: '/_app/connections/$connectionId'
+      path: '/connections/$connectionId'
+      fullPath: '/connections/$connectionId'
+      preLoaderRoute: typeof AppConnectionsConnectionIdRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/webhooks/': {
@@ -308,8 +367,10 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
   AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRoute
+  AppConnectionsConnectionIdRoute: typeof AppConnectionsConnectionIdRoute
   AppWebhooksWebhookIdRoute: typeof AppWebhooksWebhookIdRoute
   AppAgentsIndexRoute: typeof AppAgentsIndexRoute
+  AppConnectionsIndexRoute: typeof AppConnectionsIndexRoute
   AppWebhooksIndexRoute: typeof AppWebhooksIndexRoute
 }
 
@@ -322,8 +383,10 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
   AppAgentsAgentIdRoute: AppAgentsAgentIdRoute,
+  AppConnectionsConnectionIdRoute: AppConnectionsConnectionIdRoute,
   AppWebhooksWebhookIdRoute: AppWebhooksWebhookIdRoute,
   AppAgentsIndexRoute: AppAgentsIndexRoute,
+  AppConnectionsIndexRoute: AppConnectionsIndexRoute,
   AppWebhooksIndexRoute: AppWebhooksIndexRoute,
 }
 
@@ -333,6 +396,7 @@ const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
   LoginRoute: LoginRoute,
   SetupRoute: SetupRoute,
+  ApproveIdRoute: ApproveIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

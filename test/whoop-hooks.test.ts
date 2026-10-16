@@ -53,7 +53,7 @@ describe("POST /hooks/connections/:id", () => {
     emitted = [];
     flag = true;
     const realGet = ctx.settings.get.bind(ctx.settings);
-    vi.spyOn(ctx.settings, "get").mockImplementation(() => ({ ...realGet(), ...(flag ? { brokerUpstreams: true } : {}) }));
+    vi.spyOn(ctx.settings, "get").mockImplementation(() => ({ ...realGet(), brokerUpstreams: flag }));
     host = whoopHost(fake, emitted);
   });
   afterEach(async () => {
