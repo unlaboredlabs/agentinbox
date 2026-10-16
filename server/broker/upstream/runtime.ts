@@ -31,7 +31,11 @@ export interface NativeOAuthFlow {
   /** connections.preset */
   preset: string;
   authorizeUrl(p: { connectionId: string; client: Record<string, unknown> | null; redirectUri: string; state: string }): string;
-  exchange(code: string, p: { connectionId: string; client: Record<string, unknown> | null; redirectUri: string; signal: AbortSignal }): Promise<StoredTokens>;
+  /** The tokens, and the client record to store when the exchange learns more (WHOOP: whoop_user_id). Throws to fail the connect. */
+  exchange(
+    code: string,
+    p: { connectionId: string; client: Record<string, unknown> | null; redirectUri: string; signal: AbortSignal },
+  ): Promise<{ tokens: StoredTokens; client?: Record<string, unknown> | null }>;
   refreshFn(client: Record<string, unknown> | null): RefreshFn | null;
 }
 
@@ -361,7 +365,9 @@ export class UpstreamRuntime {
     const signal = AbortSignal.timeout(30_000);
     const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
     if (native) {
-      tokens = await native.exchange(q.code, { connectionId, client: this.store.client(connectionId), redirectUri: flow.redirectUri, signal });
+      const out = await native.exchange(q.code, { connectionId, client: this.store.client(connectionId), redirectUri: flow.redirectUri, signal });
+      tokens = out.tokens;
+      if (out.client) this.store.setClient(connectionId, out.client);
     } else {
       // RFC 9207: a present `iss` must be the issuer we started with; a server that promises it must send it.
       if (q.iss ? q.iss !== pending.issuer : pending.issParameter) {

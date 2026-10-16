@@ -168,6 +168,8 @@ export async function checkTarget(url: URL, opts: GuardedFetchOptions = {}): Pro
 
 const NULL_BODY = new Set([101, 103, 204, 205, 304]);
 const REDIRECT = new Set([301, 302, 303, 307, 308]);
+/** Headers kept on a cross-origin redirect (plus mcp-*); everything else may be a credential. */
+const SAFE_CROSS_ORIGIN = new Set(["accept", "accept-language", "content-type", "content-length", "user-agent", "last-event-id", "cache-control"]);
 
 /** A body stream that errors once more than `max` bytes have passed. */
 function capped(body: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
@@ -241,10 +243,9 @@ export function guardedFetch(opts: GuardedFetchOptions = {}): GuardedFetch {
         if (hop >= MAX_REDIRECTS) throw new SourceError("protocol", `Upstream redirected more than ${MAX_REDIRECTS} times`);
         const next = new URL(res.headers.get("location")!, url);
         if (originKey(next) !== startOrigin) {
-          // Never carry credentials to another origin.
-          headers.delete("authorization");
-          headers.delete("cookie");
-          for (const name of [...headers.keys()]) if (name.startsWith("x-api") || name === "api-key") headers.delete(name);
+          // Never carry credentials to another origin: a static header can have any name, so only plain
+          // protocol headers survive the hop.
+          for (const name of [...headers.keys()]) if (!SAFE_CROSS_ORIGIN.has(name) && !name.startsWith("mcp-")) headers.delete(name);
         }
         if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
           method = "GET";

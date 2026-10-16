@@ -620,6 +620,32 @@ describe("MCP OAuth: registration order and authorization server variants", () =
     expect(doc.redirect_uris).toEqual(["https://broker.example/oauth/connections/callback"]);
   });
 
+  it("a native user_app flow (WHOOP-style): our state, its exchange; the client record it returns is stored; a bad code leaves the status alone", async () => {
+    const e = env();
+    const id = addConnection(e.ctx, { url: "https://api.prod.whoop.com/x", auth: "oauth", kind: "native_whoop", preset: "whoop", privateTarget: null });
+    e.rt.store.setClient(id, { client_id: "cid", client_secret: "csecret-123456" });
+    const seen: string[] = [];
+    e.rt.registerNativeFlow({
+      preset: "whoop",
+      authorizeUrl: ({ state, redirectUri, client }) => `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${String(client?.client_id)}&state=${state}&redirect_uri=${encodeURIComponent(redirectUri)}`,
+      exchange: async (code, p) => {
+        seen.push(`${code}@${p.redirectUri}`);
+        if (code === "bad") throw new SourceError("needs_reauth", "WHOOP refused the token request (invalid_grant)");
+        return { tokens: { accessToken: "wa", refreshToken: "wr", expiresAt: Date.now() + 3600_000, scope: "offline", issuer: null }, client: { ...p.client, whoop_user_id: 42 } };
+      },
+      refreshFn: () => async (cur) => ({ ...cur, accessToken: "wa2" }),
+    });
+    const bad = await e.rt.startConnect(id, { redirect: "https_localhost" });
+    expect(bad.state.length).toBeGreaterThanOrEqual(8);
+    await expect(e.rt.finishConnect({ code: "bad", state: bad.state })).rejects.toMatchObject({ code: "needs_reauth" });
+    expect(status(e.ctx, id).status).toBe("active");
+    const ok = await e.rt.startConnect(id, { redirect: "https_localhost" });
+    await e.rt.finishConnectFromUrl(`${HTTPS_LOCALHOST_REDIRECT}?code=good&state=${ok.state}`);
+    expect(seen).toEqual([`bad@${HTTPS_LOCALHOST_REDIRECT}`, `good@${HTTPS_LOCALHOST_REDIRECT}`]);
+    expect(e.rt.store.tokens(id)).toMatchObject({ accessToken: "wa", refreshToken: "wr" });
+    expect(e.rt.store.client(id)).toMatchObject({ client_id: "cid", whoop_user_id: 42 });
+  });
+
   it("the fake's up.fetch maps only its own origin (port boundary)", async () => {
     const up = await fake({ advertisedOrigin: "http://forge.test:3773" });
     // Not mapped to the fake (forge.test doesn't resolve), where a prefix match would have mapped it.

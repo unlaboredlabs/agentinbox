@@ -13,7 +13,7 @@ import {
 } from "@modelcontextprotocol/client";
 import { errorMessage } from "../../util/errors.ts";
 import type { Logger } from "../../util/log.ts";
-import type { Refresher } from "../credentials/refresher.ts";
+import { type Refresher, untilAborted } from "../credentials/refresher.ts";
 import type { SqliteCredentialStore } from "../credentials/store.ts";
 import { type RefreshFn, SourceError, type ToolCallContext, type ToolDef, type ToolListing, type ToolResult, type ToolSource } from "../types.ts";
 import { type ConnectionRow, formatVerdict, parseVerdict, type ProtocolVerdict } from "./connection.ts";
@@ -149,9 +149,7 @@ export class RemoteToolSource implements ToolSource {
   }
 
   private remember(live: Live): Live {
-
-    const s = formatVerdict(live.verdict);
-    this.deps.saveVerdict(s);
+    this.deps.saveVerdict(formatVerdict(live.verdict));
     return live;
   }
 
@@ -162,13 +160,14 @@ export class RemoteToolSource implements ToolSource {
   private async client(signal: AbortSignal): Promise<Live> {
     if (this.closed) throw new SourceError("unavailable", "This connection was closed");
     if (!this.live) {
-      const p = this.open(signal);
+      // Shared by concurrent callers: its own deadline, not the first caller's signal.
+      const p = this.open(AbortSignal.timeout(this.timeout));
       this.live = p;
       p.catch(() => {
         if (this.live === p) this.live = null;
       });
     }
-    return this.live;
+    return untilAborted(this.live, signal);
   }
 
   private async drop(): Promise<void> {
