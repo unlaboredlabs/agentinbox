@@ -628,6 +628,27 @@ describe("/api/connections", () => {
     expect((await json(await req("/connections"))).map((c: { slug: string }) => c.slug)).toEqual(["notion"]);
   });
 
+  it("a WHOOP reconnect keeps the pasted client as a candidate until the consent completes", async () => {
+    const h = harness();
+    disposers.push(h.dispose);
+    const cookie = await h.claim();
+    const { ctx } = h;
+    ctx.settings.update({ brokerUpstreams: true });
+    const t0 = new Date().toISOString();
+    ctx.db.run(
+      "INSERT INTO connections (id, kind, preset, slug, name, auth_type, created_at, updated_at) VALUES ('con_w', 'native_whoop', 'whoop', 'whoop', 'WHOOP', 'oauth', ?, ?)",
+      t0,
+      t0,
+    );
+    upstreams(ctx).store.setClient("con_w", { client_id: "good-id", client_secret: "good-secret-123" });
+    const res = await h.request("/api/connections/con_w/connect", { method: "POST", cookie, headers: CSRF, json: { inputs: { client_id: "typo-id", client_secret: "typo-secret-123" } } });
+    const r = await json(res);
+    expect(r).toMatchObject({ status: "authorize" });
+    expect(new URL(r.authorizeUrl).searchParams.get("client_id")).toBe("typo-id");
+    // The working client is untouched until WHOOP's consent comes back.
+    expect(upstreams(ctx).store.client("con_w")).toEqual({ client_id: "good-id", client_secret: "good-secret-123" });
+  });
+
   it("the app serves connection webhooks through the broker's hook host by default", async () => {
     const t = setup();
     disposers.push(t.dispose);

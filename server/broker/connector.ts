@@ -111,10 +111,12 @@ export function upstreamConnector(ctx: AppContext, up: UpstreamRuntime, presetFo
           const a = preset.auth;
           const clientId = input.inputs?.[a.clientIdInput]?.trim();
           const secret = input.inputs?.[a.clientSecretInput];
-          if (clientId || secret) {
-            up.store.setClient(conn.id, { ...(up.store.client(conn.id) ?? {}), ...(clientId ? { [a.clientIdInput]: clientId } : {}), ...(secret ? { [a.clientSecretInput]: secret } : {}) });
-          }
-          const r = await up.startConnect(conn.id, { reconnectPolicy: preset.reconnectPolicy });
+          // A candidate only: saved with the tokens once the consent completes, so a typo can't break a working connection.
+          const candidate =
+            clientId || secret
+              ? { ...(up.store.client(conn.id) ?? {}), ...(clientId ? { [a.clientIdInput]: clientId } : {}), ...(secret ? { [a.clientSecretInput]: secret } : {}) }
+              : null;
+          const r = await up.startConnect(conn.id, { reconnectPolicy: preset.reconnectPolicy, nativeClient: candidate });
           return { status: "authorize", authorizeUrl: r.authUrl, callbackMode: r.callbackMode, redirectUri: r.redirectUri };
         }
         if (conn.kind !== "remote_http" || !conn.url) throw new HttpError(400, "connection_kind", `${conn.name} has no sign-in flow`);
@@ -153,5 +155,6 @@ export function upstreamConnector(ctx: AppContext, up: UpstreamRuntime, presetFo
 
     createSource: (c) => up.source(c.id),
     invalidate: (id) => up.invalidate(id),
+    disconnect: (id) => up.disconnect(id),
   };
 }

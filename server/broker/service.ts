@@ -64,6 +64,8 @@ export interface Connector {
   finishFromUrl?(raw: string): Promise<{ status: "connected"; connectionId: string } | { status: "error"; message: string; connectionId: null }>;
   /** Drops the pooled session and fetch (URL or allow edited, reconnect, kill, delete). */
   invalidate?(connectionId: string): Promise<void>;
+  /** Closes the session, stops refreshing and deletes every credential (URL edit). */
+  disconnect?(connectionId: string): Promise<void>;
 }
 
 export interface BrokerParts {
@@ -281,11 +283,23 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
   const defaultNativeDeps = (c: Connection): NativeSourceDeps => nativeDepsFor(ctx, up, c);
 
-  /** Catalog listing per connection: the source is built on first use. */
+  /**
+   * Catalog listing per connection. The catalog gets a proxy that resolves the live source on every listing, so a
+   * reconnect (which replaces the pooled session) never leaves it on a closed one.
+   */
   const attach = (connectionId: string) => {
-    if (!enabled()) return;
-    const source = service.source(connectionId);
-    if (source) void catalog.attach(source);
+    if (!enabled() || !service.source(connectionId)) return;
+    const live = (): ToolSource => {
+      const s = service.source(connectionId);
+      if (!s) throw new SourceError("unavailable", "The connection is disabled or the broker is off");
+      return s;
+    };
+    void catalog.attach({
+      connectionId,
+      listTools: (signal) => live().listTools(signal),
+      callTool: (name, args, callCtx) => live().callTool(name, args, callCtx),
+      close: async () => {},
+    });
   };
   const attachAll = () => {
     for (const c of listConnections(ctx)) if (c.status !== "disabled") attach(c.id);
@@ -404,10 +418,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
     source(connectionId) {
       if (!enabled()) return null;
-      const existing = sources.get(connectionId);
-      if (existing) return existing;
       const c = getConnection(ctx, connectionId);
       if (!c || c.status === "disabled") return null;
+      // Remote sources are pooled by the upstream runtime, which drops and rebuilds them on reconnect, URL or
+      // allow edits: never cached here, so nothing keeps using a closed session.
+      if (c.kind === "remote_http") return createSource(c);
+      const existing = sources.get(connectionId);
+      if (existing) return existing;
       const s = createSource(c);
       sources.set(connectionId, s);
       return s;
