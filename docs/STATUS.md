@@ -57,17 +57,23 @@ anything earlier in that doc.
 - #50: attachments on `create_draft`, `reply` and `send_message` (25 MB per message, at most 10 files, Gmail-blocked
   types refused, filenames cleaned and decoded, shown on approval cards, audited). Published as `nightly.48`.
 
-## Current: xaq (renamed 2026-10-16) — MCP broker M1–M3 code shipped
+## Current: xaq (renamed 2026-10-16) — MCP broker M1–M3 + T3 Code shipped
 
 - **Renamed:** repo `wynn-dev/xaq` (was `wynn-dev/agentinbox`), package `xaq-cli`, bin `xaq`, #60.
   - The first xaq-cli nightly is `0.1.0-nightly.71` (main 54b04b0), published via OIDC with provenance.
   - The last agentinbox-cli nightly is `0.1.0-nightly.69`.
 - **Broker:** everything in [docs/MCP-BROKER.md](MCP-BROKER.md) M1–M3 is merged (#52–#72). Nits are in FOLLOWUPS.md.
 
+- **After Wynn's first Mac upgrade (2026-10-16):**
+  - #74: ownership-aware dirs (a foreign `~/.config/xaq` is never used or touched; agentinbox dirs stay in use). Published in `nightly.73`.
+  - #75: in search mode every tool stays callable by name; agents from before the upgrade are pinned to direct; `auto` is decided once. WHOOP polls without webhooks (a reconciliation poll that keeps running even with webhooks), the webhook step appears only on a really public URL, and Tailscale gets an optional Funnel step. Published in `nightly.74`.
+  - #77: the tool-change pin/hold is removed (Wynn's decision; don't re-add): a changed tool is used at once, with only an audit entry. Published in `nightly.75`.
+  - #76: the T3 Code preset (tier L): MCP OAuth, http only on private/tailnet addresses, same-origin sign-in, 30-day expiry with a warning and Reconnect, several servers, a risk table. Published in `nightly.76`.
+  - T3 E2E rule: only a disposable `t3 serve` under `env -i` with a fresh `T3CODE_HOME`. Never the live :3773, `~/.t3` or `~/.hermes/mcp-tokens`.
+
 Open, in order:
-1. **Wynn's Mac upgrade** per #60's runbook: `plutil` checks, then `npx -y agentinbox-cli@latest service install`
-   and `listen service install`, then `npx -y xaq-cli@latest service install` and `listen service install`. Hermes
-   needs no change.
+1. **Wynn's Mac upgrade from step 4:** `npx -y xaq-cli@latest service install`, then `listen service install`,
+   `listen status`, `hermes mcp test agentinbox`, and a test email (the commands are in the lead thread).
 2. **Wynn repoints `agentinbox-cli`'s npm trusted publisher** to `wynn-dev/xaq` + `shim.yml`. Then: run `shim.yml`,
    `npm deprecate agentinbox-cli …`, and `npm deprecate xaq-cli@0.0.0-stage …`. Don't run `shim.yml` before that.
 3. **Real-world checks that need Wynn:**
@@ -75,7 +81,8 @@ Open, in order:
    - the Hermes import (M1 #3). Open decision: one entry or two; the rec is two, keeping a mail-only `agentinbox`
      entry for routes confined with `mcp-agentinbox`;
    - WHOOP with his own developer app (M2);
-   - Hermes in search mode (M3) after the import.
+   - Hermes in search mode (M3) after the import: opt-in from the agent's "Tool list" card;
+   - T3 Code: connect forge's T3 servers.
 
 ## Rules (Wynn / Adri)
 
