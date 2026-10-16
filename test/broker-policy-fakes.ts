@@ -75,7 +75,7 @@ export function grant(ctx: AppContext, agentId: string, connectionId: string, le
   );
 }
 
-/** Like the catalog's registry: granted connections, read level lists read tools only, held tools excluded. */
+/** Like the catalog's registry: granted connections, read level lists read tools only. */
 export class DbRegistry implements ToolRegistry {
   /** Tests flip this to see that the policy denies non-read tools at the read level on its own. */
   filterRead = true;

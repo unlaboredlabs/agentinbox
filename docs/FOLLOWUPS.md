@@ -304,12 +304,11 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 
 ### Endpoint (#63, agent-facing review)
 - `get_call_status` is listed for any connection grant, even full/read only; it disappears once the last grant is removed while results are still stored.
-- A client with a cached tool list calling a held tool gets "Tool X not found"; route every `__` name to BrokerCalls for the clearer on-hold message.
 - `connectionGrantsOf` doesn't filter disabled connections (they appear in instructions); `visibleConnectionIds` doesn't filter disabled agents.
 - `brokerInstructions` says tools are "prefixed with its name"; the prefix is the slug.
 - Catalog: a risky verb straight after a read prefix is exempt (`fetch_delete_messages` is a read); unlikely from honest servers.
 - Catalog: `cleanSchema` tests the raw key against `description`, so a zero-width-split `description` key skips the 256 cap (still stripped, under 32 KB).
-- Catalog: when every pinned tool comes back refused, the old pins keep being served with no hold or ping; a refused tool should be held as changed.
+- Catalog: when every stored tool comes back refused (invalid definitions), the old definitions keep being served and nothing is audited; record a `connection.tool_changed`-style audit entry, or drop them. (No hold exists since 2026-10-16.)
 - The doc says bare `pay` isn't matched in descriptions; the code includes it (stricter). Fix the doc.
 - The `readOnlyHint` residual risk is undocumented; the description check is skipped when only `readOnlyHint: false` is set; names are classified raw, not cleaned.
 - Upstream: the 16 MiB body cap counts across a whole long-lived SSE stream (legacy HTTP+SSE carries every result on one GET).
@@ -350,7 +349,6 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - Event `detail` sent to agents isn't delimiter-escaped (`format.ts:427`) beyond `cleanLine`; `approval.requested` deliveries to a now-disabled agent's webhook still go out (`access.ts:53`).
 - Console UX: for a generic share/send tool, "Always allow" defaults to "Any call"; defaulting to the recipients is safer. "Only for these 2 items" doesn't list them.
 - Console UX: on a phone the pinned button area covers about half the screen; the sidebar shows "Get started 0/8" before a path is chosen; closing the OAuth pop-up leaves "Waiting for Notion…" spinning; the expiry badge rounds up; the sidebar tagline still says "Gmail for your agents".
-- Confirm that a held tool sends its outbound ping/event (seen in the console only).
 
 ### CLI (#66)
 - Add a session kind or max-expiry column to `admin_sessions` so the CLI's one-time row doesn't rely on a `created_at` trick.
@@ -388,7 +386,6 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - The CLI header prompt repeats itself and doesn't say whether to type "Bearer ".
 - Aborting `connections add` at the header prompt leaves a keyless connection listed as active with 0 tools.
 - The approve page says "This action can't be undone" for `notion-delete-pages` (moves pages to Trash).
-- A held tool returns "Tool … not found" instead of the documented `tool_on_hold`.
 - "The next step checks that it works" after creating the agent, but Finish setup goes straight to Overview; an abandoned pairing request stays as a banner until it expires.
 - Disable deletes the stored bearer key; the CLI help ("turn it back on in the console") doesn't say so.
 

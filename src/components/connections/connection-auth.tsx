@@ -279,9 +279,9 @@ export function ConnectionAuthHost() {
             <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
             <p>
               {phase.connection.tools.total > 0
-                ? `${phase.connection.tools.total} tool${phase.connection.tools.total === 1 ? "" : "s"} found and pinned.`
+                ? `${phase.connection.tools.total} tool${phase.connection.tools.total === 1 ? "" : "s"} found.`
                 : "Its tools are being listed now."}{" "}
-              If a tool's definition changes later, xaq holds that tool until you accept the change.
+              If a tool's definition changes later, agents simply use the new one; the audit log notes the change.
             </p>
           </div>
         )}

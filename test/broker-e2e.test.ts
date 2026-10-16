@@ -68,7 +68,7 @@ describe("broker end to end (fake upstream, OAuth + DCR)", () => {
     // The catalog lists and pins the tools.
     const listed = await ctx.broker.catalog.refresh(con.id);
     expect(listed).toMatchObject({ ok: true });
-    expect((await json(await api(`/connections/${con.id}`))).tools).toMatchObject({ total: 2, active: 2, held: 0 });
+    expect((await json(await api(`/connections/${con.id}`))).tools).toEqual({ total: 2 });
 
     // The agent, over HTTP with its key.
     const client = new Client({ name: "e2e", version: "1" });
@@ -115,7 +115,7 @@ describe("broker end to end (fake upstream, OAuth + DCR)", () => {
     expect(afterReconnect.isError).toBeFalsy();
     expect(text(afterReconnect)).toContain("Page post: hello");
     await ctx.broker.catalog.refresh(con.id);
-    expect((await json(await api(`/connections/${con.id}`))).tools).toMatchObject({ active: 2 });
+    expect((await json(await api(`/connections/${con.id}`))).tools).toEqual({ total: 2 });
 
     // A sign-in started before a URL edit can't complete afterwards (it was for the old server).
     const stale = await json(await api(`/connections/${con.id}/connect`, { method: "POST", json: {} }));

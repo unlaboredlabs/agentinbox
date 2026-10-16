@@ -30,7 +30,7 @@ const rangeSchema = (extra: Record<string, unknown> = {}) => ({
   additionalProperties: false,
 });
 
-/** Pre-pinned, deterministic definitions (the catalog pins these; changing one is a tool change). */
+/** Pre-pinned, deterministic definitions (the catalog hashes these; changing one is audited as a tool change). */
 export const WHOOP_TOOLS: readonly ToolDef[] = [
   {
     name: "get_today",

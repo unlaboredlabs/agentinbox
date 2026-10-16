@@ -27,7 +27,7 @@ import type {
 } from "@shared/types";
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { apiGet } from "./api";
-import type { ApprovalRule, ConnectionGrant, ConnectionView, HeldToolView, McpCallApprovalView, PresetView } from "@shared/types";
+import type { ApprovalRule, ConnectionGrant, ConnectionView, McpCallApprovalView, PresetView } from "@shared/types";
 import { agentConnections } from "../components/connections/connection-flow";
 
 export type * from "./broker-dto";
@@ -165,9 +165,6 @@ export const queries = {
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => apiGet<ConnectionView[]>("/api/connections"), refetchInterval: 60_000 }),
   connection: (id: string) =>
     queryOptions({ queryKey: keys.connection(id), queryFn: () => apiGet<ConnectionView>(`/api/connections/${encodeURIComponent(id)}`) }),
-  /** Tools on hold on one connection, each with its pinned and candidate definition and their diff. */
-  heldTools: (id: string) =>
-    queryOptions({ queryKey: [...keys.connection(id), "held"], queryFn: () => apiGet<HeldToolView[]>(`/api/connections/${encodeURIComponent(id)}/held`) }),
   presets: () => queryOptions({ queryKey: keys.presets, queryFn: () => apiGet<PresetView[]>("/api/connections/presets"), staleTime: 10 * 60_000 }),
   connectionGrants: (connectionId: string) =>
     queryOptions({

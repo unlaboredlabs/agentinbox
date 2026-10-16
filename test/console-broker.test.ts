@@ -29,7 +29,6 @@ import {
   exactOrigin,
   finishEarlyCreate,
   grantsWith,
-  heldNotices,
   hostPort,
   inputProblems,
   LEVEL_INFO,
@@ -69,7 +68,7 @@ const conn = (over: Partial<Shared.ConnectionView> = {}): Shared.ConnectionView 
   instructionsHash: null,
   createdAt: inDays(-3),
   updatedAt: inDays(-3),
-  tools: { total: 12, active: 12, held: 0 },
+  tools: { total: 12 },
   expiresInDays: null,
   agents: 2,
   ...over,
@@ -154,19 +153,6 @@ describe("Connections: status in plain words", () => {
     expect(connectionStatusView(conn({ expiresAt: inDays(7) }), NOW)).toMatchObject({ label: "Expires in 7 days", tone: "warn", action: "reconnect" });
     expect(connectionStatusView(conn({ expiresAt: inDays(0.5) }), NOW)).toMatchObject({ label: "Expires in 1 day", tone: "bad" });
     expect(connectionStatusView(conn({ expiresAt: inDays(-1) }), NOW)).toMatchObject({ label: "Expired", tone: "bad", action: "reconnect" });
-  });
-
-  it("says which connection changed how many tools, skipping disabled ones", () => {
-    expect(
-      heldNotices([
-        conn({ tools: { total: 12, active: 11, held: 1 } }),
-        conn({ id: "con_2", name: "T3 forge", tools: { total: 5, active: 2, held: 3 } }),
-        conn({ id: "con_3", status: "disabled", tools: { total: 2, active: 0, held: 2 } }),
-      ]),
-    ).toEqual([
-      { id: "con_1", text: "Notion changed 1 tool" },
-      { id: "con_2", text: "T3 forge changed 3 tools" },
-    ]);
   });
 });
 
@@ -416,7 +402,7 @@ describe("Review fixes (#65)", () => {
   });
 
   it("says 'Not signed in' for an OAuth connection whose sign-in was abandoned", () => {
-    const fresh = conn({ tools: { total: 0, active: 0, held: 0 }, toolsCachedAt: null });
+    const fresh = conn({ tools: { total: 0 }, toolsCachedAt: null });
     expect(connectionStatusView(fresh, NOW)).toMatchObject({ label: "Not signed in", action: "reconnect" });
     expect(connectionStatusView({ ...fresh, status: "needs_reauth", authType: "header" }, NOW).label).toBe("Not signed in");
     expect(connectionStatusView({ ...fresh, authType: "none" }, NOW).label).toBe("Active");

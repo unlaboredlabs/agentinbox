@@ -1,11 +1,11 @@
-// ToolRegistry over the pinned catalog: per-agent tool lists with connection_grants.level applied. Synchronous and
+// ToolRegistry over the catalog: per-agent tool lists with connection_grants.level applied. Synchronous and
 // cached in memory; call invalidate() whenever connections, grants or the catalog change (Catalog.onChange does the
 // last one).
 
 import type { Db } from "../../db/index.ts";
 import type { AccessLevel, IntegrationPreset, RegisteredTool, ToolRegistry } from "../types.ts";
-import { candidateKey, checkCollisions, exposedName, fold, type NameRefusal } from "./names.ts";
-import type { CatalogStore, HeldReason } from "./store.ts";
+import { candidateKey, checkCollisions, exposedName, type NameRefusal } from "./names.ts";
+import type { CatalogStore } from "./store.ts";
 
 export interface RegistryConnection {
   id: string;
@@ -39,10 +39,8 @@ interface Exposed {
 }
 
 interface Snapshot {
-  /** Active (pinned, not held, named without collision) tools, sorted by exposed name. */
+  /** Tools with a definition, named without collision, sorted by exposed name. */
   active: Exposed[];
-  /** Held tools by exposed name, so the call path can say `tool_on_hold` instead of "unknown tool". */
-  held: Map<string, { connectionId: string; name: string; reason: HeldReason }>;
   refused: NameRefusal[];
 }
 
@@ -76,16 +74,6 @@ export class CatalogRegistry implements ToolRegistry {
     return this.view(agentId).byName.get(exposedName) ?? null;
   }
 
-  /**
-   * A held tool by exposed name, when the agent has a grant on its connection (so the call path can answer
-   * `tool_on_hold`). Additive to the ToolRegistry contract.
-   */
-  held(agentId: string, exposed: string): { connectionId: string; name: string; reason: HeldReason } | null {
-    const h = this.snap().held.get(fold(exposed));
-    if (!h) return null;
-    return this.deps.grants(agentId).some((g) => g.connectionId === h.connectionId) ? h : null;
-  }
-
   /** Tools that can't be exposed (invalid name, or a collision with a native tool or another connection). */
   refusals(): NameRefusal[] {
     return [...this.snap().refused];
@@ -111,20 +99,15 @@ export class CatalogRegistry implements ToolRegistry {
     if (this.snapshot) return this.snapshot;
     const conns = new Map(this.deps.connections().map((c) => [c.id, c]));
     const rows = this.deps.store.allTools().filter((t) => conns.has(t.connectionId));
-    // Names are recomputed from the current slug and re-checked for collisions on every rebuild. Every row takes
-    // part (held ones too, so a held newcomer can't later steal a name); pinned ones are established.
+    // Names are recomputed from the current slug and re-checked for collisions on every rebuild. Rows with a
+    // definition are established.
     const named = rows.map((t) => ({ row: t, exposed: exposedName(conns.get(t.connectionId)!.slug, t.name) }));
     const { ok, refused } = checkCollisions(
       named.map(({ row, exposed }) => ({ connectionId: row.connectionId, name: row.name, exposedName: exposed, established: row.def !== null })),
     );
     const active: Exposed[] = [];
-    const held: Snapshot["held"] = new Map();
     for (const { row, exposed } of named) {
       if (!exposed || !ok.has(candidateKey(row.connectionId, row.name))) continue;
-      if (row.heldReason) {
-        held.set(fold(exposed), { connectionId: row.connectionId, name: row.name, reason: row.heldReason });
-        continue;
-      }
       if (!row.def || !row.pinHash) continue;
       const targetPath = this.deps.preset?.(row.connectionId)?.classify(row.def)?.targetPath;
       const cls = targetPath ? { ...row.cls, targetPath } : row.cls;
@@ -133,7 +116,7 @@ export class CatalogRegistry implements ToolRegistry {
       });
     }
     active.sort((a, b) => (a.tool.exposedName < b.tool.exposedName ? -1 : a.tool.exposedName > b.tool.exposedName ? 1 : 0));
-    this.snapshot = { active, held, refused };
+    this.snapshot = { active, refused };
     return this.snapshot;
   }
 }
