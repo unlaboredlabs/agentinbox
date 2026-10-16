@@ -115,6 +115,36 @@ describe("POST /hooks/connections/:id", () => {
     expect(emitted).toEqual([]);
   });
 
+  it("/hooks/connections/whoop (the URL the setup shows): the signature picks the connection, and marks it delivered", async () => {
+    const delivered: string[] = [];
+    const conn1 = host.webhookTarget("conn1")!;
+    const conn2 = { ...conn1, clientSecret: "another-apps-secret", deps: { ...conn1.deps, connectionId: "conn2" } };
+    const app = createApp(ctx, {
+      connectionHooks: { ...host, presetWebhookTargets: (id) => (id === "whoop" ? [conn2, conn1] : []), delivered: (id) => void delivered.push(id) },
+    });
+    const msg = fake.webhook({ type: "recovery.updated", id: "sleep-uuid", trace_id: "trace-p" });
+    expect((await post(app, "/hooks/connections/whoop", msg)).status).toBe(204);
+    expect(emitted).toEqual([expect.objectContaining({ connectionId: "conn1", dedupeKey: "whoop:trace-p" })]);
+    expect(delivered).toEqual(["conn1"]);
+    expect((await post(app, "/hooks/connections/whoop", fake.webhook({ type: "sleep.updated", id: "a", trace_id: "t" }, { secret: "forged" }))).status).toBe(401);
+    expect((await post(app, "/hooks/connections/notion", msg)).status).toBe(404);
+    expect(delivered).toEqual(["conn1"]);
+  });
+
+  it("Funnel traffic on another host:port than the public URL's only reaches the hooks", async () => {
+    ctx.settings.update({ publicUrl: "https://box.tail1234.ts.net" });
+    const app = createApp(ctx, { connectionHooks: host });
+    const funnel = { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net:8443" };
+    for (const path of ["/", "/api/system", "/mcp", "/agent/v1/events", "/hooks/connections"]) {
+      const res = await app.request(path, { headers: funnel });
+      expect(res.status, path).toBe(404);
+    }
+    const msg = fake.webhook({ type: "sleep.updated", id: "f", trace_id: "trace-f" });
+    expect((await post(app, "/hooks/connections/conn1", { ...msg, headers: { ...msg.headers, ...funnel } })).status).toBe(204);
+    // The owner funnelled the console itself (the public URL's host): not fenced.
+    expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net" } })).status).toBe(401);
+  });
+
   it("builds the webhook URL from the public URL", () => {
     expect(connectionHookUrl("https://inbox.example.com/", "conn1")).toBe("https://inbox.example.com/hooks/connections/conn1");
   });

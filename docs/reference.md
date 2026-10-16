@@ -43,7 +43,14 @@ key; the broker holds every upstream credential and lists only the tools the age
 
 - **Add one**: in the console, Connections → Add connection; or `npx xaq-cli connections add notion|whoop|<url>`
   on the daemon's machine. Presets: Notion (its hosted MCP, two clicks) and WHOOP (your own WHOOP developer app; the
-  console walks you through it). Any other server: paste its URL; xaq finds out whether it needs an OAuth
+  console walks you through it). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
+  WHOOP every 15 minutes for new recoveries, sleeps and workouts (`whoop.*` events).
+  - **Optional webhooks:** they bring those events within seconds instead. The setup offers them only when the
+    internet can reach this install.
+  - **Tailnet-only installs** (Tailscale `serve` on a `*.ts.net` name): the setup offers an optional Tailscale Funnel
+    command that exposes only the webhook path, on its own port.
+
+  Any other server: paste its URL; xaq finds out whether it needs an OAuth
   sign-in or an API key. Servers on this machine or your private network (loopback, Tailscale) need an explicit
   "allow this host" for that exact address.
 - **One choice per connection**: Full access, Ask before risky actions (default), or Read only, for all agents or
