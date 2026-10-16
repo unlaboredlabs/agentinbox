@@ -169,7 +169,7 @@ export class UpstreamRuntime {
         store: this.store,
         refresher: this.refresher,
         refresh: this.refreshFnFor(conn),
-        saveVerdict: (v) => this.ctx.db.run("UPDATE connections SET protocol = ? WHERE id = ?", v, connectionId),
+        saveVerdict: (v) => this.ctx.db.run("UPDATE connections SET protocol = ?, protocol_checked_at = ? WHERE id = ?", v, v ? new Date(this.now()).toISOString() : null, connectionId),
         log: this.ctx.log.child("broker"),
         clientInfo: { name: CLIENT_NAME, version: this.ctx.config.version },
         callTimeoutMs: this.opts.callTimeoutMs,

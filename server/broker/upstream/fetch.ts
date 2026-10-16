@@ -63,7 +63,7 @@ export function canonicalPrivateTarget(input: string): string {
   };
   if (typeof input !== "string" || input.length > 300) fail("not a short string");
   // oxlint-disable-next-line no-control-regex -- refusing control characters is the point here
-  if (/[\\%\s\u0000-\u001f\u007f@?#]/.test(input)) fail("it contains a character that isn't allowed");
+  if (/[\\%\s\u0000-\u001f\u007f@?#[\]]/.test(input)) fail("it contains a character that isn't allowed (IPv6 literals aren't accepted: use a hostname)");
   let u: URL;
   try {
     u = new URL(input);

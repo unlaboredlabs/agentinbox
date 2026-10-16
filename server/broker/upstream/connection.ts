@@ -15,10 +15,11 @@ export interface ConnectionRow {
   preset: string | null;
   expires_at: string | null;
   protocol: string | null;
+  protocol_checked_at: string | null;
 }
 
 export function getConnection(db: Db, id: string): ConnectionRow | null {
-  return db.get<ConnectionRow>("SELECT id, kind, slug, name, url, auth_type, private_target, status, status_reason, preset, expires_at, protocol FROM connections WHERE id = ?", id) ?? null;
+  return db.get<ConnectionRow>("SELECT id, kind, slug, name, url, auth_type, private_target, status, status_reason, preset, expires_at, protocol, protocol_checked_at FROM connections WHERE id = ?", id) ?? null;
 }
 
 /** A remote_http connection that can be talked to right now, or a SourceError saying why not. */

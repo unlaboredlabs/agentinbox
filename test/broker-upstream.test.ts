@@ -185,7 +185,7 @@ describe("guarded fetch: SSRF guard and the private-target allow", () => {
   it("private_target must be canonical scheme://host:port", () => {
     expect(canonicalPrivateTarget("http://127.0.0.1:3773")).toBe("http://127.0.0.1:3773");
     expect(canonicalPrivateTarget("http://100.104.249.49:3773")).toBe("http://100.104.249.49:3773");
-    expect(canonicalPrivateTarget("https://[::1]:8443")).toBe("https://[::1]:8443");
+    expect(() => canonicalPrivateTarget("https://[::1]:8443")).toThrow(); // the schema CHECK refuses brackets
     for (const bad of [
       "http://127.0.0.1", // no explicit port
       "http://127.0.0.1:3773/",

@@ -68,7 +68,6 @@ export class RemoteToolSource implements ToolSource {
   private live: Promise<Live> | null = null;
   private lastToken: string | undefined;
   private insufficientScope: string | null = null;
-  private verdictCheckedAt = 0;
   private closed = false;
 
   constructor(private readonly deps: RemoteSourceDeps) {
@@ -121,7 +120,9 @@ export class RemoteToolSource implements ToolSource {
     const fetch = this.sdkFetch(conn);
     const authProvider = this.authProvider(conn);
     const url = new URL(conn.url);
-    const cached = Date.now() - this.verdictCheckedAt < VERDICT_TTL_MS || this.verdictCheckedAt === 0 ? parseVerdict(conn.protocol) : null;
+    // The cached verdict skips the probe; it expires (a legacy server may have upgraded, and the SDK can't tell).
+    const fresh = conn.protocol_checked_at && Date.now() - Date.parse(conn.protocol_checked_at) < VERDICT_TTL_MS;
+    const cached = fresh ? parseVerdict(conn.protocol) : null;
 
     const viaSse = async (): Promise<Live> => {
       const client = this.newClient("legacy");
@@ -148,9 +149,9 @@ export class RemoteToolSource implements ToolSource {
   }
 
   private remember(live: Live): Live {
-    this.verdictCheckedAt = Date.now();
+
     const s = formatVerdict(live.verdict);
-    if (s !== this.deps.connection().protocol) this.deps.saveVerdict(s);
+    this.deps.saveVerdict(s);
     return live;
   }
 
@@ -187,7 +188,7 @@ export class RemoteToolSource implements ToolSource {
         // A stale cached verdict: forget it and probe once more.
         if (this.deps.connection().protocol && !(findSourceError(err) || err instanceof UnauthorizedError) && !signal.aborted) {
           this.deps.saveVerdict(null);
-          this.verdictCheckedAt = 0;
+
           live = await this.client(signal);
         } else throw err;
       }
