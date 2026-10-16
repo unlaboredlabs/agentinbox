@@ -156,7 +156,7 @@ export class FakeSources {
     return s;
   }
 
-  source(connectionId: string) {
+  source(connectionId: string): FakeSource | null | Promise<FakeSource | null> {
     return this.map.get(connectionId) ?? null;
   }
 

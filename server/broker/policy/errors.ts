@@ -5,7 +5,7 @@ import type { Scrubber } from "./output.ts";
 
 export interface DescribedFailure {
   /** Audit reason: the SourceError code, or "internal". */
-  reason: SourceErrorCode | "internal";
+  reason: SourceErrorCode | "internal" | "connection_disabled";
   message: string;
   /** The call may have reached the upstream (and done something): counted toward risky caps, never retried. */
   maybeRan: boolean;

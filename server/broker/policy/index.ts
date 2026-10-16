@@ -34,7 +34,7 @@ import {
   transition,
   updateToolCall,
 } from "./store.ts";
-import { validateArgs, validateOutput } from "./validate.ts";
+import { MAX_ARGS_BYTES, validateArgs, validateOutput } from "./validate.ts";
 
 export { canonicalJson } from "./canonical.ts";
 
@@ -191,6 +191,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     try {
       if (!isPlainObject(args)) throw new TypeError("Arguments must be an object");
       bytes = canonicalJson(args);
+      if (Buffer.byteLength(bytes) > MAX_ARGS_BYTES) throw new RangeError(`Arguments are too large (over ${MAX_ARGS_BYTES / 1024 / 1024} MB). Nothing was sent`);
     } catch (err) {
       record("error", "invalid_arguments", {});
       return text(`Invalid arguments for ${exposedName}: ${(err as Error).message}.`, true);
@@ -221,7 +222,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
             `If nobody answers, it expires at ${approval.expiresAt}.`,
         );
       }
-      const ran = await this.execute(tool.connectionId, conn?.name ?? tool.slug, tool, args, { agentId, signal, scrubber });
+      const ran = await this.execute(tool.connectionId, conn?.name ?? tool.slug, tool, args, { agentId, signal });
       const counted = tool.cls.risky && (!ran.failure || ran.failure.maybeRan);
       const detail = {
         ...fp,
@@ -243,29 +244,41 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     }
   }
 
-  /** Runs one call on the connection's source and post-processes the answer. Never throws. */
-  private async execute(
-    connectionId: string,
-    connectionName: string,
-    tool: RegisteredTool,
-    args: Record<string, unknown>,
-    opts: { agentId: string; signal: AbortSignal; scrubber: Scrubber },
-  ): Promise<Executed> {
+  /**
+   * Runs one call on the connection's source and post-processes the answer. Never throws. The scrubber is built
+   * after the call, so a token refreshed (rotated) during it is scrubbed too. Getting the source may await (a
+   * connect, a refresh): the connection is re-checked afterwards, so a kill in that window stops the call.
+   */
+  private async execute(connectionId: string, connectionName: string, tool: RegisteredTool, args: Record<string, unknown>, opts: { agentId: string; signal: AbortSignal }): Promise<Executed> {
     const sourceDetail: Record<string, unknown> = {};
+    let raw: ToolResult;
     try {
       const source = await this.deps.sources.source(connectionId);
       if (!source) throw new SourceError("unavailable", "the connection isn't set up");
-      const raw = await source.callTool(tool.def.name, args, { agentId: opts.agentId, connectionId, signal: opts.signal, auditDetail: sourceDetail });
+      const conn = connectionInfo(this.ctx.db, connectionId);
+      if (!conn || conn.status === "disabled") {
+        const failure: DescribedFailure = { reason: "connection_disabled", message: `${connectionName} was turned off in agentinbox, so the call wasn't sent.`, maybeRan: false };
+        return { result: text(failure.message, true), signals: null, failure, sourceDetail };
+      }
+      raw = await source.callTool(tool.def.name, args, { agentId: opts.agentId, connectionId, signal: opts.signal, auditDetail: sourceDetail });
+    } catch (err) {
+      const scrubber = this.scrubberFor(connectionId);
+      const failure = describeFailure(err, connectionName, scrubber);
+      if (failure.reason === "internal") this.log.warn("Upstream call failed", { connection: connectionId, tool: tool.def.name, error: scrubber.scrub(errorMessage(err)).text });
+      return { result: text(failure.message, true), signals: null, failure, sourceDetail };
+    }
+    try {
       const { result, signals } = processResult(raw, {
         source: `${tool.slug}/${tool.def.name}`,
-        scrubber: opts.scrubber,
+        scrubber: this.scrubberFor(connectionId),
         maxChars: this.ctx.settings.get().maxBodyChars,
         validateStructured: (v) => validateOutput(tool.pinHash, tool.def.outputSchema, v),
       });
       return { result, signals, failure: null, sourceDetail };
     } catch (err) {
-      const failure = describeFailure(err, connectionName, opts.scrubber);
-      if (failure.reason === "internal") this.log.warn("Upstream call failed", { connection: connectionId, tool: tool.def.name, error: opts.scrubber.scrub(errorMessage(err)).text });
+      // The call ran; only reading its answer failed.
+      this.log.warn("Processing an upstream result failed", { connection: connectionId, tool: tool.def.name, error: this.scrubberFor(connectionId).scrub(errorMessage(err)).text });
+      const failure: DescribedFailure = { reason: "internal", message: `${connectionName} answered, but agentinbox couldn't read the answer. The call ran: check before trying again.`, maybeRan: true };
       return { result: text(failure.message, true), signals: null, failure, sourceDetail };
     }
   }
@@ -505,10 +518,9 @@ export class BrokerPolicyRuntime implements BrokerCalls {
     }
     const tool = this.currentTool(row.agent_id, row.connection_id, call.tool)!;
     const conn = connectionInfo(this.ctx.db, row.connection_id);
-    const scrubber = this.scrubberFor(row.connection_id);
     const args = JSON.parse(call.args) as Record<string, unknown>;
     // Approved calls aren't tied to the approver's request: the source's own timeout bounds them.
-    const ran = await this.execute(row.connection_id, conn?.name ?? tool.slug, tool, args, { agentId: row.agent_id, signal: new AbortController().signal, scrubber });
+    const ran = await this.execute(row.connection_id, conn?.name ?? tool.slug, tool, args, { agentId: row.agent_id, signal: new AbortController().signal });
     const detail = {
       argsBytes: Buffer.byteLength(call.args),
       resultBytes: resultBytes(ran.result),

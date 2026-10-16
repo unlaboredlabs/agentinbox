@@ -616,6 +616,91 @@ describe("SourceError → plain words", () => {
   });
 });
 
+describe("hostile schemas and sizes", () => {
+  const EVIL = "^(a+)+$";
+  const evilInput = "a".repeat(40) + "!";
+
+  beforeEach(() => grant(w.h.ctx, w.agent, w.con, "full"));
+
+  it("an upstream outputSchema pattern can't backtrack on its own structuredContent (RE2, linear)", async () => {
+    addTool(w.h.ctx, w.con, "notion", {
+      name: "evil_out",
+      read: true,
+      outputSchema: { type: "object", properties: { s: { type: "string", pattern: EVIL } }, patternProperties: { [EVIL]: { type: "string" } } },
+    });
+    w.src.handler = () => ({ content: [{ type: "text", text: "x" }], structuredContent: { s: evilInput, [evilInput]: "v" } });
+    const t0 = performance.now();
+    const r = await w.rt.call(w.agent, "notion__evil_out", {}, signal());
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(r.structuredContent).toBeUndefined(); // doesn't match the pattern: dropped
+  });
+
+  it("input patterns run on RE2 too, and still validate", async () => {
+    addTool(w.h.ctx, w.con, "notion", { name: "evil_in", inputSchema: { type: "object", properties: { s: { type: "string", pattern: EVIL }, t: { type: "string", pattern: "^[a-z]+$" } } } });
+    const t0 = performance.now();
+    const r = await w.rt.call(w.agent, "notion__evil_in", { s: evilInput }, signal());
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(textOf(r)).toContain("Invalid arguments");
+    expect(textOf(await w.rt.call(w.agent, "notion__evil_in", { t: "ABC" }, signal()))).toContain("Invalid arguments");
+    expect(textOf(await w.rt.call(w.agent, "notion__evil_in", { s: "aaa", t: "abc" }, signal()))).toContain("ran evil_in");
+  });
+
+  it("a pattern RE2 can't express isn't checked (the upstream validates its own input)", async () => {
+    addTool(w.h.ctx, w.con, "notion", { name: "lookahead", inputSchema: { type: "object", properties: { s: { type: "string", pattern: "^(?=a)a$" } } } });
+    expect(textOf(await w.rt.call(w.agent, "notion__lookahead", { s: "zzz" }, signal()))).toContain("ran lookahead");
+  });
+
+  it("uniqueItems is dropped and oversized arguments are refused", async () => {
+    addTool(w.h.ctx, w.con, "notion", { name: "uniq", inputSchema: { type: "object", properties: { xs: { type: "array", uniqueItems: true } } } });
+    const t0 = performance.now();
+    await w.rt.call(w.agent, "notion__uniq", { xs: Array.from({ length: 20_000 }, (_, i) => ({ i })) }, signal());
+    expect(performance.now() - t0).toBeLessThan(2000);
+    const big = await w.rt.call(w.agent, "notion__uniq", { xs: ["x".repeat(1024 * 1024)] }, signal());
+    expect(textOf(big)).toContain("too large");
+    expect(w.src.calls).toHaveLength(1);
+  });
+});
+
+describe("scrubber and kill races", () => {
+  beforeEach(() => grant(w.h.ctx, w.agent, w.con, "full"));
+
+  it("a token straddling the 300-character cut of an error message doesn't leak its prefix", async () => {
+    const token = "straddle-token-0123456789abcdef";
+    w.credentials.saveTokens(w.con, { accessToken: token, refreshToken: null, expiresAt: null, scope: null, issuer: null });
+    w.src.handler = () => {
+      throw new SourceError("unavailable", `${"x".repeat(290)} ${token}`);
+    };
+    const t = textOf(await w.rt.call(w.agent, "notion__search", {}, signal()));
+    expect(t).not.toContain(token.slice(0, 8));
+  });
+
+  it("a token refreshed during the call is scrubbed from its result", async () => {
+    w.credentials.saveTokens(w.con, { accessToken: "old-token-aaaaaaaaaaaa", refreshToken: null, expiresAt: null, scope: null, issuer: null });
+    w.src.handler = () => {
+      w.credentials.saveTokens(w.con, { accessToken: "new-token-bbbbbbbbbbbb", refreshToken: "new-refresh-cccccccccc", expiresAt: null, scope: null, issuer: null });
+      return { content: [{ type: "text", text: "new-token-bbbbbbbbbbbb new-refresh-cccccccccc" }] };
+    };
+    const t = textOf(await w.rt.call(w.agent, "notion__search", {}, signal()));
+    expect(t).not.toContain("new-token-bbbbbbbbbbbb");
+    expect(t).not.toContain("new-refresh-cccccccccc");
+  });
+
+  it("a kill while the source is being acquired stops the call before it's forwarded", async () => {
+    const original = w.sources.source.bind(w.sources);
+    w.sources.source = async (id: string) => {
+      await Promise.resolve();
+      w.h.ctx.db.run("UPDATE connections SET status = 'disabled' WHERE id = ?", id);
+      return original(id);
+    };
+    const r = await w.rt.call(w.agent, "notion__delete_pages", { page_ids: ["p"] }, signal());
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toContain("turned off");
+    expect(w.src.calls).toHaveLength(0);
+    expect(audits("notion__delete_pages")[0]).toMatchObject({ reason: "connection_disabled" });
+    expect(audits("notion__delete_pages")[0]!.detail).not.toHaveProperty("riskyCounted");
+  });
+});
+
 describe("kill switch", () => {
   it("disables the connection, cancels pending approvals, clears credentials and closes the source", async () => {
     grant(w.h.ctx, w.agent, w.con, "ask");
