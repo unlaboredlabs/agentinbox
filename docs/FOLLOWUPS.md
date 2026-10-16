@@ -372,3 +372,21 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `cutEntries` drops comment lines at the very end of the block when the last entry is removed (comment loss only).
 - Static `platforms.webhook.extra.routes` detection, and t3code-worldstream: the import still creates a pending connection for a retired server that answers; add a per-entry skip.
 - CLI: when the browser fails to open (e.g. `open` uses its bundled `xdg-open`), nothing says so; the command just waits after printing the link.
+
+### Rename (#60, delta review)
+- `serviceInstallInput` carries `PORT`/`HOST` over only from the old agentinbox unit; a later plain `npx xaq-cli service install` resets to `0.0.0.0:8425` (pre-existing behaviour). Carry them from the installed xaq unit too.
+- The script renamed "Wynn's config" fixtures to xaq names; keep one fixture with the old names (`agentinbox` entry, `${AGENTINBOX_API_KEY}`, `mcp-agentinbox`) via `rename-xaq: keep`.
+- `import.ts` `SELF_NAME` skips any third-party server named `xaq-*` or `agentinbox-*` as if it were ours.
+- The listener's user-agent is now `xaq-cli/<v>`; an unmigrated daemon shows its version as unknown.
+- The connections CLI targets `~/.xaq` if it appears, instead of `~/.agentinbox` (fails clearly with "No xaq data").
+
+### New-user broker walk (Oct 2026)
+- Gmail wording remains for non-Gmail users: the "Gmail for your agents" tagline, "Gmail accounts" in the sidebar, the password page, "the AI tool that will read your mail", an Overview full of mail counts; the agent's tool list includes Gmail tools with no Gmail account connected.
+- The Notion dialog example says `notion__search`; the real name is `notion__notion-search`.
+- The CLI's default name for a loopback server is `127-0-0-1-38081`; the console's rule gives `local-38081`. After naming a connection, the console can still show its host as the name.
+- The CLI header prompt repeats itself and doesn't say whether to type "Bearer ".
+- Aborting `connections add` at the header prompt leaves a keyless connection listed as active with 0 tools.
+- The approve page says "This action can't be undone" for `notion-delete-pages` (moves pages to Trash).
+- A held tool returns "Tool … not found" instead of the documented `tool_on_hold`.
+- "The next step checks that it works" after creating the agent, but Finish setup goes straight to Overview; an abandoned pairing request stays as a banner until it expires.
+- Disable deletes the stored bearer key; the CLI help ("turn it back on in the console") doesn't say so.

@@ -64,8 +64,8 @@ const configInput = (o: ServerFlags) => ({ port: portOption(o.port), host: o.hos
 
 const program = new Command("agentinbox")
   .description(
-    "Self-hosted Gmail broker for AI agents. Start it, open the link it prints, and the web console " +
-      "walks you through the rest (Google Cloud, connecting Gmail, your first agent).",
+    "Self-hosted MCP broker for AI agents (Notion, WHOOP, any MCP server, Gmail and Calendar). Start it, open the " +
+      "link it prints, and the web console walks you through the rest (what to connect, your first agent).",
   )
   .version(version, "-v, --version", "print the version")
   .helpOption("-h, --help", "show help")
