@@ -61,7 +61,8 @@
  *   requireResource, requiredScope, metadataIssuer (publish a wrong `issuer`), pkce (false: S256 not advertised),
  *   dcr (false: no registration_endpoint; use `preRegistered` clients), scopesSupported, pkce "absent" (no
  *   code_challenge_methods_supported at all), advertiseIss (false: no authorization_response_iss_parameter_supported),
- *   cimd (client ID metadata documents: an https client_id is fetched with `cimdFetch`). The token endpoint checks
+ *   cimd (client ID metadata documents: an https client_id is fetched with `cimdFetch`), challengeScope (a
+ *   `scope="…"` in the 401, for step-up). The token endpoint checks
  *   the RFC 7636 verifier format (43–128 unreserved characters). `issuerPath` puts the issuer under a path (RFC 8414
  *   path insertion; the root documents 404). Fixed at start: authServer,
  *   prm, advertiseResourceMetadata (false: a bare `WWW-Authenticate: Bearer`), metadataAt, preRegistered.
@@ -159,6 +160,8 @@ export interface FakeOAuthSettings {
    * client_id, fetching the document with `cimdFetch` (offline tests point it at the broker's own route).
    */
   cimd: boolean;
+  /** A `scope="…"` to put in the 401's WWW-Authenticate (step-up), or null. */
+  challengeScope: string | null;
 }
 
 export interface FakeOAuthOptions extends Partial<FakeOAuthSettings> {
@@ -495,6 +498,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     scopesSupported: oauthCfg?.scopesSupported ?? ["notes:read", "notes:write"],
     advertiseIss: oauthCfg?.advertiseIss ?? true,
     cimd: oauthCfg?.cimd ?? false,
+    challengeScope: oauthCfg?.challengeScope ?? null,
   };
   const issuerPath = (oauthCfg?.issuerPath ?? "").replace(/\/$/, "");
 
@@ -907,7 +911,7 @@ export async function startFakeMcpUpstream(opts: FakeUpstreamOptions = {}): Prom
     const grant = t ? grants.find((g) => g.id === t.grantId) : undefined;
     const rm = authCfg.advertiseResourceMetadata === false ? "" : `resource_metadata="${prmUrl}"`;
     if (!t || !grant || grant.revoked || t.exp <= now() || t.resource !== up.url) {
-      const parts = [rm, presented ? 'error="invalid_token"' : ""].filter(Boolean).join(", ");
+      const parts = [rm, presented ? 'error="invalid_token"' : "", settings.challengeScope ? `scope="${settings.challengeScope}"` : ""].filter(Boolean).join(", ");
       sendJson(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer${parts ? ` ${parts}` : ""}` });
       return null;
     }

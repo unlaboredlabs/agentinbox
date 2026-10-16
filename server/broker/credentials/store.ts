@@ -65,6 +65,8 @@ export interface PkceFlow {
   redirectUri: string;
   /** The discovery result this flow started with. */
   pending: PendingAuth;
+  /** The candidate client registration (MCP OAuth): stored as the connection's client only once the consent completes. */
+  client?: Record<string, unknown> | null;
   createdAt: number;
 }
 
@@ -179,9 +181,18 @@ export class SqliteCredentialStore implements CredentialStore {
 
   /** The registration, keyed by issuer inside the record (`issuer`): reused only with that issuer. */
   setClient(connectionId: string, client: Record<string, unknown>): void {
-    this.patch(connectionId, {
-      oauth_client_enc: this.enc(JSON.stringify(client)),
-      ...(typeof client.issuer === "string" ? { oauth_issuer_enc: this.enc(client.issuer) } : {}),
+    // Never the issuer: only saveTokens ties a credential to an issuer (with the tokens it issued).
+    this.patch(connectionId, { oauth_client_enc: this.enc(JSON.stringify(client)) });
+  }
+
+  /**
+   * A completed consent: the client it used and the tokens it issued (with their issuer), in one transaction.
+   * Nothing about a sign-in is stored before this (startConnect keeps its candidate client in the flow record).
+   */
+  saveConsent(connectionId: string, client: Record<string, unknown> | null, tokens: StoredTokens): void {
+    this.deps.db.tx(() => {
+      if (client) this.setClient(connectionId, client);
+      this.saveTokens(connectionId, tokens);
     });
   }
 

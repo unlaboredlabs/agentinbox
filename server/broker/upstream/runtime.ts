@@ -135,12 +135,13 @@ export class UpstreamRuntime {
   }
 
   /** The connection's guarded fetch, rebuilt when its private-target allow changes. */
-  fetchFor(conn: Pick<ConnectionRow, "id" | "private_target">): GuardedFetch {
+  fetchFor(conn: Pick<ConnectionRow, "id" | "private_target" | "url">): GuardedFetch {
+    const key = `${conn.private_target ?? ""}|${conn.url ?? ""}`;
     const hit = this.fetches.get(conn.id);
-    if (hit && hit.allow === conn.private_target) return hit.fetch;
+    if (hit && hit.allow === key) return hit.fetch;
     if (hit) void hit.fetch.close();
-    const fetch = guardedFetch({ allow: allowFromColumn(conn.private_target), lookup: this.opts.lookup, dial: this.opts.dial });
-    this.fetches.set(conn.id, { allow: conn.private_target, fetch });
+    const fetch = guardedFetch({ allow: allowFromColumn(conn.private_target, conn.url), lookup: this.opts.lookup, dial: this.opts.dial });
+    this.fetches.set(conn.id, { allow: key, fetch });
     return fetch;
   }
 
@@ -272,6 +273,7 @@ export class UpstreamRuntime {
     let authUrl: string;
     let pending: PendingAuth;
     let verifier = "";
+    let client: StoredClient | null = null;
 
     const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
     if (native) {
@@ -284,17 +286,25 @@ export class UpstreamRuntime {
       const url = validateUpstreamUrl(conn.url);
       const ch = await this.challenge(fetch, url);
       const w = parseWwwAuthenticate(ch.www);
-      const allow = allowFromColumn(conn.private_target);
+      const allow = allowFromColumn(conn.private_target, conn.url);
       const d = await discover(fetch, url, w.resourceMetadata, allow);
-      const scope = requestedScope(d.metadata, d.resourceMetadata?.scopes_supported, w.scope ?? this.store.tokens(connectionId)?.scope ?? undefined);
-      const client = await ensureClient(fetch, d.metadata, this.store.client(connectionId) as StoredClient | null, {
-        redirectUri,
-        preRegistered: o.preRegistered,
-        metadataDocumentUrl: await this.metadataDocumentUrl(),
-        clientName: CLIENT_NAME,
-        scope,
-      });
-      this.store.setClient(connectionId, { ...client, resource: d.resource });
+      // Step-up: ask for the union of what the 401 wants and what this issuer already granted.
+      const stored = this.store.tokens(connectionId);
+      const granted = stored?.issuer === d.issuer ? (stored.scope ?? "") : "";
+      const union = [...new Set(`${w.scope ?? ""} ${granted}`.split(/\s+/).filter(Boolean))].join(" ");
+      const scope = requestedScope(d.metadata, d.resourceMetadata?.scopes_supported, union || undefined);
+      // The candidate client lives in this flow's encrypted record only: nothing about the connection's
+      // credential changes before the consent completes (an abandoned sign-in elsewhere changes nothing).
+      client = {
+        ...(await ensureClient(fetch, d.metadata, this.store.client(connectionId) as StoredClient | null, {
+          redirectUri,
+          preRegistered: o.preRegistered,
+          metadataDocumentUrl: await this.metadataDocumentUrl(),
+          clientName: CLIENT_NAME,
+          scope,
+        })),
+        resource: d.resource,
+      };
       const pkce = pkcePair();
       verifier = pkce.verifier;
       authUrl = authorizationUrl(d.metadata, client, { redirectUri, state, challenge: pkce.challenge, resource: d.resource, scope });
@@ -310,8 +320,7 @@ export class UpstreamRuntime {
     }
     const full: PendingAuth = { ...pending, ...(o.reconnectPolicy?.maxLifetimeDays ? { capDays: o.reconnectPolicy.maxLifetimeDays } : {}) };
     // Each flow keeps its own verifier and discovery result: concurrent Reconnects don't overwrite each other.
-    this.store.addFlow(connectionId, state, { verifier, redirectUri, pending: full });
-    this.store.setPending(connectionId, full);
+    this.store.addFlow(connectionId, state, { verifier, redirectUri, pending: full, client });
     this.ctx.db.run("DELETE FROM oauth_states WHERE created_at < ?", new Date(this.now() - STATE_TTL_MS).toISOString());
     this.ctx.db.run(
       "INSERT INTO oauth_states (state, code_verifier, redirect_uri, reauth_account_id, created_at, connection_id) VALUES (?, '', ?, NULL, ?, ?)",
@@ -342,8 +351,28 @@ export class UpstreamRuntime {
    */
   async finishConnect(q: { code?: string | null; state?: string | null; iss?: string | null; error?: string | null; errorDescription?: string | null }): Promise<FinishConnectResult> {
     this.requireEnabled();
+    // The state comes first, even for an error response: an unknown state gets no upstream text echoed back.
+    let taken: { connectionId: string };
+    try {
+      taken = this.takeState(q.state ?? null);
+    } catch (err) {
+      if (q.error) throw new HttpError(400, "oauth_error", "The sign-in didn't complete.", "Start the connection again from Connections in the console.");
+      throw err;
+    }
+    const { connectionId } = taken;
+    const conn = getConnection(this.ctx.db, connectionId);
+    if (!conn) throw new HttpError(404, "not_found", "Connection not found");
+    const flow = this.store.takeFlow(connectionId, q.state!);
+    const pending = flow?.pending ?? null;
+    if (!flow || !pending) throw new HttpError(400, "oauth_state", "This sign-in link has expired or was already used.", "Start the connection again.");
+    const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
+
+    // RFC 9207, before acting on (or showing) anything in the response, errors included: a present `iss` must be
+    // the issuer we started with, and a server that promises it must send it.
+    if (!native && (q.iss ? q.iss !== pending.issuer : pending.issParameter)) {
+      throw new HttpError(400, "oauth_issuer", "The sign-in came back from a different authorization server than the one it started at.", "Start the connection again.");
+    }
     if (q.error) {
-      if (q.state) this.ctx.db.run("DELETE FROM oauth_states WHERE state = ? AND connection_id IS NOT NULL", q.state);
       const denied = q.error === "access_denied";
       throw new HttpError(
         400,
@@ -352,41 +381,35 @@ export class UpstreamRuntime {
         q.errorDescription ? scrubText(q.errorDescription, [], 200) : "Try connecting again from Connections in the console.",
       );
     }
-    const { connectionId } = this.takeState(q.state ?? null);
     if (!q.code) throw new HttpError(400, "oauth_no_code", "The sign-in didn't return an authorization code.", "Start the connection again.");
-    const conn = getConnection(this.ctx.db, connectionId);
-    if (!conn) throw new HttpError(404, "not_found", "Connection not found");
-    const flow = this.store.takeFlow(connectionId, q.state!);
-    const pending = flow?.pending ?? null;
-    if (!flow || !pending) throw new HttpError(400, "oauth_state", "This sign-in link has expired or was already used.", "Start the connection again.");
 
     let tokens: StoredTokens;
+    let client: Record<string, unknown> | null;
     let registration: string | null = null;
     const signal = AbortSignal.timeout(30_000);
-    const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
     if (native) {
       const out = await native.exchange(q.code, { connectionId, client: this.store.client(connectionId), redirectUri: flow.redirectUri, signal });
       tokens = out.tokens;
-      if (out.client) this.store.setClient(connectionId, out.client);
+      client = out.client ?? null;
     } else {
-      // RFC 9207: a present `iss` must be the issuer we started with; a server that promises it must send it.
-      if (q.iss ? q.iss !== pending.issuer : pending.issParameter) {
-        throw new HttpError(400, "oauth_issuer", "The sign-in came back from a different authorization server than the one it started at.", "Start the connection again.");
+      const candidate = flow.client as StoredClient | null | undefined;
+      if (!candidate?.client_id || candidate.issuer !== pending.issuer) {
+        throw new HttpError(400, "oauth_client", "The OAuth client registration for this sign-in is missing.", "Start the connection again.");
       }
-      const client = this.store.client(connectionId) as StoredClient | null;
-      if (!client || client.issuer !== pending.issuer) throw new HttpError(400, "oauth_client", "The OAuth client registration changed during the sign-in.", "Start the connection again.");
-      registration = client.source;
-      tokens = await exchangeCode(this.fetchFor(conn), client, { code: q.code, verifier: flow.verifier, redirectUri: flow.redirectUri, resource: pending.resource }, signal, this.now);
+      registration = candidate.source;
+      client = candidate;
+      tokens = await exchangeCode(this.fetchFor(conn), candidate, { code: q.code, verifier: flow.verifier, redirectUri: flow.redirectUri, resource: pending.resource }, signal, this.now);
     }
 
-    this.store.saveTokens(connectionId, { ...tokens, issuer: tokens.issuer ?? (native ? null : pending.issuer) });
+    // Client, tokens and the issuer they're tied to, together, only now. No `scope` in the answer means what we asked for.
+    this.store.saveConsent(connectionId, client, { ...tokens, issuer: native ? (tokens.issuer ?? null) : pending.issuer, scope: tokens.scope ?? pending.scope });
     // Credential lifetime for the dated warnings: no refresh token = the access token's expiry (saveTokens);
     // a preset's cap (Notion: 180 days) runs from this consent.
     if (tokens.refreshToken) {
       const cap = pending.capDays ? new Date(this.now() + pending.capDays * 86_400_000).toISOString() : null;
       this.ctx.db.run("UPDATE connections SET expires_at = ? WHERE id = ?", cap, connectionId);
     }
-    this.store.setPending(connectionId, null);
+
     this.store.markActive(connectionId);
     await this.invalidate(connectionId);
     const fresh = getConnection(this.ctx.db, connectionId)!;
@@ -427,6 +450,10 @@ export class UpstreamRuntime {
       return { auth: "blocked", message: (err as Error).message, privateTarget: null };
     }
     const allow = o.privateTarget ? { origin: canonicalPrivateTarget(o.privateTarget) } : null;
+    // An allow only ever covers the probed URL's own origin.
+    if (allow && allow.origin !== originKey(url)) {
+      return { auth: "blocked", message: `The private-target allow ${allow.origin} isn't this URL's origin (${originKey(url)})`, privateTarget: null };
+    }
     const fetch = guardedFetch({ allow, lookup: this.opts.lookup, dial: this.opts.dial });
     try {
       let ch: { status: number; www: string | null };

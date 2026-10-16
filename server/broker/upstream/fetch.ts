@@ -79,11 +79,15 @@ export function canonicalPrivateTarget(input: string): string {
   return canonical;
 }
 
-/** The allow for a stored `private_target`, or null when unset (or, defensively, not canonical). */
-export function allowFromColumn(privateTarget: string | null): PrivateTargetAllow | null {
-  if (!privateTarget) return null;
+/**
+ * The allow for a stored `private_target`, or null when unset. Defensively null too when it isn't canonical or
+ * isn't the connection URL's own origin: the allow only ever covers the connection's own host, whatever the API did.
+ */
+export function allowFromColumn(privateTarget: string | null, connectionUrl: string | null): PrivateTargetAllow | null {
+  if (!privateTarget || !connectionUrl) return null;
   try {
-    return { origin: canonicalPrivateTarget(privateTarget) };
+    const origin = canonicalPrivateTarget(privateTarget);
+    return origin === originKey(connectionUrl) ? { origin } : null;
   } catch {
     return null;
   }

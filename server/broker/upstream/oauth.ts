@@ -102,11 +102,14 @@ export async function ensureClient(fetch: Fetch, md: AuthServerMetadata, existin
   const local = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/)/.test(o.redirectUri);
   const res = await fetch(md.registration_endpoint, {
     method: "POST",
+    // Never re-send the registration (or a secret in a body) to wherever a 307/308 points.
+    redirect: "error",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
       client_name: o.clientName,
       redirect_uris: [o.redirectUri],
-      grant_types: ["authorization_code", "refresh_token"],
+      // refresh_token only when advertised: a strict server may refuse to register a grant it doesn't support.
+      grant_types: md.grant_types_supported?.includes("refresh_token") ? ["authorization_code", "refresh_token"] : ["authorization_code"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
       // SEP-837: a loopback redirect is a native app's.
@@ -174,7 +177,8 @@ async function tokenRequest(fetch: Fetch, client: StoredClient, params: Record<s
   }
   let res: Response;
   try {
-    res = await fetch(client.token_endpoint, { method: "POST", headers, body: form.toString(), signal: signalFor(signal) });
+    // redirect "error": a 307/308 would re-send the code, verifier, refresh token or secret elsewhere.
+    res = await fetch(client.token_endpoint, { method: "POST", headers, body: form.toString(), redirect: "error", signal: signalFor(signal) });
   } catch (err) {
     if (err instanceof SourceError) throw err;
     if ((err as Error).name === "TimeoutError" || (err as Error).name === "AbortError") throw new SourceError("timeout", "The token endpoint didn't answer in time");

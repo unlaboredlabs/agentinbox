@@ -8,7 +8,8 @@ import { expiryNotice } from "../server/broker/credentials/expiry.ts";
 import { Refresher } from "../server/broker/credentials/refresher.ts";
 import { scrubText } from "../server/broker/credentials/scrub.ts";
 import { discoverAuthServer, fetchJsonDoc } from "../server/broker/upstream/discovery.ts";
-import { canonicalPrivateTarget, checkTarget, guardedFetch } from "../server/broker/upstream/fetch.ts";
+import { allowFromColumn, canonicalPrivateTarget, checkTarget, guardedFetch } from "../server/broker/upstream/fetch.ts";
+import { exchangeCode } from "../server/broker/upstream/oauth.ts";
 import { HTTPS_LOCALHOST_REDIRECT, UpstreamRuntime } from "../server/broker/upstream/runtime.ts";
 import { type RefreshFn, SourceError, type StoredTokens, type ToolCallContext } from "../server/broker/types.ts";
 import type { ConnectionEvent } from "../server/broker/credentials/store.ts";
@@ -644,6 +645,112 @@ describe("MCP OAuth: registration order and authorization server variants", () =
     expect(seen).toEqual([`bad@${HTTPS_LOCALHOST_REDIRECT}`, `good@${HTTPS_LOCALHOST_REDIRECT}`]);
     expect(e.rt.store.tokens(id)).toMatchObject({ accessToken: "wa", refreshToken: "wr" });
     expect(e.rt.store.client(id)).toMatchObject({ client_id: "cid", whoop_user_id: 42 });
+  });
+
+  it("an abandoned sign-in against another authorization server changes nothing: refresh still goes to the first", async () => {
+    const a = await fake({ auth: { kind: "oauth", accessTokenTtlSec: 3600 } });
+    const b = await fake({ auth: { kind: "oauth" } });
+    const e = env();
+    const id = addConnection(e.ctx, { url: a.url, auth: "oauth" });
+    await connectOAuth(e, id, a);
+    const before = { client: e.rt.store.client(id), tokens: e.rt.store.tokens(id) };
+    // The upstream now points elsewhere (or its metadata names another AS); the admin starts and abandons a sign-in.
+    e.ctx.db.run("UPDATE connections SET url = ?, private_target = ? WHERE id = ?", b.url, b.origin, id);
+    await e.rt.startConnect(id);
+    expect(b.oauth!.registrations.size).toBe(1);
+    e.ctx.db.run("UPDATE connections SET url = ?, private_target = ? WHERE id = ?", a.url, a.origin, id);
+    expect(e.rt.store.client(id)).toEqual(before.client);
+    expect(e.rt.store.tokens(id)).toEqual(before.tokens);
+    const n = b.requests.length;
+    const conn = e.ctx.db.get("SELECT * FROM connections WHERE id = ?", id) as never;
+    await e.rt.refresher.accessToken(id, e.rt.refreshFnFor(conn)!, AbortSignal.timeout(5000), { force: true });
+    expect(b.requests.length).toBe(n);
+    expect(a.requests.filter((r) => r.path === "/token" && r.body.includes("grant_type=refresh_token")).map((r) => r.status)).toEqual([200]);
+    expect(status(e.ctx, id).status).toBe("active");
+  });
+
+  it("two concurrent first connects with DCR: whichever finishes last, client and tokens match", async () => {
+    for (const order of [
+      [0, 1],
+      [1, 0],
+    ]) {
+      const up = await fake({ auth: { kind: "oauth" } });
+      const e = env();
+      const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+      const starts = [await e.rt.startConnect(id), await e.rt.startConnect(id)];
+      expect(up.oauth!.registrations.size).toBe(2);
+      expect(e.rt.store.client(id)).toBeNull(); // nothing stored before a consent
+      const cbs = [await up.oauth!.followAuthorize(starts[0]!.authUrl), await up.oauth!.followAuthorize(starts[1]!.authUrl)];
+      for (const i of order) await e.rt.finishConnectFromUrl(cbs[i]!.toString());
+      const last = order[1]!;
+      expect(e.rt.store.client(id)!.client_id).toBe(new URL(starts[last]!.authUrl).searchParams.get("client_id"));
+      up.oauth!.expireAccessTokens();
+      expect(firstText(await e.rt.source(id).callTool("echo", { o: last }, callCtx(id)))).toBe(`{"o":${last}}`);
+      expect(status(e.ctx, id).status).toBe("active");
+    }
+  });
+
+  it("step-up: the reconnect asks for the union of the 401's scope and the granted one", async () => {
+    const up = await fake({ auth: { kind: "oauth", scopesSupported: ["notes:read", "notes:write"], challengeScope: "notes:read" } });
+    const e = env();
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    const first = await connectOAuth(e, id, up);
+    expect(new URL(first.start.authUrl).searchParams.get("scope")).toBe("notes:read");
+    expect(e.rt.store.tokens(id)!.scope).toBe("notes:read");
+    up.oauth!.settings.challengeScope = "notes:write";
+    const again = await e.rt.startConnect(id);
+    expect(new URL(again.authUrl).searchParams.get("scope")?.split(" ").sort()).toEqual(["notes:read", "notes:write"]);
+  });
+
+  it("iss is checked before an error response is acted on; an unknown state echoes nothing", async () => {
+    const up = await fake({ auth: { kind: "oauth", issMode: "wrong", deny: true } });
+    const e = env();
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    const start = await e.rt.startConnect(id);
+    const cb = await up.oauth!.followAuthorize(start.authUrl);
+    expect(cb.searchParams.get("error")).toBe("access_denied");
+    await expect(e.rt.finishConnectFromUrl(cb.toString())).rejects.toMatchObject({ code: "oauth_issuer" });
+    const err = await e.rt.finishConnect({ state: "nope", error: "server_error", errorDescription: "<script>evil</script>" }).catch((x: unknown) => x);
+    expect(err).toMatchObject({ code: "oauth_error" });
+    expect(JSON.stringify({ m: (err as Error).message, h: (err as { hint?: string }).hint })).not.toContain("evil");
+  });
+
+  it("token requests never follow redirects (a 307 would re-send the code and verifier)", async () => {
+    let elsewhere = 0;
+    const s = createServer((req, res) => {
+      if (req.url === "/token") return res.writeHead(307, { location: "/steal" }).end();
+      elsewhere++;
+      res.end("{}");
+    });
+    await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
+    cleanup.push(() => new Promise((r) => s.close(() => r(undefined))));
+    const origin = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    const f = guardedFetch({ allow: { origin } });
+    cleanup.push(() => f.close());
+    const client = { issuer: origin, client_id: "c", token_endpoint_auth_method: "none", source: "dcr" as const, token_endpoint: `${origin}/token` };
+    await expect(exchangeCode(f, client, { code: "x", verifier: "v".repeat(43), redirectUri: "http://localhost/cb", resource: `${origin}/mcp` })).rejects.toMatchObject({ code: "protocol" });
+    expect(elsewhere).toBe(0);
+  });
+
+  it("the allow only covers the connection's own origin, whatever is stored", async () => {
+    expect(allowFromColumn("http://127.0.0.1:1111", "http://127.0.0.1:2222/mcp")).toBeNull();
+    expect(allowFromColumn("http://127.0.0.1:1111", "http://127.0.0.1:1111/mcp")).toEqual({ origin: "http://127.0.0.1:1111" });
+    const up = await fake({ protocol: "stateless-2026" });
+    const e = env();
+    expect(await e.rt.probe(up.url, { privateTarget: "http://127.0.0.1:1" })).toMatchObject({ auth: "blocked", privateTarget: null });
+    const id = addConnection(e.ctx, { url: up.url, auth: "none", privateTarget: "http://127.0.0.1:1" });
+    await expect(e.rt.source(id).listTools(AbortSignal.timeout(5000))).rejects.toMatchObject({ code: "blocked_target" });
+  });
+
+  it("Google's /oauth/callback never consumes a connection's state", async () => {
+    const up = await fake({ auth: { kind: "oauth" } });
+    const e = env();
+    const id = addConnection(e.ctx, { url: up.url, auth: "oauth" });
+    const start = await e.rt.startConnect(id);
+    const cb = await up.oauth!.followAuthorize(start.authUrl);
+    await createApp(e.ctx).request(`/oauth/callback?code=${cb.searchParams.get("code")}&state=${start.state}`);
+    await createApp(e.ctx).request(`/oauth/callback?error=access_denied&state=${start.state}`);
+    await expect(e.rt.finishConnectFromUrl(cb.toString())).resolves.toMatchObject({ connectionId: id });
   });
 
   it("the fake's up.fetch maps only its own origin (port boundary)", async () => {

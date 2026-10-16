@@ -207,7 +207,14 @@ export class RemoteToolSource implements ToolSource {
 
   private mapError(err: unknown, signal: AbortSignal): unknown {
     if (signal.aborted) return signal.reason ?? err;
-    const conn = this.deps.connection();
+    let conn: ConnectionRow & { url: string };
+    try {
+      conn = this.deps.connection();
+    } catch (gone) {
+      // The connection went needs_reauth/disabled/away meanwhile: still drop the session, then say why.
+      void this.drop();
+      return findSourceError(gone) ?? gone;
+    }
     const own = findSourceError(err);
     if (own) return own;
     if (this.insufficientScope !== null) {
