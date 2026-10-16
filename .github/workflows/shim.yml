@@ -28,6 +28,7 @@ jobs:
     # Only from main.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest # trusted publishing needs a GitHub-hosted runner
+    timeout-minutes: 20
     timeout-minutes: 15
     defaults:
       run:

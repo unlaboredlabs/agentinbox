@@ -27,6 +27,7 @@ jobs:
     # Never publish from a manual dispatch on a branch other than main.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest # trusted publishing needs a GitHub-hosted runner
+    timeout-minutes: 20
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
