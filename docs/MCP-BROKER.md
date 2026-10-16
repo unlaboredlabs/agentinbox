@@ -1,7 +1,7 @@
 # MCP broker: plan
 
-Status: **plan, not built.** Written 2026-10-16. The decisions below marked DECIDED come from Wynn. Everything else is
-a recommendation until he answers the [question list](#questions-for-wynn). Research sources are linked inline. The
+Status: **decided; building.** Written and decided 2026-10-16. Every decision is recorded below; the
+[question list](#decisions-on-the-questions-wynn-2026-10-16-go) has the answers. Research sources are linked inline. The
 code map refers to main at e2fe0c5.
 
 ## Goal
@@ -190,88 +190,91 @@ ask for them. Resources and prompts aren't proxied in v1.
   (connection, credential).
 - **Pinning (rug-pull defence).** Each tool's hash is `sha256(JCS({name, title, description, inputSchema,
   outputSchema, annotations}))`, and the server's `instructions` are hashed separately.
-  - A tool goes to agents only once its current hash is approved.
-  - A new or changed hash moves the tool to `pending_review`: it's hidden, and calls fail with `tool_changed`. The
-    console shows a diff to re-approve.
-  - Agents always receive the **approved snapshot**, never the live definition. Arguments are validated against the
+  - **No review gate at setup.** Every tool is pinned on connect and is available at once, subject to the
+    connection's access level.
+  - **Hold on change.** Later, a changed hash, or a tool that wasn't there at connect, puts **that tool** on hold.
+    Calls to it fail with `tool_on_hold` ("its definition changed; the owner must accept the change"), and the
+    owner gets a ping: the `connection.tool_changed` event, a console notice, and webhooks and the listener (so
+    Hermes can tell Wynn). The accept page shows a diff, and one tap re-pins the tool. Other tools on the
+    connection keep working.
+  - Agents always receive the **pinned snapshot**, never the live definition. Arguments are validated against the
     pinned `inputSchema` (ajv) before they're forwarded.
   - Precedents: [mcp-context-protector](https://github.com/trailofbits/mcp-context-protector),
     [Invariant on rug pulls](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks).
 - **Descriptions shown to agents** are cleaned and capped: ANSI escapes, tag characters, zero-width and bidi
-  characters are stripped, about 1 KB per tool and 256 characters per parameter. At review time the console flags
-  suspicious signs without blocking them: `<IMPORTANT>`, "don't tell the user", file paths, other servers' tool
-  names, catch-all parameters (`context`, `sidenote`) and base64 blobs. The operator may override a description.
-- **Bulk review.** After a connection is made, the console lists all its tools grouped as read, write or destructive,
-  with "Approve all read tools" and per-tool toggles. Reviewing 60 Notion tools takes one screen, not 60 clicks.
+  characters are stripped, about 1 KB per tool and 256 characters per parameter. The connection page lists suspicious
+  signs as information, never as a gate: `<IMPORTANT>`, "don't tell the user", file paths, other servers' tool names,
+  catch-all parameters (`context`, `sidenote`) and base64 blobs.
 
-### Per-agent scopes (grants)
+### Access and approvals (DECIDED: Wynn's model)
 
-Native grants stay exactly as they are, keyed by agent × Google account. A new **tool grant** is keyed by agent ×
-connection, and gives each tool a mode:
+Native Gmail/Calendar grants stay exactly as they are in M1. Moving them to this model is an M4 item.
 
-- `allow`
-- `approval`: the broker holds the call until a human approves it
-- `deny`
+**One choice per connection.** Connecting an integration asks one question: what can agents do with it?
 
-Defaults, consistent with "a new agent can do nothing":
+| Level | Tools listed | Asking |
+|---|---|---|
+| **Full access** | all | never |
+| **Ask before risky actions** (the default) | all | risky tools wait for approval; everything else goes straight through |
+| **Read only** | read tools only | never; other tools aren't listed or callable |
 
-| Tool class | Default mode |
-|---|---|
-| New or unknown tool | deny until reviewed |
-| Read | allow |
-| Write | approval |
-| Destructive or egress | approval, or deny for deletes |
+**Agents:** the connect dialog also asks which agents get the connection, defaulting to all of them. Each agent's
+page shows its connections with the same three-way choice plus "no access", so one agent can have a different level.
+That's stored as a `connection_grants` row per agent × connection with a `level`. There are no per-tool grant modes.
 
-**Classifying tools.** A tool's class is, in order of priority: the operator's override, then a heuristic on its name
-(`send|post|create|update|delete|share|publish|invite|exec|run|fetch`), then its annotations. Annotations may only
-**raise** risk. `destructiveHint: true` and `openWorldHint: true` count, but `readOnlyHint` from an unreviewed server
-is ignored: the spec says clients MUST treat annotations as untrusted
-([tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)).
+**What counts as risky: irreversible actions only.** Deleting, sending mail or messages, publishing or sharing outside,
+and payments. Creating and editing goes through without asking. Classification, in this order:
 
-**Other parts of a tool grant:**
-- **Argument constraints,** optional per tool, generalising `allowTo`. For example `notion__create_pages` where
-  `parent.page_id ∈ {…}`.
-- **Caps** per tool and per class, generalising `reserveSend`. They count queued and uncertain calls.
-- **A per-agent daily egress byte budget,** which catches drip exfiltration spread over many small calls.
+1. **Pre-made integrations say so themselves.** Each preset ships a list of risky tools:
+   - Notion: `notion-delete-pages`, `notion-delete-databases`, and anything that shares or publishes outside the
+     workspace;
+   - Gmail: sending (already native);
+   - WHOOP: none, since everything is read.
+2. **Generic MCP servers with annotations:** `destructiveHint: true` is risky, and `readOnlyHint: true` is a read
+   tool.
+3. **Generic MCP servers, either way:** a tool counts as risky if its **name** contains one of these words (split on
+   `_`, `-`, `.` and camelCase), or, when it has no annotations, if its **description** does:
 
-**Lethal-trifecta banner** ([Willison](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)). Each approved tool
-carries three flags:
-- `private`: it reads the user's data;
-- `untrusted`: it returns content third parties can write;
-- `egress`: it can send data out.
+   `delete remove destroy drop purge trash erase wipe send email mail message reply forward publish share post invite
+   pay payment charge transfer refund purchase`
 
-The grant editor takes the union across all of an agent's connections. When one agent has all three, it shows a red
-banner naming the tools behind each, with two fixes: "set egress tools to approval" or "split into a reader and an
-actor".
+   The name check runs even when annotations are present, so a delete tool can't escape by claiming `readOnlyHint`.
+   The spec says annotations from untrusted servers are hints
+   ([tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)).
 
-### Approvals for risky tools
+**Read only** includes only:
+- tools a preset marks as reads;
+- tools annotated `readOnlyHint: true` that aren't risky by name;
+- unannotated tools whose name starts with `get list search find read fetch query describe count lookup view`
+  and aren't risky.
 
-> **On hold (Wynn, 2026-10-16).** Wynn finds the approval system too complicated and not user-friendly, and Adri is
-> proposing a simpler model. Everything in this section, the approval rows of the defaults table above, and
-> questions 5 and 6 wait for that answer. The design below is the pre-redesign draft, kept for reference only.
+Anything else is hidden at the read-only level. Better to hide a harmless tool than expose a write.
 
-A new approval kind, `mcp.call`:
-- **When the call is queued:** validate it, canonicalise the arguments, and store their bytes with their sha256, the
-  tool's pinned hash and an expiry.
-- **The console card shows exactly those bytes.** Recipients and URLs are pulled to the top, then the
-  pretty-printed JSON follows. Lines wrap rather than scroll sideways, invisible characters are shown as visible
-  escapes, and long strings are expanded. The WhatsApp exfiltration hid its payload past a scrollbar
-  ([Invariant](https://invariantlabs.ai/blog/whatsapp-mcp-exploited)).
-- **On approve:** re-check the agent, the grant, the tool's pinned hash and the argument hash, then forward **the
-  stored bytes**. The result (truncated) is kept for `get_call_status`.
-- **Uncertain outcomes:** with no idempotency key, an interrupted call is marked as having an unknown outcome and is
-  never retried automatically.
-- **The agent's side:** it gets `pending_approval` plus an approval id, and polls with a generic `get_call_status`
-  tool, as `get_send_status` works today. Approvals also emit an `approval.requested` event, so webhooks and the
-  listener can notify the human, e.g. Hermes on Telegram.
-- **Avoiding approval fatigue:**
-  - only writes and egress need approval;
-  - scoped, expiring standing rules ("allow `notion__create_pages` under page X for 7 days") instead of
-    "always allow";
-  - grouping of similar pending calls;
-  - an agent is paused once it has more than N pending approvals an hour.
-- **Schema changes:** this requires migrating `approvals.account_id` and `draft_id` away from NOT NULL. SQLite needs a
-  table rebuild for that, which keeps the pending rows; Calendar's kinds will move onto the same table.
+**Approvals.** One kind, `mcp.call`, used for risky tools at the "ask" level.
+- **Pending is returned at once.** The agent gets `pending_approval` and an `approval_id` immediately, never a
+  blocking call, and carries on with other work. It checks back with `get_call_status(approval_id)`. The status is
+  pending, rejected, expired, or done with the call's result, which the broker stores when it runs the approved call.
+- **Exact arguments.** When the call is queued, the arguments are validated, canonicalised and stored with their
+  sha256 and the tool's pinned hash. The card shows exactly those bytes: lines wrap, invisible characters appear as
+  escapes, and recipients and URLs come first. On approve, the broker re-checks the agent, the grant, the pin and the
+  hash, then forwards the stored bytes. An interrupted call is marked as having an unknown outcome and is never
+  retried automatically.
+- **"Always allow this"** is on every card. It creates an allow rule for **this agent and this tool**, optionally also
+  for **the target**: the preset's target field (a Notion page or database id, a mail recipient), or, for generic
+  tools, one argument the user picks on the card. A matching call never asks again. The rules are listed and
+  removable on the agent's page.
+- **The approval link** opens a **one-tap approve page** (`/approve/<id>`): a minimal, mobile-first page with the
+  call, then Approve, Always allow, and Reject. The user is already signed in through the console session; if they
+  aren't, they sign in and come back to it. It isn't the full console. The link goes out in the `approval.requested`
+  event, so webhooks and the listener can carry it: Hermes can text it to Wynn. **Chat replies can't approve.**
+- **Expiry:** an unanswered approval expires after 24 hours, which is configurable. The agent's `get_call_status`
+  says so.
+- **Schema:** the `approvals` table is rebuilt with `account_id` and `draft_id` nullable, keeping pending rows.
+  `approval_rules` holds agent, connection, tool, an optional target path and value, and created_at.
+
+**Limits kept from the earlier draft:** per-agent caps on risky calls per hour and day (counting queued and uncertain
+ones), and the kill switch per connection. Argument constraints, the egress byte budget and the trifecta banner move
+to M4.
 
 ### Upstream output is untrusted
 
@@ -339,7 +342,7 @@ The events outbox, webhooks, SSE stream and listener relay are generalised:
 - Event types become open-ended under a prefix: `whoop.recovery_updated` and `connection.auth_failed`, next to today's
   closed mail and calendar enum.
 - Events carry `connection_id` where they used to carry `account_id`.
-- `canSeeEvent` gains a branch for tool grants.
+- `canSeeEvent` gains a branch for connection grants.
 - A listener stream for an agent without Gmail access must work. Today the stream refuses it with `no_read_grant`.
 
 ## Pre-made integrations
@@ -367,7 +370,8 @@ public product possible without a shared secret.
 - the URL;
 - slug `notion`;
 - read/write classes taken from Notion's own labels;
-- deletes and the agent-session tools denied by default;
+- risky (asks first at the default level): deleting pages or databases, and sharing or publishing outside the
+  workspace;
 - a "Reconnect before day 180" warning.
 
 **Fallback,** for people who need per-page access or whose Enterprise workspace blocks MCP clients: a small native
@@ -432,7 +436,8 @@ The bar: the CLI wizard and console guide every step end to end, with deep links
   - **Custom:** paste a URL. The broker probes it and shows what it found ("OAuth via auth.example.com, supports
     automatic registration", or "needs an API key"), then shows the right button or field. stdio: an admin form with
     a command preview and the version-pinning check.
-  - Then: **review tools** (bulk approve reads), **pick agents** (grant modes per tool), done.
+  - Then **one choice**: full access, ask before risky actions (preselected) or read only, plus which agents get it.
+    Done. There's no tool review step.
 - **Import from a client config, for Hermes dogfooding and migrations.**
   - `npx agentinbox-cli import --from hermes` (also `claude-code`, `cursor`, `codex`) reads that client's MCP config.
     For Hermes that's `~/.hermes/config.yaml` `mcp_servers`.
@@ -441,7 +446,7 @@ The bar: the CLI wizard and console guide every step end to end, with deep links
   - Then `setup-mcp --tool hermes` replaces the separate entries with the single broker entry, keeping a backup.
   - A dry run comes first and prints exactly what will change.
 - **CLI.** `npx agentinbox-cli connections add notion|whoop|<url>` runs interactively in the terminal: it opens the
-  browser for OAuth (or uses paste mode over SSH) and asks the review questions. `connections list|reconnect|disable`.
+  browser for OAuth (or uses paste mode over SSH) and asks the one access question. `connections list|reconnect|disable`.
   Writing the broker's database needs the admin, so the CLI talks to the local daemon's admin API with a one-time
   local token.
 - **Every failure names its fix in the UI:** `needs_reauth` → Reconnect, an expiring cap → a dated reminder, a 429 →
@@ -538,13 +543,13 @@ controls are enforced in code, on the action side, as agentinbox already does fo
 |---|---|---|---|
 | Injection flowing across tools (untrusted output driving a write elsewhere) | GitHub MCP toxic flow ([Invariant](https://invariantlabs.ai/blog/mcp-github-vulnerability)); WhatsApp JSON breakout | Nonce-wrapped untrusted output; provenance flags; trifecta banner; writes and egress to approval by default | v1 |
 | | | Session taint: after untrusted output, egress calls escalate to approval for N minutes (CaMeL-style; [arXiv 2503.18813](https://arxiv.org/abs/2503.18813), [design patterns](https://arxiv.org/abs/2506.08837)) | later |
-| Tool poisoning and rug pulls | `<IMPORTANT>` `add` tool reading `~/.ssh` ([Invariant](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)); [line jumping](https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/); postmark-mcp 1.0.16 BCC'ing all mail ([BleepingComputer](https://www.bleepingcomputer.com/news/security/unofficial-postmark-mcp-npm-silently-stole-users-emails/)) | Hash pinning, review on change, serving the pinned snapshot, cleaned descriptions, review-time signals, pinned stdio versions | v1 |
+| Tool poisoning and rug pulls | `<IMPORTANT>` `add` tool reading `~/.ssh` ([Invariant](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)); [line jumping](https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/); postmark-mcp 1.0.16 BCC'ing all mail ([BleepingComputer](https://www.bleepingcomputer.com/news/security/unofficial-postmark-mcp-npm-silently-stole-users-emails/)) | Hash pinning on connect, hold and ping on any change or new tool, serving the pinned snapshot, cleaned descriptions, informational signals, pinned stdio versions | v1 |
 | Cross-server shadowing | A description rewriting another server's `send_email` | Operator-chosen slugs, collision checks, flagging descriptions that name other servers' tools, per-agent grants | v1 |
 | Token exfiltration and confused deputy | Token passthrough and SSRF ([MCP security](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)); CVE-2025-6514 | No passthrough; encrypted per-connection credentials; scrubbing of exact token strings and `Bearer …` from results and errors; one pinned, guarded fetch; https only for authorization URLs, except on a connection's own admin-allowed private host | v1 |
 | stdio as a code-execution surface | Spec "local MCP server compromise" | Admin-only; full command shown; pinned versions; `shell: false`; minimal env; no `process.env` inheritance | v1 |
 | | | bubblewrap or `systemd-run` sandbox, network namespace | later |
-| Approval bypass | Arguments hidden past a scrollbar; "always allow" fatigue; lying annotations | Exact-bytes approvals with hash re-check; annotations can only raise risk; scoped expiring rules; caps and an egress byte budget against split calls | v1 |
-| | | Near-duplicate egress detection | later |
+| Approval bypass | Arguments hidden past a scrollbar; "always allow" fatigue; lying annotations | Exact-bytes approvals with hash re-check; the name check applies even with annotations; "always allow" scoped to agent, tool and optionally target; caps on risky calls | v1 |
+| | | Egress byte budget, near-duplicate egress detection | later |
 | Incident response | Postmark victims couldn't tell what was sent | Audit per call: agent, connection, tool, pinned hash, decision, args hash and size, result size, signals, duration. Full arguments kept only for writes and egress, with secrets redacted. One-click kill per connection (disable, cancel pending, kill the process, RFC 7009 revoke, delete the credential). An incident view per connection and time window | v1 |
 | | | Hash-chained audit rows | later |
 
@@ -567,7 +572,8 @@ what reaches an upstream, and who can call it. It doesn't vouch for the upstream
 
 **Forced refactors (each one a milestone item):**
 1. A `connections` table, with Google as a native kind. The `accounts` table stays and is linked to it.
-2. `tool_grants` beside the native `grants`, plus a `decideTool()` in policy.
+2. `connection_grants` (agent × connection, level) and `approval_rules` beside the native `grants`, plus a
+   `decideTool()` in policy.
 3. Rebuilding the approvals table: `account_id` and `draft_id` become nullable, and a generic payload is added.
 4. Opening the closed enums: `TOOL_NAMES`, `EVENT_TYPES`, `ApprovalKind`, `UntrustedTag`, `describeError`.
 5. An upstream client runtime: the SDK client pool, stdio supervision, the catalog cache and the pinned fetch.
@@ -609,16 +615,18 @@ grants or migrations. It ships as a nightly and is done when every item under "D
 - remote HTTP upstreams (Streamable HTTP in both generations, plus SSE) with auth none, static header or OAuth
   (pre-registered, DCR, or a metadata document), proactive refresh and `needs_reauth`;
 - the pinned SSRF-guarded fetch;
-- catalog, pinning and review;
+- catalog and pinning, with hold-and-ping on a changed or new tool;
 - `<slug>__<tool>` namespacing;
-- tool grants with allow, approval or deny;
-- `mcp.call` approvals with exact arguments;
+- connection grants with the three levels and risk classification;
+- `mcp.call` approvals: pending returned at once, `get_call_status`, exact arguments, "always allow" rules, the
+  one-tap approve page;
 - untrusted output wrapping and token scrubbing;
 - the audit fields;
 - the one-click kill;
 - `connection.auth_failed` events and a listener stream for agents without Gmail;
-- console: Connections, Add connection (custom URL plus the **Notion preset**), the tool review screen, the tool grant
-  editor, the approval card, and first run with Google optional;
+- console: Connections, Add connection (custom URL plus the **Notion preset**) with the one access choice, the
+  approval card with "always allow", the one-tap approve page, the allow-rule list, the accept-change page, and
+  first run with Google optional;
 - CLI: `connections add|list|reconnect|disable` and `import --from hermes|claude-code|cursor|codex`;
 - docs and SKILL.md.
 
@@ -631,11 +639,14 @@ four of Hermes's six upstreams are on loopback or Tailscale.
    - a 401 refresh followed by `needs_reauth`;
    - a bearer server;
    - a 2025 session server and a 2026 stateless server;
-   - a changed tool landing in `pending_review`;
-   - an approval forwarding the exact bytes;
+   - a changed or new tool going on hold, with the ping, then accepted;
+   - the three levels, risk classification and an approval forwarding the exact bytes;
+   - "always allow" not asking twice;
+   - pending returned at once;
    - an SSRF block;
    - native Gmail and Calendar tools unchanged.
-2. Notion connects through the preset on a real workspace, and an agent reads and writes, with the write approved.
+2. Notion connects through the preset on a real workspace. An agent reads and edits without being asked, and a delete
+   asks through the one-tap page.
 3. Hermes on Wynn's install has **one** MCP entry, the broker. It serves agentinbox's native tools plus brightspace,
    hearloom, t3code-macbook and forge through the private-target allow, and whoop as a generic bearer connection
    until M2. t3code-worldstream is retired and isn't migrated.
@@ -647,13 +658,13 @@ until PR 8, so existing users see nothing half-built:
 | # | PR | Tier |
 |---|---|---|
 | 1 | SDK spike, written up as a short ADR: stay on v1.32 or move to the v2 client, decided by a 2025 session server and a 2026 stateless server in the fake | M |
-| 2 | Schema (migration 8): `connections`, `connection_credentials`, `upstream_tools` (pins), `tool_grants`; rebuild `approvals` with nullable `account_id`/`draft_id` and a generic payload; `owner_id` columns. Existing data is untouched, and there's an upgrade test from main's DB | L |
+| 2 | Schema (migration 8): `connections`, `connection_credentials`, `upstream_tools` (pins), `connection_grants`, `approval_rules`; rebuild `approvals` with nullable `account_id`/`draft_id` and a generic payload; `owner_id` columns. Existing data is untouched, and there's an upgrade test from main's DB | L |
 | 3 | Upstream runtime: the pinned, guarded fetch with the private-target allow, the client pool (both protocol generations plus SSE), timeouts and cancellation, strict discovery, static-header auth | L |
 | 4 | OAuth to upstreams: an SQLite `OAuthClientProvider` (pre-registered, DCR, client ID metadata document), PKCE, `state` and `iss` checks, `resource`, proactive and reactive refresh, `needs_reauth` and expiry warnings, `connection.auth_failed`, the `/oauth/connections/callback` route | L, plus a security review |
-| 5 | Catalog and pinning: list with TTL, hashing, `pending_review`, cleaned descriptions, review signals, namespacing and collision checks | L |
-| 6 | Policy and approvals: `decideTool`, the defaults, caps and egress budget, `mcp.call` approvals with exact bytes, `get_call_status`, output wrapping, token scrubbing, the audit fields, the kill switch | L, plus a security review |
+| 5 | Catalog and pinning: list with TTL, hashing, hold on change or new tool, `connection.tool_changed`, accept, cleaned descriptions, informational signals, namespacing and collision checks | L |
+| 6 | Policy and approvals: the levels, risk classification (presets, annotations, the word list), `decideTool`, caps, `mcp.call` with pending at once and exact bytes, `get_call_status`, `approval_rules` (always allow), output wrapping, token scrubbing, the audit fields, the kill switch | L, plus a security review |
 | 7 | MCP endpoint aggregation: upstream tools on `/mcp` next to the unchanged native ones, the instructions, a listener stream without Gmail, the events | L |
-| 8 | Console: Connections, Add connection (custom URL plus the Notion preset), tool review, the tool grant editor, the approval card, the private-target allow UX, first run with Google optional. The feature flag is removed here | M |
+| 8 | Console: Connections, Add connection (custom URL plus the Notion preset) with the one access choice, agent access levels, the approval card with "always allow", the one-tap `/approve/<id>` page, the allow-rule list, accepting a held tool, the private-target allow UX, first run with Google optional. The feature flag is removed here | L (approvals) |
 | 9 | CLI: `connections add/list/reconnect/disable` and `import --from hermes/claude-code/cursor/codex`, with a dry run | M |
 | 10 | E2E (done-when #1), docs, SKILL.md; then the Notion check and the Hermes migration on Wynn's install; then the persona walk | M |
 
@@ -688,6 +699,8 @@ until PR 8, so existing users see nothing half-built:
 - resources and prompts passthrough;
 - URL-mode elicitation shown as approval cards;
 - the native Notion REST fallback;
+- Gmail/Calendar grants moved to the same three-level model;
+- argument constraints, an egress byte budget and the lethal-trifecta warning;
 - more presets (GitHub, Linear, Slack: only proxies of their hosted MCPs, no native code);
 - multi-user (see question 1).
 
@@ -716,37 +729,26 @@ Planned now and executed when the name is final. `<new>` is `xaq`: the package `
   instructions use the new name.
 - **Console and docs:** branding, page titles, the setup-token page, README and SKILL.md.
 
-## Questions for Wynn
+## Decisions on the questions (Wynn, 2026-10-16: GO)
 
-The decided items above aren't repeated here. Questions 3 and 7 are answered and keep their numbers so the
-answers stay easy to match. Each question has a recommendation, so a plain "yes" to all of them
-works.
+All questions are decided. Building proceeds M0 → M1 → M2 → M3.
 
-1. **"Multi-user": one install shared by several people, or many people each running their own?**
-   **Rec: each person self-hosts their own (single owner per install, many agents) for M1–M3.** The schema gets an
-   `owner_id` from the start, so real multi-user (several logins, each with their own connections, and an admin) can
-   be M4 without a rewrite. A hosted multi-tenant service is a different product.
-2. **A hosted piece run by the project (an OAuth relay, a shared WHOOP app)?**
-   **Rec: no.** Stay fully self-hosted. Notion needs no app thanks to automatic registration, and WHOOP's rules (the
-   secret, the 10-member cap, one webhook per app) make a per-user app the only clean option. Its guided setup is 5
-   steps.
-3. *Answered (decision 5): both are remote HTTP with a static bearer, so there's no stdio in M1.*
-4. **Google optional in the first-run wizard** (a Notion- or WHOOP-only install skips Google Cloud entirely)?
-   **Rec: yes.** It's the biggest win for a public product: the Google path is 8 steps.
-5. **Default policy for newly connected tools:** hidden until reviewed, then reads allowed, writes need approval,
-   deletes denied, with "Approve all read tools" in one click.
-   **Rec: yes.** The alternative of allowing all reads automatically is faster to set up but loses the rug-pull
-   protection.
-6. **Approvals on your phone:** approval cards stay in the console, and the broker emits `approval.requested` so
-   Hermes can message you on Telegram with a link.
-   **Rec: yes, link only.** Approving from Telegram itself (a reply that approves) is M4 at the earliest, because a
-   chat reply is spoofable.
-7. *Answered (decision 6): `aib_` for every key, and `~/.agentinbox` kept with no automatic move.*
-8. **Search mode for Hermes:** Hermes loads every tool. **Rec: turn search mode on automatically for any agent with
-   more than about 30 tools**, with real tool names kept for agents under that.
-9. **Order after M1:** **Rec: M2 WHOOP, then M3 search mode.** If Hermes's tool count is already over about 50 after
-   M1, swap the order.
-10. **T3 refresh tokens** (T3 Code's MCP authorization server issues only `authorization_code` grants, so its tokens
-    can't be refreshed). **Rec:** accept dated warnings and one-click Reconnect in M1. Separately, ask T3 Code
-    upstream to add the `refresh_token` grant, so the broker can then keep it alive indefinitely, as it will for
-    Notion and WHOOP.
+1. **Multi-user:** each person self-hosts their own: a single owner per install, with many agents. The schema
+   carries `owner_id` from M1, so real multi-user can come in M4 without a rewrite.
+2. **No hosted piece run by the project.** Notion uses automatic registration, and WHOOP uses each user's own app.
+3. **No stdio in M1** (decision 5): every Hermes upstream is remote HTTP.
+4. **Google optional on first run:** yes, the recommendation. Adri's relay grouped "Q4" with approvals, but in this list Q4 is the Google question; tell the lead if that was meant otherwise.
+5. **The default policy for new tools is replaced by Wynn's model** ([Access and approvals](#access-and-approvals-decided-wynns-model)):
+   - one choice per connection: full access, ask before risky actions (the default), or read only;
+   - risky means irreversible only;
+   - "always allow" on every card;
+   - a one-tap approve page;
+   - no review gate at setup: pin on connect, hold and ping on a change;
+   - pending returned at once.
+6. **Approvals on the phone:** a link to the one-tap approve page goes out in `approval.requested`. Chat replies can't
+   approve.
+7. **Keys and data directory** (decision 6): `aib_` for every key; `~/.agentinbox` kept, with no automatic move.
+8. **Search mode:** on automatically for any agent with more than about 30 tools. Real names are kept below that.
+9. **Order:** M2 WHOOP, then M3 search mode. If Hermes has more than about 50 tools after M1, M3 comes first.
+10. **T3 refresh tokens:** dated warnings and one-click Reconnect in M1, and a request to T3 Code to add the
+    `refresh_token` grant.

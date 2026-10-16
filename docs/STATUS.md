@@ -57,10 +57,10 @@ anything earlier in that doc.
 - #50: attachments on `create_draft`, `reply` and `send_message` (25 MB per message, at most 10 files, Gmail-blocked
   types refused, filenames cleaned and decoded, shown on approval cards, audited). Published as `nightly.48`.
 
-## Next direction: MCP broker (planning, no code yet)
+## Current: MCP broker (building)
 
-Plan: [docs/MCP-BROKER.md](MCP-BROKER.md). Wynn's decisions are recorded there (rename, public product, native WHOOP,
-Hermes dogfood). Building waits for his answers to its question list, relayed by Adri. Milestones: M0 rename, M1
+Plan: [docs/MCP-BROKER.md](MCP-BROKER.md). All decided on 2026-10-16 (Wynn: GO), including his simpler approval model.
+Building milestone by milestone. The rename (M0) is PR `chore/rename-xaq` (draft until the switch). Milestones: M0 rename, M1
 broker core with the Notion preset, M2 WHOOP, M3 search mode, M4 hardening.
 
 ## Rules (Wynn / Adri)
