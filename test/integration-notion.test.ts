@@ -1,0 +1,149 @@
+import { describe, expect, it } from "vitest";
+import type { ToolDef } from "../server/broker/types.ts";
+import { presets } from "../server/integrations/index.ts";
+import { classifyNotionTool, notionPreset } from "../server/integrations/notion/index.ts";
+import { NOTION_TOOLS } from "../server/integrations/notion/tools.ts";
+
+const tool = (name: string, properties: Record<string, unknown> = {}): ToolDef => ({
+  name,
+  description: "",
+  inputSchema: { type: "object", properties },
+});
+
+// Written out independently of NOTION_TOOLS so a change to the data shows up here.
+const READ = [
+  "notion-search",
+  "notion-ai-search",
+  "notion-memory-search",
+  "notion-get-tool-access",
+  "notion-get-self",
+  "notion-download-skill",
+  "notion-get-enabled-skills",
+  "notion-fetch",
+  "notion-get-file-download-urls",
+  "notion-list-private-pages",
+  "notion-list-shared-pages",
+  "notion-list-favorite-pages",
+  "notion-list-recent-pages",
+  "notion-list-page-backlinks",
+  "notion-download-attachment",
+  "notion-query-data-sources",
+  "notion-query-multiple-data-sources",
+  "notion-query-meeting-notes",
+  "notion-search-agents",
+  "notion-query-sessions",
+  "notion-search-sessions",
+  "notion-get-session-status",
+  "notion-wait-session",
+  "notion-list-session-events",
+  "notion-read-session-event",
+  "notion-get-comments",
+  "notion-get-teams",
+  "notion-get-groups",
+  "notion-get-users",
+  "notion-get-async-task",
+];
+const WRITE = [
+  "notion-upload-skill",
+  "notion-update-enabled-skills",
+  "notion-convert-page-to-skill",
+  "notion-create-file-upload",
+  "notion-create-attachment",
+  "notion-create-pages",
+  "notion-update-page",
+  "notion-move-pages",
+  "notion-restore-pages",
+  "notion-duplicate-page",
+  "notion-create-database",
+  "notion-create-folder",
+  "notion-update-folder",
+  "notion-update-data-source",
+  "notion-create-view",
+  "notion-update-view",
+  "notion-spawn-session",
+  "notion-stop-session",
+  "notion-send-message-to-session",
+  "notion-create-comment",
+  "notion-update-comment",
+  "notion-set-discussion-resolved",
+  "notion-set-comment-reaction",
+];
+const RISKY = ["notion-delete-pages", "notion-delete-databases", "notion-delete-comment"];
+
+describe("Notion preset", () => {
+  it("has the documented shape", () => {
+    expect(notionPreset).toMatchObject({
+      slug: "notion",
+      kind: "remote_http",
+      url: "https://mcp.notion.com/mcp",
+      auth: { type: "mcp_oauth" },
+      reconnectPolicy: { maxLifetimeDays: 180, idleDays: 30 },
+    });
+    expect(notionPreset.slug).toMatch(/^[a-z0-9-]{1,24}$/);
+    expect(presets()).toContain(notionPreset);
+  });
+
+  it("covers exactly Notion's 56 documented tools", () => {
+    const expected = [...READ, ...WRITE, ...RISKY].sort();
+    expect(new Set(expected).size).toBe(56);
+    expect(Object.keys(NOTION_TOOLS).sort()).toEqual(expected);
+  });
+
+  it.each(READ)("%s is a read", (name) => {
+    expect(classifyNotionTool(tool(name))).toEqual({ risky: false, read: true, source: "preset" });
+  });
+
+  it.each(WRITE)("%s is a write that goes through", (name) => {
+    expect(classifyNotionTool(tool(name))).toEqual({ risky: false, read: false, source: "preset" });
+  });
+
+  it.each(RISKY)("%s is risky", (name) => {
+    expect(classifyNotionTool(tool(name))).toMatchObject({ risky: true, read: false, source: "preset" });
+  });
+
+  it("takes the delete target from the tool's schema", () => {
+    expect(classifyNotionTool(tool("notion-delete-pages", { page_ids: {}, user_confirmed: {} }))?.targetPath).toBe("page_ids");
+    expect(classifyNotionTool(tool("notion-delete-databases", { database_ids: {} }))?.targetPath).toBe("database_ids");
+    expect(classifyNotionTool(tool("notion-delete-comment", { comment_id: {} }))?.targetPath).toBe("comment_id");
+    // No known id argument: no target rather than a wrong one.
+    expect(classifyNotionTool(tool("notion-delete-pages", { user_confirmed: {} }))?.targetPath).toBeUndefined();
+    expect(classifyNotionTool({ name: "notion-delete-pages", description: "", inputSchema: {} })?.targetPath).toBeUndefined();
+    // Non-delete tools never carry a target.
+    expect(classifyNotionTool(tool("notion-update-page", { page_id: {} }))?.targetPath).toBeUndefined();
+  });
+
+  it("maps the documented short aliases", () => {
+    expect(classifyNotionTool(tool("fetch"))).toEqual({ risky: false, read: true, source: "preset" });
+    expect(classifyNotionTool(tool("ai-search"))?.read).toBe(true);
+  });
+
+  it("returns null for tools it doesn't know", () => {
+    expect(classifyNotionTool(tool("notion-share-page"))).toBeNull();
+    expect(classifyNotionTool(tool("notion-publish-site"))).toBeNull();
+    expect(classifyNotionTool(tool("toString"))).toBeNull();
+    expect(classifyNotionTool(tool("__proto__"))).toBeNull();
+  });
+
+  it("renders plain setup steps", () => {
+    const steps = notionPreset.setupSteps({
+      publicUrl: "https://inbox.example.com",
+      redirectUri: "https://inbox.example.com/oauth/connections/callback",
+      webhookUrl: null,
+    });
+    expect(steps.map((s) => s.id)).toEqual(["connect", "approve", "reconnect"]);
+    expect(steps[0]!.title).toBe("Connect");
+    expect(steps[1]!.title).toBe("In Notion, choose the workspace and approve");
+    expect(steps[1]!.body).toMatch(/Business and Enterprise/);
+    expect(steps[2]!.body).toMatch(/180 days/);
+    expect(steps[2]!.body).toMatch(/30 days/);
+    for (const s of steps) {
+      expect(s.link).toBeUndefined();
+      expect(s.input).toBeUndefined();
+      expect(s.body).not.toMatch(/https?:\/\/|[*#[\]]/);
+    }
+  });
+
+  // TODO(W10): enable once feat/broker-sdk-spike lands test/fake-mcp-upstream.ts and the upstream manager exists:
+  // start the fake with Notion-like tool names, connect it through the preset's ToolSource, list and call a tool.
+  it.skip("proxies a Notion-like fake upstream", () => {});
+});
