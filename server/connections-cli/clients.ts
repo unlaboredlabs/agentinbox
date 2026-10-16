@@ -32,6 +32,8 @@ export interface ClientEntry {
    * repository wrote it. Imported only when Claude Code approved it, and only after its own confirmation.
    */
   fromProject?: boolean;
+  /** Client-side settings the broker doesn't carry over: tool filters and timeouts. */
+  dropped?: DroppedSettings;
   /** The client says it uses OAuth (Hermes `auth: oauth`, an oauth block). Its tokens stay in the client. */
   oauth: boolean;
   enabled: boolean;
@@ -39,6 +41,26 @@ export interface ClientEntry {
   problem?: string;
   /** stdio: the command line, for the listing. */
   command?: string;
+}
+
+export interface DroppedSettings {
+  /** Tools the client hides from its agent (Hermes tools.exclude, Codex disabled_tools). */
+  exclude?: string[];
+  /** The only tools the client shows (Hermes tools.include, Codex enabled_tools). */
+  include?: string[];
+  /** Other settings by name, e.g. timeout, connect_timeout. */
+  settings: string[];
+}
+
+const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined);
+
+function droppedFrom(e: Record<string, unknown>, filters: { include: unknown; exclude: unknown }, settingKeys: string[]): DroppedSettings | undefined {
+  const d: DroppedSettings = { settings: settingKeys.filter((k) => e[k] !== undefined && e[k] !== null) };
+  const inc = strings(filters.include);
+  const exc = strings(filters.exclude);
+  if (inc?.length) d.include = inc;
+  if (exc?.length) d.exclude = exc;
+  return d.include || d.exclude || d.settings.length ? d : undefined;
 }
 
 export interface ClientConfig {
@@ -176,11 +198,13 @@ function readHermes(opts: ReadOptions): ClientConfig {
       result.entries.push({ ...base, problem: `its url uses \${${url.missing}}, which isn't set in ${files.env}` });
       continue;
     }
+    const tools = isObj(e.tools) ? (e.tools as Record<string, unknown>) : {};
     const entry: ClientEntry = {
       ...base,
       url: url.value,
       transport: e.transport === "sse" ? "sse" : "http",
       oauth: e.auth === "oauth" || isObj(e.oauth),
+      dropped: droppedFrom(e as Record<string, unknown>, { include: tools.include, exclude: tools.exclude }, ["timeout", "connect_timeout"]),
     };
     if (e.client_cert !== undefined || e.identity_header !== undefined) {
       result.entries.push({ ...entry, problem: "it uses a client certificate or identity header, which the broker doesn't support yet" });
@@ -266,7 +290,12 @@ function readCodex(opts: ReadOptions): ClientConfig {
       result.entries.push({ ...base, problem: "no url" });
       continue;
     }
-    const entry: ClientEntry = { ...base, url: e.url, oauth: isObj(e.oauth) || e.auth === "oauth" };
+    const entry: ClientEntry = {
+      ...base,
+      url: e.url,
+      oauth: isObj(e.oauth) || e.auth === "oauth",
+      dropped: droppedFrom(e, { include: e.enabled_tools, exclude: e.disabled_tools }, ["tool_timeout_sec", "startup_timeout_sec"]),
+    };
     if (e.http_headers_helper !== undefined) {
       result.entries.push({ ...entry, problem: "it gets its headers from a helper command, which the broker can't run" });
       continue;

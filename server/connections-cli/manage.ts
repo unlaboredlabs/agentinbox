@@ -168,19 +168,36 @@ export async function authorize(
   throw new Error(`Timed out waiting for the sign-in. Try again with \`${NPX} connections reconnect ${conn.slug}\`${overSsh(env) ? "" : " (add --paste to paste the address instead)"}.`);
 }
 
+/** Working = active with at least one tool listed: a "connected" answer alone isn't proof (a header isn't tested). */
+export const isWorking = (c: ConnectionView) => c.status === "active" && c.tools.total > 0;
+
+/**
+ * Waits briefly for a just-connected connection's first tool sync: until it works, turns needs_reauth / error /
+ * disabled, or `ms` pass. Returns the last view.
+ */
+export async function waitWorking(api: ConnectionsApi, c: ConnectionView, opts: { pollMs?: number; ms?: number } = {}): Promise<ConnectionView> {
+  let now = c;
+  const deadline = Date.now() + (opts.ms ?? 10_000);
+  while (!isWorking(now) && now.status === "active" && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, opts.pollMs ?? 500));
+    now = await api.get(c.id);
+  }
+  return now;
+}
+
 /** Connects (header, setup inputs, or OAuth) and returns the connection as it ends up. */
 export async function connectNow(conn: ConnectionView, input: StartConnectInput, deps: ManageDeps, flags: { paste?: boolean } = {}): Promise<ConnectionView> {
   const r = await deps.api.connect(conn.id, input);
-  if (r.status === "connected") return r.connection;
+  if (r.status === "connected") return waitWorking(deps.api, r.connection, { pollMs: deps.pollMs, ms: deps.timeoutMs === undefined ? undefined : Math.min(deps.timeoutMs, 10_000) });
   if (r.status === "authorize") return authorize(conn, r, deps, flags);
   throw new Error(r.message);
 }
 
 function printResult(p: Prompter, c: ConnectionView): void {
-  if (c.status === "active") {
+  if (isWorking(c)) {
     p.print(`${pc.green("✔")} Connected "${c.slug}": ${c.tools.total} tool${c.tools.total === 1 ? "" : "s"}, seen by agents as ${c.slug}__<tool> (${accessLabel(c.levelDefault)}).`);
   } else {
-    p.print(`${pc.yellow("○")} "${c.slug}" was added but is ${c.status}${c.statusReason ? `: ${safeText(c.statusReason, 200)}` : ""}.`);
+    p.print(`${pc.yellow("○")} "${c.slug}" isn't working yet: ${c.status}${c.statusReason ? ` (${safeText(c.statusReason, 200)})` : ""}, ${c.tools.total} tools.`);
     p.print(`  ${reconnectHint(c)}`);
   }
 }
@@ -211,7 +228,7 @@ async function createThen(base: Pending, flags: AddFlags, deps: ManageDeps, afte
     return 1;
   }
   printResult(p, conn);
-  return conn.status === "active" ? 0 : 1;
+  return isWorking(conn) ? 0 : 1;
 }
 
 async function addPreset(preset: PresetView, flags: AddFlags, deps: ManageDeps, taken: Set<string>): Promise<number> {
@@ -333,7 +350,7 @@ export async function reconnectConnection(slug: string, flags: { paste?: boolean
   const c = await api.bySlug(slug);
   const after = await connectNow(c, c.authType === "header" ? { header: await headerFor(p, flags) } : {}, deps, flags);
   printResult(p, after);
-  return after.status === "active" ? 0 : 1;
+  return isWorking(after) ? 0 : 1;
 }
 
 export async function disableConnection(slug: string, deps: ManageDeps): Promise<number> {

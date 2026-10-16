@@ -5,10 +5,11 @@ import { NPX } from "../listen/version.ts";
 
 /**
  * `connections …` and `import --from …`: run on the daemon's machine, talking to its admin API through the
- * one-time local admin session (admin.ts). Hidden from --help while the broker is behind the `brokerUpstreams`
- * setting; the console PR that turns it on un-hides them (CONNECTIONS_VISIBLE).
+ * one-time local admin session (admin.ts). Listed in --help since the console (#65) shipped; while the daemon's
+ * `brokerUpstreams` setting is off they say so (CONNECTIONS_VISIBLE).
  */
-export const CONNECTIONS_VISIBLE = false;
+export const CONNECTIONS_VISIBLE = true;
+const GROUP = "MCP connections (on agentinbox's machine):";
 
 const collect = (value: string, previous: string[] | undefined) => [...(previous ?? []), value];
 const dataDirOf = (o: { data?: string }) => resolve(o.data ?? process.env.AGENTINBOX_DATA ?? join(homedir(), ".agentinbox"));
@@ -48,7 +49,8 @@ export function registerConnectionsCommands(program: Command): void {
   const connections = program
     .command("connections", { hidden: !CONNECTIONS_VISIBLE })
     .description("the MCP servers agentinbox connects agents to (Notion, WHOOP, any MCP URL); run on agentinbox's machine")
-    .summary("add, list, reconnect or remove connected MCP servers");
+    .summary("add, list, reconnect or remove connected MCP servers")
+    .helpGroup(GROUP);
 
   dataOption(
     connections
@@ -108,6 +110,7 @@ Examples:
       .command("import", { hidden: !CONNECTIONS_VISIBLE })
       .description("move an agent tool's MCP servers into agentinbox: one connection each, credentials moved into agentinbox")
       .summary("import MCP servers from Hermes, Claude Code, Cursor or Codex")
+      .helpGroup(GROUP)
       .requiredOption("--from <client>", "hermes, claude-code, cursor or codex"),
   )
     .option("--dry-run", "print exactly what would be created and changed, and change nothing")
@@ -134,14 +137,20 @@ Examples:
       const { runImport } = await import("./import.ts");
       const self = await selfOrigins(dataDirOf(o));
       if (o.dryRun) {
+        // Read-only: the admin channel (when the daemon runs) only lists existing connections.
         const { TerminalPrompter } = await import("./prompt.ts");
-        process.exitCode = await runImport(o, {
-          prompter: new TerminalPrompter(!!o.yes),
-          openApi: () => {
-            throw new Error("dry run");
-          },
-          selfOrigins: self,
-        });
+        const { openAdminChannel } = await import("./admin.ts");
+        const { ConnectionsApi } = await import("./api.ts");
+        let channel: import("./admin.ts").AdminChannel | null = null;
+        try {
+          process.exitCode = await runImport(o, {
+            prompter: new TerminalPrompter(!!o.yes),
+            openApi: () => new ConnectionsApi((channel = openAdminChannel({ dataDir: dataDirOf(o) }))),
+            selfOrigins: self,
+          });
+        } finally {
+          (channel as import("./admin.ts").AdminChannel | null)?.close();
+        }
         return;
       }
       process.exitCode = await withApi(o, (deps) => runImport(o, { prompter: deps.prompter, openApi: () => deps.api, selfOrigins: self }));

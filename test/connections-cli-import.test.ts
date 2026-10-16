@@ -47,9 +47,13 @@ const pairHermes = (agentId: string) =>
 /** Scripts allow private targets by exact origin; --yes alone never does. */
 const ALLOW = ["http://127.0.0.1:8787", "http://127.0.0.1:3000", "http://127.0.0.1:3773", "http://100.104.249.49:3773"];
 const YES = { from: "hermes", yes: true, allowPrivate: ALLOW };
+/** Hermes' telegram platform confined to agentinbox (Wynn's config) makes the replace ask a person; most tests drop it. */
+const unconfine = () => writeFileSync(join(hermes, "config.yaml"), readFileSync(join(hermes, "config.yaml"), "utf8").replace("telegram: [web, mcp-agentinbox]", "telegram: [web]"));
 const deps = (daemon: Daemon, prompter: ScriptedPrompter) => ({
   prompter,
   openApi: () => daemon.api,
+  verifyMs: 200,
+  pollMs: 5,
   lookup: publicLookup,
   env: process.env,
   selfOrigins: ["http://127.0.0.1:8425", "http://localhost:8425"],
@@ -163,6 +167,7 @@ describe("import --from hermes", () => {
 
   it("--yes creates the connections, moves the headers, then replaces only the working entries (with a backup)", async () => {
     pairHermes(d.agents.hermes);
+    unconfine();
     const original = readFileSync(join(hermes, "config.yaml"), "utf8");
     const p = new ScriptedPrompter([], true);
     const code = await runImport(YES, deps(d, p));
@@ -200,7 +205,7 @@ describe("import --from hermes", () => {
     const after = readFileSync(join(hermes, "config.yaml"), "utf8");
     expect(Object.keys(readMcpServers(after)!)).toEqual(["agentinbox", "t3code-macbook", "forge", "playwright"]);
     expect(after).toContain('url: "https://macbook.tailb10092.ts.net/mcp"');
-    expect(after).toContain("platform_toolsets:\n  telegram: [web, mcp-agentinbox]");
+    expect(after).toContain("platform_toolsets:\n  telegram: [web]");
     expect(after).toContain("model:\n  default: anthropic/claude-sonnet");
     expect(after).not.toContain("whoop");
     expect(readFileSync(join(hermes, ".env"), "utf8")).toContain(`AGENTINBOX_API_KEY=${PROFILE_KEY}`);
@@ -211,18 +216,20 @@ describe("import --from hermes", () => {
 
   it("re-running after Reconnect replaces the OAuth entries too, and creates nothing twice", async () => {
     pairHermes(d.agents.hermes);
+    unconfine();
     await runImport(YES, deps(d, new ScriptedPrompter([], true)));
     d.giveTools("t3code-macbook");
     d.giveTools("forge");
     const p = new ScriptedPrompter([], true);
     expect(await runImport(YES, deps(d, p))).toBe(0);
     expect(rows()).toHaveLength(5);
-    expect(p.text).toContain('already a connection: "forge" (active, 3 tools)');
+    expect(p.text).toContain('already connected: "forge" (3 tools)');
     expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "playwright"]);
   });
 
   it("a failed connection stays in Hermes and leaves nothing behind; the rest are replaced", async () => {
     pairHermes(d.agents.hermes);
+    unconfine();
     const connect = d.upstreams.connect;
     d.upstreams.connect = (conn, input) => (conn.slug === "hearloom" ? { status: "error", message: "Couldn't reach http://127.0.0.1:3000/mcp" } : connect(conn, input));
     const p = new ScriptedPrompter([], true);
@@ -246,8 +253,76 @@ describe("import --from hermes", () => {
     expect(backups(hermes)).toEqual([]);
   });
 
+  it("a header connect that doesn't work (401: needs_reauth, no tools) is never counted as working", async () => {
+    pairHermes(d.agents.hermes);
+    unconfine();
+    const connect = d.upstreams.connect;
+    d.upstreams.connect = (conn, input) => {
+      if (conn.slug !== "whoop") return connect(conn, input);
+      // The connector stores the header and says "connected"; the first sync then gets a 401.
+      d.h.ctx.db.run("UPDATE connections SET status = 'needs_reauth', status_reason = 'The server answered 401' WHERE id = ?", conn.id);
+      return { status: "connected" };
+    };
+    const p = new ScriptedPrompter([], true);
+    expect(await runImport(YES, deps(d, p))).toBe(0);
+    expect(p.text).toContain('○ whoop → "whoop": not working (needs_reauth: The server answered 401, 0 tools), so it stays in Hermes.');
+    const servers = Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!);
+    expect(servers).toContain("whoop");
+    expect(servers).not.toContain("brightspace");
+  });
+
+  it("a connect that stays active but never lists a tool isn't counted either", async () => {
+    pairHermes(d.agents.hermes);
+    unconfine();
+    d.upstreams.connect = (conn) => (conn.slug === "t3code-macbook" || conn.slug === "forge" ? { status: "authorize", authorizeUrl: "http://x.example/a" } : { status: "connected" });
+    const p = new ScriptedPrompter([], true);
+    await runImport(YES, deps(d, p));
+    expect(p.text).toContain('○ whoop → "whoop": not working (active, 0 tools), so it stays in Hermes.');
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "whoop", "brightspace", "hearloom", "t3code-macbook", "forge", "playwright"]);
+  });
+
+  it("routes confined to agentinbox: named, with the slugs they'd now see; the replace defaults to no and --yes never answers it", async () => {
+    pairHermes(d.agents.hermes);
+    writeFileSync(join(hermes, "webhook_subscriptions.json"), JSON.stringify({ "agentinbox": { toolsets: ["mcp-agentinbox"] }, github: { toolsets: ["web"] } }));
+    mkdirSync(join(hermes, "cron"));
+    writeFileSync(join(hermes, "cron", "jobs.json"), JSON.stringify({ jobs: [{ id: "j1", name: "email-watch", enabled_toolsets: ["agentinbox"] }, { id: "j2", name: "news", enabled_toolsets: ["web"] }] }));
+    const before = readFileSync(join(hermes, "config.yaml"), "utf8");
+    const p = new ScriptedPrompter([], true);
+    expect(await runImport(YES, deps(d, p))).toBe(0);
+    expect(p.text).toContain("These Hermes settings are limited to the agentinbox server only:\n  platform_toolsets.telegram (config.yaml)\n  webhook route agentinbox\n  cron job email-watch");
+    expect(p.text).toContain('they now also see the tools of "whoop", "brightspace", "hearloom" (as <name>__<tool>)');
+    expect(p.text).toContain("--yes doesn't answer this; Hermes's config wasn't changed");
+    expect(readFileSync(join(hermes, "config.yaml"), "utf8")).toBe(before);
+    // A person can say yes (the default is no).
+    const p2 = new ScriptedPrompter(["y"]);
+    expect(await runImport({ from: "hermes", allowPrivate: ALLOW }, deps(d, p2))).toBe(0);
+    expect(p2.asked.at(-1)).toContain("[y/N]");
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "t3code-macbook", "forge", "playwright"]);
+  });
+
+  it("says which client settings the broker doesn't carry: tool filters and timeouts", async () => {
+    const p = new ScriptedPrompter([]);
+    await runImport({ from: "hermes", dryRun: true }, { ...deps(d, p), openApi: () => { throw new Error("no daemon"); } });
+    expect(p.text).toContain("not carried over: its tool filter hides delete_recording; through agentinbox every tool is listed (subject to the access level)");
+    expect(p.text).toContain("not carried over: timeout (agentinbox uses its own 60 s per call)");
+    expect(p.text).toContain("not carried over: connect_timeout (agentinbox uses its own 60 s per call)");
+    expect(p.text).toContain("agentinbox wasn't reachable, so existing connections weren't checked");
+  });
+
+  it("a dry run on a re-run checks the existing connections and reprints the Connect step", async () => {
+    await runImport(YES, deps(d, new ScriptedPrompter([], true)));
+    const p = new ScriptedPrompter([]);
+    expect(await runImport({ from: "hermes", dryRun: true }, deps(d, p))).toBe(0);
+    expect(p.text).toMatch(/whoop\s+already connected: "whoop" \(3 tools\)/);
+    expect(p.text).toMatch(/forge\s+already a connection: "forge", needs Connect; it stays in Hermes until it works/);
+    expect(p.text).toContain("Reconnect: npx agentinbox-cli connections reconnect forge");
+    expect(p.text).not.toContain('create connection "forge"');
+    expect(p.text).toContain("Would create 0 connections");
+  });
+
   it("--yes alone never allows a private-network host", async () => {
     pairHermes(d.agents.hermes);
+    unconfine();
     const p = new ScriptedPrompter([], true);
     expect(await runImport({ from: "hermes", yes: true }, deps(d, p))).toBe(0);
     expect(rows().map((r) => r.slug)).toEqual(["whoop"]);
@@ -257,6 +332,7 @@ describe("import --from hermes", () => {
 
   it("scenario A: an existing connection Hermes' agent has no grant on is replaced only once it gets one", async () => {
     pairHermes(d.agents.hermes);
+    unconfine();
     const before = readFileSync(join(hermes, "config.yaml"), "utf8");
     const whoop = await d.api.create({ slug: "whoop", url: "https://whoop.weish.me/api/mcp", agentIds: [d.agents.claude] });
     d.giveTools("whoop");
@@ -278,6 +354,7 @@ describe("import --from hermes", () => {
 
   it("scenario B: choosing agents without Hermes' own agent warns and offers to include it", async () => {
     pairHermes(d.agents.hermes);
+    unconfine();
     // private allow? no · access · all agents? no · Hermes? no · Claude Code? yes · include Hermes? yes · create? · replace?
     const p = new ScriptedPrompter(["n", "", "n", "n", "y", "y", "y", "y"]);
     expect(await runImport({ from: "hermes" }, deps(d, p))).toBe(0);

@@ -32,15 +32,23 @@ export function stripComment(line: string): string {
 
 /** The line range of the top-level `mcp_servers:` block, or null when there isn't exactly one. */
 export function mcpServersBlock(yaml: string): { start: number; end: number; inline: string } | null {
+  return topBlock(yaml, "mcp_servers");
+}
+
+const keyRe = (key: string) => new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`);
+
+/** The line range of a top-level `<key>:` block, or null when there isn't exactly one. */
+export function topBlock(yaml: string, key: string): { start: number; end: number; inline: string } | null {
+  const re = keyRe(key);
   const lines = yaml.replace(/^﻿/, "").split("\n");
-  const tops = lines.flatMap((l, i) => (/^mcp_servers\s*:/.test(l) ? [i] : []));
+  const tops = lines.flatMap((l, i) => (re.test(l) ? [i] : []));
   if (tops.length !== 1) return null;
   const start = tops[0]!;
   let end = start + 1;
   while (end < lines.length && (lines[end]!.trim() === "" || /^\s/.test(lines[end]!) || lines[end]!.startsWith("#"))) end++;
   // Trailing blank lines and column-0 comments belong to whatever comes next.
   while (end > start + 1 && (lines[end - 1]!.trim() === "" || lines[end - 1]!.startsWith("#"))) end--;
-  return { start, end, inline: stripComment(lines[start]!.replace(/^mcp_servers\s*:/, "")).trim() };
+  return { start, end, inline: stripComment(lines[start]!.replace(re, "")).trim() };
 }
 
 function unquote(raw: string): string | typeof UNREADABLE {
@@ -166,8 +174,13 @@ function parseLines(lines: Line[], from: number, indent: number): { value: YamlV
  * no single readable block (`{}` and an absent key give an empty map).
  */
 export function readMcpServers(yaml: string): YamlMap | null {
-  const block = mcpServersBlock(yaml);
-  if (!block) return /^mcp_servers\s*:/m.test(yaml) ? null : {};
+  return readTopMap(yaml, "mcp_servers");
+}
+
+/** A top-level block map (e.g. `platform_toolsets`), read like mcp_servers. */
+export function readTopMap(yaml: string, key: string): YamlMap | null {
+  const block = topBlock(yaml, key);
+  if (!block) return new RegExp(keyRe(key).source, "m").test(yaml) ? null : {};
   if (block.inline) return block.inline === "{}" || block.inline === "null" || block.inline === "~" ? {} : null;
   const raw = yaml.replace(/^﻿/, "").split("\n").slice(block.start + 1, block.end);
   const lines: Line[] = [];

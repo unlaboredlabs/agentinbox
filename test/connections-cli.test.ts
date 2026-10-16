@@ -59,6 +59,7 @@ describe("the local admin channel", () => {
     const h = harness();
     try {
       await h.claim();
+      h.ctx.settings.update({ brokerUpstreams: false });
       const ch = openAdminChannel({
         dataDir: h.ctx.config.dataDir,
         instance: { pid: 1, host: "0.0.0.0", port: 8425, startedAt: "" },

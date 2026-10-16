@@ -45,10 +45,13 @@ const NOTION: IntegrationPreset = {
 
 export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerOff?: boolean } = {}): Promise<Daemon> {
   let giveTools: Daemon["giveTools"] = () => {};
+  // What a working connect does to the row (the credential store's markActive).
+  let markActive = (_id: string) => {};
   const upstreams: FakeUpstreams = {
     probe: () => ({ reachable: true, auth: "none", message: "It answered without a sign-in." }),
     connect: (conn) => {
       giveTools(conn.slug);
+      markActive(conn.id);
       return { status: "connected" };
     },
     connects: [],
@@ -68,9 +71,7 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
           async startConnect(conn, input) {
             upstreams.connects.push({ slug: conn.slug, input, privateTarget: conn.privateTarget });
             const out = upstreams.connect(conn, input);
-            // What a working connect does to the row (the credential store's markActive).
             if (out.status === "authorize") lastAuthorize = conn.id;
-            if (out.status === "connected") ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL WHERE id = ? AND status <> 'disabled'", conn.id);
             return out;
           },
           async finishFromUrl(raw) {
@@ -89,7 +90,8 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
       }),
   });
   await h.claim();
-  if (!opts.brokerOff) h.ctx.settings.update({ brokerUpstreams: true });
+  markActive = (id) => h.ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL WHERE id = ? AND status <> 'disabled'", id);
+  h.ctx.settings.update({ brokerUpstreams: !opts.brokerOff });
   const hermes = h.ctx.policy.createAgent({ name: "Hermes", grants: [] }).agent.id;
   const claude = h.ctx.policy.createAgent({ name: "Claude Code on mac", grants: [] }).agent.id;
   const channel = openAdminChannel({

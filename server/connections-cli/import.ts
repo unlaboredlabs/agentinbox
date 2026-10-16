@@ -8,6 +8,9 @@ import { safeText } from "../listen/ui.ts";
 import { NPX } from "../listen/version.ts";
 import type { LookupFn } from "../webhooks/ssrf.ts";
 import { accessLabel, agentsLabel, chooseAccess, chooseAgents, parseAccess } from "./access.ts";
+import { isWorking, waitWorking } from "./manage.ts";
+import { confinedRoutes } from "./routes.ts";
+import { mcpServerName } from "../listen/recipes.ts";
 import type { ConnectionsApi, ConnectionView } from "./api.ts";
 import { CLIENT_LABELS, type ClientConfig, type ClientEntry, type ImportClient, parseImportClient, readClientConfig } from "./clients.ts";
 import { checkTarget } from "./private.ts";
@@ -42,6 +45,9 @@ export interface ImportDeps {
   cwd?: string;
   /** This agentinbox's own MCP origins (loopback with its port), so its entry is never imported. */
   selfOrigins?: string[];
+  /** How long to wait for a connected server's first tool sync (default 10 s), and how often to look. */
+  verifyMs?: number;
+  pollMs?: number;
 }
 
 export type PlanItem =
@@ -188,7 +194,14 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
         out.push(`${name}${pc.yellow("skip")}: ${i.reason}; it stays in ${label}`);
         break;
       case "exists":
-        out.push(`${name}already a connection: "${i.connection.slug}" (${i.connection.status}, ${i.connection.tools.total} tools)`);
+        if (isWorking(i.connection)) out.push(`${name}already connected: "${i.connection.slug}" (${i.connection.tools.total} tools)`);
+        else {
+          const why =
+            i.entry.oauth || i.connection.authType === "oauth" || i.connection.status === "needs_reauth" ? "needs Connect" : `${i.connection.status}, ${i.connection.tools.total} tools`;
+          out.push(`${name}already a connection: "${i.connection.slug}", ${why}; it stays in ${label} until it works`);
+          out.push(`${cont}${reconnectHint(i.connection)}`);
+        }
+        out.push(...droppedLines(i.entry, cont));
         break;
       case "create": {
         out.push(`${name}${pc.green("create")} connection "${i.slug}" → ${safeText(i.url, 120)}${where(i.entry)}`);
@@ -198,6 +211,7 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
         else if (i.auth.type === "oauth") out.push(`${cont}OAuth: created needing Connect (${label} keeps its own tokens); sign in once with the link it prints`);
         else out.push(`${cont}no credential in ${label}: connected as it is (if it turns out to use OAuth, it needs Connect)`);
         if (i.privateTarget) out.push(`${cont}${pc.yellow("private network")}: needs the allow for exactly ${i.privateTarget}`);
+        out.push(...droppedLines(i.entry, cont));
         break;
       }
     }
@@ -205,19 +219,30 @@ export function renderPlan(config: ClientConfig, items: PlanItem[]): string[] {
   return out;
 }
 
+/** What the client did for this server that the broker doesn't: said in the plan, never silently dropped. */
+function droppedLines(e: ClientEntry, cont: string): string[] {
+  const d = e.dropped;
+  if (!d) return [];
+  const out: string[] = [];
+  const list = (xs: string[]) => xs.map((x) => safeText(x, 64)).join(", ");
+  if (d.exclude) out.push(`${cont}${pc.yellow("not carried over")}: its tool filter hides ${list(d.exclude)}; through agentinbox every tool is listed (subject to the access level)`);
+  if (d.include) out.push(`${cont}${pc.yellow("not carried over")}: its tool filter shows only ${list(d.include)}; through agentinbox every tool is listed (subject to the access level)`);
+  if (d.settings.length) out.push(`${cont}${pc.yellow("not carried over")}: ${d.settings.join(", ")} (agentinbox uses its own 60 s per call)`);
+  return out;
+}
+
 type CreateItem = Extract<PlanItem, { action: "create" }>;
 
 interface Outcome {
   item: CreateItem;
-  /** connected: works now; authorize: needs a sign-in (the link); failed: nothing was kept. */
-  status: "connected" | "authorize" | "failed";
+  /** connected: works now; unverified: created, but not working (yet); authorize: needs a sign-in; failed: nothing kept. */
+  status: "connected" | "unverified" | "authorize" | "failed";
   connection?: ConnectionView;
   authorizeUrl?: string;
   error?: string;
 }
 
-/** An existing connection proves itself by having tools; a fresh custom one starts "active" with none. */
-const works = (c: ConnectionView) => c.status === "active" && c.tools.total > 0;
+const works = isWorking;
 
 function setupLines(r: McpSetupResult): string[] {
   const out = [r.ok ? `${r.dryRun ? pc.cyan("○") : pc.green("✔")} ${r.message}` : `${pc.yellow("!")} ${r.message}`];
@@ -251,7 +276,14 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   const profileName = flags.profile ?? DEFAULT_PROFILE;
 
   if (flags.dryRun) {
-    const items = await planImport(config, { lookup: deps.lookup, selfOrigins: deps.selfOrigins });
+    // Existing connections from the daemon when it's reachable, so a re-run's plan is the real one.
+    let existing: ConnectionView[] | undefined;
+    try {
+      existing = await deps.openApi().list();
+    } catch {
+      existing = undefined;
+    }
+    const items = await planImport(config, { existing, lookup: deps.lookup, selfOrigins: deps.selfOrigins });
     p.print(pc.bold("Dry run: nothing is created or changed."));
     for (const l of renderPlan(config, items)) p.print(l);
     const creates = items.filter((i): i is CreateItem => i.action === "create");
@@ -259,8 +291,11 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     p.print("");
     p.print(`Would create ${creates.length} connection${creates.length === 1 ? "" : "s"} with ${access ? accessLabel(access) : "the access you choose (default: Ask before risky actions)"}.`);
     if (priv.length) p.print(`Would ask before allowing ${priv.map((i) => i.privateTarget).join(", ")} (--yes never does; --allow-private <origin> does for that origin).`);
-    p.print(pc.dim("Existing connections are checked on the real run (a server already connected isn't created twice)."));
-    const removable = creates.filter((i) => i.auth.type !== "oauth").map((i) => toRemove(i.entry));
+    if (!existing) p.print(pc.dim("agentinbox wasn't reachable, so existing connections weren't checked (the real run does: nothing is created twice)."));
+    const removable = [
+      ...items.filter((i): i is Extract<PlanItem, { action: "exists" }> => i.action === "exists" && works(i.connection)).map((i) => toRemove(i.entry)),
+      ...creates.filter((i) => i.auth.type !== "oauth").map((i) => toRemove(i.entry)),
+    ];
     p.print("");
     if (!removable.length) p.print(`${label}'s config isn't changed.`);
     else if (!profileExists(profileName)) {
@@ -310,7 +345,15 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   const who = await clientAgent(api, profileName);
   if (!creates.length) {
     p.print("Nothing to create.");
-    return offerSetup(deps, api, client, who, already.filter((a) => works(a.connection)).map((a) => ({ entry: a.entry, connection: a.connection })), [], 0);
+    return offerSetup(
+      deps,
+      api,
+      client,
+      who,
+      already.filter((a) => works(a.connection)).map((a) => ({ entry: a.entry, connection: a.connection })),
+      already.filter((a) => !works(a.connection)).map((a) => a.entry.name),
+      0,
+    );
   }
 
   const level = await chooseAccess(p, access);
@@ -331,8 +374,11 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
       created = await api.create({ slug: item.slug, name: item.entry.name, url: item.url, levelDefault: level, ...(agents === "all" ? {} : { agentIds: agents }) });
       if (item.privateTarget) await api.allowPrivateTarget(created.id, true);
       const r = await api.connect(created.id, item.auth.type === "header" ? { header: { name: item.auth.name, value: item.auth.value } } : {});
-      if (r.status === "connected") outcomes.push({ item, status: "connected", connection: r.connection });
-      else if (r.status === "authorize") outcomes.push({ item, status: "authorize", connection: created, authorizeUrl: r.authorizeUrl });
+      if (r.status === "connected") {
+        // "connected" means stored, not tested (a header connect doesn't call the server): wait for the first tool sync.
+        const after = await waitWorking(api, r.connection, { pollMs: deps.pollMs, ms: deps.verifyMs });
+        outcomes.push({ item, status: works(after) ? "connected" : "unverified", connection: after });
+      } else if (r.status === "authorize") outcomes.push({ item, status: "authorize", connection: created, authorizeUrl: r.authorizeUrl });
       else throw new Error(r.message);
     } catch (err) {
       // Nothing half-made stays behind: running the import again retries it cleanly.
@@ -346,6 +392,11 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     const name = safeText(o.item.entry.name, 40);
     if (o.status === "failed") p.print(`${pc.red("✘")} ${name}: ${safeText(o.error!, 300)} (it stays in ${label})`);
     else if (o.status === "connected") p.print(`${pc.green("✔")} ${name} → "${o.connection!.slug}", ${o.connection!.tools.total} tools`);
+    else if (o.status === "unverified") {
+      const c = o.connection!;
+      p.print(`${pc.yellow("○")} ${name} → "${c.slug}": not working (${c.status}${c.statusReason ? `: ${safeText(c.statusReason, 200)}` : ""}, ${c.tools.total} tools), so it stays in ${label}.`);
+      p.print(`    ${reconnectHint(c)}   then run this import again.`);
+    }
     else {
       p.print(`${pc.yellow("○")} ${name} → "${o.connection!.slug}": needs Connect. Sign in (link valid 15 minutes):`);
       p.print(`    ${pc.cyan(o.authorizeUrl!)}`);
@@ -357,7 +408,10 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
     ...already.filter((a) => works(a.connection)).map((a) => ({ entry: a.entry, connection: a.connection })),
     ...outcomes.filter((o) => o.status === "connected").map((o) => ({ entry: o.item.entry, connection: o.connection! })),
   ];
-  const pending = outcomes.filter((o) => o.status === "authorize").map((o) => o.item.entry.name);
+  const pending = [
+    ...already.filter((a) => !works(a.connection)).map((a) => a.entry.name),
+    ...outcomes.filter((o) => o.status === "authorize" || o.status === "unverified").map((o) => o.item.entry.name),
+  ];
   return offerSetup(deps, api, client, who, working, pending, failed ? 1 : 0);
 }
 
@@ -384,7 +438,7 @@ async function offerSetup(
 ): Promise<number> {
   const p = deps.prompter;
   const label = CLIENT_LABELS[client];
-  if (pending.length) p.print(pc.dim(`${pending.join(", ")} stay${pending.length === 1 ? "s" : ""} in ${label} until you Reconnect; then run this import again to replace ${pending.length === 1 ? "it" : "them"}.`));
+  if (pending.length) p.print(pc.dim(`${pending.join(", ")} stay${pending.length === 1 ? "s" : ""} in ${label} until ${pending.length === 1 ? "it works" : "they work"} through agentinbox (Reconnect); then run this import again to replace ${pending.length === 1 ? "it" : "them"}.`));
   if (!working.length) return code;
   if (!who.profile) {
     p.print(
@@ -422,10 +476,21 @@ async function offerSetup(
   }
   if (!usable.length) return code;
   p.print("");
-  const ok = await p.confirm(
-    `Replace ${usable.map((e) => `"${e.name}"`).join(", ")} in ${label} with the single agentinbox entry (setup-mcp --tool ${client}, with a backup)?`,
-    true,
-  );
+  const question = `Replace ${usable.map((e) => `"${e.name}"`).join(", ")} in ${label} with the single agentinbox entry (setup-mcp --tool ${client}, with a backup)?`;
+  const routes = confinedRoutes(client, mcpServerName(who.profileName), deps.env);
+  let ok: boolean;
+  if (routes.length) {
+    const slugs = working.filter((w) => usable.includes(w.entry)).map((w) => w.connection.slug);
+    p.print(pc.yellow(`These ${label} settings are limited to the agentinbox server only:`));
+    for (const r of routes) p.print(`  ${safeText(r, 120)}`);
+    p.print(
+      pc.yellow(
+        `Through agentinbox they now also see the tools of ${slugs.map((s) => `"${s}"`).join(", ")} (as <name>__<tool>), which ${routes.length === 1 ? "it" : "they"} couldn't reach before. ` +
+          `If one is triggered by email or webhooks, those tools become reachable from that content. Give ${agentName} less access on those connections, or keep them out, if that's not what you want.`,
+      ),
+    );
+    ok = await p.confirmExplicit(question, `${label}'s config wasn't changed; decide in a terminal`);
+  } else ok = await p.confirm(question, true);
   if (!ok) {
     p.print(`${label}'s config wasn't changed. Run this import again any time to do it.`);
     return code;
