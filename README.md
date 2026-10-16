@@ -14,6 +14,11 @@ npx agentinbox-cli
 Open the link it prints: the console walks you through the rest (Google Cloud setup, connecting Gmail, your first
 agent). Requires Node.js 22.13 or newer.
 
+Google Calendar is supported too (optional). It needs the Calendar API enabled in your Google Cloud project, the
+Calendar scopes on the consent screen, Calendar added to each account, and `calendar.read` (and, to make changes,
+`calendar.write`) on the agent's grant. The console's setup covers all of it; existing installs use Overview → "Add
+Google Calendar". Details: [docs/calendar.md](docs/calendar.md).
+
 ![Overview](docs/screenshots/overview.png)
 
 ## More

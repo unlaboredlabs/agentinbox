@@ -376,7 +376,8 @@ webhook route `agentinbox` (`--forward http://127.0.0.1:8644/webhooks/agentinbox
 listener's secret). Hermes verifies the signature, runs the route's prompt (the same triage task), and delivers the
 reply where the route says. A `[SILENT]` reply isn't delivered. Filtered mail never reaches Hermes, so it costs
 nothing. When you pass `--recipe hermes`, or your saved command is the old one-run-per-email Hermes command, the
-listener says so in one line; it also warns at start if the gateway doesn't answer on `/health`.
+listener says so in one line; it also warns at start if the gateway doesn't answer on `/health`, and if the route
+puts the email into its prompt without the toolsets limit below ([Upgrading](#upgrading-an-existing-listener)).
 
 **What the route's agent can use.** By default a Hermes webhook run gets Hermes' `hermes-webhook` toolset
 (`web_search`, `web_extract`, `vision_analyze`, `clarify`) plus **every MCP server enabled in Hermes**. With email as
@@ -497,6 +498,44 @@ agentinbox listen service uninstall [--profile <name>]                 # keeps t
 - The unit only says `listen --profile <name>`. The key stays in the 0600 profile file. The unit's `PATH` is your
   shell's `PATH` with npx and version-manager shims removed, so `claude`, `codex` and `hermes` resolve as they do in
   your terminal.
+
+## Upgrading an existing listener
+
+After updating agentinbox (for example from a `0.1.0-nightly.34` listener):
+
+- **Re-run `listen service install`.** The service runs its own stable install in `~/.local/share/agentinbox/app`
+  (`agentinbox-cli@latest`), not the npx cache, so updating the package or running a newer `npx agentinbox-cli` doesn't
+  change what the service runs. `npx agentinbox-cli listen service install [--profile <name>]` reinstalls it and
+  restarts every profile's listener on it. The service also reads the profile only when it starts: pass changed
+  settings to `install` (it saves them first), or reinstall after `listen … --save`.
+- **Gmail categories are skipped now.** Mail in Gmail's Promotions, Social and Forums tabs no longer wakes the agent
+  (see [Noise](#noise-what-wakes-your-agent)). A profile saved before this default says so in one line at start. To
+  get them back: `npx agentinbox-cli listen service install --all-categories` (or `--include-category forums`,
+  repeatable), or `listen --all-categories --save` for a foreground listener.
+- **Hermes routes get the cleaned body.** A forward to a Hermes route (`/webhooks/<name>` on this machine) now sends
+  `{ "type": …, "notice": …, "event": <payload cleaned as for --exec> }` instead of the raw `WebhookPayload`
+  (`{ type, timestamp, data }`). `type` is still at the top level; the message is now under `event.data.message`
+  (it was `data.message`). A route prompt using `{__raw__}` keeps working; one that read other fields, or a
+  `--script` filter that did, must read the new shape.
+- **An older custom Hermes route.** If the route the listener forwards to puts the event into its prompt (a
+  placeholder such as `{__raw__}`, or no prompt at all), has no `cron_job`, and isn't limited to
+  `"toolsets": ["mcp-agentinbox"]`, the listener warns at start and `listen status` shows it: email-triggered runs there
+  get Hermes' web tools and every MCP server, including any calendar access you granted. Move to the confined route:
+
+  ```sh
+  npx agentinbox-cli listen hermes --deliver telegram --run          # creates the route agentinbox, limited to the agentinbox tools
+  npx agentinbox-cli listen service install --recipe hermes          # points the service at it (foreground: listen --save --recipe hermes)
+  hermes webhook remove agentinbox-mail                              # the old route
+  ```
+
+  A gateway on another port: `--forward http://127.0.0.1:<port>/webhooks/agentinbox` instead of `--recipe hermes`.
+  A custom route whose prompt has no placeholders and that runs its own `--script` or fires a cron job (the event
+  never reaches an LLM prompt) can stay as it is, and gets no warning. Its script must accept the cleaned body above,
+  though: top-level `type`, the message under `event.data.message`.
+- **Calendar invitations don't wake the agent by default.** The default types are still `message.received` only. Add
+  them with `--types message.received,calendar.invitation_received` (plus `calendar.event_created`,
+  `calendar.event_updated`, `calendar.event_cancelled` if wanted, or `all`); the agent needs `calendar.read` on the
+  account.
 
 ## Status
 

@@ -5,9 +5,10 @@ import { normalizeFilter, webhookFilterSchema } from "../webhooks/filter.ts";
 import { resolve } from "node:path";
 import { newSecret, validateForwardUrl } from "./forward.ts";
 import { assertTrustedDir } from "./fsutil.ts";
-import { workDir } from "./paths.ts";
+import { DEFAULT_PROFILE, workDir } from "./paths.ts";
 import type { Profile } from "./profile.ts";
 import { parseRecipeTool, recipe } from "./recipes.ts";
+import { NPX } from "./version.ts";
 
 /**
  * `listen` flags. Each group overrides the profile as a unit: targets (--recipe/--exec/--forward), --types,
@@ -317,6 +318,16 @@ export function typesNotes(c: Pick<EffectiveConfig, "types" | "typesDefaulted">)
     );
   }
   return { info, warn };
+}
+
+/**
+ * The category skip is newer than many profiles: when the profile has no skipCategories (the default) and no
+ * category flag was given, one line saying what is now skipped and how to take it back.
+ */
+export function categoryNote(profileName: string, profile: Profile, flags: ListenFlags, c: Pick<EffectiveConfig, "filter" | "skipCategories">): string | null {
+  if (profile.skipCategories !== undefined || flags.allCategories || flags.includeCategory?.length || flags.defaultCategories || !effectiveSkip(c).length) return null;
+  const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
+  return `New: mail in Gmail's Promotions, Social and Forums tabs is now skipped by default. To get it back: \`${NPX} listen${p} --all-categories --save\` (or one tab: \`--include-category forums --save\`; for the service: \`${NPX} listen service install${p} --all-categories\`).`;
 }
 
 /** One-line description of the filter for the console. */
