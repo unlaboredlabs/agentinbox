@@ -7,7 +7,6 @@ import {
   ACCESS_LEVELS,
   type AccessLevel,
   CONNECTION_KINDS,
-  CONNECTION_PRESETS,
   CONNECTION_SLUG_RE,
   type Connection,
   type ConnectionAuthType,
@@ -42,7 +41,7 @@ const level = z.enum(ACCESS_LEVELS);
 
 const createSchema = z
   .object({
-    preset: z.enum(CONNECTION_PRESETS).optional(),
+    preset: z.string().min(1).max(64).optional(),
     url: httpUrl.optional(),
     name: name.optional(),
     slug: slug.optional(),

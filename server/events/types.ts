@@ -9,10 +9,7 @@ export interface NewEvent {
   type: EventType;
   /** Account events. Connection events (isConnectionEventType) pass connectionId instead. */
   accountId?: string;
-  /**
-   * Connection events (`connection.*`, `approval.requested`, `<preset>.*`). Stored in events.account_id
-   * (connection ids are `con_…`, so they never collide with an account id) and read back as connectionId.
-   */
+  /** Connection events (`connection.*`, `approval.requested`, `<preset>.*`): events.connection_id (account_id ''). */
   connectionId?: string;
   message?: MessageSummary | null;
   /**

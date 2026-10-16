@@ -17,8 +17,8 @@ export function createEventsService(ctx: AppContext): EventsService {
 
   function emit(e: NewEvent): MailEvent | null {
     if (inTransaction(ctx.db)) throw new Error("events.emit must not be called inside a transaction: it publishes after its own commit");
-    const owner = isConnectionEventType(e.type) ? e.connectionId : e.accountId;
-    if (!owner) throw new Error(`events.emit: ${e.type} needs ${isConnectionEventType(e.type) ? "connectionId" : "accountId"}`);
+    const connection = isConnectionEventType(e.type);
+    if (connection ? !e.connectionId : !e.accountId) throw new Error(`events.emit: ${e.type} needs ${connection ? "connectionId" : "accountId"}`);
     const stored = ctx.db.tx((): StoredEvent | null => {
       const createdAt = now();
       const id = newId("evt");
@@ -27,12 +27,13 @@ export function createEventsService(ctx: AppContext): EventsService {
       const calendarEvent = e.calendarEvent ?? null;
       const inserted = ctx.db.get<{ seq: number }>(
         `INSERT INTO events (id, type, account_id, gmail_message_id, gmail_thread_id, label_ids, message, changed_label_ids, detail, dedupe_key, created_at,
-           calendar_id, calendar_event)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           calendar_id, calendar_event, connection_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(dedupe_key) DO NOTHING RETURNING seq`,
         id,
         e.type,
-        owner,
+        // Connection events store '' (migration 8 keeps account_id NOT NULL) and their connection_id.
+        connection ? "" : (e.accountId ?? ""),
         message?.id ?? null,
         message?.threadId ?? null,
         json.str(threadLabelIds),
@@ -43,6 +44,7 @@ export function createEventsService(ctx: AppContext): EventsService {
         createdAt,
         calendarEvent?.calendarId ?? null,
         calendarEvent ? json.str(calendarEvent) : null,
+        connection ? (e.connectionId ?? null) : null,
       );
       if (!inserted) return null;
       const event = eventBySeq(ctx.db, inserted.seq)!;

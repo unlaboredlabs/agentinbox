@@ -81,14 +81,20 @@ export const BROKER_EVENT_TYPES = [
   "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
 ] as const;
 export type BrokerEventType = (typeof BROKER_EVENT_TYPES)[number];
-/** Events a native integration emits: `<preset>.<name>`, e.g. `whoop.recovery_updated`. */
-export type PresetEventType = `${ConnectionPreset}.${string}`;
+/**
+ * Events a native integration emits: `<preset>.<name>`, e.g. `whoop.recovery_updated` (IntegrationPreset.id and
+ * NativeEvents.types). Open-ended, so EventType as a whole is too: code that needs the known set uses
+ * EVENT_TYPES and BROKER_EVENT_TYPES.
+ */
+export type PresetEventType = `${string}.${string}`;
 export type EventType = NativeEventType | BrokerEventType | PresetEventType;
 
 const PRESET_EVENT_RE = /^([a-z0-9-]{1,24})\.[a-z0-9_]{1,64}$/;
+/** Prefixes of agentinbox's own events: a preset can't be named like one. */
+const RESERVED_EVENT_PREFIXES = new Set(["message", "thread", "label", "account", "sync", "calendar", "connection", "approval"]);
 export const isPresetEventType = (t: string): t is PresetEventType => {
   const m = PRESET_EVENT_RE.exec(t);
-  return !!m && (CONNECTION_PRESETS as readonly string[]).includes(m[1]!);
+  return !!m && !RESERVED_EVENT_PREFIXES.has(m[1]!);
 };
 /** Events about a connection (broker or preset), never an account. */
 export const isConnectionEventType = (t: string): t is BrokerEventType | PresetEventType =>
@@ -1077,13 +1083,12 @@ export type Approval = GoogleApproval | McpCallApproval;
 // ───────────────────────────── MCP broker: connections ─────────────────────────────
 // docs/MCP-BROKER.md. Stored since migration 8; nothing serves these until the broker PRs land (behind the
 // brokerUpstreams setting). Credentials never cross the API boundary: there's no DTO for them.
+// AccessLevel and ToolAnnotations mirror server/broker/types.ts: the console can't import that file (it uses
+// Node's Buffer, and tsconfig.app has no Node types). Keep them in step.
 
 /** native_whoop (M2), stdio (M4) and native_google are reserved; M1 creates remote_http only. */
 export const CONNECTION_KINDS = ["remote_http", "native_whoop", "stdio", "native_google"] as const;
 export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
-
-export const CONNECTION_PRESETS = ["notion", "whoop"] as const;
-export type ConnectionPreset = (typeof CONNECTION_PRESETS)[number];
 
 export const CONNECTION_AUTH_TYPES = ["none", "header", "oauth"] as const;
 export type ConnectionAuthType = (typeof CONNECTION_AUTH_TYPES)[number];
@@ -1111,7 +1116,8 @@ export interface Connection {
   /** null = the install's single owner. */
   ownerId: string | null;
   kind: ConnectionKind;
-  preset: ConnectionPreset | null;
+  /** IntegrationPreset.id (server/broker/types.ts), checked against the preset registry in code; null = custom. */
+  preset: string | null;
   slug: string;
   name: string;
   /** The MCP endpoint (remote_http). */
@@ -1140,7 +1146,6 @@ export interface ToolAnnotations {
   destructiveHint?: boolean;
   idempotentHint?: boolean;
   openWorldHint?: boolean;
-  [key: string]: unknown;
 }
 
 /** A tool definition as pinned (upstream_tools.definition). The pin hashes this plus the tool's name. */
@@ -1221,7 +1226,8 @@ export interface ConnectionView extends Connection {
 
 /** POST /api/connections: a custom MCP URL, or a preset (its URL and auth come from the preset). */
 export interface CreateConnectionInput {
-  preset?: ConnectionPreset;
+  /** IntegrationPreset.id (GET /api/connections/presets). */
+  preset?: string;
   /** Required without a preset. */
   url?: string;
   /** Default: the preset's display name, else the URL's host. */
