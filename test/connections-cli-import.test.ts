@@ -5,7 +5,7 @@ import { readClientConfig } from "../server/connections-cli/clients.ts";
 import { planImport, runImport } from "../server/connections-cli/import.ts";
 import { ScriptedPrompter } from "../server/connections-cli/prompt.ts";
 import { readMcpServers } from "../server/connections-cli/yaml.ts";
-import { setupMcp } from "../server/listen/mcpsetup.ts";
+import { checkRewrite, setupMcp } from "../server/listen/mcpsetup.ts";
 import { saveProfile } from "../server/listen/profile.ts";
 import { type Daemon, publicLookup, startDaemon } from "./connections-cli-fake.ts";
 import { isolateXdg } from "./listen-client-fake.ts";
@@ -300,6 +300,21 @@ describe("import --from hermes", () => {
     expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toEqual(["agentinbox", "t3code-macbook", "forge", "playwright"]);
   });
 
+  it("a static webhook route in config.yaml confined to agentinbox gets the warning too", async () => {
+    pairHermes(d.agents.hermes);
+    unconfine();
+    const yaml = readFileSync(join(hermes, "config.yaml"), "utf8");
+    writeFileSync(
+      join(hermes, "config.yaml"),
+      `${yaml}platforms:\n  webhook:\n    enabled: true\n    extra:\n      routes:\n        email-triage:\n          toolsets: [mcp-agentinbox]\n        github:\n          toolsets: [web]\n`,
+    );
+    const p = new ScriptedPrompter([], true);
+    expect(await runImport(YES, deps(d, p))).toBe(0);
+    expect(p.text).toContain("These Hermes settings are limited to the agentinbox server only:\n  webhook route email-triage (config.yaml)\n");
+    expect(p.text).not.toContain("webhook route github");
+    expect(Object.keys(readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!)).toContain("whoop");
+  });
+
   it("says which client settings the broker doesn't carry: tool filters and timeouts", async () => {
     const p = new ScriptedPrompter([]);
     await runImport({ from: "hermes", dryRun: true }, { ...deps(d, p), openApi: () => { throw new Error("no daemon"); } });
@@ -482,8 +497,56 @@ describe("setup-mcp removing imported entries", () => {
     expect(after).toContain("    timeout: 120\n  brightspace:");
     // The removed entry's own comment goes with it; the next entry keeps its own.
     expect(after).not.toContain("# T3 on this laptop");
-    expect(after).toContain("      Authorization: \"Bearer ${BRIGHTSPACE_TOKEN}\"   # course tools\n  # forge over Tailscale\n  forge:");
+    expect(after).toContain("      Authorization: \"Bearer ${BRIGHTSPACE_TOKEN}\"   # course tools\n\n  # forge over Tailscale\n  forge:");
     expect(Object.keys(readMcpServers(after)!)).toEqual(["agentinbox", "whoop", "brightspace", "forge", "playwright"]);
+  });
+
+  describe("comments inside a removed entry never end it early (no header lands under another server)", () => {
+    const write = (yaml: string) => writeFileSync(join(hermes, "config.yaml"), yaml);
+    const servers = () => readMcpServers(readFileSync(join(hermes, "config.yaml"), "utf8"))!;
+    const t3 = { url: "http://127.0.0.1:3773", auth: "oauth" };
+    const ours = { url: "https://mail.example.com/mcp", headers: { Authorization: "Bearer ${AGENTINBOX_API_KEY}" } };
+
+    it("a commented-out property at column 0", () => {
+      write(['mcp_servers:', '  t3code-macbook:', '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "#    timeout: 120", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', ""].join("\n"));
+      expect(setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] }).ok).toBe(true);
+      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+      expect(readFileSync(join(hermes, "config.yaml"), "utf8")).not.toContain("WHOOP_MCP_TOKEN");
+    });
+
+    it("a note at the entries' indent", () => {
+      write(['mcp_servers:', '  t3code-macbook:', '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "  # TODO rotate", "", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', "  # forge next", "  forge:", "    url: http://100.104.249.49:3773", ""].join("\n"));
+      expect(setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] }).ok).toBe(true);
+      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3, forge: { url: "http://100.104.249.49:3773" } });
+      const after = readFileSync(join(hermes, "config.yaml"), "utf8");
+      expect(after).not.toContain("WHOOP_MCP_TOKEN");
+      expect(after).not.toContain("TODO rotate");
+      expect(after).toContain("  # forge next\n  forge:");
+    });
+
+    it("whoop first: its leftovers can't land under the inserted agentinbox entry", () => {
+      write(["mcp_servers:", "  whoop:", "    url: https://whoop.weish.me/api/mcp", "  # old timeout below", "#    timeout: 120", "    headers:", '      Authorization: "Bearer ${WHOOP_MCP_TOKEN}"', "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    auth: oauth", ""].join("\n"));
+      expect(setupMcp("hermes", target, "/p.json", { removeServers: [{ name: "whoop" }] }).ok).toBe(true);
+      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+      expect(readFileSync(join(hermes, "config.yaml"), "utf8")).not.toContain("WHOOP_MCP_TOKEN");
+    });
+
+    it("the same for the agentinbox entry setup-mcp replaces", () => {
+      write(["mcp_servers:", "  t3code-macbook:", '    url: "http://127.0.0.1:3773"', "    auth: oauth", "  agentinbox:", "    url: https://old.example/mcp", "  # rotated 2026-10", "    headers:", '      Authorization: "Bearer ${AGENTINBOX_API_KEY}"', "      X-Old: yes", ""].join("\n"));
+      expect(setupMcp("hermes", target, "/p.json").ok).toBe(true);
+      expect(servers()).toEqual({ agentinbox: ours, "t3code-macbook": t3 });
+    });
+
+    it("the safety net refuses any rewrite that doesn't read back exactly", () => {
+      const before = { a: { url: "x" }, b: { url: "y", headers: { Authorization: "Bearer s" } } };
+      const entry = { url: "u" };
+      expect(checkRewrite(before, { a: { url: "x" }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBeNull();
+      expect(checkRewrite(before, { a: { url: "x", headers: { Authorization: "Bearer s" } }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe('"a" would change');
+      expect(checkRewrite(before, { a: { url: "x" }, agentinbox: { ...entry, headers: { Authorization: "Bearer s" } } }, { name: "agentinbox", entry }, ["b"])).toBe('"agentinbox" wouldn\'t be exactly the new entry');
+      expect(checkRewrite(before, { a: { url: "x" }, b: { url: "y" }, agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe('"b" would still be there');
+      expect(checkRewrite(before, { agentinbox: entry }, { name: "agentinbox", entry }, ["b"])).toBe('"a" would disappear');
+      expect(checkRewrite(before, null, { name: "agentinbox", entry }, [])).toBe("it can't be read back");
+    });
   });
 
   it("Hermes: an entry that isn't there changes nothing either", () => {

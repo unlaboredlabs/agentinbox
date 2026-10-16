@@ -18,6 +18,8 @@ export interface FakeUpstreams {
   connects: { slug: string; input: StartConnectInput; privateTarget: string | null }[];
   /** Paste mode: the URLs POSTed to /api/connections/finish. A `state=ok` one finishes the last sign-in started. */
   finishes: string[];
+  /** What a successful finish does to the connection (default: active with 3 tools). */
+  finish: (connectionId: string) => void;
   probes: { url: string; privateTarget: string | null }[];
 }
 
@@ -57,6 +59,11 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
     connects: [],
     probes: [],
     finishes: [],
+    finish: (id) => {
+      const slug = h.ctx.db.get<{ slug: string }>("SELECT slug FROM connections WHERE id = ?", id)!.slug;
+      giveTools(slug);
+      markActive(id);
+    },
   };
   let lastAuthorize: string | null = null;
   const h = harness({
@@ -80,9 +87,7 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
               return { status: "error" as const, message: "This sign-in link has expired or was already used.", connectionId: null };
             }
             const id = lastAuthorize;
-            const slug = ctx.db.get<{ slug: string }>("SELECT slug FROM connections WHERE id = ?", id)!.slug;
-            giveTools(slug);
-            ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL WHERE id = ?", id);
+            upstreams.finish(id);
             return { status: "connected" as const, connectionId: id };
           },
           createSource: stubParts().connector.createSource,

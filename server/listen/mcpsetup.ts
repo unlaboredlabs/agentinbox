@@ -10,7 +10,9 @@ import { DEFAULT_PROFILE } from "./paths.ts";
 import { mcpServerName } from "./recipes.ts";
 import { NPX } from "./version.ts";
 import { safeText } from "./ui.ts";
-import { removeYamlServers } from "../connections-cli/yaml.ts";
+import { isDeepStrictEqual } from "node:util";
+import { readTomlMcpServers } from "../connections-cli/toml.ts";
+import { cutEntries, readMcpServers, removeYamlServers } from "../connections-cli/yaml.ts";
 
 /**
  * `--setup-mcp`: registers the agentinbox MCP server in the agent's own tool without the key ever
@@ -53,6 +55,37 @@ export interface RemoveServer {
   scope?: "user" | "local" | "project";
   projectDir?: string;
 }
+
+/**
+ * The safety net under every rewrite: the new file, read back with the same readers, must hold exactly the old
+ * entries minus the removed ones (each unchanged, deep-equal), plus our entry as intended. Anything else means the
+ * rewrite moved a line where it doesn't belong (e.g. a header under another server): refuse it. Returns the
+ * problem, or null when it's right.
+ */
+export function checkRewrite(
+  before: Record<string, unknown> | null,
+  after: Record<string, unknown> | null,
+  ours: { name: string; entry: unknown },
+  removed: string[],
+): string | null {
+  if (!before || !after) return "it can't be read back";
+  const gone = new Set(removed);
+  for (const [name, entry] of Object.entries(before)) {
+    if (name === ours.name || gone.has(name)) continue;
+    if (!(name in after)) return `"${name}" would disappear`;
+    if (!isDeepStrictEqual(after[name], entry)) return `"${name}" would change`;
+  }
+  for (const name of removed) if (name in after) return `"${name}" would still be there`;
+  for (const name of Object.keys(after)) if (name !== ours.name && !(name in before)) return `"${name}" would appear`;
+  if (!isDeepStrictEqual(after[ours.name], ours.entry)) return `"${ours.name}" wouldn't be exactly the new entry`;
+  return null;
+}
+
+const refused = (file: string, why: string, manual: string[]): McpSetupResult => ({
+  ok: false,
+  message: `Not rewriting ${file}: read back, the result isn't right (${why}). Nothing was changed.`,
+  manual,
+});
 
 /** The entries to remove, never the agentinbox entry itself. */
 const removals = (t: McpSetupTarget, opts: McpSetupOptions) => (opts.removeServers ?? []).filter((r) => r.name !== t.name);
@@ -225,10 +258,19 @@ function setupCodex(t: McpSetupTarget, profileFile: string, opts: McpSetupOption
     `${replaces} ${file} (other tables are kept) and set the file to 0600, since it will hold the key:`,
     ...indent(codexBlock({ ...t, key: KEY_SHOWN })),
   ];
+  const base = without.replace(/\s*$/, "");
+  const next = `${base ? `${base}\n\n` : ""}${codexBlock(t)}`;
+  const toTable = (x: ReturnType<typeof readTomlMcpServers>) => x as Record<string, unknown>;
+  const problem = checkRewrite(
+    toTable(readTomlMcpServers(current)),
+    toTable(readTomlMcpServers(next)),
+    { name: t.name, entry: { url: t.url, http_headers: { Authorization: `Bearer ${t.key}` }, default_tools_approval_mode: "approve" } },
+    extra.map((r) => r.name),
+  );
+  if (problem) return refused(file, problem, manual);
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Codex: nothing was changed. setup-mcp would:`, changes, verify };
   const backup = backupFile(file);
-  const base = without.replace(/\s*$/, "");
-  writePrivateFile(file, `${base ? `${base}\n\n` : ""}${codexBlock(t)}`, { privateDir: false });
+  writePrivateFile(file, next, { privateDir: false });
   return { ok: true, message: `Added [mcp_servers.${t.name}] to ${file} (now mode 0600: it holds the key).${removedNote(extra)}`, backup, verify, removed: extra.map((r) => r.name) };
 }
 
@@ -267,9 +309,13 @@ function setupCursor(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
     ...indent(`"${t.name}": ${JSON.stringify(entry(KEY_SHOWN), null, 2)}`),
   ];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Cursor: nothing was changed. setup-mcp would:`, changes, verify };
+  const before = structuredClone(servers);
   for (const r of extra) delete servers[r.name];
   servers[t.name] = entry(t.key);
   doc.mcpServers = servers;
+  const reread = (JSON.parse(JSON.stringify(doc)) as { mcpServers: Record<string, unknown> }).mcpServers;
+  const problem = checkRewrite(before, reread, { name: t.name, entry: entry(t.key) }, extra.map((r) => r.name));
+  if (problem) return refused(file, problem, manual);
   const backup = backupFile(file);
   writePrivateFile(file, JSON.stringify(doc, null, 2) + "\n", { privateDir: false });
   return {
@@ -363,14 +409,10 @@ export function upsertYamlServer(yaml: string, name: string, entry: string[]): s
   const firstChild = body.find((l) => l.trim() && !l.trimStart().startsWith("#"));
   const indent = firstChild ? firstChild.match(/^(\s*)/)![1]! : "  ";
   if (!indent || /\t/.test(indent)) return null;
-  const kept: string[] = [];
-  let skipping = false;
-  for (const l of body) {
-    const own = l.match(/^(\s*)/)![1]!.length;
-    if (l.trim() && own === indent.length) skipping = new RegExp(`^${escapeRe(indent)}["']?${escapeRe(name)}["']?\\s*:`).test(l);
-    else if (l.trim() && own < indent.length) return null;
-    if (!skipping) kept.push(l);
-  }
+  // Comments inside the old entry never end it early (cutEntries), so none of its lines can land elsewhere.
+  const cut = cutEntries(body, indent, [name]);
+  if (!cut) return null;
+  const { kept } = cut;
   const insert = block(indent);
   return [...lines.slice(0, top + 1), ...insert, ...kept, ...lines.slice(end)].join("\n");
 }
@@ -406,6 +448,11 @@ function setupHermes(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
     return { ok: false, message: `Couldn't remove ${extra.map((r) => `"${r.name}"`).join(", ")} from ${configFile} safely; nothing was changed.`, manual };
   }
   if (next === null) return { ok: false, message: `${configFile} uses a layout we won't rewrite automatically.`, manual };
+  {
+    const ours = { url: t.url, headers: { Authorization: `Bearer \${${envVar}}` } };
+    const problem = checkRewrite(readMcpServers(current), readMcpServers(next), { name: t.name, entry: ours }, extra.map((r) => r.name));
+    if (problem) return refused(configFile, problem, manual);
+  }
   const verify = [`hermes mcp test ${t.name}`];
   const changes = [
     backupLine(configFile),

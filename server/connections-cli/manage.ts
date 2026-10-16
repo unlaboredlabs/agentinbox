@@ -189,7 +189,8 @@ export async function waitWorking(api: ConnectionsApi, c: ConnectionView, opts: 
 export async function connectNow(conn: ConnectionView, input: StartConnectInput, deps: ManageDeps, flags: { paste?: boolean } = {}): Promise<ConnectionView> {
   const r = await deps.api.connect(conn.id, input);
   if (r.status === "connected") return waitWorking(deps.api, r.connection, { pollMs: deps.pollMs, ms: deps.timeoutMs === undefined ? undefined : Math.min(deps.timeoutMs, 10_000) });
-  if (r.status === "authorize") return authorize(conn, r, deps, flags);
+  // A finished sign-in is the start, not proof: wait for the first tool sync, as for a header.
+  if (r.status === "authorize") return waitWorking(deps.api, await authorize(conn, r, deps, flags), { pollMs: deps.pollMs, ms: deps.timeoutMs === undefined ? undefined : Math.min(deps.timeoutMs, 10_000) });
   throw new Error(r.message);
 }
 

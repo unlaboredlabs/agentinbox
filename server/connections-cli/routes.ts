@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { hermesHome } from "../listen/mcpsetup.ts";
 import type { ImportClient } from "./clients.ts";
-import { readTopMap } from "./yaml.ts";
+import { readTopMap, UNREADABLE, type YamlValue } from "./yaml.ts";
 
 /**
  * Places in a client's config that confine something to the agentinbox MCP server alone: Hermes platform toolsets,
@@ -26,8 +26,21 @@ export function confinedRoutes(client: ImportClient, serverName: string, env: No
   try {
     const config = join(home, "config.yaml");
     if (existsSync(config)) {
-      const platforms = readTopMap(readFileSync(config, "utf8"), "platform_toolsets") ?? {};
+      const yaml = readFileSync(config, "utf8");
+      const platforms = readTopMap(yaml, "platform_toolsets") ?? {};
       for (const [platform, toolsets] of Object.entries(platforms)) if (confines(toolsets)) out.push(`platform_toolsets.${platform} (config.yaml)`);
+      // Static webhook routes: platforms.webhook.extra.routes, a map of name → route or a list of routes.
+      const get = (v: YamlValue | undefined, k: string): YamlValue | undefined => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, YamlValue>)[k] : undefined);
+      const routes = get(get(get(readTopMap(yaml, "platforms") ?? undefined, "webhook"), "extra"), "routes");
+      if (routes === UNREADABLE || (Array.isArray(routes) && routes.some((r) => r === UNREADABLE))) {
+        out.push("webhook routes in config.yaml (platforms.webhook.extra.routes: couldn't be read, so check their toolsets)");
+      } else if (Array.isArray(routes)) {
+        routes.forEach((r, i) => {
+          if (confines(get(r, "toolsets"))) out.push(`webhook route ${String(get(r, "name") ?? `#${i + 1}`)} (config.yaml)`);
+        });
+      } else if (routes && typeof routes === "object") {
+        for (const [name, r] of Object.entries(routes as Record<string, YamlValue>)) if (confines(get(r, "toolsets"))) out.push(`webhook route ${name} (config.yaml)`);
+      }
     }
   } catch {
     // Unreadable: nothing to warn about from it.

@@ -141,6 +141,21 @@ describe("connections add", () => {
     expect(d.h.ctx.db.get("SELECT private_target FROM connections")).toEqual({ private_target: "http://127.0.0.1:3000" });
   });
 
+  it("a paste-mode Reconnect succeeds once the first tool sync lands", async () => {
+    d.upstreams.probe = () => ({ reachable: true, auth: "oauth", message: "OAuth" });
+    d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://t3.example/authorize?state=ok", callbackMode: "paste", redirectUri: "https://localhost/oauth/connections/callback" });
+    const c = await d.api.create({ slug: "t3", url: "https://t3.example/mcp" });
+    d.h.ctx.db.run("UPDATE connections SET auth_type = 'oauth', status = 'needs_reauth' WHERE id = ?", c.id);
+    // The sign-in finishes at once; the tools arrive a moment later (the catalog's first sync).
+    d.upstreams.finish = (id) => {
+      d.h.ctx.db.run("UPDATE connections SET status = 'active' WHERE id = ?", id);
+      setTimeout(() => d.giveTools("t3", 4), 30);
+    };
+    const p = new ScriptedPrompter(["https://localhost/oauth/connections/callback?code=x&state=ok"]);
+    expect(await reconnectConnection("t3", {}, deps(p))).toBe(0);
+    expect(p.text).toContain('✔ Connected "t3": 4 tools');
+  });
+
   it("Reconnect on an active OAuth connection waits for the new credential, not just any update", async () => {
     d.upstreams.probe = () => ({ reachable: true, auth: "oauth", message: "OAuth" });
     d.upstreams.connect = () => ({ status: "authorize", authorizeUrl: "https://t3.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A8425%2Foauth%2Fconnections%2Fcallback" });

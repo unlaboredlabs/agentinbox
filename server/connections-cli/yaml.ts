@@ -202,6 +202,65 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * Removes `mcp_servers.<name>` for each name, keeping everything else byte for byte. Returns null when any of
  * them isn't a plain block entry this can cut out safely (then nothing should be written).
  */
+/**
+ * Cuts the named entries out of an mcp_servers block body (its lines after `mcp_servers:`), whose entries sit at
+ * `indent`. Comment and blank lines met inside a cut entry are held until the next real line decides: a sibling
+ * key at `indent` (or less) keeps them with what follows (unless that is cut too), a deeper line means they were
+ * part of the cut entry. So a commented-out property (`#    timeout: 120`) or a note (`  # TODO`) inside an entry
+ * never ends it early, and none of its lines can end up under a neighbour. null when a layout can't be cut safely.
+ */
+export function cutEntries(body: string[], indent: string, names: string[]): { kept: string[]; found: Set<string> } | null {
+  const isKey = (l: string, name: string) => new RegExp(`^${escapeRe(indent)}(["']?)${escapeRe(name)}\\1\\s*:`).test(l);
+  const ind = (l: string) => /^(\s*)/.exec(l)![1]!.length;
+  const isComment = (l: string) => l.trimStart().startsWith("#");
+  const kept: string[] = [];
+  const found = new Set<string>();
+  let skipping = false;
+  let pending: string[] = [];
+  for (const l of body) {
+    const blank = !l.trim();
+    if (skipping && (blank || isComment(l))) {
+      pending.push(l);
+      continue;
+    }
+    if (blank || isComment(l)) {
+      kept.push(l);
+      continue;
+    }
+    const own = ind(l);
+    if (own < indent.length) return null;
+    if (own > indent.length) {
+      // Part of the current entry: a cut one's held comments go with it.
+      if (skipping) pending = [];
+      else kept.push(l);
+      continue;
+    }
+    // A sibling key: what was held belongs to it.
+    const hit = names.find((n) => isKey(l, n)) ?? null;
+    if (hit) {
+      if (found.has(hit)) return null;
+      found.add(hit);
+      // Only block entries: a flow-style `name: { … }` might span lines we can't see the end of.
+      if (stripComment(l).replace(/^[^:]*:/, "").trim()) return null;
+      // Comments right above a cut entry (at its indent or less) were about it: they go with it.
+      pending = [];
+      while (kept.length && isComment(kept[kept.length - 1]!) && ind(kept[kept.length - 1]!) <= indent.length) kept.pop();
+      skipping = true;
+      continue;
+    }
+    if (skipping) kept.push(...pending.filter((x) => !x.trim() || ind(x) <= indent.length));
+    pending = [];
+    skipping = false;
+    kept.push(l);
+  }
+  // Held lines at the end of the block were the cut entry's.
+  return { kept, found };
+}
+
+/**
+ * Removes `mcp_servers.<name>` for each name, keeping everything else byte for byte. Returns null when any of
+ * them isn't a plain block entry this can cut out safely (then nothing should be written).
+ */
 export function removeYamlServers(yaml: string, names: string[]): string | null {
   if (!names.length) return yaml;
   const block = mcpServersBlock(yaml);
@@ -212,29 +271,9 @@ export function removeYamlServers(yaml: string, names: string[]): string | null 
   if (!first) return null;
   const indent = /^(\s*)/.exec(first)![1]!;
   if (!indent || indent.includes("\t")) return null;
-  const isKey = (l: string, name: string) => new RegExp(`^${escapeRe(indent)}(["']?)${escapeRe(name)}\\1\\s*:`).test(l);
-  const kept: string[] = [];
-  const found = new Set<string>();
-  let skipping = false;
-  for (const l of body) {
-    const own = /^(\s*)/.exec(l)![1]!.length;
-    if (l.trim() && !l.trimStart().startsWith("#") && own === indent.length) {
-      const hit = names.find((n) => isKey(l, n));
-      skipping = !!hit;
-      if (hit) {
-        if (found.has(hit)) return null;
-        found.add(hit);
-        // Comment lines right above a removed entry (at its indent or less) were about it: they go with it.
-        while (kept.length && kept[kept.length - 1]!.trimStart().startsWith("#") && /^(\s*)/.exec(kept[kept.length - 1]!)![1]!.length <= indent.length) kept.pop();
-        // Only block entries: a flow-style `name: { … }` might span lines we can't see the end of.
-        if (stripComment(l).replace(/^[^:]*:/, "").trim()) return null;
-      }
-    } else if (l.trim() && !l.trimStart().startsWith("#") && own < indent.length) return null;
-    // A comment at the entries' own indent (or less) introduces the next entry: it's kept with it.
-    else if (skipping && l.trimStart().startsWith("#") && own <= indent.length) skipping = false;
-    if (!skipping) kept.push(l);
-  }
-  if (found.size !== names.length) return null;
+  const cut = cutEntries(body, indent, names);
+  if (!cut || cut.found.size !== names.length) return null;
+  const { kept } = cut;
   const hasChild = kept.some((l) => l.trim() && !l.trimStart().startsWith("#"));
   const head = hasChild ? lines[block.start]! : "mcp_servers: {}";
   return [...lines.slice(0, block.start), head, ...(hasChild ? kept : kept.filter((l) => l.trim())), ...lines.slice(block.end)].join("\n");
