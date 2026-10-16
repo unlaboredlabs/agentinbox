@@ -79,6 +79,7 @@ const conn = (over: Partial<Shared.ConnectionView> = {}): Shared.ConnectionView 
   expiresInDays: null,
   expired: false,
   grantedScopes: null,
+  broadScopes: null,
   agents: 2,
   ...over,
 });
@@ -235,13 +236,17 @@ describe("T3 Code in the console: a user-named server, expiry and granted scopes
     expect(connectionStatusView(conn({ expiresAt: inDays(0.5) }), NOW)).toMatchObject({ label: "Expires in 1 day", tone: "bad" });
   });
 
-  it("shows the scopes T3 granted, and what Full access means", () => {
+  it("shows the granted scopes, and warns when they include the extension's broad ones", () => {
     expect(grantedScopesView(conn({ grantedScopes: null }))).toBeNull();
     expect(grantedScopesView(conn({ preset: "notion", grantedScopes: ["read"] }))).toEqual({ scopes: ["read"], note: null });
-    const full = grantedScopesView(conn({ preset: "t3code", grantedScopes: ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"] }));
-    expect(full?.note).toMatch(/Full access in T3/);
-    expect(grantedScopesView(conn({ preset: "t3code", grantedScopes: ["orchestration:read", "orchestration:operate"] }))?.note).toMatch(/start, message and stop/);
-    expect(grantedScopesView(conn({ preset: "t3code", grantedScopes: ["orchestration:read"] }))?.note).toMatch(/Read only in T3/);
+    // T3 Code's manifest names its Full access scopes broad (remote.auth.broadScopes).
+    const t3 = { preset: "t3code", name: "forge", broadScopes: ["settings:write", "source-control:write"] };
+    const full = grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"] }));
+    expect(full?.scopes).toHaveLength(4);
+    expect(full?.note).toBe("Broad access: this sign-in granted settings:write, source-control:write on forge. If agents don't need that, reconnect and pick a lower level.");
+    expect(grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read", "orchestration:operate"] }))?.note).toBeNull();
+    // Without broad scopes named, nothing is called broad, whatever the preset.
+    expect(grantedScopesView(conn({ preset: "t3code", grantedScopes: ["settings:write"] }))?.note).toBeNull();
   });
 });
 

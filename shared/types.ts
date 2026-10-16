@@ -1286,6 +1286,11 @@ export interface ConnectionView extends Connection {
    * source-control:write) or less (its Read only grants orchestration:read alone).
    */
   grantedScopes: string[] | null;
+  /**
+   * Scopes that mean broad access on this connection's extension (its manifest's `remote.auth.broadScopes`, e.g. T3
+   * Code's settings:write): the console warns when grantedScopes include any. null when the extension names none.
+   */
+  broadScopes: string[] | null;
   /** Agents with a grant on this connection. */
   agents: number;
 }
@@ -1385,9 +1390,9 @@ export interface PresetView {
   url: string | null;
   authType: ConnectionAuthType;
   setupSteps: SetupStepView[];
-  reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number } | null;
+  reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number; tokenLifetimeCapDays?: number } | null;
   /**
-   * The user names the server (T3 Code): `url` is null, CreateConnectionInput.url is required, and `defaultPath` is
+   * The user names the server (T3 Code, Brightspace): `url` is null, CreateConnectionInput.url is required, and `defaultPath` is
    * appended when only an origin is given. One connection per server, named after its host unless named.
    */
   userServer: { defaultPath: string } | null;

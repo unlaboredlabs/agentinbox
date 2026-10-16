@@ -26,7 +26,9 @@ import {
 import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
-import { presets } from "../integrations/index.ts";
+import { type UpgradeResult, upgradeToExtensions } from "../extensions/bootstrap.ts";
+import type { ExtensionPin, ExtensionStore } from "../extensions/contract.ts";
+import { extensionStore, presetById, presets } from "../integrations/index.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -167,6 +169,12 @@ export interface BrokerService extends Lifecycle {
    * of events emitted.
    */
   pollEvents(at?: number): Promise<number>;
+  /**
+   * The startup upgrade to extensions (server/extensions/bootstrap.ts): connections of the Notion, T3 Code and WHOOP
+   * presets are bound to those extensions, and missing ones install in the background; once one is installed its
+   * connections are re-listed under its risk map. start() runs it with the registered extension store.
+   */
+  upgradeExtensions(store: ExtensionStore, pins?: readonly ExtensionPin[]): UpgradeResult;
 }
 
 const UNAVAILABLE = "Integrations aren't available in this build of xaq yet.";
@@ -521,6 +529,25 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     webhookReachability: () => reach.check(),
     pollEvents,
 
+    upgradeExtensions(store, pins) {
+      return upgradeToExtensions({
+        db: ctx.db,
+        store,
+        ...(pins ? { pins } : {}),
+        log,
+        onInstalled: (_ext, connectionIds) => {
+          // presets() is reloaded: cached views drop, native sources are rebuilt, and each connection is re-listed,
+          // which re-classifies its pinned tools under the extension's risk map.
+          invalidate("all");
+          for (const id of connectionIds) {
+            const c = getConnection(ctx, id);
+            if (!c) continue;
+            void (c.kind === "remote_http" ? Promise.resolve() : closeSource(id)).then(() => catalog.refresh(id)).catch(() => {});
+          }
+        },
+      });
+    },
+
     start() {
       // Agents from before search mode keep their full tool list (once per install; docs/MCP-BROKER.md).
       try {
@@ -535,6 +562,15 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         if (released) log.info("Released tools held for a change by an older version", { tools: released });
       } catch (err) {
         log.error("Couldn't release tools held by an older version", { error: errorMessage(err) });
+      }
+      // Connections of the former core presets are bound to their extensions; missing ones install in the background.
+      const extensions = extensionStore();
+      if (extensions) {
+        try {
+          service.upgradeExtensions(extensions);
+        } catch (err) {
+          log.error("Couldn't bind connections to their extensions", { error: errorMessage(err) });
+        }
       }
       policy.start();
       ctx.bus.on("settings", onSettings);
@@ -632,5 +668,7 @@ export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = 
   const scope = c.authType === "oauth" ? ctx.db.get<{ scope: string | null }>("SELECT scope FROM connection_credentials WHERE connection_id = ? AND access_token_enc IS NOT NULL", c.id)?.scope : null;
   const grantedScopes = typeof scope === "string" ? scope.split(/\s+/).filter(Boolean) : null;
   const expired = c.status !== "disabled" && isExpired(c, at);
-  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, agents };
+  const auth = c.preset ? presetById(c.preset)?.auth : undefined;
+  const broadScopes = auth?.type === "mcp_oauth" && auth.broadScopes?.length ? [...auth.broadScopes] : null;
+  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, broadScopes, agents };
 }

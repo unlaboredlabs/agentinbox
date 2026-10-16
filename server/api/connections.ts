@@ -97,7 +97,7 @@ function freeName(ctx: AppContext, base: string, ownerId: string | null): string
 
 /** A free slug from a host or preset slug: lowercase, dashes, at most 24, suffixed -2, -3… on collision. */
 function freeSlug(ctx: AppContext, base: string): string {
-  const root = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "mcp";
+  const root = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20).replace(/-+$/, "") || "mcp";
   const taken = (s: string) => !!ctx.db.get("SELECT 1 FROM connections WHERE slug = ?", s);
   if (!taken(root)) return root;
   for (let i = 2; ; i++) if (!taken(`${root}-${i}`)) return `${root}-${i}`;

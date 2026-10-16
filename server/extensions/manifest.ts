@@ -1,0 +1,640 @@
+// The extension manifest, `xaq-extension.json` (docs/EXTENSIONS.md): its type, a strict validator, the JSON Schema
+// the xaq-extensions repo checks manifests with (scripts/validate.mjs), and `presetFromManifest`, which turns an
+// installed extension into the IntegrationPreset the broker, policy, catalog and console already use.
+//
+// Strict on purpose: an unknown key anywhere is an error (schema 1), and every value is checked here, not by the
+// schema alone. Setup strings may use {{publicUrl}}, {{redirectUri}} and {{webhookUrl}} and nothing else; a step
+// that uses {{webhookUrl}} must say `"when": "webhookUrl"`, so it only shows when the internet can reach this install.
+
+import type { IntegrationPreset, PresetAuth, SetupContext, SetupStep, ToolClass, ToolDef } from "../broker/types.ts";
+import { createCodeSource, type InstalledExtension } from "./contract.ts";
+
+export const MANIFEST_FILE = "xaq-extension.json";
+export const MANIFEST_SCHEMA_VERSION = 1;
+
+// ───────────── Types ─────────────
+
+export type RiskClass = "read" | "write" | "risky";
+
+export interface RiskEntry {
+  class: RiskClass;
+  /**
+   * JSON Pointer (RFC 6901) to the argument naming the call's target, for "always allow … for this target"; or
+   * candidate pointers, of which the first whose top-level argument the tool's live input schema declares wins.
+   * No declared candidate: no target (never a wrong one).
+   */
+  target?: string | string[];
+}
+
+export type RemoteAuth =
+  | { type: "none" }
+  | { type: "header"; headerName: string; prefix?: string }
+  /** `broadScopes`: granted scopes that mean broad access; the console warns when a sign-in grants any of them. */
+  | { type: "mcp_oauth"; broadScopes?: string[] };
+
+export type CodeAuth =
+  | { type: "none" }
+  | { type: "user_app"; authorizeUrl: string; tokenUrl: string; scopes: string[]; clientIdInput: string; clientSecretInput: string };
+
+export interface ManifestSetupStep extends SetupStep {
+  /** Shown only when this context is present: "webhookUrl" when the internet can reach the install's webhooks. */
+  when?: "webhookUrl";
+}
+
+export interface Manifest {
+  schema: 1;
+  name: string;
+  displayName: string;
+  version: string;
+  description: string;
+  kind: "remote" | "code";
+  slug: string;
+  remote?: {
+    url?: string;
+    userServer?: { defaultPath: string; sameOriginIssuer?: boolean };
+    auth: RemoteAuth;
+  };
+  code?: {
+    entry: string;
+    node?: string;
+    auth: CodeAuth;
+    network?: string[];
+    events?: string[];
+  };
+  reconnectPolicy?: { maxLifetimeDays?: number; idleDays?: number; tokenLifetimeCapDays?: number };
+  setup?: ManifestSetupStep[];
+  risk?: { tools: Record<string, RiskEntry>; nameCheckExempt?: string[] };
+}
+
+export class ManifestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManifestError";
+  }
+}
+
+// ───────────── Rules (shared by the validator and the JSON Schema) ─────────────
+
+const NAME_RE = /^[a-z0-9-]{1,32}$/;
+const SLUG_RE = /^[a-z0-9-]{1,24}$/;
+const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const STEP_ID_RE = /^[a-z0-9-]{1,32}$/;
+const INPUT_KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const HEADER_RE = /^[A-Za-z0-9-]{1,100}$/;
+const TOOL_NAME_RE = /^[A-Za-z0-9_.\-/]{1,128}$/;
+const POINTER_RE = /^(\/([^~/]|~[01])*)+$/;
+const HOST_RE = /^(?=.{1,253}$)(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const EVENT_NAME_RE = /^[a-z0-9_]{1,64}$/;
+const ENTRY_RE = /^(?!\/)(?!.*(^|\/)\.\.?(\/|$))[A-Za-z0-9_./-]{1,200}\.(mjs|js)$/;
+/** xaq's own event prefixes (shared/types.ts): an extension that names its events can't be called like one. */
+const RESERVED_NAMES = new Set(["message", "thread", "label", "account", "sync", "calendar", "connection", "approval", "xaq"]);
+const TEMPLATE_VARS = ["publicUrl", "redirectUri", "webhookUrl"] as const;
+type TemplateVar = (typeof TEMPLATE_VARS)[number];
+const TEMPLATE_RE = /\{\{\s*([^{}]*?)\s*\}\}/g;
+// No control characters except newline in prose (manifests are shown to the admin verbatim).
+// oxlint-disable-next-line no-control-regex
+const CONTROL_RE = /[\u0000-\u0009\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
+const MAX_DAYS = 3650;
+
+// ───────────── Validator ─────────────
+
+type Obj = Record<string, unknown>;
+
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+
+function fail(path: string, msg: string): never {
+  throw new ManifestError(`${MANIFEST_FILE}: ${path} ${msg}`);
+}
+
+function obj(v: unknown, path: string, allowed: readonly string[], required: readonly string[] = []): Obj {
+  if (!isObj(v)) fail(path, "must be an object");
+  for (const k of Object.keys(v)) if (!allowed.includes(k)) fail(path, `has an unknown key "${k.slice(0, 64)}"`);
+  for (const k of required) if (!Object.hasOwn(v, k)) fail(path, `is missing "${k}"`);
+  return v;
+}
+
+function str(v: unknown, path: string, opts: { max: number; min?: number; re?: RegExp; multiline?: boolean; what?: string }): string {
+  if (typeof v !== "string") fail(path, "must be a string");
+  if (v.length < (opts.min ?? 1)) fail(path, "must not be empty");
+  if (v.length > opts.max) fail(path, `must be at most ${opts.max} characters`);
+  if (opts.re && !opts.re.test(v)) fail(path, `must be ${opts.what ?? `like ${opts.re.source}`}`);
+  const control = opts.multiline ? v.replace(/\n/g, "") : v;
+  if (CONTROL_RE.test(control)) fail(path, "must not contain control characters");
+  return v;
+}
+
+function bool(v: unknown, path: string): boolean {
+  if (typeof v !== "boolean") fail(path, "must be true or false");
+  return v;
+}
+
+function days(v: unknown, path: string): number {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > MAX_DAYS) fail(path, `must be a whole number of days from 1 to ${MAX_DAYS}`);
+  return v;
+}
+
+function strList(v: unknown, path: string, item: (s: unknown, p: string) => string, max: number): string[] {
+  if (!Array.isArray(v)) fail(path, "must be an array");
+  if (v.length > max) fail(path, `must have at most ${max} entries`);
+  const out = v.map((s, i) => item(s, `${path}[${i}]`));
+  if (new Set(out).size !== out.length) fail(path, "has duplicates");
+  return out;
+}
+
+function httpsUrl(v: unknown, path: string): string {
+  const s = str(v, path, { max: 2048 });
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    fail(path, "must be an absolute URL");
+  }
+  if (u.protocol !== "https:") fail(path, "must be an https URL");
+  if (u.username || u.password) fail(path, "must not carry a user name or password");
+  return s;
+}
+
+/** Template variables used in a string; unknown ones are refused. */
+function templateVars(s: string, path: string): TemplateVar[] {
+  const out: TemplateVar[] = [];
+  for (const m of s.matchAll(TEMPLATE_RE)) {
+    const name = m[1]!;
+    if (!(TEMPLATE_VARS as readonly string[]).includes(name)) fail(path, `uses {{${name.slice(0, 40)}}}: only {{publicUrl}}, {{redirectUri}} and {{webhookUrl}} are available`);
+    out.push(name as TemplateVar);
+  }
+  // A stray brace pair left after removing the valid ones is a typo ({{publicUrl}, {publicUrl}}).
+  if (/\{\{|\}\}/.test(s.replace(TEMPLATE_RE, ""))) fail(path, "has an unbalanced {{ }}");
+  return out;
+}
+
+function templated(v: unknown, path: string, opts: { max: number; multiline?: boolean }, used: Set<TemplateVar>): string {
+  const s = str(v, path, opts);
+  for (const name of templateVars(s, path)) used.add(name);
+  return s;
+}
+
+function validatePattern(v: unknown, path: string): string {
+  const s = str(v, path, { max: 500 });
+  try {
+    new RegExp(s);
+  } catch {
+    fail(path, "must be a valid regular expression");
+  }
+  return s;
+}
+
+function validateStep(v: unknown, path: string): ManifestSetupStep {
+  const o = obj(v, path, ["id", "title", "body", "link", "copy", "input", "when"], ["id", "title", "body"]);
+  const used = new Set<TemplateVar>();
+  const step: ManifestSetupStep = {
+    id: str(o.id, `${path}.id`, { max: 32, re: STEP_ID_RE, what: "lowercase letters, digits and dashes" }),
+    title: templated(o.title, `${path}.title`, { max: 120 }, used),
+    body: templated(o.body, `${path}.body`, { max: 4000, multiline: true }, used),
+  };
+  if (o.link !== undefined) {
+    const l = obj(o.link, `${path}.link`, ["label", "url"], ["label", "url"]);
+    const label = templated(l.label, `${path}.link.label`, { max: 120 }, used);
+    const url = templated(l.url, `${path}.link.url`, { max: 2048 }, used);
+    // A link is either an https URL or one of this install's own addresses.
+    if (!/^\{\{\s*(publicUrl|redirectUri|webhookUrl)\s*\}\}/.test(url)) httpsUrl(url, `${path}.link.url`);
+    step.link = { label, url };
+  }
+  if (o.copy !== undefined) {
+    const c = obj(o.copy, `${path}.copy`, ["label", "value"], ["label", "value"]);
+    step.copy = { label: templated(c.label, `${path}.copy.label`, { max: 120 }, used), value: templated(c.value, `${path}.copy.value`, { max: 2048 }, used) };
+  }
+  if (o.input !== undefined) {
+    const i = obj(o.input, `${path}.input`, ["key", "label", "secret", "pattern", "placeholder"], ["key", "label"]);
+    step.input = {
+      key: str(i.key, `${path}.input.key`, { max: 64, re: INPUT_KEY_RE, what: "a lowercase identifier (letters, digits, _)" }),
+      label: str(i.label, `${path}.input.label`, { max: 120 }),
+    };
+    if (i.secret !== undefined) step.input.secret = bool(i.secret, `${path}.input.secret`);
+    if (i.pattern !== undefined) step.input.pattern = validatePattern(i.pattern, `${path}.input.pattern`);
+    if (i.placeholder !== undefined) step.input.placeholder = str(i.placeholder, `${path}.input.placeholder`, { max: 200 });
+  }
+  if (o.when !== undefined) {
+    if (o.when !== "webhookUrl") fail(`${path}.when`, 'must be "webhookUrl"');
+    step.when = "webhookUrl";
+  }
+  if (used.has("webhookUrl") && step.when !== "webhookUrl") fail(path, 'uses {{webhookUrl}}, so it needs "when": "webhookUrl"');
+  return step;
+}
+
+function validateRisk(v: unknown, path: string): NonNullable<Manifest["risk"]> {
+  const o = obj(v, path, ["tools", "nameCheckExempt"], ["tools"]);
+  if (!isObj(o.tools)) fail(`${path}.tools`, "must be an object");
+  const names = Object.keys(o.tools);
+  if (names.length > 1000) fail(`${path}.tools`, "must list at most 1000 tools");
+  const tools: Record<string, RiskEntry> = {};
+  for (const name of names) {
+    const p = `${path}.tools["${name.slice(0, 64)}"]`;
+    str(name, p, { max: 128, re: TOOL_NAME_RE, what: "a tool name" });
+    const e = obj(o.tools[name], p, ["class", "target"], ["class"]);
+    if (e.class !== "read" && e.class !== "write" && e.class !== "risky") fail(`${p}.class`, 'must be "read", "write" or "risky"');
+    const entry: RiskEntry = { class: e.class };
+    if (e.target !== undefined) {
+      const pointer = (t: unknown, tp: string) => str(t, tp, { max: 512, re: POINTER_RE, what: 'a JSON Pointer such as "/projectId"' });
+      if (Array.isArray(e.target)) {
+        const list = strList(e.target, `${p}.target`, pointer, 16);
+        if (!list.length) fail(`${p}.target`, "must not be empty");
+        entry.target = list;
+      } else {
+        entry.target = pointer(e.target, `${p}.target`);
+      }
+    }
+    Object.defineProperty(tools, name, { value: entry, enumerable: true, writable: true, configurable: true });
+  }
+  const risk: NonNullable<Manifest["risk"]> = { tools };
+  if (o.nameCheckExempt !== undefined) {
+    risk.nameCheckExempt = strList(o.nameCheckExempt, `${path}.nameCheckExempt`, (s, p) => str(s, p, { max: 128, re: TOOL_NAME_RE, what: "a tool name" }), 100);
+    for (const name of risk.nameCheckExempt) {
+      // The exemption makes the table's answer final for that name: it must have one, and it can't be "risky" (moot).
+      if (!Object.hasOwn(tools, name)) fail(`${path}.nameCheckExempt`, `names ${name}, which risk.tools doesn't list`);
+      if (tools[name]!.class === "risky") fail(`${path}.nameCheckExempt`, `names ${name}, which is already risky`);
+    }
+  }
+  return risk;
+}
+
+function validateRemote(v: unknown): NonNullable<Manifest["remote"]> {
+  const o = obj(v, "remote", ["url", "userServer", "auth"], ["auth"]);
+  const remote: NonNullable<Manifest["remote"]> = { auth: { type: "none" } };
+  if ((o.url === undefined) === (o.userServer === undefined)) fail("remote", 'needs exactly one of "url" or "userServer"');
+  if (o.url !== undefined) remote.url = httpsUrl(o.url, "remote.url");
+  if (o.userServer !== undefined) {
+    const u = obj(o.userServer, "remote.userServer", ["defaultPath", "sameOriginIssuer"], ["defaultPath"]);
+    remote.userServer = { defaultPath: str(u.defaultPath, "remote.userServer.defaultPath", { max: 200, re: /^\/[A-Za-z0-9_.~\-/]*$/, what: 'a path such as "/mcp"' }) };
+    if (u.sameOriginIssuer !== undefined) remote.userServer.sameOriginIssuer = bool(u.sameOriginIssuer, "remote.userServer.sameOriginIssuer");
+  }
+  const a = obj(o.auth, "remote.auth", ["type", "headerName", "prefix", "broadScopes"], ["type"]);
+  const extra = (allowed: string[]) => {
+    for (const k of Object.keys(a)) if (k !== "type" && !allowed.includes(k)) fail("remote.auth", `has "${k}", which type ${String(a.type)} doesn't take`);
+  };
+  switch (a.type) {
+    case "none":
+      extra([]);
+      remote.auth = { type: "none" };
+      break;
+    case "header": {
+      extra(["headerName", "prefix"]);
+      const auth: RemoteAuth = { type: "header", headerName: str(a.headerName, "remote.auth.headerName", { max: 100, re: HEADER_RE, what: "an HTTP header name" }) };
+      if (a.prefix !== undefined) auth.prefix = str(a.prefix, "remote.auth.prefix", { max: 32, re: /^[\x21-\x7e]+ ?$/, what: 'a short scheme such as "Bearer "' });
+      remote.auth = auth;
+      break;
+    }
+    case "mcp_oauth": {
+      extra(["broadScopes"]);
+      const auth: RemoteAuth = { type: "mcp_oauth" };
+      if (a.broadScopes !== undefined) auth.broadScopes = strList(a.broadScopes, "remote.auth.broadScopes", (s, p) => str(s, p, { max: 200, re: /^[\x21\x23-\x5b\x5d-\x7e]+$/, what: "an OAuth scope" }), 50);
+      remote.auth = auth;
+      break;
+    }
+    default:
+      fail("remote.auth.type", 'must be "mcp_oauth", "header" or "none"');
+  }
+  return remote;
+}
+
+function validateCode(v: unknown, name: string): NonNullable<Manifest["code"]> {
+  const o = obj(v, "code", ["entry", "node", "auth", "network", "events"], ["entry", "auth"]);
+  const code: NonNullable<Manifest["code"]> = {
+    entry: str(o.entry, "code.entry", { max: 200, re: ENTRY_RE, what: "a relative path to one .mjs or .js file inside the extension" }),
+    auth: { type: "none" },
+  };
+  if (o.node !== undefined) code.node = str(o.node, "code.node", { max: 64, re: /^[<>=^~ 0-9.x|*-]+$/, what: 'a semver range such as ">=22.13"' });
+  const a = obj(o.auth, "code.auth", ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"], ["type"]);
+  if (a.type === "none") {
+    if (Object.keys(a).length > 1) fail("code.auth", 'of type "none" takes no other keys');
+  } else if (a.type === "user_app") {
+    obj(a, "code.auth", ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"], ["authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"]);
+    code.auth = {
+      type: "user_app",
+      authorizeUrl: httpsUrl(a.authorizeUrl, "code.auth.authorizeUrl"),
+      tokenUrl: httpsUrl(a.tokenUrl, "code.auth.tokenUrl"),
+      scopes: strList(a.scopes, "code.auth.scopes", (s, p) => str(s, p, { max: 200, re: /^[\x21\x23-\x5b\x5d-\x7e]+$/, what: "an OAuth scope" }), 50),
+      clientIdInput: str(a.clientIdInput, "code.auth.clientIdInput", { max: 64, re: INPUT_KEY_RE, what: "a setup input key" }),
+      clientSecretInput: str(a.clientSecretInput, "code.auth.clientSecretInput", { max: 64, re: INPUT_KEY_RE, what: "a setup input key" }),
+    };
+    if (code.auth.clientIdInput === code.auth.clientSecretInput) fail("code.auth", "needs different inputs for the client id and secret");
+  } else {
+    fail("code.auth.type", 'must be "user_app" or "none"');
+  }
+  if (o.network !== undefined) code.network = strList(o.network, "code.network", (s, p) => str(s, p, { max: 253, re: HOST_RE, what: "a lowercase host name" }), 50);
+  if (o.events !== undefined) {
+    if (name.length > 24) fail("code.events", "needs an extension name of at most 24 characters (event types are <name>.<event>)");
+    code.events = strList(
+      o.events,
+      "code.events",
+      (s, p) => {
+        const t = str(s, p, { max: 90 });
+        const dot = t.indexOf(".");
+        if (t.slice(0, dot) !== name || !EVENT_NAME_RE.test(t.slice(dot + 1))) fail(p, `must be "${name}.<event>" (lowercase letters, digits, _)`);
+        return t;
+      },
+      50,
+    );
+  }
+  return code;
+}
+
+/** Validates a parsed `xaq-extension.json`. Throws ManifestError naming the first problem. Returns a fresh copy. */
+export function validateManifest(raw: unknown): Manifest {
+  const o = obj(
+    raw,
+    "the manifest",
+    ["schema", "name", "displayName", "version", "description", "kind", "slug", "remote", "code", "reconnectPolicy", "setup", "risk"],
+    ["schema", "name", "displayName", "version", "description", "kind", "slug"],
+  );
+  if (o.schema !== MANIFEST_SCHEMA_VERSION) fail("schema", `must be ${MANIFEST_SCHEMA_VERSION} (this xaq reads schema ${MANIFEST_SCHEMA_VERSION} manifests)`);
+  const name = str(o.name, "name", { max: 32, re: NAME_RE, what: "lowercase letters, digits and dashes (at most 32)" });
+  if (RESERVED_NAMES.has(name)) fail("name", `can't be "${name}": xaq uses it`);
+  if (o.kind !== "remote" && o.kind !== "code") fail("kind", 'must be "remote" or "code"');
+  const m: Manifest = {
+    schema: 1,
+    name,
+    displayName: str(o.displayName, "displayName", { max: 64 }),
+    version: str(o.version, "version", { max: 64, re: SEMVER_RE, what: 'a semantic version such as "1.0.0"' }),
+    description: str(o.description, "description", { max: 500 }),
+    kind: o.kind,
+    slug: str(o.slug, "slug", { max: 24, re: SLUG_RE, what: "lowercase letters, digits and dashes (at most 24)" }),
+  };
+  if (m.kind === "remote") {
+    if (o.code !== undefined) fail("code", 'is only for "kind": "code"');
+    if (o.remote === undefined) fail("remote", 'is required for "kind": "remote"');
+    m.remote = validateRemote(o.remote);
+  } else {
+    if (o.remote !== undefined) fail("remote", 'is only for "kind": "remote"');
+    if (o.code === undefined) fail("code", 'is required for "kind": "code"');
+    m.code = validateCode(o.code, name);
+  }
+  if (o.reconnectPolicy !== undefined) {
+    const r = obj(o.reconnectPolicy, "reconnectPolicy", ["maxLifetimeDays", "idleDays", "tokenLifetimeCapDays"]);
+    m.reconnectPolicy = {};
+    if (r.maxLifetimeDays !== undefined) m.reconnectPolicy.maxLifetimeDays = days(r.maxLifetimeDays, "reconnectPolicy.maxLifetimeDays");
+    if (r.idleDays !== undefined) m.reconnectPolicy.idleDays = days(r.idleDays, "reconnectPolicy.idleDays");
+    if (r.tokenLifetimeCapDays !== undefined) m.reconnectPolicy.tokenLifetimeCapDays = days(r.tokenLifetimeCapDays, "reconnectPolicy.tokenLifetimeCapDays");
+  }
+  if (o.setup !== undefined) {
+    if (!Array.isArray(o.setup)) fail("setup", "must be an array");
+    if (o.setup.length > 30) fail("setup", "must have at most 30 steps");
+    m.setup = o.setup.map((s, i) => validateStep(s, `setup[${i}]`));
+    const ids = m.setup.map((s) => s.id);
+    if (new Set(ids).size !== ids.length) fail("setup", "has two steps with the same id");
+    const keys = m.setup.flatMap((s) => (s.input ? [s.input.key] : []));
+    if (new Set(keys).size !== keys.length) fail("setup", "has two inputs with the same key");
+  }
+  if (m.code?.auth.type === "user_app") {
+    const keys = new Set((m.setup ?? []).map((s) => s.input?.key));
+    for (const k of [m.code.auth.clientIdInput, m.code.auth.clientSecretInput]) if (!keys.has(k)) fail("code.auth", `names the input "${k}", which no setup step asks for`);
+  }
+  if (o.risk !== undefined) m.risk = validateRisk(o.risk, "risk");
+  return m;
+}
+
+// ───────────── JSON Schema (copied into xaq-extensions' scripts/validate.mjs) ─────────────
+
+const stringOf = (maxLength: number, extra: Obj = {}) => ({ type: "string", minLength: 1, maxLength, ...extra });
+const days$ = { type: "integer", minimum: 1, maximum: MAX_DAYS };
+const scope$ = stringOf(200, { pattern: "^[\\x21\\x23-\\x5b\\x5d-\\x7e]+$" });
+const toolName$ = stringOf(128, { pattern: TOOL_NAME_RE.source });
+const pointer$ = stringOf(512, { pattern: POINTER_RE.source });
+const httpsUrl$ = stringOf(2048, { pattern: "^https://[^\\s@/]+(/\\S*)?$" });
+
+/**
+ * The manifest's JSON Schema (draft 2020-12). It checks shape; validateManifest checks the rest too (template
+ * variables, `when` for {{webhookUrl}}, unique step ids and input keys, exempt names listed in risk.tools, event
+ * prefixes, setup inputs named by user_app auth).
+ */
+export const MANIFEST_JSON_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://raw.githubusercontent.com/wynn-dev/xaq/main/docs/xaq-extension.schema.json",
+  title: "xaq extension manifest (xaq-extension.json), schema 1",
+  type: "object",
+  additionalProperties: false,
+  required: ["schema", "name", "displayName", "version", "description", "kind", "slug"],
+  properties: {
+    schema: { const: 1 },
+    name: stringOf(32, { pattern: NAME_RE.source, not: { enum: [...RESERVED_NAMES] } }),
+    displayName: stringOf(64),
+    version: stringOf(64, { pattern: SEMVER_RE.source }),
+    description: stringOf(500),
+    kind: { enum: ["remote", "code"] },
+    slug: stringOf(24, { pattern: SLUG_RE.source }),
+    remote: {
+      type: "object",
+      additionalProperties: false,
+      required: ["auth"],
+      properties: {
+        url: httpsUrl$,
+        userServer: {
+          type: "object",
+          additionalProperties: false,
+          required: ["defaultPath"],
+          properties: { defaultPath: stringOf(200, { pattern: "^/[A-Za-z0-9_.~\\-/]*$" }), sameOriginIssuer: { type: "boolean" } },
+        },
+        auth: {
+          oneOf: [
+            { type: "object", additionalProperties: false, required: ["type"], properties: { type: { const: "none" } } },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["type", "headerName"],
+              properties: { type: { const: "header" }, headerName: stringOf(100, { pattern: HEADER_RE.source }), prefix: stringOf(32, { pattern: "^[\\x21-\\x7e]+ ?$" }) },
+            },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["type"],
+              properties: { type: { const: "mcp_oauth" }, broadScopes: { type: "array", maxItems: 50, uniqueItems: true, items: scope$ } },
+            },
+          ],
+        },
+      },
+      oneOf: [{ required: ["url"], not: { required: ["userServer"] } }, { required: ["userServer"], not: { required: ["url"] } }],
+    },
+    code: {
+      type: "object",
+      additionalProperties: false,
+      required: ["entry", "auth"],
+      properties: {
+        entry: stringOf(200, { pattern: ENTRY_RE.source }),
+        node: stringOf(64, { pattern: "^[<>=^~ 0-9.x|*-]+$" }),
+        auth: {
+          oneOf: [
+            { type: "object", additionalProperties: false, required: ["type"], properties: { type: { const: "none" } } },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["type", "authorizeUrl", "tokenUrl", "scopes", "clientIdInput", "clientSecretInput"],
+              properties: {
+                type: { const: "user_app" },
+                authorizeUrl: httpsUrl$,
+                tokenUrl: httpsUrl$,
+                scopes: { type: "array", maxItems: 50, uniqueItems: true, items: scope$ },
+                clientIdInput: stringOf(64, { pattern: INPUT_KEY_RE.source }),
+                clientSecretInput: stringOf(64, { pattern: INPUT_KEY_RE.source }),
+              },
+            },
+          ],
+        },
+        network: { type: "array", maxItems: 50, uniqueItems: true, items: stringOf(253, { pattern: HOST_RE.source }) },
+        events: { type: "array", maxItems: 50, uniqueItems: true, items: stringOf(90, { pattern: "^[a-z0-9-]{1,24}\\.[a-z0-9_]{1,64}$" }) },
+      },
+    },
+    reconnectPolicy: {
+      type: "object",
+      additionalProperties: false,
+      properties: { maxLifetimeDays: days$, idleDays: days$, tokenLifetimeCapDays: days$ },
+    },
+    setup: {
+      type: "array",
+      maxItems: 30,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "title", "body"],
+        properties: {
+          id: stringOf(32, { pattern: STEP_ID_RE.source }),
+          title: stringOf(120),
+          body: stringOf(4000),
+          link: { type: "object", additionalProperties: false, required: ["label", "url"], properties: { label: stringOf(120), url: stringOf(2048, { pattern: "^(https://|\\{\\{)" }) } },
+          copy: { type: "object", additionalProperties: false, required: ["label", "value"], properties: { label: stringOf(120), value: stringOf(2048) } },
+          input: {
+            type: "object",
+            additionalProperties: false,
+            required: ["key", "label"],
+            properties: {
+              key: stringOf(64, { pattern: INPUT_KEY_RE.source }),
+              label: stringOf(120),
+              secret: { type: "boolean" },
+              pattern: stringOf(500),
+              placeholder: stringOf(200),
+            },
+          },
+          when: { const: "webhookUrl" },
+        },
+      },
+    },
+    risk: {
+      type: "object",
+      additionalProperties: false,
+      required: ["tools"],
+      properties: {
+        tools: {
+          type: "object",
+          maxProperties: 1000,
+          propertyNames: { pattern: TOOL_NAME_RE.source, maxLength: 128 },
+          additionalProperties: {
+            type: "object",
+            additionalProperties: false,
+            required: ["class"],
+            properties: {
+              class: { enum: ["read", "write", "risky"] },
+              target: { oneOf: [pointer$, { type: "array", minItems: 1, maxItems: 16, uniqueItems: true, items: pointer$ }] },
+            },
+          },
+        },
+        nameCheckExempt: { type: "array", maxItems: 100, uniqueItems: true, items: toolName$ },
+      },
+    },
+  },
+  allOf: [
+    { if: { properties: { kind: { const: "remote" } } }, then: { required: ["remote"], not: { required: ["code"] } } },
+    { if: { properties: { kind: { const: "code" } } }, then: { required: ["code"], not: { required: ["remote"] } } },
+  ],
+} as const;
+
+// ───────────── Setup copy ─────────────
+
+/** The manifest's setup steps for this install: `when` applied, {{variables}} filled in. */
+export function renderSetup(steps: readonly ManifestSetupStep[], ctx: SetupContext): SetupStep[] {
+  const vars: Record<TemplateVar, string> = { publicUrl: ctx.publicUrl, redirectUri: ctx.redirectUri, webhookUrl: ctx.webhookUrl ?? "" };
+  const fill = (s: string) => s.replace(TEMPLATE_RE, (_, name: string) => vars[name as TemplateVar]);
+  const out: SetupStep[] = [];
+  for (const s of steps) {
+    if (s.when === "webhookUrl" && !ctx.webhookUrl) continue;
+    const step: SetupStep = { id: s.id, title: fill(s.title), body: fill(s.body) };
+    if (s.link) step.link = { label: fill(s.link.label), url: fill(s.link.url) };
+    if (s.copy) step.copy = { label: fill(s.copy.label), value: fill(s.copy.value) };
+    if (s.input) step.input = { ...s.input };
+    out.push(step);
+  }
+  return out;
+}
+
+// ───────────── Risk map ─────────────
+
+/** The first candidate pointer whose top-level argument the live input schema declares. */
+function declaredTarget(tool: ToolDef, target: string | string[] | undefined): string | undefined {
+  if (target === undefined) return undefined;
+  const props = tool.inputSchema.properties;
+  if (!props || typeof props !== "object" || Array.isArray(props)) return undefined;
+  for (const pointer of Array.isArray(target) ? target : [target]) {
+    const top = pointer.slice(1).split("/")[0]!.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Object.hasOwn(props, top)) return pointer;
+  }
+  return undefined;
+}
+
+/** The risk map as IntegrationPreset.classify: exact names only; null (the generic rules) for anything unlisted. */
+export function classifierFor(risk: Manifest["risk"]): (tool: ToolDef) => ToolClass | null {
+  const tools = risk?.tools ?? {};
+  return (tool) => {
+    const entry = Object.hasOwn(tools, tool.name) ? tools[tool.name] : undefined;
+    if (!entry) return null;
+    const cls: ToolClass = { risky: entry.class === "risky", read: entry.class === "read", source: "preset" };
+    const path = declaredTarget(tool, entry.target);
+    if (path) cls.targetPath = path;
+    return cls;
+  };
+}
+
+// ───────────── Manifest → IntegrationPreset ─────────────
+
+/** The IntegrationPreset for a validated manifest. `ext` is needed for code extensions (the host starts its entry). */
+export function presetFromValidManifest(m: Manifest, ext: InstalledExtension | null): IntegrationPreset {
+  const setup = m.setup ?? [];
+  const base = {
+    id: m.name,
+    displayName: m.displayName,
+    slug: m.slug,
+    classify: classifierFor(m.risk),
+    setupSteps: (ctx: SetupContext) => renderSetup(setup, ctx),
+    ...(m.risk?.nameCheckExempt?.length ? { nameCheckExempt: [...m.risk.nameCheckExempt] } : {}),
+    ...(m.reconnectPolicy && Object.keys(m.reconnectPolicy).length ? { reconnectPolicy: { ...m.reconnectPolicy } } : {}),
+  };
+  if (m.kind === "remote") {
+    const r = m.remote!;
+    const auth: PresetAuth =
+      r.auth.type === "header"
+        ? { type: "header", headerName: r.auth.headerName, ...(r.auth.prefix !== undefined ? { prefix: r.auth.prefix } : {}) }
+        : r.auth.type === "mcp_oauth"
+          ? { type: "mcp_oauth", ...(r.auth.broadScopes?.length ? { broadScopes: [...r.auth.broadScopes] } : {}) }
+          : { type: "none" };
+    return {
+      ...base,
+      kind: "remote_http",
+      auth,
+      ...(r.url ? { url: r.url } : {}),
+      ...(r.userServer ? { userServer: { defaultPath: r.userServer.defaultPath, sameOriginIssuer: r.userServer.sameOriginIssuer === true } } : {}),
+    };
+  }
+  const c = m.code!;
+  const auth: PresetAuth = c.auth.type === "user_app" ? { ...c.auth, scopes: [...c.auth.scopes] } : { type: "none" };
+  return {
+    ...base,
+    kind: "native",
+    auth,
+    ...(ext ? { createSource: (deps) => createCodeSource(ext, deps) } : {}),
+    ...(c.events?.length ? { events: { types: [...c.events] } } : {}),
+  };
+}
+
+/** The IntegrationPreset of an installed extension. Throws ManifestError when its manifest is invalid or not its own. */
+export function presetFromManifest(ext: InstalledExtension): IntegrationPreset {
+  const m = validateManifest(ext.manifest);
+  if (m.name !== ext.name) throw new ManifestError(`${MANIFEST_FILE}: name is "${m.name}", but the extension is installed as "${ext.name}"`);
+  if (m.kind !== ext.kind) throw new ManifestError(`${MANIFEST_FILE}: kind is "${m.kind}", but the extension is installed as "${ext.kind}"`);
+  return presetFromValidManifest(m, ext);
+}

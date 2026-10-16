@@ -51,7 +51,7 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
   "reconnectPolicy": { "maxLifetimeDays": 180, "idleDays": 30, "tokenLifetimeCapDays": 30 },
 
   // Setup copy: SetupStep[] (server/broker/types.ts). Strings may use {{publicUrl}}, {{redirectUri}}, {{webhookUrl}}
-  // and nothing else. A step with "when": "webhookUrl" / "funnel" appears only when that context is present.
+  // and nothing else. A step with "when": "webhookUrl" appears only when the internet reaches this install.
   "setup": [ { "id": "app", "title": "…", "body": "…", "copy": { "label": "Redirect URI", "value": "{{redirectUri}}" } } ],
 
   // The risk map: exact tool names. Anything not listed falls back to the generic rules (annotations + verbs).
@@ -65,6 +65,46 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
 The manifest becomes an `IntegrationPreset` through `presetFromManifest` (in `server/extensions/manifest.ts`), so the
 broker, policy, catalog and console don't change shape. `kind: "code"` maps to `kind: "native"` with a `createSource`
 that talks to the child.
+
+Field rules, all enforced by `validateManifest`. The JSON Schema `MANIFEST_JSON_SCHEMA` (same file, copied into the
+repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the validator's.
+- **Required:** `schema`, `name`, `displayName`, `version`, `description`, `kind`, `slug`, and `remote` or `code` to
+  match `kind`. `reconnectPolicy` (and each of its fields), `setup` and `risk` are optional.
+- **`remote`:** exactly one of `url` (https) and `userServer`. `userServer.sameOriginIssuer` defaults to false.
+- **`remote.auth.broadScopes`** (with `mcp_oauth` only, optional): granted scopes that mean broad access. The console
+  warns when a sign-in grants any of them. T3 Code: `["settings:write", "source-control:write"]`.
+- **`reconnectPolicy`:** each field is a whole number of days, from 1 to 3650.
+  - `maxLifetimeDays`: a cap on a refreshable sign-in, counted from the sign-in (Notion: 180).
+  - `idleDays`: shown only (Notion: 30).
+  - `tokenLifetimeCapDays`: for a credential without a refresh token, `expires_at` is the smaller of the token's
+    expiry and the sign-in time plus N days. When the server sends no `expires_in`, it is N days (T3 Code: 30).
+    Warnings come at 7 days and 1 day, as for any expiry.
+- **`setup`:** steps have `id`, `title` and `body`, plus optionally one each of `link`, `copy` and `input` (the
+  `SetupStep` shape), and `when`.
+  - **Variables:** only `{{publicUrl}}`, `{{redirectUri}}` and `{{webhookUrl}}` (validator only). Any other
+    `{{…}}` is an error.
+  - **`when`:** the only value is `"webhookUrl"`. A step that uses `{{webhookUrl}}` must have it (validator only).
+  - **Links:** a link is https, or starts with one of the variables.
+  - **Uniqueness:** step ids and input keys are unique (validator only).
+- **`risk.tools[name].class`:**
+
+  | `class` | `ToolClass` | Effect |
+  | --- | --- | --- |
+  | `"read"` | `{ read: true, risky: false }` | Listed at Read only. |
+  | `"write"` | `{ read: false, risky: false }` | Goes through without asking. |
+  | `"risky"` | `{ read: false, risky: true }` | Asks at the "ask" level. |
+
+  Tools not listed return null, which means the generic rules (annotations, then the verb list).
+- **`risk.tools[name].target`:** a JSON Pointer, or an array of candidate pointers. The first candidate whose
+  top-level argument the tool's live `inputSchema` declares becomes the "always allow … for this target" path. If
+  none is declared, there is no target. Notion uses `["/page_ids", "/pages", "/page_id", "/ids", "/id"]`.
+- **`risk.nameCheckExempt`:** each name must be listed in `risk.tools` and not be `risky` (validator only). The
+  table's answer is final for those exact names.
+- **`code`:** `entry` is a relative `.mjs` or `.js` path inside the extension. `events` are `<name>.<event>`, which
+  limits a name with events to 24 characters. A `user_app` auth's `clientIdInput` and `clientSecretInput` must be
+  setup inputs (validator only).
+- **Names:** an extension can't use one of xaq's own event prefixes as its name (`message`, `calendar`,
+  `connection`, `approval`, …).
 
 ## Sources, pinning and the registry
 
@@ -143,6 +183,16 @@ that talks to the child.
   - until it's installed, a remote connection keeps working as a generic MCP connection (generic risk rules, which
     is the safe direction), and a code one shows "Installing the extension…" with its tools unavailable;
   - tokens, client records, grants, levels and always-allow rules are untouched: nobody re-authorizes.
+- **Binding:** `connections.preset` holds the extension's name. That is the binding, with no extra column.
+  `usedBy(name)` is the ids of the connections `WHERE preset = name` (`server/extensions/bootstrap.ts`).
+- **Reconnect before the install:** a bound connection whose extension isn't installed yet can't be reconnected.
+  Its sign-in waits for the extension's own rules (T3 Code's same-origin issuer) instead of running generic ones.
+  Its tools keep working on the stored credential.
+- **The registry:** `presets()` (`server/integrations/index.ts`) stays synchronous. It lists the installed extensions'
+  presets, then what is still in core; an installed extension replaces a core preset of the same name. The store
+  calls `reloadPresets()` after an install, update or remove. After a background install, the bound connections are
+  re-listed, which re-classifies their pinned tools under the manifest.
+- **Placeholder pins:** an all-zero commit in `bootstrap.json` installs nothing. The release fills in the real pins.
 - **Test:** a DB fixture shaped like Wynn's install: `notion-personal` and `notion-work` (Notion preset), `whoop` (a
   generic MCP connection to the dashboard URL with a bearer key) and `brightspace` (generic, bearer, `127.0.0.1`). After
   the upgrade, all four list and call tools with the same credentials and exposed names.

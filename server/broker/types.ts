@@ -137,8 +137,12 @@ export interface SetupContext {
 export type PresetAuth =
   | { type: "none" }
   | { type: "header"; headerName: string; prefix?: string }
-  /** Remote MCP OAuth discovered from the server; registration by DCR or a metadata document (Notion). */
-  | { type: "mcp_oauth" }
+  /**
+   * Remote MCP OAuth discovered from the server; registration by DCR or a metadata document (Notion). `broadScopes`
+   * (additive, from an extension manifest): granted scopes that mean broad access (T3's Full access); the console
+   * warns when a sign-in grants any of them.
+   */
+  | { type: "mcp_oauth"; broadScopes?: readonly string[] }
   /** Provider OAuth with the user's own app (WHOOP): fixed endpoints, client secret, no PKCE. */
   | {
       type: "user_app";
@@ -167,8 +171,12 @@ export interface IntegrationPreset {
   createSource?(deps: NativeSourceDeps): ToolSource;
   /** Native presets with inbound events. */
   events?: NativeEvents;
-  /** Shown as dated warnings (e.g. Notion: 180-day cap, 30-day idle). */
-  reconnectPolicy?: { maxLifetimeDays?: number; idleDays?: number };
+  /**
+   * Shown as dated warnings (e.g. Notion: 180-day cap, 30-day idle). `tokenLifetimeCapDays` (additive): a credential
+   * without a refresh token lasts at most this long from its sign-in, and this long when the server doesn't say
+   * (T3 Code: 30).
+   */
+  reconnectPolicy?: { maxLifetimeDays?: number; idleDays?: number; tokenLifetimeCapDays?: number };
   /**
    * Additive (T3 Code): a remote preset with no fixed `url`, where the user names the server (one connection per
    * server). `defaultPath` is appended when only an origin is given; with `sameOriginIssuer` the authorization server

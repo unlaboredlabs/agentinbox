@@ -231,7 +231,8 @@ That's stored as a `connection_grants` row per agent × connection with a `level
 **What counts as risky: irreversible actions only.** Deleting, sending mail or messages, publishing or sharing outside,
 and payments. Creating and editing goes through without asking. Classification, in this order:
 
-1. **Pre-made integrations say so themselves.** Each preset ships a list of risky tools:
+1. **Pre-made integrations say so themselves.** Each extension's manifest ships a risk map (`risk.tools`: exact tool
+   names, each `read`, `write` or `risky`; see [EXTENSIONS.md](EXTENSIONS.md)). The risky ones:
    - Notion: `notion-delete-pages`, `notion-delete-databases`, and anything that shares or publishes outside the
      workspace;
    - Gmail: sending (already native);
@@ -374,6 +375,23 @@ The events outbox, webhooks, SSE stream and listener relay are generalised:
 
 ## Pre-made integrations
 
+**Presets became extensions (2026-10-16, [EXTENSIONS.md](EXTENSIONS.md)).**
+- **Where they live:** Notion, T3 Code and Brightspace are remote extensions in
+  [wynn-dev/xaq-extensions](https://github.com/wynn-dev/xaq-extensions): a manifest each, with no code. WHOOP becomes
+  a code extension. Core keeps only the generic machinery: remote MCP OAuth, a same-origin issuer, user-named
+  servers, the private-target allow, expiry and lifetime caps, `user_app` OAuth, and events.
+- **How they load:** an installed extension's `xaq-extension.json` becomes an `IntegrationPreset` through
+  `presetFromManifest` (`server/extensions/manifest.ts`), so the broker, policy, catalog and console are unchanged.
+  `presets()` (`server/integrations/index.ts`) lists the installed extensions, then whatever is still in core, and is
+  rebuilt on install, update and remove.
+- **Binding:** `connections.preset` holds the extension's name, which binds the connection to the extension.
+- **Upgrading needs no new sign-in:** existing Notion, T3 Code and WHOOP connections are bound at startup, and a
+  missing extension installs in the background from `server/extensions/bootstrap.json`. Until then a remote
+  connection works as a generic one: generic risk rules, and Reconnect waits for the install.
+
+The sections below describe each integration's design. Their data (URL, auth, setup copy, risk table) is now the
+extension's manifest.
+
 ### Notion: proxy the hosted MCP, with a native fallback
 
 | | Hosted MCP (`mcp.notion.com/mcp`) | Archived OSS server + internal token | Native REST tools |
@@ -393,7 +411,7 @@ Sources: [Notion MCP](https://developers.notion.com/guides/mcp/get-started-with-
 clients (`token_endpoint_auth_methods_supported` includes `none`), so **no install registers an app**. That makes a
 public product possible without a shared secret.
 
-**Preset contents:**
+**Extension contents** (`extensions/notion/xaq-extension.json`, formerly the core preset):
 - the URL;
 - slug `notion`;
 - read/write classes taken from Notion's own labels;
@@ -480,19 +498,24 @@ is an https public URL, or paste mode with `https://localhost`.
 
 ### T3 Code: the user's own server, 30 days, no refresh
 
-As built (`server/integrations/t3code/`), on the generic MCP OAuth upstream, checked against a live
+As built (the `t3code` extension, `extensions/t3code/xaq-extension.json` in xaq-extensions, formerly the core preset
+`server/integrations/t3code/`), on the generic MCP OAuth upstream, checked against a live
 `t3@nightly 0.1.1-nightly.20261016.3218` on 2026-10-16:
 
 - **OAuth is standard.** Discovery at `/.well-known/oauth-protected-resource[/mcp]` and
   `/.well-known/oauth-authorization-server`; DCR at `/oauth/mcp/register` (public client, `none`; the `client_id` is
   a signed, stateless token, so registering again orphans nothing); PKCE S256; `iss` on the redirect. T3 accepts
   `resource` (its own MCP URL) and refuses any other with `invalid_target`, so no special handling.
-- **No refresh token.** `expires_in` is 2,592,000 (30 days). xaq records it as the connection's `expires_at`.
+- **No refresh token.** `expires_in` is 2,592,000 (30 days). xaq records it as the connection's `expires_at`. The
+  manifest's `reconnectPolicy.tokenLifetimeCapDays: 30` caps it: `expires_at` is never later than 30 days after the
+  sign-in, and is 30 days out when a server doesn't send `expires_in`.
 - **Scopes follow T3's own approval page, not the request.** The page asks for a one-time pairing code and an access
   level: Read only grants `orchestration:read`; Supervised (Limited on older versions) adds `orchestration:operate`;
   Full access adds `settings:write` and `source-control:write`. T3 also refuses project changes unless the client has
   Full access. xaq accepts whatever comes back, stores it (`connection_credentials.scope`), audits it on connect and
-  shows it on the connection page. The setup recommends Supervised.
+  shows it on the connection page. The setup recommends Supervised. The manifest names `settings:write` and
+  `source-control:write` as `remote.auth.broadScopes`, and the connection page warns when a sign-in granted any of
+  them (core doesn't know T3's scope names).
 - **The pairing code** comes from T3 → Settings → Connections, `t3 auth pairing create` on T3's machine, or the
   `Token:` line `t3 serve` prints (also the `#token=` part of its `Pairing URL`). The setup steps say so.
 - **One connection per server.** The preset has no URL (`userServer`): the user gives the address, `/mcp` is added to
@@ -512,7 +535,8 @@ As built (`server/integrations/t3code/`), on the generic MCP OAuth upstream, che
   `connection.auth_failed` with `expired: true`. The policy refuses calls to it even before the sweep runs, so the
   agent gets "The T3 Code connection '<name>' expired; ask your user to reconnect it in xaq at <link>", never a
   401. Reconnect runs a new sign-in on the same connection and keeps its name, slug, agents and levels.
-- **Risk table.** `server/integrations/t3code/tools.ts` covers all 83 tools, one group per comment:
+- **Risk table.** The manifest's `risk.tools` covers all 83 tools (carried over exactly from the core preset's
+  `tools.ts`):
   - **Reads (free):** projects, threads, queues, environment, worktrees, schedules, pull requests, devices.
   - **Normal writes:** thread launch, send, interrupt and the rest of a thread's life; creating, cloning and handing
     off to worktrees; pull-request bookkeeping; opening, navigating, clicking and typing in previews; devices. T3
@@ -535,7 +559,8 @@ As built (`server/integrations/t3code/`), on the generic MCP OAuth upstream, che
   name (`nameCheckExempt`), because their `send`/`merge` stays inside T3. Unknown tools fall back to the generic
   rules: T3's annotations, then the verb list, which catches a future `t3_thread_delete` or `t3_worktree_remove`.
 - **Contract additions (additive, optional):** `IntegrationPreset.userServer`, `IntegrationPreset.nameCheckExempt`
-  and `CredentialStore.markNeedsReauth(…, { expired })`.
+  and `CredentialStore.markNeedsReauth(…, { expired })`. With the move to extensions, these were added too:
+  `reconnectPolicy.tokenLifetimeCapDays` and `PresetAuth` `mcp_oauth.broadScopes`.
 
 ## Setup UX (no external docs)
 
