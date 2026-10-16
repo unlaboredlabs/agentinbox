@@ -2,7 +2,7 @@ import { z } from "zod";
 import { type Agent, type AgentOrigin, type AgentWithKey, type CreateAgentInput, type Grant, type GrantInput, isCalendarEventType, isConnectionEventType } from "../../shared/types.ts";
 import { listenersOf } from "../agentapi/listeners.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
-import { canSeeConnection } from "../broker/access.ts";
+import { canSeeConnectionEvent } from "../broker/access.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
@@ -348,8 +348,8 @@ export function createPolicyService(ctx: AppContext): PolicyService {
 
     grants: grantsOf,
 
-    canSeeEvent(agentId, ev) {
-      if (isConnectionEventType(ev.type)) return !!ev.connectionId && canSeeConnection(db, ctx.settings.get().brokerUpstreams, agentId, ev.connectionId);
+    canSeeEvent(agentId, ev, via = "feed") {
+      if (isConnectionEventType(ev.type)) return !!ev.connectionId && canSeeConnectionEvent(db, ctx.settings.get().brokerUpstreams, agentId, ev, via);
       const r = db.get<GrantRow & { disabled: number }>(
         "SELECT g.*, a.disabled FROM grants g JOIN agents a ON a.id = g.agent_id WHERE g.agent_id = ? AND g.account_id = ?",
         agentId,

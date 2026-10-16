@@ -1,9 +1,11 @@
 // The MCP broker as an AppContext service (docs/MCP-BROKER.md). It holds one ToolSource per connection, the
 // tool registry, the policy's call path and the connector, and owns the lifecycle and the kill switch.
 //
-// The parts come from other workstreams (server/broker/types.ts lists who builds what). Until each one is
-// wired, its default here is an inert stub: no tools, calls answered with isError, probes that report
-// "not available". Tests pass fakes through createBrokerService(ctx, parts).
+// The parts come from other workstreams (server/broker/types.ts lists who builds what). The policy runtime
+// (server/broker/policy) is built here and supplies calls, get_call_status, approved-call execution and the kill
+// switch; the credential store falls back to a plain table store. Parts not wired yet (catalog registry, upstream
+// connector) are inert stubs: no tools, probes that report "not available". Tests pass fakes through
+// createBrokerService(ctx, parts).
 //
 // Everything is behind Settings.brokerUpstreams (off by default): with it off, `view` is null, /mcp lists
 // only the native tools, connection events are invisible and /api/connections answers 404.
@@ -28,6 +30,8 @@ import { presets } from "../integrations/index.ts";
 import { Approvals } from "../mail/approvals.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
+import { tableCredentials } from "./credentials-table.ts";
+import { type BrokerPolicyRuntime, createBrokerPolicyRuntime } from "./policy/index.ts";
 import {
   type BrokerCalls,
   type CredentialStore,
@@ -64,21 +68,22 @@ export interface BrokerParts {
   /** get_call_status(approval_id), from the policy workstream. */
   callStatus(agentId: string, approvalId: string): ToolResult | Promise<ToolResult>;
   /**
-   * Runs an approved mcp.call (re-checks agent, grant, pin and args hash, then forwards the stored bytes).
-   * Approvals.approve calls it after claiming the approval. Absent: approving an mcp.call is refused (409).
+   * Runs an mcp.call approval already claimed ("approved"): re-checks agent, grant, pin and args hash, forwards
+   * the stored bytes and records the outcome on the approval (sent with the result, back to pending, or failed
+   * with an unknown outcome). Approvals.approve calls it after claiming. Default: the policy runtime.
    */
-  runApprovedCall?(approval: McpCallApproval, signal: AbortSignal): Promise<ToolResult>;
+  runApprovedCall?(approval: McpCallApproval): Promise<void>;
   connector: Connector;
   /** Native presets' source dependencies (credential store + token refresher). */
   nativeDeps?(connection: Connection): NativeSourceDeps;
   /** Accepts a held tool (re-pin + re-classify). Absent: the fallback re-pins the candidate as is. */
   acceptTool?(connectionId: string, name: string): void;
-  /** Kill switch extras, run before the credentials are deleted (e.g. RFC 7009 revoke, untrack refresh). */
+  /** Kill switch extras, run after the policy's kill (e.g. RFC 7009 revoke). */
   onKill?: ((connectionId: string) => void | Promise<void>)[];
   /** The preset registry; default server/integrations presets(). */
   presets?: () => IntegrationPreset[];
-  /** The credential store (client registrations, for native presets' webhook secrets). Absent: read from the table. */
-  credentials?: Pick<CredentialStore, "client">;
+  /** The credential store. Absent: tableCredentials (no refresh logic) until server/broker/credentials lands. */
+  credentials?: CredentialStore;
 }
 
 export interface BrokerOptions {
@@ -104,7 +109,13 @@ export interface BrokerService extends Lifecycle {
   calls: BrokerCalls;
   callStatus(agentId: string, approvalId: string): Promise<ToolResult>;
   canRunApprovedCalls(): boolean;
-  runApprovedCall(approval: McpCallApproval, signal: AbortSignal): Promise<ToolResult>;
+  runApprovedCall(approval: McpCallApproval): Promise<void>;
+  /** The policy runtime (also reachable as brokerPolicyOf(ctx)). */
+  policy: BrokerPolicyRuntime;
+  /** A connection grant changed level (admin API): the policy re-checks pending calls. */
+  onGrantChanged(agentId: string, connectionId: string): void;
+  /** A connection grant was removed: pending calls cancelled, "always allow" rules deleted. */
+  onGrantRemoved(agentId: string, connectionId: string): void;
   /** The connection's source, created on first use; null when the connection is missing or disabled, or the broker is off. */
   source(connectionId: string): ToolSource | null;
   connector: Connector;
@@ -129,12 +140,10 @@ export interface BrokerService extends Lifecycle {
 const UNAVAILABLE = "Integrations aren't available in this build of agentinbox yet.";
 const unavailable = (): ToolResult => ({ isError: true, content: [{ type: "text", text: UNAVAILABLE }] });
 
-/** Inert defaults: used for any part not passed in (see the header). */
-export function stubParts(): BrokerParts {
+/** Inert defaults for parts not wired yet (see the header); calls and call status come from the policy runtime. */
+export function stubParts(): Pick<BrokerParts, "registry" | "connector"> {
   return {
     registry: { forAgent: () => [], resolve: () => null },
-    calls: { call: async () => unavailable() },
-    callStatus: () => unavailable(),
     connector: {
       probe: async () => ({ reachable: false, auth: "unknown", message: UNAVAILABLE }),
       startConnect: async () => ({ status: "error", message: UNAVAILABLE }),
@@ -155,11 +164,33 @@ function unavailableSource(connectionId: string): ToolSource {
 }
 
 export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts> = {}, opts: BrokerOptions = {}): BrokerService {
-  const parts: BrokerParts = { ...stubParts(), ...given };
+  const base = { ...stubParts(), ...given };
   const log = ctx.log.child("broker");
   const sources = new Map<string, ToolSource>();
   const approvals = new Approvals(ctx);
   const enabled = () => ctx.settings.get().brokerUpstreams;
+  const credentials = given.credentials ?? tableCredentials(ctx);
+
+  // The policy runtime (W6): BrokerCalls, get_call_status, approved calls, grant hooks and the kill switch.
+  const policy = createBrokerPolicyRuntime(ctx, {
+    registry: base.registry,
+    sources: { source: (id) => service.source(id), close: (id) => closeSource(id) },
+    credentials,
+    onApprovalRequested: (ev) => {
+      try {
+        const { type, connectionId, ...detail } = ev;
+        ctx.events.emit({ type, connectionId, dedupeKey: `${type}:${ev.approvalId}`, detail });
+      } catch (err) {
+        log.error("approval.requested event failed", { error: errorMessage(err) });
+      }
+    },
+  });
+  const parts: BrokerParts = {
+    calls: policy,
+    callStatus: (agentId, id) => policy.getCallStatus(agentId, id),
+    runApprovedCall: (approval) => policy.runApprovedCall(approval),
+    ...base,
+  };
 
   const closeSource = async (connectionId: string) => {
     const s = sources.get(connectionId);
@@ -194,18 +225,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
   const presetOf = (c: Connection): IntegrationPreset | null => (c.preset ? ((parts.presets ?? presets)().find((p) => p.id === c.preset) ?? null) : null);
 
-  /** The client registration (e.g. WHOOP's pasted client id and secret), via the store or the table. */
-  function clientRecord(connectionId: string): Record<string, unknown> | null {
-    if (parts.credentials) return parts.credentials.client(connectionId);
-    const row = ctx.db.get<{ oauth_client_enc: string | null }>("SELECT oauth_client_enc FROM connection_credentials WHERE connection_id = ?", connectionId);
-    if (!row?.oauth_client_enc) return null;
-    try {
-      const parsed: unknown = JSON.parse(ctx.crypto.decrypt(row.oauth_client_enc));
-      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
-  }
+  /** The client registration (e.g. WHOOP's pasted client id and secret). */
+  const clientRecord = (connectionId: string): Record<string, unknown> | null => credentials.client(connectionId);
 
   /** Native preset events into the outbox: only the preset's own `<id>.*` types, only for that connection. */
   function emitIntegrationEvents(connection: Connection, preset: IntegrationPreset, events: IntegrationEvent[]): number {
@@ -277,8 +298,11 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   }
   let pollTimer: NodeJS.Timeout | null = null;
 
-  return {
+  const service: BrokerService = {
     enabled,
+    policy,
+    onGrantChanged: (agentId, connectionId) => void policy.onGrantChanged(agentId, connectionId),
+    onGrantRemoved: (agentId, connectionId) => void policy.onGrantRemoved(agentId, connectionId),
 
     view(agentId) {
       if (!enabled()) return null;
@@ -296,9 +320,9 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
     canRunApprovedCalls: () => !!parts.runApprovedCall,
 
-    async runApprovedCall(approval, signal) {
+    async runApprovedCall(approval) {
       if (!parts.runApprovedCall) throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
-      return parts.runApprovedCall(approval, signal);
+      return parts.runApprovedCall(approval);
     },
 
     source(connectionId) {
@@ -319,8 +343,11 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     async kill(connectionId, reason) {
       const c = getConnection(ctx, connectionId);
       if (!c) throw notFound("Connection");
-      ctx.db.run("UPDATE connections SET status = 'disabled', status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), connectionId);
-      const cancelled = approvals.cancelForConnection(connectionId, null, `the connection ${c.name} was disabled`);
+      // The policy's kill: disable, cancel pending calls, clear credentials, untrack refresh, close the source. Audited.
+      await policy.killConnection(connectionId);
+      if (reason) ctx.db.run("UPDATE connections SET status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), connectionId);
+      // Belt and braces for approvals the policy doesn't own (none today) and a source opened meanwhile.
+      approvals.cancelForConnection(connectionId, null, `the connection ${c.name} was disabled`);
       await closeSource(connectionId);
       for (const hook of parts.onKill ?? []) {
         try {
@@ -329,8 +356,6 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
           log.warn("A kill switch hook failed", { connection: connectionId, error: errorMessage(err) });
         }
       }
-      ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", connectionId);
-      ctx.audit.record({ actorType: "admin", actorId: null, action: "connection.kill", target: connectionId, outcome: "ok", detail: { slug: c.slug, cancelled } });
     },
 
     async remove(connectionId) {
@@ -364,6 +389,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     pollEvents,
 
     start() {
+      policy.start();
       ctx.bus.on("settings", onSettings);
       pollTimer = setInterval(() => void pollEvents(), opts.pollTickMs ?? 60_000);
       pollTimer.unref();
@@ -375,6 +401,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       await closeAll();
     },
   };
+  return service;
 }
 
 /** Live streams re-check access (accessProblem counts connection grants) and the console refreshes the agent. */

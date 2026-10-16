@@ -187,7 +187,7 @@ export function streamEvents(ctx: AppContext, c: Context<AgentApiEnv>, opts: Str
       if (reason) revoke(reason);
       return !reason;
     };
-    const visible = (ev: StoredEvent) => ctx.policy.canSeeEvent(agentId, ev);
+    const visible = (ev: StoredEvent) => ctx.policy.canSeeEvent(agentId, ev, "listener");
 
     let pumping = false;
     let again = false;

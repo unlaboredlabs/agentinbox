@@ -25,7 +25,6 @@ import { connectionHookUrl } from "../integrations/hooks.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
-import { Approvals } from "../mail/approvals.ts";
 import { badRequest, conflict, HttpError, notFound } from "../util/errors.ts";
 import { newId } from "../util/ids.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
@@ -105,7 +104,6 @@ export function definitionDiff(before: UpstreamToolDefinition | null, after: Ups
 
 export function connectionsApi(ctx: AppContext) {
   const app = router();
-  const approvals = new Approvals(ctx);
   const audit = (action: string, target: string, detail: Record<string, unknown> | null = null) =>
     ctx.audit.record({ ...ADMIN_ACTOR, action, target, outcome: "ok", detail });
 
@@ -266,12 +264,7 @@ export function connectionsApi(ctx: AppContext) {
     return c.body(null, 204);
   });
 
-  app.post("/connections/:id/kill", async (c) => {
-    const id = c.req.param("id");
-    requireConnection(id);
-    await ctx.broker.kill(id, "Disabled by the owner (kill switch).");
-    return c.json<ConnectionView>(view(id));
-  });
+  // POST /connections/:id/kill is the policy's (server/api/broker-approvals.ts, mounted first).
 
   app.post("/connections/:id/connect", async (c) => {
     const id = c.req.param("id");
@@ -292,7 +285,7 @@ export function connectionsApi(ctx: AppContext) {
 
   app.put("/connections/:id/grants", async (c) => {
     const id = c.req.param("id");
-    const conn = requireConnection(id);
+    requireConnection(id);
     const body = await readBody(c, grantsSchema);
     const next = new Map(body.grants.map((g) => [g.agentId, g.level]));
     requireAgents([...next.keys()]);
@@ -314,7 +307,9 @@ export function connectionsApi(ctx: AppContext) {
         );
       }
     });
-    for (const agentId of removed) approvals.cancelForConnection(id, agentId, `the agent's access to ${conn.name} was removed`);
+    // The policy cancels pending calls and deletes "always allow" rules of removed grants, and re-checks changed ones.
+    for (const agentId of removed) ctx.broker.onGrantRemoved(agentId, id);
+    for (const agentId of changed.filter((a) => before.has(a))) ctx.broker.onGrantChanged(agentId, id);
     if (removed.length || changed.length) audit("connection.grants", id, { removed, changed });
     for (const agentId of new Set([...removed, ...changed])) notifyAgent(ctx, agentId);
     return c.json<ConnectionGrant[]>(grantsOf(id));

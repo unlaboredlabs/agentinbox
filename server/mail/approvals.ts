@@ -6,8 +6,8 @@ import {
   type GoogleApproval,
   isCalendarApprovalKind,
   type McpCallApproval,
+  MAIL_APPROVAL_KINDS,
   type McpCallApprovalDetail,
-  type McpCallResult,
 } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
@@ -61,8 +61,6 @@ const SELECT = `SELECT p.*, ag.name AS agent_name, ac.email AS account_email
 
 /** Approvals left "approved" without a sent message for this long were interrupted (e.g. a crash mid-send). */
 const STUCK_AFTER_MS = 10 * 60_000;
-/** An approved upstream call gets as long as a direct one (docs/MCP-BROKER.md "Transports": 60 s). */
-const CALL_TIMEOUT_MS = 60_000;
 
 function toApproval(r: ApprovalRow): Approval {
   const p = json.parse<Partial<ApprovalPayload>>(r.payload, {});
@@ -138,6 +136,8 @@ function isTransient(err: unknown): boolean {
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
   return err instanceof TypeError && typeof code === "string" && NETWORK_CODES.has(code);
 }
+
+const isMailApprovalKind = (k: string) => (MAIL_APPROVAL_KINDS as readonly string[]).includes(k);
 
 /** Prefix of the decision note on approvals cancelled automatically (status stays "rejected"). */
 export const CANCELLED_PREFIX = "cancelled: ";
@@ -234,33 +234,23 @@ export class Approvals {
   }
 
   /**
-   * mcp.call: the broker runs the stored call (ctx.broker.runApprovedCall re-checks the agent, grant, pin and
-   * args hash, then forwards the exact bytes); "sent" = executed, with the result in tool_call.result for
-   * get_call_status. A failure is final: a call that may have reached the upstream is never retried.
+   * mcp.call: claim it, then the broker runs the stored call (ctx.broker.runApprovedCall re-checks the agent,
+   * grant, pin and args hash, forwards the exact bytes, and records the outcome and result on the approval for
+   * get_call_status). The console's /api/approvals route for mcp.call (server/api/broker-approvals.ts) claims the
+   * same way. A call that may have reached the upstream is never retried.
    */
   private async approveCall(current: McpCallApproval, note: string | null | undefined, started: number): Promise<Approval> {
     const id = current.id;
     if (!this.ctx.broker.canRunApprovedCalls()) throw conflict("Tool call requests can't be approved by this version.", "Update agentinbox, or reject the request.");
     if (!this.transition(id, "pending", "approved", note)) throw this.notPending(current);
     this.emit(id);
-    const detail = { connectionId: current.connectionId, tool: current.call.exposedName };
     try {
-      const result = await this.ctx.broker.runApprovedCall(current, AbortSignal.timeout(CALL_TIMEOUT_MS));
-      const stored: McpCallResult = {
-        content: result.content,
-        ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
-        ...(result.isError ? { isError: true } : {}),
-      };
-      this.ctx.db.run(
-        "UPDATE approvals SET status = 'sent', error = NULL, tool_call = json_set(tool_call, '$.result', json(?)) WHERE id = ?",
-        json.str(stored),
-        id,
-      );
-      this.audit("approval.approve", current, "ok", started, { ...detail, isError: !!result.isError });
+      await this.ctx.broker.runApprovedCall(current);
     } catch (err) {
+      // The runner records every outcome itself; this is a bug path, so the outcome is unknown.
       const message = errorMessage(err);
-      this.fail(id, message);
-      this.audit("approval.approve", current, "error", started, { ...detail, error: message });
+      this.ctx.db.run("UPDATE approvals SET status = 'failed', error = ? WHERE id = ? AND status = 'approved'", `${message} (outcome unknown; not retried)`, id);
+      this.audit("approval.approve", current, "error", started, { connectionId: current.connectionId, tool: current.call.exposedName, error: message });
     }
     return this.emit(id);
   }
@@ -308,7 +298,14 @@ export class Approvals {
       count++;
       const a = toApproval(r);
       await this.deleteDraft(a);
-      this.ctx.audit.record({ actorType: "system", action: "approval.expire", accountId: a.accountId, target: a.id, outcome: "ok" });
+      this.ctx.audit.record({
+        actorType: "system",
+        action: "approval.expire",
+        accountId: a.accountId,
+        target: a.id,
+        outcome: "ok",
+        ...(a.connectionId ? { detail: { connectionId: a.connectionId } } : {}),
+      });
       this.emit(r.id);
     }
     return count;
@@ -362,7 +359,8 @@ export class Approvals {
       ? this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ? AND account_id = ?", agentId, accountId)
       : this.ctx.db.all<{ id: string; kind: string }>("SELECT id, kind FROM approvals WHERE status = 'pending' AND agent_id = ?", agentId);
     return this.cancel(
-      rows.filter((r) => !only || (only === "calendar") === isCalendarApprovalKind(r.kind)).map((r) => r.id),
+      // By kind, explicitly: mcp.call is neither mail nor calendar (the broker cancels those on grant changes).
+      rows.filter((r) => !only || (only === "calendar" ? isCalendarApprovalKind(r.kind) : isMailApprovalKind(r.kind))).map((r) => r.id),
       `${CANCELLED_PREFIX}${why}`,
     );
   }
@@ -384,7 +382,14 @@ export class Approvals {
       if (!this.transition(id, "pending", "rejected", note)) continue;
       const a = this.emit(id);
       drafts.push(a);
-      this.ctx.audit.record({ actorType: "system", action: "approval.cancel", accountId: a.accountId, target: id, outcome: "ok", detail: { note } });
+      this.ctx.audit.record({
+        actorType: "system",
+        action: "approval.cancel",
+        accountId: a.accountId,
+        target: id,
+        outcome: "ok",
+        detail: { note, ...(a.connectionId ? { connectionId: a.connectionId } : {}) },
+      });
     }
     if (drafts.length) void Promise.all(drafts.map((a) => this.deleteDraft(a)));
     return drafts.length;
@@ -468,7 +473,7 @@ export class Approvals {
       target: a.id,
       outcome,
       durationMs: Date.now() - started,
-      detail: { agentId: a.agentId, kind: a.kind, ...detail },
+      detail: { agentId: a.agentId, kind: a.kind, ...(a.connectionId ? { connectionId: a.connectionId } : {}), ...detail },
     });
   }
 

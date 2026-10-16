@@ -10,6 +10,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, type CallToolResult, ListToolsRequestSchema, type ListToolsResult, type RequestId, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type AccessLevel, EXPOSED_TOOL_NAME_RE } from "../../shared/types.ts";
+import { GET_CALL_STATUS_TOOL } from "../broker/policy/index.ts";
 import type { AgentBrokerView } from "../broker/service.ts";
 import type { RegisteredTool, ToolResult } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
@@ -50,14 +51,14 @@ const listable = (t: RegisteredTool) => EXPOSED_TOOL_NAME_RE.test(t.exposedName)
 
 function toTool(t: RegisteredTool): Tool {
   const { def, cls } = t;
-  // Annotations pass through as pinned, except that an upstream can't call a risky tool read-only.
+  // Annotations pass through as pinned, except that an upstream can't call a risky tool read-only. No outputSchema:
+  // clients reject a non-error result without structuredContent when a tool declares one.
   const annotations = { ...def.annotations, ...(cls.risky ? { readOnlyHint: false, destructiveHint: true } : {}) };
   return {
     name: t.exposedName,
     ...(def.title ? { title: def.title } : {}),
     description: def.description,
     inputSchema: def.inputSchema as Tool["inputSchema"],
-    ...(def.outputSchema?.type === "object" ? { outputSchema: def.outputSchema as Tool["outputSchema"] } : {}),
     ...(Object.keys(annotations).length ? { annotations } : {}),
   };
 }
@@ -89,16 +90,15 @@ export function registerBrokerTools(ctx: AppContext, server: McpServer, principa
 
   // ───────────── get_call_status ─────────────
 
-  const input = { approval_id: z.string().min(1).describe("The approval_id a pending_approval result returned.") };
+  const input = { approval_id: z.string().min(1).describe(GET_CALL_STATUS_TOOL.inputSchema.properties.approval_id.description) };
   state.shapes.set("get_call_status", input);
   server.registerTool(
     "get_call_status",
     {
-      title: "Tool call status",
-      description:
-        "Check an integration tool call that is waiting for human approval: pending, rejected, expired, or done with the call's result. Don't call it in a tight loop; carry on with other work and check back.",
+      title: GET_CALL_STATUS_TOOL.title,
+      description: GET_CALL_STATUS_TOOL.description,
       inputSchema: input,
-      annotations: { title: "Tool call status", readOnlyHint: true, openWorldHint: false },
+      annotations: { title: GET_CALL_STATUS_TOOL.title, readOnlyHint: true, openWorldHint: false },
     },
     async (args, extra) => {
       state.handled.add(extra.requestId);

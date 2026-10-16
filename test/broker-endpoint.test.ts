@@ -288,11 +288,12 @@ describe("listener stream without Gmail", () => {
     const reader = new SseReader(res);
     try {
       await reader.until((f) => f.some((x) => x.comment === "connected"));
-      ctx.broker.emitConnectionEvent({ type: "approval.requested", connectionId: "con_1", dedupeKey: "a1", detail: { approvalId: "apr_1" } });
+      ctx.broker.emitConnectionEvent({ type: "approval.requested", connectionId: "con_1", dedupeKey: "a0", detail: { approvalId: "apr_0", agentId: "agt_other" } }); // another agent's
+      ctx.broker.emitConnectionEvent({ type: "approval.requested", connectionId: "con_1", dedupeKey: "a1", detail: { approvalId: "apr_1", agentId: agent.id } });
       ctx.broker.emitConnectionEvent({ type: "connection.tool_changed", connectionId: "con_1", dedupeKey: "a2" }); // not asked for
       await reader.until((f) => f.some((x) => x.event === "mail"));
       expect(reader.mail().map((m) => m.payload)).toEqual([
-        expect.objectContaining({ type: "approval.requested", data: expect.objectContaining({ connectionId: "con_1", detail: { approvalId: "apr_1" } }) }),
+        expect.objectContaining({ type: "approval.requested", data: expect.objectContaining({ connectionId: "con_1", detail: { approvalId: "apr_1", agentId: agent.id } }) }),
       ]);
     } finally {
       reader.cancel();
@@ -366,7 +367,7 @@ describe("broker service", () => {
     expect(await ctx.broker.pollEvents(99_000)).toBe(0);
   });
 
-  it("mcp.call approvals: 409 without the runner; with it the result is stored; an interrupted one is never retried", async () => {
+  it("mcp.call approvals run through the broker's runner; an interrupted one is never retried", async () => {
     const runs: string[] = [];
     let t = setup();
     disposers.push(t.dispose);
@@ -386,14 +387,16 @@ describe("broker service", () => {
         new Date(Date.now() + 3_600_000).toISOString(),
       );
     };
+    // The real policy runtime: the tool isn't in the registry for this agent any more, so it's cancelled, never run.
     seed(t.ctx, "apr_1");
-    await expect(t.ctx.mail.approve("apr_1")).rejects.toMatchObject({ status: 409 });
-    expect(new Approvals(t.ctx).get("apr_1")!.status).toBe("pending");
+    expect((await t.ctx.mail.approve("apr_1")).status).toBe("rejected");
 
     t = setup({
+      // Stands in for the policy runtime, which records the outcome on the claimed approval itself.
       runApprovedCall: async (a) => {
         runs.push(a.call.args);
-        return { content: [{ type: "text", text: "deleted" }], structuredContent: { ok: true } } satisfies ToolResult;
+        const result: ToolResult = { content: [{ type: "text", text: "deleted" }], structuredContent: { ok: true } };
+        t.ctx.db.run("UPDATE approvals SET status = 'sent', tool_call = json_set(tool_call, '$.result', json(?)) WHERE id = ? AND status = 'approved'", JSON.stringify(result), a.id);
       },
     });
     disposers.push(t.dispose);
@@ -517,8 +520,8 @@ describe("/api/connections", () => {
 
     // Kill switch, then delete.
     ctx.db.run("INSERT INTO connection_credentials (connection_id, header_value_enc, created_at, updated_at) VALUES (?, 'x', ?, ?)", con.id, now, now);
-    const killed = await json(await req(`/connections/${con.id}/kill`, { method: "POST" }));
-    expect(killed).toMatchObject({ status: "disabled" });
+    expect((await req(`/connections/${con.id}/kill`, { method: "POST" })).status).toBe(204);
+    expect(await json(await req(`/connections/${con.id}`))).toMatchObject({ status: "disabled" });
     expect(ctx.db.get("SELECT 1 AS x FROM connection_credentials WHERE connection_id = ?", con.id)).toBeUndefined();
     expect((await req(`/connections/${con.id}`, { method: "DELETE" })).status).toBe(204);
     expect((await req(`/connections/${con.id}`)).status).toBe(404);
