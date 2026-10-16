@@ -353,7 +353,7 @@ export const commandFailure = (err: unknown) => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Whether launchd has a job with this label loaded (`launchctl print` fails when it hasn't). */
+/** Whether launchd has a job with this label loaded (any `launchctl print` failure counts as not loaded). */
 export function launchdLoaded(ops: Pick<ServiceOps, "capture" | "uid">, label: string): boolean {
   try {
     ops.capture("launchctl", ["print", `${launchdTarget(ops)}/${label}`]);
@@ -377,13 +377,14 @@ export async function bootstrapLaunchd(
 ): Promise<void> {
   const { attempts = 5, pollMs = 250, unloadTimeoutMs = 30_000 } = opts;
   let last: unknown = null;
+  // One unload budget for all attempts: a job that never unloads costs 30 s, not 30 s per attempt.
+  const deadline = Date.now() + unloadTimeoutMs;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       ops.exec("launchctl", ["bootout", `${launchdTarget(ops)}/${label}`], { quiet: true });
     } catch {
       // Not loaded.
     }
-    const deadline = Date.now() + unloadTimeoutMs;
     while (launchdLoaded(ops, label) && Date.now() < deadline) await sleep(pollMs);
     try {
       ops.capture("launchctl", ["bootstrap", launchdTarget(ops), file]);
