@@ -76,7 +76,12 @@ export const approveSchema = z.object({
   /** The code shown in the agent's terminal, typed by the human: proves they approve that request. */
   userCode: z.string().min(1, "Type the code shown in the agent's terminal").max(20),
   name: z.string().transform(cleanText).pipe(z.string().min(1).max(80)).optional(),
-  grants: z.array(grantInputSchema).min(1, "Grant access to at least one account").max(100),
+  // May be empty: an install with only connections (Notion, WHOOP…) pairs agents without Gmail.
+  grants: z.array(grantInputSchema).max(100),
+  connections: z
+    .array(z.object({ connectionId: z.string().min(1).max(64), level: z.enum(["full", "ask", "read", "none"]) }))
+    .max(100)
+    .optional(),
 }) satisfies z.ZodType<ApprovePairingInput>;
 
 export const denySchema = z.object({ note: text(500, "Note").nullable().optional() });
@@ -369,7 +374,7 @@ export function createPairingService(ctx: AppContext, opts: PairingOptions = {})
       const t = clock();
       const agentId = db.tx(() => {
         const { agent, apiKey } = ctx.policy.createAgent(
-          { name: input.name ?? r.name, description: r.description, grants: input.grants },
+          { name: input.name ?? r.name, description: r.description, grants: input.grants, connections: input.connections },
           { origin: "paired" },
         );
         const changes = db.run(

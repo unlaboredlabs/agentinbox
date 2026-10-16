@@ -1,5 +1,5 @@
 import type { AgentTool } from "@shared/agent-api";
-import type { Account, Agent, PairingRequest } from "@shared/types";
+import type { Account, Agent, ConnectionView, PairingRequest } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
@@ -33,6 +33,10 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { useNow } from "@/hooks/use-now";
+import { useBrokerEnabled } from "@/hooks/use-broker";
+import { AGENT_LEVELS, LEVEL_INFO } from "@/components/connections/connection-flow";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { AgentLevel } from "@/lib/broker-dto";
 import { api, ApiError, toastError } from "@/lib/api";
 import { TOOL_LABEL } from "@/lib/cli";
 import { fmtDuration } from "@/lib/format";
@@ -438,10 +442,19 @@ function ApproveForm({
   const [gone, setGone] = useState(false);
   const [busy, setBusy] = useState(false);
   const [typing, setTyping] = useState<Record<string, boolean>>({});
+  // MCP broker connections: each starts at its default level (what "All agents" would give a new agent).
+  const broker = useBrokerEnabled();
+  const connectionsQuery = useQuery({ ...queries.connections(), enabled: broker });
+  const connections: ConnectionView[] = broker ? (connectionsQuery.data ?? []).filter((c) => c.status !== "disabled") : [];
+  const [levels, setLevels] = useState<Record<string, AgentLevel>>({});
+  const levelOf = (c: ConnectionView): AgentLevel => levels[c.id] ?? c.levelDefault;
+  const anyConnection = connections.some((c) => levelOf(c) !== "none");
   const more = asksForMore(p);
   const selected = usable.filter((a) => choices[a.id]?.on);
-  const problem = !selected.length
-    ? "Choose at least one account."
+  const problem = !selected.length && !anyConnection
+    ? connections.length
+      ? "Choose at least one account or connection."
+      : "Choose at least one account."
     : selected.some((a) => typing[a.id] && choices[a.id]!.preset === "custom")
       ? "Add or clear the recipient you're typing first."
       : (selected.map((a) => grantProblem(choices[a.id]!.fields)).find(Boolean) ?? null);
@@ -462,9 +475,10 @@ function ApproveForm({
           userCode: typed,
           name: name.trim() || p.name,
           grants: selected.map((a) => grantInput(a.id, choices[a.id]!.fields)),
+          ...(connections.length ? { connections: connections.map((c) => ({ connectionId: c.id, level: levelOf(c) })) } : {}),
         },
       });
-      for (const key of [keys.pairings, keys.agents, keys.setupState, keys.overview]) void qc.invalidateQueries({ queryKey: key });
+      for (const key of [keys.pairings, keys.agents, keys.setupState, keys.overview, keys.connections]) void qc.invalidateQueries({ queryKey: key });
       onApproved(agent);
     } catch (err) {
       if (err instanceof ApiError && err.code === "user_code_mismatch") setCodeError(err.message);
@@ -542,9 +556,13 @@ function ApproveForm({
       <div className="space-y-2">
         <SectionLabel>What it gets</SectionLabel>
         {usable.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No Gmail account is connected yet. <Link to="/accounts" className="font-medium text-foreground underline">Connect one</Link> first.
-          </p>
+          connections.length ? (
+            <p className="text-sm text-muted-foreground">No Gmail account is connected. That's fine: choose its connections below.</p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No Gmail account is connected yet. <Link to="/accounts" className="font-medium text-foreground underline">Connect one</Link> first.
+            </p>
+          )
         ) : (
           usable.map((a) => {
             // An account that appeared after the form opened starts unticked.
@@ -591,6 +609,32 @@ function ApproveForm({
           })
         )}
       </div>
+
+      {connections.length > 0 && (
+        <div className="space-y-2">
+          <SectionLabel>Connections</SectionLabel>
+          {connections.map((c) => (
+            <div key={c.id} className="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">{c.name}</div>
+                <p className="text-xs text-muted-foreground">{LEVEL_INFO[levelOf(c)].description}</p>
+              </div>
+              <Select value={levelOf(c)} onValueChange={(v) => setLevels((all) => ({ ...all, [c.id]: v as AgentLevel }))}>
+                <SelectTrigger className="w-full sm:w-60" aria-label={`Access to ${c.name}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENT_LEVELS.map((l) => (
+                    <SelectItem key={l} value={l}>
+                      {LEVEL_INFO[l].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ))}
+        </div>
+      )}
 
       {error != null && <ErrorAlert error={error} title="Couldn't approve" />}
 

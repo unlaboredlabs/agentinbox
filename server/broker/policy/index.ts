@@ -218,6 +218,7 @@ export class BrokerPolicyRuntime implements BrokerCalls {
         return text(
           `pending_approval: ${exposedName} needs the owner's approval before it runs, and it hasn't run yet. ` +
             `approval_id: ${approval.id}. Don't call this tool again for the same action: it would only queue a second request. ` +
+            `Ask your user to approve: ${this.ctx.settings.publicUrl()}/approve/${approval.id} . ` +
             `Carry on with other work and check with get_call_status (approval_id "${approval.id}"). ` +
             `If nobody answers, it expires at ${approval.expiresAt}.`,
         );

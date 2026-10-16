@@ -93,6 +93,8 @@ describe("broker end to end (fake upstream, OAuth + DCR)", () => {
     const pending = await client.callTool({ name: "fake__delete_page", arguments: { id: "p2" } });
     expect(text(pending)).toContain("pending_approval");
     const approvalId = /apr_[a-z0-9]+/.exec(text(pending))![0];
+    // The link an unattended agent relays to its user (the page needs the admin session).
+    expect(text(pending)).toContain(`Ask your user to approve: ${ctx.settings.publicUrl()}/approve/${approvalId}`);
     expect(deleted).toEqual([]);
     expect(text(await client.callTool({ name: "get_call_status", arguments: { approval_id: approvalId } }))).toMatch(/pending/);
 

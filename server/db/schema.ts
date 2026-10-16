@@ -473,4 +473,9 @@ export const MIGRATIONS: string[] = [
   -- connection_credentials.pkce_verifier_enc.
   ALTER TABLE oauth_states ADD COLUMN connection_id TEXT REFERENCES connections(id) ON DELETE CASCADE;
   `,
+  /* 10: broker "All agents" (new-user walk). Additive. */ `
+  -- 1: every agent gets this connection at level_default, including agents created later (console, pairing).
+  -- NULL: only the agents picked (connection_grants). Per-agent levels still live in connection_grants.
+  ALTER TABLE connections ADD COLUMN all_agents INTEGER CHECK (all_agents IS NULL OR all_agents = 1);
+  `,
 ];

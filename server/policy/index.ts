@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { type Agent, type AgentOrigin, type AgentWithKey, type CreateAgentInput, type Grant, type GrantInput, isCalendarEventType, isConnectionEventType } from "../../shared/types.ts";
+import { type AccessLevel, type Agent, type AgentOrigin, type AgentWithKey, type CreateAgentInput, type Grant, type GrantInput, isCalendarEventType, isConnectionEventType } from "../../shared/types.ts";
 import { listenersOf } from "../agentapi/listeners.ts";
 import { ADMIN_ACTOR } from "../api/util.ts";
 import { canSeeConnectionEvent } from "../broker/access.ts";
 import type { BusEvents } from "../bus.ts";
 import type { AppContext } from "../context.ts";
 import { sha256 } from "../crypto.ts";
-import { bool, json, now } from "../db/index.ts";
+import { bool, type Db, json, now } from "../db/index.ts";
 import { badRequest, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { Approvals } from "../mail/approvals.ts";
@@ -15,6 +15,22 @@ import { calendarInScope } from "./calendar.ts";
 import type { AgentPrincipal, PolicyService } from "./types.ts";
 
 export const API_KEY_PREFIX = "aib_";
+
+/**
+ * The connection grants a new agent gets: every "All agents" connection at its level_default, then the explicit
+ * choices (pairing approve) on top; "none" leaves one out. Unknown connection ids are refused.
+ */
+function connectionGrantsFor(db: Db, explicit: { connectionId: string; level: AccessLevel | "none" }[]): { connectionId: string; level: AccessLevel }[] {
+  const out = new Map<string, AccessLevel>();
+  for (const r of db.all<{ id: string; level_default: AccessLevel }>("SELECT id, level_default FROM connections WHERE all_agents = 1")) out.set(r.id, r.level_default);
+  for (const c of explicit) {
+    if (!db.get("SELECT 1 AS x FROM connections WHERE id = ?", c.connectionId)) throw badRequest(`Unknown connection ${c.connectionId}`);
+    if (!["full", "ask", "read", "none"].includes(c.level)) throw badRequest(`Unknown access level ${String(c.level)}`);
+    if (c.level === "none") out.delete(c.connectionId);
+    else out.set(c.connectionId, c.level);
+  }
+  return [...out].map(([connectionId, level]) => ({ connectionId, level }));
+}
 /** 32 base32 chars = 160 bits of entropy. */
 const KEY_RANDOM_CHARS = 32;
 /** `last_used_at` and `last_mcp_at` are written at most this often per agent (the first write is immediate). */
@@ -247,6 +263,7 @@ export function createPolicyService(ctx: AppContext): PolicyService {
         if (seen.has(g.accountId)) throw badRequest(`Only one grant per account (duplicate ${g.accountId})`);
         seen.add(g.accountId);
       }
+      const connections = connectionGrantsFor(db, input.connections ?? []);
       const apiKey = newApiKey();
       const id = newId("agt");
       db.tx(() => {
@@ -261,14 +278,20 @@ export function createPolicyService(ctx: AppContext): PolicyService {
           now(),
         );
         for (const g of grants) writeGrant(id, g);
+        const t = now();
+        for (const c of connections) {
+          db.run("INSERT INTO connection_grants (agent_id, connection_id, level, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", id, c.connectionId, c.level, t, t);
+        }
       });
+      // A brand-new agent has no cached tool view or pending calls; the registry is told anyway.
+      if (connections.length) ctx.broker?.invalidate({ agentId: id });
       for (const g of grants) if (g.capabilities.includes("calendar.read")) kickCalendar(g.accountId);
       ctx.audit.record({
         ...ADMIN_ACTOR,
         action: "agent.create",
         target: id,
         outcome: "ok",
-        detail: { name: fields.name, grants: grants.map((g) => g.accountId) },
+        detail: { name: fields.name, grants: grants.map((g) => g.accountId), ...(connections.length ? { connections: connections.map((c) => `${c.connectionId}:${c.level}`) } : {}) },
       });
       return { agent: toAgent(requireRow(id)), apiKey };
     },
