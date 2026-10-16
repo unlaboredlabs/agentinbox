@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",
+    "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "commander": "^15.0.0",
     "hono": "^4.13.13",
