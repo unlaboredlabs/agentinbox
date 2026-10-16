@@ -422,6 +422,32 @@ describe("WHOOP poll", () => {
     expect(fake.requests.filter((r) => r.startsWith("GET")).length).toBe(4 * 3);
   });
 
+  it("reconciliation: the poll announces what a missed webhook would have, not what webhooks already did", async () => {
+    const c = clock();
+    const fake = new FakeWhoop({ now: c.now });
+    const { deps } = await connected(fake);
+    const hookDeps = { ...deps, clientSecret: FAKE_WHOOP_CLIENT.clientSecret, client: { ...CLIENT_RECORD, whoop_user_id: fake.profile.user_id } } as WhoopWebhookDeps;
+    const events = createWhoopEvents({ now: c.now });
+    const first = await events.poll!(null, deps);
+
+    // Webhooks work: the morning's sleep and recovery arrive by push. Then the host sleeps, and the afternoon run's
+    // webhook fails through WHOOP's hour of retries.
+    c.advance(24 * 3_600_000);
+    fake.seed(10);
+    const sleepId = fake.sleeps[0]!.id;
+    for (const type of ["sleep.updated", "recovery.updated"]) {
+      expect(await events.handleWebhook!(fake.webhook({ type, id: sleepId, trace_id: `t-${type}` }), hookDeps)).toHaveLength(1);
+    }
+    const next = await events.poll!(first.cursor, deps);
+    expect(next.events.map((e) => [e.type, e.data])).toEqual([["whoop.workout_updated", { workoutId: "000030c0-0000-4000-8000-000000000009" }]]);
+    expect(JSON.parse(next.cursor!).since).toBe("2026-10-17T06:30:00.000Z"); // the cursor still moves past the pushed ones
+
+    // WHOOP re-scores the sleep later: that's news again, and the poll says so.
+    c.advance(3_600_000);
+    fake.sleeps[0] = { ...fake.sleeps[0]!, updated_at: new Date(c.now()).toISOString() };
+    expect((await events.poll!(next.cursor, deps)).events.map((e) => e.type)).toEqual(["whoop.sleep_updated"]);
+  });
+
   it("a garbage cursor is a fresh baseline; 429 propagates as rate_limited", async () => {
     const fake = new FakeWhoop();
     const { deps } = await connected(fake);
@@ -456,10 +482,42 @@ describe("WHOOP setup steps", () => {
     expect(keys).toEqual([auth.clientIdInput, auth.clientSecretInput]);
   });
 
-  it("with a public https URL: a webhook step with the URL to copy", () => {
-    const webhookUrl = "https://inbox.example.com/hooks/connections/conn1";
+  it("with a public https URL: an optional webhook step with the URL to copy", () => {
+    const webhookUrl = "https://inbox.example.com/hooks/connections/whoop";
     const steps = whoopPreset().setupSteps({ publicUrl: "https://inbox.example.com", redirectUri: "https://inbox.example.com/oauth/connections/callback", webhookUrl });
     expect(steps.map((s) => s.id)).toEqual(["dashboard", "team", "app", "webhook", "client-id", "client-secret", "connect"]);
-    expect(steps.find((s) => s.id === "webhook")!.copy).toEqual({ label: "Webhook URL", value: webhookUrl });
+    const step = steps.find((s) => s.id === "webhook")!;
+    expect(step.copy).toEqual({ label: "Webhook URL", value: webhookUrl });
+    expect(step.title).toMatch(/^Optional/);
+    expect(step.body).toContain("You can skip this: xaq checks WHOOP every 15 minutes");
+  });
+
+  it("tailnet-only https URL: no webhook URL anywhere, and the steps say xaq checks every 15 minutes", () => {
+    const tailnet = "https://box.tail1234.ts.net";
+    const steps = whoopPreset().setupSteps({ publicUrl: tailnet, redirectUri: `${tailnet}/oauth/connections/callback`, webhookUrl: null, funnel: null });
+    expect(steps.map((s) => s.id)).toEqual(["dashboard", "team", "app", "client-id", "client-secret", "connect"]);
+    expect(JSON.stringify(steps)).not.toContain("/hooks/");
+    expect(steps.find((s) => s.id === "connect")!.body).toContain("xaq checks every 15 minutes");
+    expect(steps.some((s) => /webhooks? (are|is) (needed|required)/i.test(s.body))).toBe(false);
+  });
+
+  it("the Funnel offer: optional, warned, the command and the Funnel webhook URL as copies", () => {
+    const tailnet = "https://box.tail1234.ts.net";
+    const funnel = {
+      port: 8443,
+      command: "tailscale funnel --bg --https=8443 --set-path=/hooks/connections http://127.0.0.1:8425/hooks/connections",
+      offCommand: "tailscale funnel --https=8443 --set-path=/hooks/connections off",
+      webhookUrl: "https://box.tail1234.ts.net:8443/hooks/connections/whoop",
+    };
+    const steps = whoopPreset().setupSteps({ publicUrl: tailnet, redirectUri: `${tailnet}/oauth/connections/callback`, webhookUrl: null, funnel });
+    expect(steps.map((s) => s.id)).toEqual(["dashboard", "team", "app", "funnel", "funnel-webhook", "client-id", "client-secret", "connect"]);
+    const offer = steps.find((s) => s.id === "funnel")!;
+    expect(offer.title).toMatch(/^Optional/);
+    expect(offer.copy).toEqual({ label: "Command", value: funnel.command });
+    expect(offer.body).toMatch(/Warning: it makes the webhook path `\/hooks\/connections` on port 8443 reachable from the whole internet/);
+    expect(offer.body).toContain(funnel.offCommand);
+    expect(steps.find((s) => s.id === "funnel-webhook")!.copy).toEqual({ label: "Webhook URL", value: funnel.webhookUrl });
+    // A public webhook URL wins over the offer.
+    expect(whoopPreset().setupSteps({ publicUrl: tailnet, redirectUri: "r", webhookUrl: "https://x.example/hooks/connections/whoop", funnel }).map((s) => s.id)).not.toContain("funnel");
   });
 });

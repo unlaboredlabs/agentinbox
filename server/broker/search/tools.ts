@@ -22,7 +22,7 @@ export const SEARCH_LIMIT_DEFAULT = 5;
 export const SEARCH_LIMIT_MAX = 10;
 
 /** Appended to the server instructions in search mode: the flow in three lines. */
-export const SEARCH_INSTRUCTIONS = `Search mode: most tools aren't listed; find them with search_tools.
+export const SEARCH_INSTRUCTIONS = `Search mode: most tools aren't listed; find them with search_tools. A tool you already know by name can still be called directly.
 - search_tools(query) returns the best-matching tools with their full input schemas, each marked read or write (risky ones may need human approval).
 - Run a read tool with call_read_tool(name, arguments) and any other with call_write_tool(name, arguments); limits, approvals and the audit apply exactly as for a direct call.`;
 

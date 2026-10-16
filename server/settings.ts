@@ -70,6 +70,8 @@ export interface InternalState {
   "setup.verifiedAt": string;
   /** When brokerUpstreams was turned on for this install by the console release (SettingsStore.brokerOnOnce). */
   "broker.defaultOnApplied": string;
+  /** When the agents that existed before search mode were pinned to direct mode, once (pinExistingAgentsDirect). */
+  "broker.searchDirectPinned": string;
 }
 
 export type InternalKey = keyof InternalState;

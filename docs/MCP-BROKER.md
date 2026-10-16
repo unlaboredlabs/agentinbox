@@ -329,6 +329,16 @@ The design:
    - 3–5 "hot" tools exposed directly.
 
    Every inner call is audited and governed under its real name, so search mode loses nothing on the broker side.
+   Search mode only trims `tools/list`: every tool the agent could call in direct mode stays callable by its real
+   name (scripts and prompts that call `search_threads` keep working), through the same handler, policy, approvals
+   and audit; a name the agent can't use still gets -32602.
+
+   An agent's mode never changes under it. The per-agent setting (`broker.search:<agentId>`) is `direct` or
+   `search`; `auto` (no choice yet) is resolved on the agent's first `/mcp` request by the 30-tool threshold and
+   recorded, so a connection that adds 80 tools later leaves a direct agent direct. The agent page shows the mode,
+   lets the user switch it, and suggests search mode once a direct agent is over the threshold. On upgrade, a
+   one-time startup step (marker `broker.searchDirectPinned`) pins every existing agent without a setting to
+   `direct`: search mode is opt-in for them. A new install pins nobody.
 3. **Code mode is deferred.** It cuts tokens the most
    ([Cloudflare](https://blog.cloudflare.com/enterprise-mcp/),
    [Anthropic](https://www.anthropic.com/engineering/code-execution-with-mcp)), but it needs a sandbox and hides each
@@ -404,10 +414,30 @@ The official v2 API ([WHOOP API](https://developer.whoop.com/api/), [OAuth](http
 So **each user registers their own app** (within Sandbox's 10 members, no review). The console guides it in 5 steps:
 1. open the developer dashboard (deep link);
 2. create a team;
-3. create an app: the wizard shows the scopes to tick, a copy button for the redirect URI, and the webhook URL when
-   there's a public https URL;
+3. create an app: the wizard shows the scopes to tick and a copy button for the redirect URI;
 4. paste the client ID and secret, which are checked live;
 5. Connect and approve.
+
+Webhooks are optional, so no step needs them. An optional webhook step appears only when the internet can reach the
+install, and an https public URL alone doesn't prove that. Most self-hosted installs use Tailscale `serve` on an
+https `*.ts.net` name, which only the tailnet reaches. `server/broker/reachability.ts` classifies the URL as public,
+private or unknown, and never calls a third-party prober:
+- **The host:** loopback, private or CGNAT IPs, `localhost`, `.local` and bare names are private.
+- **DNS:** only private, CGNAT or loopback answers mean private.
+- **`*.ts.net`:** read-only `tailscale serve status --json`, because MagicDNS answers 100.x locally even with Funnel
+  on.
+
+The webhook URL is `/hooks/connections/whoop`, the same for the app before the connection exists. The client
+secret's signature picks the connection.
+
+On a tailnet-only `*.ts.net` install with the Tailscale CLI, the wizard instead offers an optional, clearly warned
+Funnel step for the webhook path only, on a separate Funnel port:
+`tailscale funnel --bg --https=8443 --set-path=/hooks/connections http://127.0.0.1:<port>/hooks/connections`.
+- **The port:** 10000 when the console uses 8443.
+- **Why nothing else is served:** tailscaled serves nothing else on that port, and the daemon also refuses Funnel
+  traffic outside `/hooks/connections/` on any host:port but the public URL's.
+- **Who runs it:** the daemon never changes the Tailscale config; it only shows the command. Once the command has
+  run, the step shows the `https://<host>:8443/hooks/connections/whoop` URL to paste into WHOOP.
 
 There's no 30-day wall: one refresh worker per connection keeps the token alive indefinitely and saves each rotated
 refresh token atomically. Wynn's current 30-day re-login most likely comes from his dashboard's own MCP bearer, not
@@ -425,9 +455,17 @@ from WHOOP.
 All take date ranges and handle pagination, and output is compact text plus `structuredContent`.
 
 **Events:** `whoop.recovery_updated` (and sleep and workout) go through the existing outbox, webhooks and listener.
-Push comes from WHOOP webhooks when there's a public https URL, with dedupe on `trace_id` and a reconciliation poll.
-Otherwise a poll every 15 minutes (well within 10,000 requests a day). This gives a "morning recovery is in" trigger
-for Hermes.
+They come from a poll every 15 minutes, which needs nothing but the OAuth connection.
+- **Cost:** about 290 requests a day, under 3% of WHOOP's 10,000.
+- **Timeliness:** WHOOP scores a sleep or workout minutes after it ends.
+
+Optional WHOOP webhooks bring events within seconds, with dedupe on `trace_id` and a reconciliation poll:
+- **The poll never stops.** A webhook that fails while the install is offline (past WHOOP's hour of retries) is
+  found by the next poll.
+- **No double announcements.** The poll skips a record a webhook already announced, unless WHOOP updated it after
+  the push. That memory isn't persisted, so after a restart the worst case is a few duplicates, never a lost event.
+
+This gives a "morning recovery is in" trigger for Hermes.
 
 One thing to verify at build time: whether WHOOP accepts an `http://localhost` redirect. Guides disagree. The fallback
 is an https public URL, or paste mode with `https://localhost`.
@@ -763,7 +801,9 @@ All questions are decided. Building proceeds M0 → M1 → M2 → M3.
 6. **Approvals on the phone:** a link to the one-tap approve page goes out in `approval.requested`. Chat replies can't
    approve.
 7. **Keys and data directory** (decision 6): `aib_` for every key; `~/.agentinbox` kept, with no automatic move.
-8. **Search mode:** on automatically for any agent with more than about 30 tools. Real names are kept below that.
+8. **Search mode:** on automatically for a new agent with more than about 30 tools when it first connects. Real
+   names are kept below that, and for agents that existed before search mode. The mode then changes only when the
+   user changes it.
 9. **Order:** M2 WHOOP, then M3 search mode. If Hermes has more than about 50 tools after M1, M3 comes first.
 10. **T3 refresh tokens:** dated warnings and one-click Reconnect in M1, and a request to T3 Code to add the
     `refresh_token` grant.

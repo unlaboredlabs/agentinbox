@@ -27,6 +27,7 @@ import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
+import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { randomToken } from "../util/ids.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -34,6 +35,8 @@ import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGr
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
+import { type ReachabilityDeps, type WebhookReachability, reachabilityCache } from "./reachability.ts";
+import { pinExistingAgentsDirect } from "./search/mode.ts";
 import {
   type BrokerCalls,
   type CredentialStore,
@@ -97,6 +100,8 @@ export interface BrokerParts {
   presets?: () => IntegrationPreset[];
   /** The credential store. Default: the upstream runtime's (server/broker/credentials). */
   credentials?: CredentialStore;
+  /** DNS and the Tailscale CLI for the webhook reachability check (tests: fakes, no network). */
+  reachability?: Partial<ReachabilityDeps>;
 }
 
 /** What changed: one agent's grants, one connection (slug, URL, pins, kill), or everything. */
@@ -153,9 +158,18 @@ export interface BrokerService extends Lifecycle {
   emitConnectionEvent(e: { type: EventType; connectionId: string; dedupeKey: string; detail?: Record<string, unknown> }): MailEvent | null;
   /** Inbound webhooks of native presets (POST /hooks/connections/:id, server/integrations/hooks.ts). */
   hooks: ConnectionHookHost;
-  /** The connection's inbound webhook URL, or null without a public https URL (then its events are polled). */
+  /**
+   * The connection's inbound webhook URL, or null when nothing public reaches this install (server/broker/reachability.ts).
+   * From the last check: null until one has finished.
+   */
   webhookUrl(connectionId: string): string | null;
-  /** Polls every due native connection without a webhook URL once; returns the number of events emitted. */
+  /** Whether providers can reach the webhook URL, and the optional Tailscale Funnel step (cached, bounded). */
+  webhookReachability(): Promise<WebhookReachability>;
+  /**
+   * Polls every due native connection once, webhooks or not (the reconciliation poll: a delivery that failed while
+   * this install was offline is found here; presets drop what their webhooks already announced). Returns the number
+   * of events emitted.
+   */
   pollEvents(at?: number): Promise<number>;
 }
 
@@ -345,6 +359,14 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return n;
   }
 
+  const reach = reachabilityCache({
+    publicUrl: () => ctx.settings.publicUrl(),
+    localOrigin: () => loopbackUrl(ctx.config.host, ctx.config.port),
+    deps: parts.reachability,
+  });
+  /** Last verified webhook delivery for the connection's member (memory only), for the console's status. */
+  const lastDelivery = new Map<string, number>();
+
   const hooks: ConnectionHookHost = {
     webhookTarget(connectionId) {
       const c = getConnection(ctx, connectionId);
@@ -354,6 +376,17 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       const secret = clientRecord(connectionId)?.[preset.auth.clientSecretInput];
       if (typeof secret !== "string" || !secret) return null;
       return { preset, deps: parts.nativeDeps?.(c) ?? defaultNativeDeps(c), clientSecret: secret, client: clientRecord(connectionId) };
+    },
+    presetWebhookTargets(presetId) {
+      if (!presetFor(presetId)) return [];
+      return listConnections(ctx)
+        .filter((c) => c.preset === presetId)
+        .flatMap((c) => hooks.webhookTarget(c.id) ?? []);
+    },
+    // Status only: the poll keeps running regardless (the preset drops what webhooks already announced), so a
+    // delivery that fails while this install is offline is still found by the next poll.
+    delivered(connectionId) {
+      lastDelivery.set(connectionId, Date.now());
     },
     emit(events) {
       const byConnection = new Map<string, IntegrationEvent[]>();
@@ -366,10 +399,10 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
   };
 
-  const webhookUrl = (connectionId: string): string | null => {
-    const publicUrl = ctx.settings.publicUrl();
-    return publicUrl.startsWith("https://") ? connectionHookUrl(publicUrl, connectionId) : null;
-  };
+  function webhookUrl(connectionId: string): string | null {
+    const base = reach.current().webhookBase;
+    return base ? connectionHookUrl(base, connectionId) : null;
+  }
 
   const lastPoll = new Map<string, number>();
   let polling = false;
@@ -378,11 +411,17 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     polling = true;
     let emitted = 0;
     try {
+      let checked = false;
       for (const c of listConnections(ctx)) {
-        if (c.kind === "remote_http" || c.status === "disabled" || c.status === "needs_reauth" || webhookUrl(c.id)) continue;
+        if (c.kind === "remote_http" || c.status === "disabled" || c.status === "needs_reauth") continue;
         const preset = presetOf(c);
         const poll = preset?.events?.poll;
         if (!preset || !poll) continue;
+        // Only once there's something to poll (no DNS or CLI call otherwise); bounded and cached.
+        if (!checked) {
+          checked = true;
+          await reach.check();
+        }
         const interval = preset.events?.pollIntervalMs ?? 15 * 60_000;
         if (at - (lastPoll.get(c.id) ?? 0) < interval) continue;
         lastPoll.set(c.id, at);
@@ -502,9 +541,17 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
     hooks,
     webhookUrl,
+    webhookReachability: () => reach.check(),
     pollEvents,
 
     start() {
+      // Agents from before search mode keep their full tool list (once per install; docs/MCP-BROKER.md).
+      try {
+        const pinned = pinExistingAgentsDirect(ctx.db, ctx.settings);
+        if (pinned) ctx.log.child("broker").info("Kept the full tool list for existing agents", { agents: pinned });
+      } catch (err) {
+        ctx.log.error("Couldn't keep the full tool list for existing agents", { error: errorMessage(err) });
+      }
       policy.start();
       ctx.bus.on("settings", onSettings);
       wasOn = enabled();

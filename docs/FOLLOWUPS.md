@@ -230,7 +230,8 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 
 ### Search mode (#58)
 - Delete orphaned `broker.search:<agentId>` settings rows when an agent is deleted.
-- Console control for the per-agent search mode and hot list, plus the plan's automatic suggestion above about 30 tools.
+- Console control for the hot list (the mode has one on the agent page, with the suggestion above about 30 tools).
+- An agent created with the CLI before the daemon's first start is pinned to direct by the upgrade step, like an existing one.
 - The plan's "10K tokens" trigger isn't implemented; only the tool count is.
 - The done-when "at least as often as listing every tool" needs a model-in-the-loop eval; the offline eval measures retrieval only.
 - `INSTRUCTIONS` says "Start with list_accounts", which is hidden in search mode (reachable through search).
@@ -400,3 +401,23 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `/mcp` instructions still list a disabled connection (from grants).
 - Upstream `notifications/tools/list_changed` → `requestRefresh` isn't wired (the remote source has no notification hook); tool changes surface on the 10-minute timer or the Refresh tools button.
 - `/me` lists grants on turned-off connections with no status (`listen status` shows them as usable).
+
+### Directory ownership (#74 review)
+- `server/listen/paths.ts` header comment says `$XDG_*/xaq-cli`; the code uses `xaq`.
+- `server/config.ts` `DATA_MARKERS`: `master.key` is a generic name; a foreign `~/.xaq/master.key` would count as ours and be read as the master key. The db and lock markers suffice.
+- `server/config.ts` `OWN_ENTRY`: a macOS `.DS_Store` counts as foreign, so the daemon skips tightening the dir and `clearOwnInstall` refuses a partial `app.new`/`app.old` (safe rollback, clear error). Ignore `.DS_Store`.
+- `server/auth/setup-token.ts`: a foreign `~/.xaq/setup-token` of 8–128 alphanumerics would be adopted and printed in our setup link.
+- `server/service.ts` `isOurServiceEnv`: a foreign `service.env` holding only keys we know is parsed and then overwritten.
+- `server/listen/lock.ts`: a non-empty unreadable lock now throws instead of being taken over; a lock truncated by a crash must be deleted by hand.
+
+### WHOOP without webhooks (blocker round)
+- The Funnel command was checked against Tailscale's docs and source, not on a real tailnet.
+
+### Blocker round (#75 review)
+- `reachability.ts` matches the Funnel target exactly against `http://127.0.0.1:<port>`; a `localhost` target isn't detected, so the offer keeps showing.
+- A launchd PATH may not include Homebrew's `tailscale`: no Funnel offer then (polling still works).
+- `GET /api/agents/:id/tool-mode` builds a full MCP server just to read the mode.
+- `broker.search:<agentId>` rows aren't deleted with the agent.
+- The tool-mode PUT can't set an agent back to `auto`; document it.
+- `handleWebhook` marks a record pushed before the route has emitted it; a failed emit relies on WHOOP's retry.
+- A re-score WHOOP stamps within 5 minutes of a push isn't announced again (`PUSH_SLACK_MS`).

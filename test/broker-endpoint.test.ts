@@ -13,6 +13,8 @@ import { type BrokerParts, createBrokerService } from "../server/broker/service.
 import type { AccessLevel, IntegrationPreset, RegisteredTool, ToolClass, ToolDef, ToolResult } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
 import { exposedName } from "../server/broker/catalog/index.ts";
+import { whoopPreset } from "../server/integrations/whoop/index.ts";
+import { loopbackUrl } from "../server/urls.ts";
 import { upstreams } from "../server/broker/upstream/runtime.ts";
 import { Approvals } from "../server/mail/approvals.ts";
 import { buildMcpServer, INSTRUCTIONS, rejectedCall } from "../server/mcp/server.ts";
@@ -378,8 +380,26 @@ describe("broker service", () => {
     },
   });
 
+  /** DNS and Tailscale fakes: no network. `serve` is the `tailscale serve status --json` config, or null without the CLI. */
+  const fakeReach = (answers: Record<string, string[]>, serve: () => unknown = () => null) => ({
+    lookup: async (host: string) => {
+      const a = answers[host];
+      if (!a) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+      return a.map((address) => ({ address, family: address.includes(":") ? 6 : 4 }));
+    },
+    tailscale: async () => {
+      const c = serve();
+      return c === null ? null : { bin: "tailscale", stdout: JSON.stringify(c) };
+    },
+  });
+  const TAILNET = "https://box.tail1234.ts.net";
+
   it("polls native presets without a webhook URL, keeps the cursor, and serves webhook targets", async () => {
-    const t = setup({ presets: () => [pollPreset()], nativeDeps: (c) => ({ connectionId: c.id, accessToken: async () => "tok", fetch, log: silent }) });
+    const t = setup({
+      presets: () => [pollPreset()],
+      nativeDeps: (c) => ({ connectionId: c.id, accessToken: async () => "tok", fetch, log: silent }),
+      reachability: fakeReach({ "inbox.example.com": ["93.184.216.34"] }),
+    });
     disposers.push(t.dispose);
     const { ctx } = t;
     const { agent } = ctx.policy.createAgent({ name: "Hermes" });
@@ -412,10 +432,86 @@ describe("broker service", () => {
     ctx.broker.hooks.emit([{ type: "whoop.recovery_updated", connectionId: "con_w", dedupeKey: "trace-1", data: { traceId: "trace-1" } }]);
     expect(ctx.events.feed(agent.id).events).toHaveLength(3);
 
-    // With a public https URL there's a webhook, so no polling.
+    expect(ctx.broker.hooks.presetWebhookTargets!("whoop").map((x) => x.deps.connectionId)).toEqual(["con_w"]);
+    expect(ctx.broker.hooks.presetWebhookTargets!("notion")).toEqual([]);
+
+    // A public https URL offers webhooks, and the reconciliation poll keeps running: a delivery never resets the cursor.
     ctx.settings.update({ publicUrl: "https://inbox.example.com" });
+    await ctx.broker.webhookReachability();
     expect(ctx.broker.webhookUrl("con_w")).toBe("https://inbox.example.com/hooks/connections/con_w");
-    expect(await ctx.broker.pollEvents(99_000)).toBe(0);
+    expect(await ctx.broker.pollEvents(99_000)).toBe(1);
+    ctx.broker.hooks.delivered!("con_w");
+    expect(ctx.db.get<{ events_cursor: string }>("SELECT events_cursor FROM connections WHERE id = 'con_w'")!.events_cursor).toBe("3");
+    expect(await ctx.broker.pollEvents(200_000)).toBe(1);
+    expect(ctx.db.get<{ events_cursor: string }>("SELECT events_cursor FROM connections WHERE id = 'con_w'")!.events_cursor).toBe("4");
+
+    // The URL stops being public (here: tailnet-only): no webhook URL, and still polling.
+    ctx.settings.update({ publicUrl: TAILNET });
+    await ctx.broker.webhookReachability();
+    expect(ctx.broker.webhookUrl("con_w")).toBeNull();
+    expect(await ctx.broker.pollEvents(300_000)).toBe(1);
+  });
+
+  it("a tailnet-only https URL (Tailscale serve, no Funnel): no webhook URL, and the connection polls", async () => {
+    const t = setup({
+      presets: () => [pollPreset()],
+      nativeDeps: (c) => ({ connectionId: c.id, accessToken: async () => "tok", fetch, log: silent }),
+      reachability: fakeReach({ "box.tail1234.ts.net": ["100.101.102.103", "fd7a:115c:a1e0::1"] }),
+    });
+    disposers.push(t.dispose);
+    const { ctx } = t;
+    const { agent } = ctx.policy.createAgent({ name: "Hermes" });
+    seedConnection(ctx, { id: "con_w", slug: "whoop", name: "WHOOP", kind: "native_whoop", preset: "whoop", url: null }, { [agent.id]: "full" });
+    ctx.settings.update({ brokerUpstreams: true, publicUrl: TAILNET });
+    expect(await ctx.broker.pollEvents(10_000)).toBe(1);
+    expect(await ctx.broker.webhookReachability()).toMatchObject({ reach: "private", webhookBase: null, funnel: null });
+    expect(ctx.broker.webhookUrl("con_w")).toBeNull();
+    expect(await ctx.broker.pollEvents(11_000)).toBe(1);
+    expect(ctx.events.feed(agent.id).events.map((e) => e.type)).toEqual(["whoop.recovery_updated", "whoop.recovery_updated"]);
+  });
+
+  it("GET /api/connections/presets: WHOOP's webhook step only for a public URL, the Funnel offer only on *.ts.net with Tailscale", async () => {
+    let serve: unknown = null;
+    const h = harness({
+      broker: (ctx) =>
+        createBrokerService(ctx, {
+          presets: () => [whoopPreset()],
+          reachability: fakeReach({ "box.tail1234.ts.net": ["100.101.102.103"], "inbox.example.com": ["93.184.216.34"] }, () => serve),
+        }),
+    });
+    disposers.push(h.dispose);
+    const cookie = await h.claim();
+    const { ctx } = h;
+    ctx.settings.update({ brokerUpstreams: true });
+    const steps = async () => {
+      // Each case re-checks: the cache keeps one entry, for the current public URL.
+      const [whoop] = (await json(await h.request("/api/connections/presets", { cookie, headers: CSRF }))) as { setupSteps: { id: string; title: string; body: string; copy?: { value: string } }[] }[];
+      return whoop!.setupSteps;
+    };
+    const text = (s: Awaited<ReturnType<typeof steps>>) => JSON.stringify(s);
+
+    // Tailnet-only, no Tailscale CLI: no webhook anywhere; the steps say xaq checks every 15 minutes.
+    ctx.settings.update({ publicUrl: TAILNET });
+    let s = await steps();
+    expect(s.map((x) => x.id)).toEqual(["dashboard", "team", "app", "client-id", "client-secret", "connect"]);
+    expect(text(s)).not.toContain("/hooks/");
+    expect(s.find((x) => x.id === "connect")!.body).toContain("every 15 minutes");
+
+    // Public: the optional webhook step, with the preset's URL (no connection id needed).
+    ctx.settings.update({ publicUrl: "https://inbox.example.com" });
+    s = await steps();
+    expect(s.map((x) => x.id)).toEqual(["dashboard", "team", "app", "webhook", "client-id", "client-secret", "connect"]);
+    expect(s.find((x) => x.id === "webhook")).toMatchObject({ title: expect.stringMatching(/^Optional/), copy: { value: "https://inbox.example.com/hooks/connections/whoop" } });
+
+    // Tailnet-only with the Tailscale CLI (console served on 443): the Funnel offer on its own port, hooks path only.
+    serve = { TCP: { "443": { HTTPS: true } }, Web: { "box.tail1234.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:8425" } } } } };
+    ctx.settings.update({ publicUrl: TAILNET });
+    s = await steps();
+    expect(s.map((x) => x.id)).toEqual(["dashboard", "team", "app", "funnel", "funnel-webhook", "client-id", "client-secret", "connect"]);
+    const origin = loopbackUrl(ctx.config.host, ctx.config.port);
+    expect(s.find((x) => x.id === "funnel")!.copy!.value).toBe(`tailscale funnel --bg --https=8443 --set-path=/hooks/connections ${origin}/hooks/connections`);
+    expect(s.find((x) => x.id === "funnel")!.body).toMatch(/Warning: .*reachable from the whole internet/);
+    expect(s.find((x) => x.id === "funnel-webhook")!.copy!.value).toBe("https://box.tail1234.ts.net:8443/hooks/connections/whoop");
   });
 
   it("mcp.call approvals run through the broker's runner; an interrupted one is never retried", async () => {

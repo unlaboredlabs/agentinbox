@@ -43,7 +43,15 @@ key; the broker holds every upstream credential and lists only the tools the age
 
 - **Add one**: in the console, Connections → Add connection; or `npx xaq-cli connections add notion|whoop|<url>`
   on the daemon's machine. Presets: Notion (its hosted MCP, two clicks) and WHOOP (your own WHOOP developer app; the
-  console walks you through it). Any other server: paste its URL; xaq finds out whether it needs an OAuth
+  console walks you through it). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
+  WHOOP every 15 minutes for new recoveries, sleeps and workouts (`whoop.*` events).
+  - **Optional webhooks:** they bring those events within seconds, and the 15-minute check keeps running as a
+    reconciliation poll, so a webhook missed while the machine was asleep or offline still arrives. The setup offers
+    webhooks only when the internet can reach this install.
+  - **Tailnet-only installs** (Tailscale `serve` on a `*.ts.net` name): the setup offers an optional Tailscale Funnel
+    command that exposes only the webhook path, on its own port.
+
+  Any other server: paste its URL; xaq finds out whether it needs an OAuth
   sign-in or an API key. Servers on this machine or your private network (loopback, Tailscale) need an explicit
   "allow this host" for that exact address.
 - **One choice per connection**: Full access, Ask before risky actions (default), or Read only, for all agents or
@@ -54,8 +62,12 @@ key; the broker holds every upstream credential and lists only the tools the age
   means it never asks twice; the rules are listed on the agent's page.
 - **Tool changes**: every tool's definition is pinned when you connect. If a server later changes or adds a tool,
   that tool is held until you accept the change (Connections shows a diff).
-- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`. Agents with more than about 30 tools get
-  search mode (`search_tools`, `call_read_tool`, `call_write_tool`), or any agent with `/mcp?mode=search`.
+- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`.
+- **Search mode**: the tool list shows only `search_tools`, `call_read_tool`, `call_write_tool` and `get_call_status`;
+  the agent finds the rest by searching. Calling a tool by its name still works, with the same access, approvals and
+  audit. A new agent gets search mode if it has more than about 30 tools the first time it connects. After that its
+  mode changes only when you change it (agent page → Tool list), never because a connection added tools. Agents
+  created before search mode keep every tool listed. Any agent can ask for it with `/mcp?mode=search`.
 - **Import**: `npx xaq-cli import --from hermes|claude-code|cursor|codex [--dry-run]` moves a client's remote
   MCP servers into connections and replaces them with the single xaq entry, after a backup. Entries that don't
   work yet (an OAuth sign-in to finish, a rejected key) stay in the client until they do.

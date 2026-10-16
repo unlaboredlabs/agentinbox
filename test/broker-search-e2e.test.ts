@@ -6,7 +6,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { SEARCH_MODE_THRESHOLD } from "../server/broker/search/mode.ts";
+import { SEARCH_MODE_THRESHOLD, setAgentSearchSettings } from "../server/broker/search/mode.ts";
 import { SEARCH_AUDIT_ACTION } from "../server/broker/search/tools.ts";
 import { type FakeMcpUpstream, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
 import { CSRF, harness, json } from "./platform-helpers.ts";
@@ -100,5 +100,24 @@ describe("search mode end to end (fake upstream)", () => {
     expect(actions.filter((a) => a === SEARCH_AUDIT_ACTION)).toHaveLength(1);
     expect(actions.some((a) => a.startsWith("call_") || a === "search_tools" || a === "unknown_tool")).toBe(false);
     expect(JSON.stringify(rows)).not.toContain("wiki page");
+
+    // Called by name, unlisted: the same broker path. A read runs; the risky one is pending at once, nothing sent.
+    expect(ctx.db.get<{ value: string }>("SELECT value FROM settings WHERE key = ?", `broker.search:${agent.id}`)?.value).toContain('"search"');
+    expect(text(await client.callTool({ name: "wiki__get_record_4", arguments: { id: "r2" } }))).toContain("Record r2");
+    const direct = await client.callTool({ name: "wiki__delete_page", arguments: { id: "p3" } });
+    expect(text(direct)).toContain("pending_approval");
+    expect(deleted).toEqual(["p2"]);
+
+    // Read only: the write tool is refused by name exactly as in direct mode (it isn't the agent's tool any more).
+    expect(await json(await api(`/connections/${con.id}/grants`, { method: "PUT", json: { grants: [{ agentId: agent.id, level: "read" }] } }))).toHaveLength(1);
+    const refusal = async () => {
+      const r = await client.callTool({ name: "wiki__delete_page", arguments: { id: "p4" } }).catch((err: Error) => err.message);
+      return typeof r === "string" ? r : text(r);
+    };
+    const inSearch = await refusal();
+    expect(inSearch).toMatch(/-32602.*wiki__delete_page not found/);
+    setAgentSearchSettings(ctx.db, agent.id, { mode: "direct" });
+    expect(await refusal()).toBe(inSearch);
+    expect(deleted).toEqual(["p2"]);
   }, 20_000);
 });

@@ -121,8 +121,16 @@ export interface SetupContext {
   publicUrl: string;
   /** Redirect URI for upstream OAuth (/oauth/connections/callback on this install). */
   redirectUri: string;
-  /** Inbound webhook URL for this connection, or null without a public https URL (then the preset polls). */
+  /**
+   * Inbound webhook URL, or null when nothing public reaches this install (server/broker/reachability.ts). Presets
+   * poll either way (with webhooks it's the reconciliation poll), so a webhook step is always optional.
+   */
   webhookUrl: string | null;
+  /**
+   * The optional Tailscale Funnel step: the install is tailnet-only on a *.ts.net name and the Tailscale CLI is
+   * there. `command` exposes only the webhook path on `port`; once run, webhooks go to `webhookUrl`.
+   */
+  funnel?: { port: number; command: string; offCommand: string; webhookUrl: string } | null;
 }
 
 /** OAuth facts for a preset whose provider needs the user's own app (WHOOP) or a known DCR server (Notion). */

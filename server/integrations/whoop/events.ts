@@ -1,5 +1,7 @@
-// WHOOP events (https://developer.whoop.com/docs/developing/webhooks): signed v2 webhooks when the install has a
-// public https URL, and a 15-minute poll otherwise. Events carry ids only; agents fetch the data with the tools.
+// WHOOP events (https://developer.whoop.com/docs/developing/webhooks): a 15-minute poll, which needs nothing but the
+// OAuth connection, and optional signed v2 webhooks when the internet can reach this install. With webhooks the poll
+// keeps running as the reconciliation poll (a delivery that failed while the install was offline is found there), and
+// skips records a webhook already announced. Events carry ids only; agents fetch the data with the tools.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IntegrationEvent, NativeEvents, NativeSourceDeps } from "../../broker/types.ts";
@@ -23,10 +25,20 @@ export const TIMESTAMP_HEADER = "x-whoop-signature-timestamp";
  * memory, then the outbox's dedupeKey); outside it they're refused (401).
  */
 export const SIGNATURE_TOLERANCE_MS = 2 * 3_600_000;
+/**
+ * A poll is 3 requests (recoveries, sleeps, workouts; up to 4 pages each), so about 290 a day: under 3% of WHOOP's
+ * 10,000 a day and never near 100 a minute, leaving the rest for agents' tool calls on the same app. WHOOP scores a
+ * sleep or workout minutes after it ends and new data lands a few times a day, so 15 minutes is timely enough.
+ */
 export const POLL_INTERVAL_MS = 15 * 60_000;
 /** How far back a poll looks for changed records (a sleep scored this morning started last night). */
 const POLL_LOOKBACK_MS = 48 * 3_600_000;
 const POLL_MAX_PAGES = 4;
+/**
+ * A record a webhook announced is skipped by the poll unless WHOOP updated it after the push. updated_at is WHOOP's
+ * clock and the push time ours: the slack absorbs the skew between them.
+ */
+export const PUSH_SLACK_MS = 5 * 60_000;
 
 const header = (headers: Record<string, string>, name: string): string | undefined => {
   for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === name) return v;
@@ -80,6 +92,12 @@ function parseCursor(cursor: string | null): PollCursor | null {
 
 export function createWhoopEvents(opts: WhoopEventsOptions = {}): NativeEvents {
   const now = opts.now ?? Date.now;
+  /**
+   * `${connectionId}:${type}:${id}` → when a webhook announced it, so the poll doesn't announce it again. Memory only:
+   * after a restart the worst case is a few duplicates, never a lost event.
+   */
+  const pushed = new Map<string, number>();
+  const pushKey = (connectionId: string, type: string, id: string) => `${connectionId}:${type}:${id}`;
 
   return {
     types: WHOOP_EVENT_TYPES,
@@ -113,6 +131,7 @@ export function createWhoopEvents(opts: WhoopEventsOptions = {}): NativeEvents {
       }
       // Stateless: the route dedupes on dedupeKey, and only after the events are safely emitted.
       const data: Record<string, unknown> = { [mapped.idKey]: id, traceId };
+      pushed.set(pushKey(deps.connectionId, mapped.type, id), now());
       return [{ type: mapped.type, connectionId: deps.connectionId, dedupeKey: `whoop:${traceId}`, data }];
     },
 
@@ -126,6 +145,8 @@ export function createWhoopEvents(opts: WhoopEventsOptions = {}): NativeEvents {
         pollAll<Sleep>(deps, PATHS.sleeps, start, signal),
         pollAll<Workout>(deps, PATHS.workouts, start, signal),
       ]);
+      // Older pushes are outside what this poll can see anyway.
+      for (const [k, at] of pushed) if (t - at > POLL_LOOKBACK_MS) pushed.delete(k);
       const since = prev ? Date.parse(prev.since) : null;
       // High-water mark in WHOOP's clock (updated_at), not ours; our clock only when there's nothing at all.
       let high = since ?? Number.NEGATIVE_INFINITY;
@@ -135,6 +156,8 @@ export function createWhoopEvents(opts: WhoopEventsOptions = {}): NativeEvents {
         if (Number.isNaN(u)) return;
         if (u > high) high = u;
         if (since === null || u <= since) return;
+        const pushedAt = pushed.get(pushKey(deps.connectionId, type, idKey));
+        if (pushedAt !== undefined && u <= pushedAt + PUSH_SLACK_MS) return;
         events.push({ type, connectionId: deps.connectionId, dedupeKey: `whoop:poll:${type}:${idKey}:${updatedAt}`, data });
       };
       // Pending records come back as updated once scored; announcing them now would only be noise.

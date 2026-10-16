@@ -85,9 +85,13 @@ describe("POST /hooks/connections/:id", () => {
 
   it("another WHOOP member of the same app: acknowledged (204) but nothing emitted", async () => {
     const app = createApp(ctx, { connectionHooks: host });
+    const delivered: string[] = [];
+    const app2 = createApp(ctx, { connectionHooks: { ...host, delivered: (id) => void delivered.push(id) } });
     const stranger = fake.webhook({ type: "workout.updated", id: "their-workout", trace_id: "t-other", user_id: 777 });
     expect((await post(app, "/hooks/connections/conn1", stranger)).status).toBe(204);
+    expect((await post(app2, "/hooks/connections/conn1", stranger)).status).toBe(204);
     expect(emitted).toEqual([]);
+    expect(delivered).toEqual([]); // says nothing about this connection's own webhooks
   });
 
   it("401 on a bad signature or a timestamp outside 2 h; nothing emitted", async () => {
@@ -113,6 +117,39 @@ describe("POST /hooks/connections/:id", () => {
     const res = await app.request("/hooks/connections/conn1", { method: "POST", body: "x".repeat(17 * 1024), headers: { "content-type": "application/json" } });
     expect(res.status).toBe(413);
     expect(emitted).toEqual([]);
+  });
+
+  it("/hooks/connections/whoop (the URL the setup shows): the signature picks the connection, and marks it delivered", async () => {
+    const delivered: string[] = [];
+    const conn1 = host.webhookTarget("conn1")!;
+    const conn2 = { ...conn1, clientSecret: "another-apps-secret", deps: { ...conn1.deps, connectionId: "conn2" } };
+    const app = createApp(ctx, {
+      connectionHooks: { ...host, presetWebhookTargets: (id) => (id === "whoop" ? [conn2, conn1] : []), delivered: (id) => void delivered.push(id) },
+    });
+    const msg = fake.webhook({ type: "recovery.updated", id: "sleep-uuid", trace_id: "trace-p" });
+    expect((await post(app, "/hooks/connections/whoop", msg)).status).toBe(204);
+    expect(emitted).toEqual([expect.objectContaining({ connectionId: "conn1", dedupeKey: "whoop:trace-p" })]);
+    expect(delivered).toEqual(["conn1"]);
+    expect((await post(app, "/hooks/connections/whoop", fake.webhook({ type: "sleep.updated", id: "a", trace_id: "t" }, { secret: "forged" }))).status).toBe(401);
+    expect((await post(app, "/hooks/connections/notion", msg)).status).toBe(404);
+    expect(delivered).toEqual(["conn1"]);
+  });
+
+  it("Funnel traffic on another host:port than the public URL's only reaches the hooks", async () => {
+    ctx.settings.update({ publicUrl: "https://box.tail1234.ts.net" });
+    const app = createApp(ctx, { connectionHooks: host });
+    const funnel = { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net:8443" };
+    for (const path of ["/", "/api/system", "/mcp", "/agent/v1/events", "/hooks/connections"]) {
+      const res = await app.request(path, { headers: funnel });
+      expect(res.status, path).toBe(404);
+    }
+    const msg = fake.webhook({ type: "sleep.updated", id: "f", trace_id: "trace-f" });
+    expect((await post(app, "/hooks/connections/conn1", { ...msg, headers: { ...msg.headers, ...funnel } })).status).toBe(204);
+    // The owner funnelled the console itself (the public URL's host): not fenced.
+    expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net" } })).status).toBe(401);
+    expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "BOX.tail1234.ts.net:443" } })).status).toBe(401); // default port
+    ctx.settings.update({ publicUrl: "https://box.tail1234.ts.net:443" });
+    expect((await app.request("/api/system", { headers: { "tailscale-funnel-request": "?1", host: "box.tail1234.ts.net" } })).status).toBe(401);
   });
 
   it("builds the webhook URL from the public URL", () => {

@@ -24,6 +24,7 @@ import { exposedName } from "../broker/catalog/index.ts";
 import { connectionView, getConnection, listConnections, notifyAgent } from "../broker/service.ts";
 import { Approvals } from "../mail/approvals.ts";
 import { connectionHookUrl } from "../integrations/hooks.ts";
+import type { WebhookReachability } from "../broker/reachability.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
@@ -173,13 +174,17 @@ export function connectionsApi(ctx: AppContext) {
         };
       });
 
-  const presetView = (p: IntegrationPreset): PresetView => {
+  const presetView = (p: IntegrationPreset, reach: WebhookReachability): PresetView => {
     const publicUrl = ctx.settings.publicUrl();
     const steps = p.setupSteps({
       publicUrl,
       redirectUri: `${publicUrl}/oauth/connections/callback`,
-      // Per connection (POST /hooks/connections/:id): no connection exists yet while choosing a preset.
-      webhookUrl: publicUrl.startsWith("https://") ? connectionHookUrl(publicUrl, "<connection id>") : null,
+      // The preset's URL (POST /hooks/connections/<preset id>): no connection exists yet while choosing a preset, and
+      // the route finds the connection by its signature. Only when the internet can reach it.
+      webhookUrl: reach.webhookBase ? connectionHookUrl(reach.webhookBase, p.id) : null,
+      funnel: reach.funnel
+        ? { port: reach.funnel.port, command: reach.funnel.command, offCommand: reach.funnel.offCommand, webhookUrl: connectionHookUrl(reach.funnel.origin, p.id) }
+        : null,
     });
     return {
       id: p.id,
@@ -195,7 +200,10 @@ export function connectionsApi(ctx: AppContext) {
 
   app.get("/connections", (c) => c.json<ConnectionView[]>(listConnections(ctx).map((x) => connectionView(ctx, x))));
 
-  app.get("/connections/presets", (c) => c.json<PresetView[]>(ctx.broker.presets().map(presetView)));
+  app.get("/connections/presets", async (c) => {
+    const reach = await ctx.broker.webhookReachability();
+    return c.json<PresetView[]>(ctx.broker.presets().map((p) => presetView(p, reach)));
+  });
 
   app.post("/connections/probe", async (c) => {
     const body = await readBody(c, probeSchema);

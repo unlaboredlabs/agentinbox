@@ -98,6 +98,25 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
     return c.text("Not found", 404);
   });
 
+  // The WHOOP setup's optional Tailscale Funnel exposes only the hooks path on its own port. The real fence is
+  // tailscaled's mount: it serves nothing else on that port (server/broker/reachability.ts). This is only a backstop,
+  // and a weak one, since the Host it compares is whatever the client sent: tailscaled marks Funnel traffic with
+  // Tailscale-Funnel-Request (and drops a client-sent one), and Funnel traffic for any host:port but the public URL's
+  // (whose owner chose to funnel the console) only reaches the hooks.
+  const bareHost = (h: string) => h.toLowerCase().replace(/:(443|80)$/, "");
+  app.use("*", async (c, next) => {
+    if (c.req.header("tailscale-funnel-request") && !c.req.path.startsWith(`${CONNECTION_HOOKS_PREFIX}/`)) {
+      let publicHost: string | null = null;
+      try {
+        publicHost = bareHost(new URL(ctx.settings.publicUrl()).host);
+      } catch {
+        // No usable public URL: nothing is the funnelled console.
+      }
+      if (bareHost(c.req.header("host") ?? "") !== publicHost) return c.text("Not found", 404);
+    }
+    await next();
+  });
+
   // ── Public ──
   // The rest of the body is never read, so the connection can't be reused: say so, or a keep-alive client
   // sends its next request on a socket that is about to close.

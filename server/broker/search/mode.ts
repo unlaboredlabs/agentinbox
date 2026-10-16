@@ -1,5 +1,6 @@
 // When /mcp serves search mode instead of every tool (docs/MCP-BROKER.md, "One endpoint with 100+ tools").
 import { type Db, json } from "../../db/index.ts";
+import type { SettingsStore } from "../../settings.ts";
 
 /** Above this many visible tools (native + broker), an agent gets search mode unless its setting says otherwise. */
 export const SEARCH_MODE_THRESHOLD = 30;
@@ -15,7 +16,10 @@ export const CALL_STATUS_TOOL = "get_call_status";
 
 export type ToolMode = "direct" | "search";
 
-/** The per-agent choice: `auto` follows the threshold; `search` and `direct` force it (`?mode=search` still wins). */
+/**
+ * The per-agent choice: `search` and `direct` force it (`?mode=search` still wins). `auto` means not decided yet: the
+ * agent's first /mcp request resolves it by the threshold and records the result (exposeTools), so it sticks.
+ */
 export type AgentSearchPreference = "auto" | "search" | "direct";
 
 export interface AgentSearchSettings {
@@ -47,6 +51,24 @@ export function setAgentSearchSettings(db: Db, agentId: string, patch: Partial<A
     JSON.stringify(next),
   );
   return next;
+}
+
+/**
+ * Once per install, at startup: every agent without a setting gets `direct`, so an upgrade never takes its tools
+ * out of tools/list (scripts and prompts that expect them listed keep working); search mode is opt-in for them.
+ * Agents created later have no setting and follow `auto`. Explicit settings are kept; a new install pins nobody.
+ * Returns how many agents were pinned (0 once the marker is set).
+ */
+export function pinExistingAgentsDirect(db: Db, settings: SettingsStore): number {
+  if (settings.getState("broker.searchDirectPinned")) return 0;
+  return db.tx(() => {
+    const ids = db
+      .all<{ id: string }>("SELECT id FROM agents WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'broker.search:' || agents.id)")
+      .map((r) => r.id);
+    for (const id of ids) setAgentSearchSettings(db, id, { mode: "direct" });
+    settings.setState("broker.searchDirectPinned", new Date().toISOString());
+    return ids.length;
+  });
 }
 
 export interface ModeInput {
