@@ -21,6 +21,7 @@ import {
   type UpstreamToolDefinition,
 } from "../../shared/types.ts";
 import { connectionView, getConnection, listConnections, notifyAgent } from "../broker/service.ts";
+import { connectionHookUrl } from "../integrations/hooks.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
@@ -150,7 +151,8 @@ export function connectionsApi(ctx: AppContext) {
     const steps = p.setupSteps({
       publicUrl,
       redirectUri: `${publicUrl}/oauth/connections/callback`,
-      webhookUrl: publicUrl.startsWith("https://") ? `${publicUrl}/integrations/${p.id}/webhook` : null,
+      // Per connection (POST /hooks/connections/:id): no connection exists yet while choosing a preset.
+      webhookUrl: publicUrl.startsWith("https://") ? connectionHookUrl(publicUrl, "<connection id>") : null,
     });
     return {
       id: p.id,

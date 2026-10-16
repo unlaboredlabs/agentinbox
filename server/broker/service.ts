@@ -8,26 +8,30 @@
 // Everything is behind Settings.brokerUpstreams (off by default): with it off, `view` is null, /mcp lists
 // only the native tools, connection events are invisible and /api/connections answers 404.
 
-import type {
-  AccessLevel,
-  Connection,
-  ConnectionAuthType,
-  ConnectionProbe,
-  ConnectionView,
-  EventType,
-  MailEvent,
-  McpCallApproval,
-  StartConnectInput,
-  StartConnectResult,
+import {
+  type AccessLevel,
+  type Connection,
+  type ConnectionAuthType,
+  type ConnectionProbe,
+  type ConnectionView,
+  type EventType,
+  isPresetEventType,
+  type MailEvent,
+  type McpCallApproval,
+  type StartConnectInput,
+  type StartConnectResult,
 } from "../../shared/types.ts";
 import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
+import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
 import { Approvals } from "../mail/approvals.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
 import {
   type BrokerCalls,
+  type CredentialStore,
+  type IntegrationEvent,
   type IntegrationPreset,
   type NativeSourceDeps,
   type RegisteredTool,
@@ -73,6 +77,13 @@ export interface BrokerParts {
   onKill?: ((connectionId: string) => void | Promise<void>)[];
   /** The preset registry; default server/integrations presets(). */
   presets?: () => IntegrationPreset[];
+  /** The credential store (client registrations, for native presets' webhook secrets). Absent: read from the table. */
+  credentials?: Pick<CredentialStore, "client">;
+}
+
+export interface BrokerOptions {
+  /** How often the native-preset event poll checks which connections are due (each polls every pollIntervalMs). Default 60 s. */
+  pollTickMs?: number;
 }
 
 // ───────────── The service ─────────────
@@ -107,6 +118,12 @@ export interface BrokerService extends Lifecycle {
   acceptTool(connectionId: string, name: string): void;
   /** Emits a connection event (connection.*, approval.requested, `<preset>.*`) through the events outbox. */
   emitConnectionEvent(e: { type: EventType; connectionId: string; dedupeKey: string; detail?: Record<string, unknown> }): MailEvent | null;
+  /** Inbound webhooks of native presets (POST /hooks/connections/:id, server/integrations/hooks.ts). */
+  hooks: ConnectionHookHost;
+  /** The connection's inbound webhook URL, or null without a public https URL (then its events are polled). */
+  webhookUrl(connectionId: string): string | null;
+  /** Polls every due native connection without a webhook URL once; returns the number of events emitted. */
+  pollEvents(at?: number): Promise<number>;
 }
 
 const UNAVAILABLE = "Integrations aren't available in this build of agentinbox yet.";
@@ -137,7 +154,7 @@ function unavailableSource(connectionId: string): ToolSource {
   };
 }
 
-export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts> = {}): BrokerService {
+export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts> = {}, opts: BrokerOptions = {}): BrokerService {
   const parts: BrokerParts = { ...stubParts(), ...given };
   const log = ctx.log.child("broker");
   const sources = new Map<string, ToolSource>();
@@ -155,7 +172,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
   function createSource(c: Connection): ToolSource {
     if (c.kind === "remote_http") return parts.connector.createSource(c);
-    const preset = c.preset ? ((parts.presets ?? presets)().find((p) => p.id === c.preset) ?? null) : null;
+    const preset = presetOf(c);
     if (!preset?.createSource) return unavailableSource(c.id);
     return preset.createSource(parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
   }
@@ -174,6 +191,91 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   const onSettings = (s: { brokerUpstreams: boolean }) => {
     if (!s.brokerUpstreams && sources.size) void closeAll();
   };
+
+  const presetOf = (c: Connection): IntegrationPreset | null => (c.preset ? ((parts.presets ?? presets)().find((p) => p.id === c.preset) ?? null) : null);
+
+  /** The client registration (e.g. WHOOP's pasted client id and secret), via the store or the table. */
+  function clientRecord(connectionId: string): Record<string, unknown> | null {
+    if (parts.credentials) return parts.credentials.client(connectionId);
+    const row = ctx.db.get<{ oauth_client_enc: string | null }>("SELECT oauth_client_enc FROM connection_credentials WHERE connection_id = ?", connectionId);
+    if (!row?.oauth_client_enc) return null;
+    try {
+      const parsed: unknown = JSON.parse(ctx.crypto.decrypt(row.oauth_client_enc));
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Native preset events into the outbox: only the preset's own `<id>.*` types, only for that connection. */
+  function emitIntegrationEvents(connection: Connection, preset: IntegrationPreset, events: IntegrationEvent[]): number {
+    let n = 0;
+    for (const e of events) {
+      if (e.connectionId !== connection.id || !e.type.startsWith(`${preset.id}.`) || !isPresetEventType(e.type)) {
+        log.warn("Dropped an integration event", { connection: connection.id, type: e.type.slice(0, 80) });
+        continue;
+      }
+      if (ctx.events.emit({ type: e.type, connectionId: connection.id, dedupeKey: `${connection.id}:${e.dedupeKey}`, detail: e.data })) n++;
+    }
+    return n;
+  }
+
+  const hooks: ConnectionHookHost = {
+    webhookTarget(connectionId) {
+      const c = getConnection(ctx, connectionId);
+      if (!c || c.status === "disabled" || c.status === "needs_reauth") return null;
+      const preset = presetOf(c);
+      if (!preset?.events?.handleWebhook || preset.auth.type !== "user_app") return null;
+      const secret = clientRecord(connectionId)?.[preset.auth.clientSecretInput];
+      if (typeof secret !== "string" || !secret) return null;
+      return { preset, deps: parts.nativeDeps?.(c) ?? defaultNativeDeps(c), clientSecret: secret };
+    },
+    emit(events) {
+      const byConnection = new Map<string, IntegrationEvent[]>();
+      for (const e of events) byConnection.set(e.connectionId, [...(byConnection.get(e.connectionId) ?? []), e]);
+      for (const [id, list] of byConnection) {
+        const c = getConnection(ctx, id);
+        const preset = c ? presetOf(c) : null;
+        if (c && preset) emitIntegrationEvents(c, preset, list);
+      }
+    },
+  };
+
+  const webhookUrl = (connectionId: string): string | null => {
+    const publicUrl = ctx.settings.publicUrl();
+    return publicUrl.startsWith("https://") ? connectionHookUrl(publicUrl, connectionId) : null;
+  };
+
+  const lastPoll = new Map<string, number>();
+  let polling = false;
+  async function pollEvents(at = Date.now()): Promise<number> {
+    if (polling || !enabled()) return 0;
+    polling = true;
+    let emitted = 0;
+    try {
+      for (const c of listConnections(ctx)) {
+        if (c.kind === "remote_http" || c.status === "disabled" || c.status === "needs_reauth" || webhookUrl(c.id)) continue;
+        const preset = presetOf(c);
+        const poll = preset?.events?.poll;
+        if (!preset || !poll) continue;
+        const interval = preset.events?.pollIntervalMs ?? 15 * 60_000;
+        if (at - (lastPoll.get(c.id) ?? 0) < interval) continue;
+        lastPoll.set(c.id, at);
+        try {
+          const cursor = ctx.db.get<{ events_cursor: string | null }>("SELECT events_cursor FROM connections WHERE id = ?", c.id)?.events_cursor ?? null;
+          const r = await poll(cursor, parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
+          emitted += emitIntegrationEvents(c, preset, r.events);
+          ctx.db.run("UPDATE connections SET events_cursor = ? WHERE id = ?", r.cursor, c.id);
+        } catch (err) {
+          log.warn("Integration event poll failed", { connection: c.id, error: errorMessage(err) });
+        }
+      }
+    } finally {
+      polling = false;
+    }
+    return emitted;
+  }
+  let pollTimer: NodeJS.Timeout | null = null;
 
   return {
     enabled,
@@ -257,12 +359,19 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       return ctx.events.emit({ type: e.type, connectionId: e.connectionId, dedupeKey: e.dedupeKey, detail: e.detail });
     },
 
+    hooks,
+    webhookUrl,
+    pollEvents,
+
     start() {
       ctx.bus.on("settings", onSettings);
+      pollTimer = setInterval(() => void pollEvents(), opts.pollTickMs ?? 60_000);
+      pollTimer.unref();
     },
 
     async stop() {
       ctx.bus.off("settings", onSettings);
+      if (pollTimer) clearInterval(pollTimer);
       await closeAll();
     },
   };

@@ -69,6 +69,11 @@ export interface BrokerToolState {
   /** Exposed names listed to this agent. */
   dynamic: Set<string>;
   signal?: AbortSignal;
+  /**
+   * Search mode (M3): list only these exposed names directly; null or absent lists every tool. get_call_status
+   * is always listed.
+   */
+  only?: ReadonlySet<string> | null;
 }
 
 export function registerBrokerTools(ctx: AppContext, server: McpServer, principal: AgentPrincipal, view: AgentBrokerView, state: BrokerToolState): void {
@@ -112,7 +117,7 @@ export function registerBrokerTools(ctx: AppContext, server: McpServer, principa
 
   // ───────────── upstream tools ─────────────
 
-  const tools = view.tools.filter(listable);
+  const tools = view.tools.filter((t) => listable(t) && (!state.only || state.only.has(t.exposedName)));
   if (!tools.length) return;
   for (const t of tools) state.dynamic.add(t.exposedName);
   const listed = tools.map(toTool);
