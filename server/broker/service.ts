@@ -31,7 +31,8 @@ import { conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { randomToken } from "../util/ids.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
 import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
-import { tableCredentials } from "./credentials-table.ts";
+import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
+import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
 import {
   type BrokerCalls,
@@ -51,7 +52,7 @@ import {
 /** StartConnectResult without the view (the API adds the fresh ConnectionView on "connected"). */
 export type ConnectOutcome = Exclude<StartConnectResult, { status: "connected" }> | { status: "connected" };
 
-/** The upstream runtime's entry points (server/broker/upstream/*). Stubbed until that branch lands. */
+/** The upstream runtime's entry points (server/broker/upstream/*), adapted in server/broker/connector.ts. */
 export interface Connector {
   /** Probes an MCP URL: reachable, which auth, blocked by the SSRF guard. Never stores anything. */
   probe(input: { url: string; privateTarget: string | null }, signal: AbortSignal): Promise<ConnectionProbe>;
@@ -59,6 +60,12 @@ export interface Connector {
   startConnect(connection: Connection, input: StartConnectInput, signal: AbortSignal): Promise<ConnectOutcome>;
   /** The ToolSource for a remote_http connection. */
   createSource(connection: Connection): ToolSource;
+  /** Paste mode: finishes a sign-in from the landing URL the user copied. */
+  finishFromUrl?(raw: string): Promise<{ status: "connected"; connectionId: string } | { status: "error"; message: string; connectionId: null }>;
+  /** Drops the pooled session and fetch (URL or allow edited, reconnect, kill, delete). */
+  invalidate?(connectionId: string): Promise<void>;
+  /** Closes the session, stops refreshing and deletes every credential (URL edit). */
+  disconnect?(connectionId: string): Promise<void>;
 }
 
 export interface BrokerParts {
@@ -88,7 +95,7 @@ export interface BrokerParts {
   onKill?: ((connectionId: string) => void | Promise<void>)[];
   /** The preset registry; default server/integrations presets(). */
   presets?: () => IntegrationPreset[];
-  /** The credential store. Absent: tableCredentials (no refresh logic) until server/broker/credentials lands. */
+  /** The credential store. Default: the upstream runtime's (server/broker/credentials). */
   credentials?: CredentialStore;
 }
 
@@ -155,7 +162,7 @@ export interface BrokerService extends Lifecycle {
 const UNAVAILABLE = "Integrations aren't available in this build of agentinbox yet.";
 const unavailable = (): ToolResult => ({ isError: true, content: [{ type: "text", text: UNAVAILABLE }] });
 
-/** Inert defaults for parts not wired yet (see the header); calls and call status come from the policy runtime. */
+/** Inert parts, for tests that don't want the catalog or the upstream runtime. */
 export function stubParts(): Pick<BrokerParts, "registry" | "connector"> {
   return {
     registry: { forAgent: () => [], resolve: () => null },
@@ -182,9 +189,22 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   const log = ctx.log.child("broker");
   const sources = new Map<string, ToolSource>();
   const enabled = () => ctx.settings.get().brokerUpstreams;
-  const credentials = given.credentials ?? tableCredentials(ctx);
   const presetList = () => (given.presets ?? presets)();
   const presetFor = (presetId: string | null) => (presetId ? (presetList().find((p) => p.id === presetId) ?? null) : null);
+
+  // The upstream runtime (W3/W4): credential store, refresher, connect flow, remote sources. Created here, first,
+  // so its connection events go to the outbox; native OAuth flows are registered before start() runs.
+  const up = upstreams(ctx, {
+    emit: (e) => {
+      try {
+        ctx.events.emit({ type: e.type, connectionId: e.connectionId, dedupeKey: e.dedupeKey, detail: e.detail });
+      } catch (err) {
+        log.error(`${e.type} event failed`, { error: errorMessage(err) });
+      }
+    },
+  });
+  registerNativeFlows(up);
+  const credentials = given.credentials ?? up.store;
 
   // The catalog (W5): pins, holds and the per-agent registry over upstream_tools.
   const store = new SqliteCatalogStore(ctx.db);
@@ -210,7 +230,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     preset: (id) => presetFor(getConnection(ctx, id)?.preset ?? null),
   });
   catalog.onChange(() => catalogRegistry.invalidate());
-  const base = { ...stubParts(), registry: catalogRegistry as ToolRegistry, ...given };
+  const base = { registry: catalogRegistry as ToolRegistry, connector: upstreamConnector(ctx, up, presetFor), ...given };
   const invalidate = (scope: InvalidateScope) => {
     if (given.invalidate) return given.invalidate(scope);
     if (typeof scope === "object" && "agentId" in scope) catalogRegistry.invalidateAgent(scope.agentId);
@@ -222,6 +242,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     registry: base.registry,
     sources: { source: (id) => service.source(id), close: (id) => closeSource(id) },
     credentials,
+    refresher: up.refresher,
     onApprovalRequested: (ev) => {
       try {
         const { type, connectionId, ...detail } = ev;
@@ -246,6 +267,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     const s = sources.get(connectionId);
     sources.delete(connectionId);
     await s?.close().catch((err: unknown) => log.warn("Closing a tool source failed", { connection: connectionId, error: errorMessage(err) }));
+    // The runtime pools remote sessions too: drop its entry, or the next source would be the closed one.
+    await parts.connector.invalidate?.(connectionId).catch((err: unknown) => log.warn("Dropping an upstream session failed", { connection: connectionId, error: errorMessage(err) }));
   };
   const closeAll = async () => {
     await Promise.all([...sources.keys()].map(closeSource));
@@ -258,22 +281,25 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return preset.createSource(parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
   }
 
-  function defaultNativeDeps(c: Connection): NativeSourceDeps {
-    return {
-      connectionId: c.id,
-      accessToken: async () => {
-        throw new SourceError("needs_reauth", `The owner must reconnect ${c.name} in agentinbox (Connections → Reconnect).`);
-      },
-      fetch: globalThis.fetch,
-      log: { info: (msg, meta) => log.info(msg, meta), warn: (msg, meta) => log.warn(msg, meta) },
-    };
-  }
+  const defaultNativeDeps = (c: Connection): NativeSourceDeps => nativeDepsFor(ctx, up, c);
 
-  /** Catalog listing per connection: the source is built on first use. */
+  /**
+   * Catalog listing per connection. The catalog gets a proxy that resolves the live source on every listing, so a
+   * reconnect (which replaces the pooled session) never leaves it on a closed one.
+   */
   const attach = (connectionId: string) => {
-    if (!enabled()) return;
-    const source = service.source(connectionId);
-    if (source) void catalog.attach(source);
+    if (!enabled() || !service.source(connectionId)) return;
+    const live = (): ToolSource => {
+      const s = service.source(connectionId);
+      if (!s) throw new SourceError("unavailable", "The connection is disabled or the broker is off");
+      return s;
+    };
+    void catalog.attach({
+      connectionId,
+      listTools: (signal) => live().listTools(signal),
+      callTool: (name, args, callCtx) => live().callTool(name, args, callCtx),
+      close: async () => {},
+    });
   };
   const attachAll = () => {
     for (const c of listConnections(ctx)) if (c.status !== "disabled") attach(c.id);
@@ -392,10 +418,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
     source(connectionId) {
       if (!enabled()) return null;
-      const existing = sources.get(connectionId);
-      if (existing) return existing;
       const c = getConnection(ctx, connectionId);
       if (!c || c.status === "disabled") return null;
+      // Remote sources are pooled by the upstream runtime, which drops and rebuilds them on reconnect, URL or
+      // allow edits: never cached here, so nothing keeps using a closed session.
+      if (c.kind === "remote_http") return createSource(c);
+      const existing = sources.get(connectionId);
+      if (existing) return existing;
       const s = createSource(c);
       sources.set(connectionId, s);
       return s;

@@ -46,6 +46,11 @@ export interface StartConnectOptions {
   reconnectPolicy?: IntegrationPreset["reconnectPolicy"];
   /** "https_localhost": paste mode on https://localhost/oauth/connections/callback (providers refusing http://localhost). */
   redirect?: "default" | "https_localhost";
+  /**
+   * A native preset's candidate client (the user's pasted app): used for this sign-in and stored only with the
+   * tokens once the consent completes.
+   */
+  nativeClient?: Record<string, unknown> | null;
 }
 
 export interface StartConnectResult {
@@ -276,8 +281,10 @@ export class UpstreamRuntime {
     let client: StoredClient | null = null;
 
     const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
+    let nativeCandidate: Record<string, unknown> | null = null;
     if (native) {
-      authUrl = native.authorizeUrl({ connectionId, client: this.store.client(connectionId), redirectUri, state });
+      nativeCandidate = o.nativeClient ?? null;
+      authUrl = native.authorizeUrl({ connectionId, client: nativeCandidate ?? this.store.client(connectionId), redirectUri, state });
       pending = { issuer: new URL(authUrl).origin, resource: "", redirectUri, authorizationEndpoint: authUrl, tokenEndpoint: "", scope: null, issParameter: false };
     } else {
       if (conn.kind !== "remote_http" || !conn.url) throw new HttpError(400, "connection_kind", `${conn.name} has no sign-in flow`);
@@ -318,9 +325,14 @@ export class UpstreamRuntime {
         issParameter: d.metadata.authorization_response_iss_parameter_supported === true,
       };
     }
-    const full: PendingAuth = { ...pending, ...(o.reconnectPolicy?.maxLifetimeDays ? { capDays: o.reconnectPolicy.maxLifetimeDays } : {}) };
+    const full: PendingAuth = {
+      ...pending,
+      ...(o.reconnectPolicy?.maxLifetimeDays ? { capDays: o.reconnectPolicy.maxLifetimeDays } : {}),
+      // The server this sign-in is for: a URL edit before the callback makes it void.
+      ...(conn.url ? { origin: originKey(conn.url) } : {}),
+    };
     // Each flow keeps its own verifier and discovery result: concurrent Reconnects don't overwrite each other.
-    this.store.addFlow(connectionId, state, { verifier, redirectUri, pending: full, client });
+    this.store.addFlow(connectionId, state, { verifier, redirectUri, pending: full, client: native ? nativeCandidate : client });
     this.ctx.db.run("DELETE FROM oauth_states WHERE created_at < ?", new Date(this.now() - STATE_TTL_MS).toISOString());
     this.ctx.db.run(
       "INSERT INTO oauth_states (state, code_verifier, redirect_uri, reauth_account_id, created_at, connection_id) VALUES (?, '', ?, NULL, ?, ?)",
@@ -366,6 +378,9 @@ export class UpstreamRuntime {
     const pending = flow?.pending ?? null;
     if (!flow || !pending) throw new HttpError(400, "oauth_state", "This sign-in link has expired or was already used.", "Start the connection again.");
     const native = conn.kind !== "remote_http" && conn.preset ? this.native.get(conn.preset) : undefined;
+    if (pending.origin !== undefined && (!conn.url || originKey(conn.url) !== pending.origin)) {
+      throw new HttpError(409, "connection_changed", "The connection's URL changed after this sign-in started.", "Connect again from Connections in the console.");
+    }
 
     // RFC 9207, before acting on (or showing) anything in the response, errors included: a present `iss` must be
     // the issuer we started with, and a server that promises it must send it.
@@ -388,9 +403,11 @@ export class UpstreamRuntime {
     let registration: string | null = null;
     const signal = AbortSignal.timeout(30_000);
     if (native) {
-      const out = await native.exchange(q.code, { connectionId, client: this.store.client(connectionId), redirectUri: flow.redirectUri, signal });
+      // The candidate client this sign-in started with (a pasted app), else the stored one.
+      const nativeClient = (flow.client as Record<string, unknown> | null | undefined) ?? this.store.client(connectionId);
+      const out = await native.exchange(q.code, { connectionId, client: nativeClient, redirectUri: flow.redirectUri, signal });
       tokens = out.tokens;
-      client = out.client ?? null;
+      client = out.client ?? (flow.client ? nativeClient : null);
     } else {
       const candidate = flow.client as StoredClient | null | undefined;
       if (!candidate?.client_id || candidate.issuer !== pending.issuer) {

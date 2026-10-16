@@ -27,16 +27,23 @@ import { connectionHookUrl } from "../integrations/hooks.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
-import { badRequest, conflict, HttpError, notFound } from "../util/errors.ts";
+import { canonicalPrivateTarget, originKey, PrivateTargetError, validateUpstreamUrl } from "../broker/upstream/fetch.ts";
+import { badRequest, conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
 import { newId, randomToken } from "../util/ids.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
+/** The upstream runtime's URL rule (http(s), no userinfo): the same check the connect flow applies. */
 const httpUrl = z
   .string()
   .trim()
   .max(2048)
-  .refine((u) => URL.canParse(u) && /^https?:$/.test(new URL(u).protocol), "URL must be a full http(s) URL, e.g. https://mcp.example.com/mcp")
-  .refine((u) => !URL.canParse(u) || (!new URL(u).username && !new URL(u).password), "URL must not contain credentials; add them when connecting instead");
+  .superRefine((u, issues) => {
+    try {
+      validateUpstreamUrl(u);
+    } catch (err) {
+      issues.addIssue({ code: "custom", message: errorMessage(err) });
+    }
+  });
 const slug = z.string().trim().regex(CONNECTION_SLUG_RE, "Slug must be 1-24 lowercase letters, digits or dashes");
 const name = z.string().trim().min(1, "Name is required").max(100, "Name must be at most 100 characters");
 const level = z.enum(ACCESS_LEVELS);
@@ -57,6 +64,7 @@ const grantsSchema = z.object({ grants: z.array(z.object({ agentId: z.string().m
 const privateTargetSchema = z.object({ allow: z.boolean() }).strict();
 const acceptSchema = z.object({ candidateHash: z.string().min(1).max(128) }).strict();
 const probeSchema = z.object({ url: httpUrl, connectionId: z.string().optional() }).strict();
+const finishSchema = z.object({ url: z.string().trim().min(1).max(8192) }).strict();
 const connectSchema = z
   .object({
     header: z.object({ name: z.string().trim().regex(/^[A-Za-z0-9-]{1,100}$/, "Header name must be letters, digits or dashes"), value: z.string().min(1).max(8192) }).strict().optional(),
@@ -66,10 +74,16 @@ const connectSchema = z
 
 const authTypeOf = (a: PresetAuth): ConnectionAuthType => (a.type === "none" ? "none" : a.type === "header" ? "header" : "oauth");
 
-/** `scheme://host:port` of a URL, with the default port spelled out (the private-target allow is pinned to it). */
+/**
+ * The canonical private-target allow for a connection URL (`scheme://host:port`, explicit port), by the upstream
+ * guard's own rule (canonicalPrivateTarget); 400 when the host can't be allowed (e.g. an IPv6 literal).
+ */
 export function exactOrigin(url: string): string {
-  const u = new URL(url);
-  return `${u.protocol}//${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  try {
+    return canonicalPrivateTarget(originKey(url));
+  } catch (err) {
+    throw badRequest(err instanceof PrivateTargetError ? err.message : "That URL can't be allowed", "Use a hostname or an IPv4 address.");
+  }
 }
 
 /** A free slug from a host or preset slug: lowercase, dashes, at most 24, suffixed -2, -3… on collision. */
@@ -184,8 +198,8 @@ export function connectionsApi(ctx: AppContext) {
   app.post("/connections/probe", async (c) => {
     const body = await readBody(c, probeSchema);
     const conn = body.connectionId ? requireConnection(body.connectionId) : null;
-    // The allow only covers the exact origin it was granted for.
-    const privateTarget = conn?.privateTarget && conn.privateTarget === exactOrigin(body.url) ? conn.privateTarget : null;
+    // The allow only covers the exact origin it was granted for (the guard re-checks it too).
+    const privateTarget = conn?.privateTarget && conn.url && originKey(conn.url) === originKey(body.url) ? conn.privateTarget : null;
     return c.json(await ctx.broker.connector.probe({ url: body.url, privateTarget }, c.req.raw.signal));
   });
 
@@ -281,12 +295,17 @@ export function connectionsApi(ctx: AppContext) {
           t,
           id,
         );
-        credentialsCleared = ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", id).changes > 0;
+        credentialsCleared = !!ctx.db.get("SELECT 1 AS x FROM connection_credentials WHERE connection_id = ?", id);
+        // Sign-ins started for the old server can't complete (finishConnect also checks the origin).
+        ctx.db.run("DELETE FROM oauth_states WHERE connection_id = ?", id);
         cancelled = approvals.cancelForConnection(id, null, `${before.name}'s URL changed`);
         changed.push("url");
       }
     });
     if (changed.includes("url")) {
+      // The runtime's disconnect: closes the session, stops the refresher and deletes every credential.
+      if (ctx.broker.connector.disconnect) await ctx.broker.connector.disconnect(id);
+      else ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", id);
       ctx.broker.catalog.detach(id);
       await ctx.broker.reload(id);
       if (before.privateTarget) audit("connection.private_target.revoke", id, { target: before.privateTarget, why: "url_changed" });
@@ -318,8 +337,23 @@ export function connectionsApi(ctx: AppContext) {
     await ctx.broker.reload(id);
     if (r.status === "connected") ctx.broker.attach(id);
     audit("connection.connect", id, { status: r.status, header: !!body.header });
-    if (r.status === "connected") return c.json<StartConnectResult>({ status: "connected", connection: view(id) });
+    if (r.status === "connected") {
+      ctx.broker.invalidate({ connectionId: id });
+      return c.json<StartConnectResult>({ status: "connected", connection: view(id) });
+    }
     return c.json<StartConnectResult>(r);
+  });
+
+  // Paste mode (no direct callback to this install): the landing URL the user copied after approving.
+  app.post("/connections/finish", async (c) => {
+    const { url } = await readBody(c, finishSchema);
+    const finish = ctx.broker.connector.finishFromUrl;
+    if (!finish) throw new HttpError(404, "not_found", "No such API route");
+    const r = await finish(url);
+    if (r.status === "error") return c.json<StartConnectResult>({ status: "error", message: r.message }, 400);
+    ctx.broker.invalidate({ connectionId: r.connectionId });
+    ctx.broker.attach(r.connectionId);
+    return c.json<StartConnectResult>({ status: "connected", connection: view(r.connectionId) });
   });
 
   app.get("/connections/:id/grants", (c) => {
