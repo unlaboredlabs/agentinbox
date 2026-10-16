@@ -54,8 +54,44 @@ const yesNo = (b: boolean | undefined) => (b ? "Yes" : null);
 const list = (xs: string[]) => (xs.length < 2 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 const people = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
 
-type When = { start: string; end: string; allDay: boolean };
-const when = (w: Partial<When>, fmt: FormatOptions) => (w.start ? fmtEventWhen({ start: w.start, end: w.end ?? w.start, allDay: !!w.allDay }, fmt) : null);
+type When = { start: string; end: string; allDay: boolean; timeZone: string | null };
+const HAS_OFFSET = /(?:Z|[+-]\d{2}:\d{2})$/i;
+
+/** UTC minus wall clock of instant `t` in `tz`, in ms. */
+function zoneOffset(t: number, tz: string): number {
+  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const p = Object.fromEntries(f.formatToParts(t).map((x) => [x.type, Number(x.value)]));
+  return Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!) - (t - (((t % 1000) + 1000) % 1000));
+}
+
+/**
+ * A date-time without an offset is wall-clock time in `tz` (the server accepts that with time_zone and
+ * Google reads it so): the instant it names. Two passes settle DST edges. Offset date-times pass through.
+ */
+function inZone(s: string, tz: string): string {
+  if (HAS_OFFSET.test(s)) return s;
+  const wall = Date.parse(`${s}Z`);
+  if (Number.isNaN(wall)) return s;
+  const first = wall - zoneOffset(wall, tz);
+  return new Date(wall - zoneOffset(first, tz)).toISOString();
+}
+
+/**
+ * When, as Google will apply it. With a time zone the times are shown in it and labeled ("2:00 – 3:00 PM
+ * (Asia/Tokyo)"), so the label is always true. All-day dates are calendar dates: no zone applies.
+ */
+function when(w: Partial<When>, fmt: FormatOptions): string | null {
+  if (!w.start) return null;
+  const e = { start: w.start, end: w.end ?? w.start, allDay: !!w.allDay };
+  if (e.allDay || !w.timeZone) return fmtEventWhen(e, fmt);
+  const tz = w.timeZone;
+  try {
+    return `${fmtEventWhen({ ...e, start: inZone(e.start, tz), end: inZone(e.end, tz) }, { ...fmt, timeZone: tz })} (${tz})`;
+  } catch {
+    // A zone this browser's Intl doesn't know: the console's zone, unlabeled.
+    return fmtEventWhen(e, fmt);
+  }
+}
 const guestsOf = (e: CalendarEventSummary | null) => (e ? e.attendees.filter((x) => !x.resource).map((x) => x.email) : []);
 const repeats = (r: string[] | undefined) => (r?.length ? r.join("; ") : null);
 
@@ -100,7 +136,10 @@ export function calendarApprovalView(a: CalendarApproval, fmt: FormatOptions = {
         label: "When",
         key: "when",
         before: b ? when(b, fmt) : null,
-        after: when({ start: ch.start ?? b?.start, end: ch.end ?? b?.end, allDay: ch.allDay ?? b?.allDay }, fmt),
+        after: when(
+          { start: ch.start ?? b?.start, end: ch.end ?? b?.end, allDay: ch.allDay ?? b?.allDay, timeZone: (ch.start !== undefined && ch.timeZone) || b?.timeZone },
+          fmt,
+        ),
       },
       { label: "Where", key: "location", before: b?.location ?? null, after: ch.location ?? b?.location ?? null },
       { label: "Video call", key: "addConference", before: b?.conferenceUrl ? "Yes" : null, after: yesNo(ch.addConference) ?? (b?.conferenceUrl ? "Yes" : null) },

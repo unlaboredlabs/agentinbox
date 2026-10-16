@@ -265,7 +265,8 @@ describe("calendar approvals", () => {
     });
     const v = calendarApprovalView(a, FMT);
     const when = v.rows.find((r) => r.label === "When")!;
-    expect(when).toEqual({ label: "When", before: "Tue, Oct 20, 2:00 – 3:00 PM", after: "Tue, Oct 20, 4:00 – 5:00 PM", changed: true });
+    // The event's zone (Europe/Berlin, UTC+2 in October), labeled.
+    expect(when).toEqual({ label: "When", before: "Tue, Oct 20, 4:00 – 5:00 PM (Europe/Berlin)", after: "Tue, Oct 20, 6:00 – 7:00 PM (Europe/Berlin)", changed: true });
     expect(v.rows.find((r) => r.label === "Where")).toEqual({ label: "Where", before: "Room 4", after: "Room 4", changed: false });
     expect(v.effects).toEqual([
       "Changes the time and the guests of “Quarterly review” on Ops.",
@@ -275,6 +276,33 @@ describe("calendar approvals", () => {
     ]);
     expect(v.guests).toEqual(["carol@acme.dev"]);
     expect(v.description).toBeNull();
+  });
+
+  it("date-times without an offset are wall-clock time in the change's time zone, labeled", () => {
+    const a = approval("calendar.create", {
+      change: { summary: "Sync", start: "2026-10-20T14:00:00", end: "2026-10-20T15:00:00", allDay: false, timeZone: "Asia/Tokyo" },
+    });
+    // The console's zone doesn't matter: 14:00 Tokyo is shown as 14:00 Tokyo (05:00 UTC, 07:00 Berlin).
+    for (const timeZone of ["UTC", "Europe/Berlin", "America/Los_Angeles"]) {
+      const v = calendarApprovalView(a, { ...FMT, timeZone });
+      expect(v.rows.find((r) => r.label === "When")!.after).toBe("Tue, Oct 20, 2:00 – 3:00 PM (Asia/Tokyo)");
+      expect(v.effects[0]).toBe("Creates “Sync” on Ops, Tue, Oct 20, 2:00 – 3:00 PM (Asia/Tokyo).");
+    }
+    // Just after New York leaves DST (Nov 1 2026, 02:00): 03:00 is EST (08:00 UTC), not EDT.
+    const dst = approval("calendar.update", {
+      before: summary(),
+      change: { start: "2026-11-01T03:00:00", end: "2026-11-01T10:00:00", allDay: false, timeZone: "America/New_York" },
+    });
+    expect(calendarApprovalView(dst, FMT).rows.find((r) => r.label === "When")!.after).toBe("Sun, Nov 1, 3:00 – 10:00 AM (America/New_York)");
+  });
+
+  it("all-day dates show no zone and never shift", () => {
+    const a = approval("calendar.update", {
+      before: summary({ allDay: true, start: "2026-10-22", end: "2026-10-23", timeZone: "Pacific/Auckland" }),
+      change: { start: "2026-10-23", end: "2026-10-25", allDay: true },
+    });
+    const when = calendarApprovalView(a, { ...FMT, timeZone: "America/Los_Angeles" }).rows.find((r) => r.label === "When")!;
+    expect(when).toMatchObject({ before: "Thu, Oct 22 (all day)", after: "Oct 23 – 24 (all day)" });
   });
 
   it("notifications off: says nobody is emailed and that new guests still see the event", () => {
