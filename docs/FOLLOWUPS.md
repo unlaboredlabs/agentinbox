@@ -201,3 +201,4 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `mime_type` isn't compared with the extension (an `.html` file can be labelled `application/pdf`).
 - Look-alike dots (U+FF0E) in filenames pass the blocklist (Gmail's own content check is the backstop).
 - `draftFingerprint` doesn't hash attachment bytes, so a same-size swap made in the Gmail UI wouldn't be caught (pre-existing; no agent tool can do it).
+- Attachment filenames: only strictly valid encoded-words are refused; a client tolerating spaces inside one (`=?UTF-8?Q?evil .exe?=`) might show `evil .exe`. Refusing any name with `=?` … `?=` would close it.
