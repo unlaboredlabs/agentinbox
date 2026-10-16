@@ -26,8 +26,8 @@ import type {
 } from "@shared/types";
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { apiGet } from "./api";
-import type { ApprovalRule, McpCallApprovalView, UpstreamTool } from "@shared/types";
-import type { AgentConnection, ConnectionView, PresetView } from "./broker-dto";
+import type { ApprovalRule, ConnectionGrant, ConnectionView, HeldToolView, McpCallApprovalView, PresetView } from "@shared/types";
+import { agentConnections } from "../components/connections/connection-flow";
 
 export type * from "./broker-dto";
 
@@ -161,14 +161,24 @@ export const queries = {
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => apiGet<ConnectionView[]>("/api/connections"), refetchInterval: 60_000 }),
   connection: (id: string) =>
     queryOptions({ queryKey: keys.connection(id), queryFn: () => apiGet<ConnectionView>(`/api/connections/${encodeURIComponent(id)}`) }),
-  /** A connection's tools; held ones carry the candidate definition next to the pinned one. */
-  connectionTools: (id: string) =>
-    queryOptions({ queryKey: [...keys.connection(id), "tools"], queryFn: () => apiGet<UpstreamTool[]>(`/api/connections/${encodeURIComponent(id)}/tools`) }),
+  /** Tools on hold on one connection, each with its pinned and candidate definition and their diff. */
+  heldTools: (id: string) =>
+    queryOptions({ queryKey: [...keys.connection(id), "held"], queryFn: () => apiGet<HeldToolView[]>(`/api/connections/${encodeURIComponent(id)}/held`) }),
   presets: () => queryOptions({ queryKey: keys.presets, queryFn: () => apiGet<PresetView[]>("/api/connections/presets"), staleTime: 10 * 60_000 }),
+  connectionGrants: (connectionId: string) =>
+    queryOptions({
+      queryKey: [...keys.connection(connectionId), "grants"],
+      queryFn: () => apiGet<ConnectionGrant[]>(`/api/connections/${encodeURIComponent(connectionId)}/grants`),
+    }),
+  /** One agent's level on every connection (adapter: the API keeps grants per connection). */
   agentConnections: (agentId: string) =>
     queryOptions({
       queryKey: keys.agentConnections(agentId),
-      queryFn: () => apiGet<AgentConnection[]>(`/api/agents/${encodeURIComponent(agentId)}/connections`),
+      queryFn: async () => {
+        const list = await apiGet<ConnectionView[]>("/api/connections");
+        const grants = await Promise.all(list.map((c) => apiGet<ConnectionGrant[]>(`/api/connections/${encodeURIComponent(c.id)}/grants`)));
+        return agentConnections(agentId, list, Object.fromEntries(list.map((c, i) => [c.id, grants[i]!])));
+      },
     }),
   approvalRules: (agentId: string) =>
     queryOptions({ queryKey: [...keys.approvalRules, agentId], queryFn: () => apiGet<ApprovalRule[]>("/api/approval-rules", { agentId }) }),

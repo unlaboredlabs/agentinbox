@@ -100,6 +100,8 @@ function setup(extra: Partial<BrokerParts> = {}) {
   let ctxRef: AppContext;
   const t = testContext({ broker: (ctx) => createBrokerService(ctx, fakeParts(() => ctxRef, rec, extra)) });
   ctxRef = t.ctx;
+  // These tests start with the broker off and turn it on (the default is on since the console, M1 PR 8).
+  t.ctx.settings.update({ brokerUpstreams: false });
   return { ...t, rec };
 }
 
@@ -278,6 +280,7 @@ describe("listener stream without Gmail", () => {
     seedConnection(ctx, { id: "con_1", slug: "notion", name: "Notion" }, { [agent.id]: "ask" });
     const open = () => fetch(`${url}/agent/v1/events/stream?start=beginning&types=approval.requested,connection.auth_failed`, { headers: { authorization: `Bearer ${apiKey}` } });
 
+    ctx.settings.update({ brokerUpstreams: false });
     const refused = await open();
     expect(refused.status).toBe(403);
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("no_read_grant");
@@ -444,6 +447,7 @@ describe("/api/connections", () => {
     const a = ctx.policy.createAgent({ name: "a" }).agent;
     const b = ctx.policy.createAgent({ name: "b" }).agent;
 
+    ctx.settings.update({ brokerUpstreams: false });
     expect((await req("/connections")).status).toBe(404);
     ctx.settings.update({ brokerUpstreams: true });
     expect(await json(await req("/connections"))).toEqual([]);

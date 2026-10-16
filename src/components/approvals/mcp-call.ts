@@ -68,6 +68,52 @@ export function targetName(pointer: string): string {
   return last.replace(/~1/g, "/").replace(/~0/g, "~") || pointer;
 }
 
+/** The value at a JSON Pointer (RFC 6901) in parsed arguments, or undefined. */
+export function atPointer(doc: unknown, pointer: string): unknown {
+  if (pointer === "") return doc;
+  if (!pointer.startsWith("/")) return undefined;
+  let cur: unknown = doc;
+  for (const raw of pointer.slice(1).split("/")) {
+    const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Array.isArray(cur) && /^(0|[1-9]\d*)$/.test(key)) cur = cur[Number(key)];
+    else if (cur && typeof cur === "object" && Object.prototype.hasOwnProperty.call(cur, key)) cur = (cur as Record<string, unknown>)[key];
+    else return undefined;
+  }
+  return cur;
+}
+
+export interface TargetChoice {
+  /** JSON Pointer sent as alwaysAllow.targetPath. */
+  path: string;
+  label: string;
+  /** The tool's own target (sent without targetPath: the server uses the tool's). */
+  own: boolean;
+}
+
+/**
+ * What "Always allow this" may be limited to: the tool's own target when it has one, else (generic tools) any of
+ * the call's arguments the server offers (argumentPaths), labelled with this call's value.
+ */
+export function targetChoices(v: Pick<McpCallApprovalView, "target" | "argumentPaths"> & { approval: { call: { args: string } } }): TargetChoice[] {
+  if (v.target) return [{ path: v.target.path, label: targetLabel(v.target), own: true }];
+  let args: unknown;
+  try {
+    args = JSON.parse(v.approval.call.args);
+  } catch {
+    return [];
+  }
+  return v.argumentPaths.flatMap((path) => {
+    const value = atPointer(args, path);
+    return value === undefined ? [] : [{ path, label: targetLabel({ path, value }), own: false }];
+  });
+}
+
+/** The approve body's alwaysAllow for a choice (null = any call to this tool). */
+export function alwaysAllowFor(choice: TargetChoice | null): { target?: boolean; targetPath?: string } {
+  if (!choice) return { target: false };
+  return choice.own ? { target: true } : { target: true, targetPath: choice.path };
+}
+
 /** Problems a reviewer must see before deciding, most serious first. */
 export function cardWarnings(v: Pick<McpCallApprovalView, "argsIntact" | "tool" | "connection">): string[] {
   const out: string[] = [];

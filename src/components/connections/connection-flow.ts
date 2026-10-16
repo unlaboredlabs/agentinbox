@@ -1,9 +1,19 @@
 // Console decisions for broker connections (docs/MCP-BROKER.md) as pure functions, so they can be tested directly:
-// a connection's status in plain words, the Add connection draft, what a probe found, access levels, held-tool
-// notices and diffs. No React and relative imports only: vitest and the server typecheck load this module too.
+// a connection's status in plain words, the Add connection draft and the request sequence it turns into, what a
+// probe found, access levels and held-tool notices. Built on the /api/connections DTOs in shared/types.ts.
+// No React and relative imports only: vitest and the server typecheck load this module too.
 
-import type { AccessLevel, UpstreamTool } from "../../../shared/types.ts";
-import type { AgentLevel, ConnectionOAuthMessage, ConnectionView, CreateConnectionInput, PresetView, ProbeResult, SetupStep } from "../../lib/broker-dto.ts";
+import type {
+  AccessLevel,
+  ConnectionGrant,
+  ConnectionProbe,
+  ConnectionView,
+  CreateConnectionInput,
+  PresetView,
+  SetupStepView,
+  StartConnectInput,
+} from "../../../shared/types.ts";
+import type { AgentConnection, AgentLevel } from "../../lib/broker-dto.ts";
 
 /** A subset of the console's Tone (src/lib/labels.ts). */
 type Tone = "good" | "warn" | "bad" | "idle";
@@ -39,15 +49,20 @@ export interface ConnectionStatusView {
   tone: Tone;
   /** One sentence; names the fix when there is one. */
   description: string;
-  /** The button that fixes it. */
-  action: "reconnect" | "enable" | null;
+  /** The button that fixes it. A disabled connection (the kill switch) comes back with a reconnect too. */
+  action: "reconnect" | null;
 }
 
-/** A connection's badge: active / needs reconnect / expiring in N days / disabled. Warns from 7 days before a reconnect date. */
+/** A connection's badge: active / needs reconnect / expiring in N days / disabled. Warns from 7 days before expiresAt. */
 export function connectionStatusView(c: Pick<ConnectionView, "status" | "statusReason" | "expiresAt" | "name">, now: number): ConnectionStatusView {
   switch (c.status) {
     case "disabled":
-      return { label: "Disabled", tone: "idle", description: "Agents don't see its tools. Turn it back on to use it again.", action: "enable" };
+      return {
+        label: "Disabled",
+        tone: "idle",
+        description: `${c.statusReason ? `${cap(c.statusReason)}. ` : ""}Agents don't see its tools. Reconnect to use it again.`,
+        action: "reconnect",
+      };
     case "needs_reauth":
       return {
         label: "Needs reconnect",
@@ -56,18 +71,11 @@ export function connectionStatusView(c: Pick<ConnectionView, "status" | "statusR
         action: "reconnect",
       };
     case "error":
-      return {
-        label: "Error",
-        tone: "bad",
-        description: `${c.statusReason ?? "The server isn't answering."} Reconnecting often fixes it.`,
-        action: "reconnect",
-      };
+      return { label: "Error", tone: "bad", description: `${c.statusReason ?? "The server isn't answering."} Reconnecting often fixes it.`, action: "reconnect" };
     case "active": {
       if (!c.expiresAt) return { label: "Active", tone: "good", description: "Working.", action: null };
       const days = daysLeft(c.expiresAt, now);
-      if (days <= 0) {
-        return { label: "Expired", tone: "bad", description: `Its sign-in has expired. Reconnect ${c.name} to keep it working.`, action: "reconnect" };
-      }
+      if (days <= 0) return { label: "Expired", tone: "bad", description: `Its sign-in has expired. Reconnect ${c.name} to keep it working.`, action: "reconnect" };
       if (days <= 7) {
         return {
           label: `Expires in ${days} day${days === 1 ? "" : "s"}`,
@@ -81,88 +89,46 @@ export function connectionStatusView(c: Pick<ConnectionView, "status" | "statusR
   }
 }
 
-// ───────────── Held tools ─────────────
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** "Notion changed 1 tool", per connection with held tools. */
-export function heldNotices(connections: readonly Pick<ConnectionView, "id" | "name" | "heldCount" | "status">[]): { id: string; text: string }[] {
+export function heldNotices(connections: readonly Pick<ConnectionView, "id" | "name" | "tools" | "status">[]): { id: string; text: string }[] {
   return connections
-    .filter((c) => c.heldCount > 0 && c.status !== "disabled")
-    .map((c) => ({ id: c.id, text: `${c.name} changed ${c.heldCount} tool${c.heldCount === 1 ? "" : "s"}` }));
+    .filter((c) => c.tools.held > 0 && c.status !== "disabled")
+    .map((c) => ({ id: c.id, text: `${c.name} changed ${c.tools.held} tool${c.tools.held === 1 ? "" : "s"}` }));
 }
 
-export type DiffLine = { kind: "same" | "add" | "del"; text: string };
+// ───────────── Agent access (adapter over per-connection grants) ─────────────
 
-/** Line diff (LCS) of two texts, for the accept-change page. */
-export function lineDiff(before: string, after: string): DiffLine[] {
-  const a = before === "" ? [] : before.split("\n");
-  const b = after === "" ? [] : after.split("\n");
-  const n = a.length;
-  const m = b.length;
-  // Big definitions: no LCS table (n×m), just old then new.
-  if (n * m > 250_000) return [...a.map((text) => ({ kind: "del" as const, text })), ...b.map((text) => ({ kind: "add" as const, text }))];
-  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) lcs[i]![j] = a[i] === b[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
-  }
-  const out: DiffLine[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      out.push({ kind: "same", text: a[i]! });
-      i++;
-      j++;
-    } else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) out.push({ kind: "del", text: a[i++]! });
-    else out.push({ kind: "add", text: b[j++]! });
-  }
-  while (i < n) out.push({ kind: "del", text: a[i++]! });
-  while (j < m) out.push({ kind: "add", text: b[j++]! });
-  return out;
+/** One agent's level on every connection, from the connections and each connection's grants. */
+export function agentConnections(agentId: string, connections: readonly ConnectionView[], grants: Record<string, readonly ConnectionGrant[]>): AgentConnection[] {
+  return connections.map((c) => ({
+    connectionId: c.id,
+    slug: c.slug,
+    name: c.name,
+    status: c.status,
+    level: grants[c.id]?.find((g) => g.agentId === agentId)?.level ?? "none",
+  }));
 }
 
-/** What changed in a held tool, as before/after text pairs (description, then the input schema; others when they differ). */
-export function heldDiff(t: Pick<UpstreamTool, "definition" | "candidate">): { label: string; before: string; after: string; changed: boolean }[] {
-  const json = (v: unknown) => (v === undefined ? "" : JSON.stringify(v, null, 2));
-  // Before: what's pinned (null for a new tool). After: what accepting would pin.
-  const p = t.definition;
-  const n = t.candidate;
-  const rows = [
-    { label: "Description", before: p?.description ?? "", after: n?.description ?? "" },
-    { label: "Arguments (input schema)", before: json(p?.inputSchema), after: json(n?.inputSchema) },
-    { label: "Title", before: p?.title ?? "", after: n?.title ?? "" },
-    { label: "Output schema", before: json(p?.outputSchema), after: json(n?.outputSchema) },
-    { label: "Annotations", before: json(p?.annotations), after: json(n?.annotations) },
-  ].map((r) => ({ ...r, changed: r.before !== r.after }));
-  // Description and arguments always show (so a reviewer sees them); the rest only when they changed.
-  return rows.filter((r, i) => i < 2 || r.changed);
+/** The PUT /api/connections/:id/grants body that sets one agent's level and keeps everyone else's. */
+export function grantsWith(grants: readonly ConnectionGrant[], agentId: string, level: AgentLevel): { grants: { agentId: string; level: AccessLevel }[] } {
+  const others = grants.filter((g) => g.agentId !== agentId).map((g) => ({ agentId: g.agentId, level: g.level }));
+  return { grants: level === "none" ? others : [...others, { agentId, level }] };
 }
 
 // ───────────── Upstream sign-in ─────────────
 
-/** The connection callback page's message (ConnectionOAuthMessage), for the connection being signed in only. */
-export function oauthMessageFor(data: unknown, connectionId: string | null): { ok: true } | { ok: false; code: string; error: string; hint: string | null } | null {
+/**
+ * The connection callback page's message (server/api/oauth.ts CONNECTION_CALLBACK_SCRIPT), for the connection being
+ * signed in only. It says which connection; whether it worked is read back from the connection (refetch).
+ */
+export function oauthMessageFor(data: unknown, connectionId: string | null): { ok: boolean; error: string | null } | null {
   if (!data || typeof data !== "object") return null;
-  const m = data as Partial<ConnectionOAuthMessage>;
+  const m = data as { type?: unknown; ok?: unknown; connectionId?: unknown; error?: unknown };
   if (m.type !== "agentinbox:connection-oauth") return null;
-  if (connectionId && m.connectionId && m.connectionId !== connectionId) return null;
-  if (m.ok) return { ok: true };
-  return { ok: false, code: m.code ?? "oauth_error", error: m.error ?? "The sign-in didn't complete.", hint: m.hint ?? null };
-}
-
-/** Checks a pasted callback address before sending it (paste mode); a problem in plain words, or null. */
-export function pastedProblem(value: string, state: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(value.trim());
-  } catch {
-    return "That isn't a full address. Copy everything in the address bar, starting with http.";
-  }
-  const err = url.searchParams.get("error");
-  if (err) return err === "access_denied" ? "This address says the sign-in was cancelled. Start again and approve it." : `The sign-in returned an error: ${err}`;
-  if (!url.searchParams.get("code")) return "This address has no authorization code. Copy it after approving the sign-in.";
-  const s = url.searchParams.get("state");
-  if (s && s !== state) return "This address belongs to an older sign-in attempt. Use the newest one.";
-  return null;
+  if (!connectionId || m.connectionId !== connectionId) return null;
+  return { ok: m.ok !== false, error: typeof m.error === "string" ? m.error : null };
 }
 
 // ───────────── Add connection ─────────────
@@ -199,7 +165,7 @@ export function slugProblem(slug: string, taken: readonly string[]): string | nu
 }
 
 /** Setup inputs still missing or not matching their pattern, by key. */
-export function inputProblems(steps: readonly SetupStep[], values: Record<string, string>): Record<string, string> {
+export function inputProblems(steps: readonly SetupStepView[], values: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const s of steps) {
     if (!s.input) continue;
@@ -218,145 +184,154 @@ export function inputProblems(steps: readonly SetupStep[], values: Record<string
   return out;
 }
 
-/** How the connection signs in to the upstream, as the dialog's control after the source is known. */
-export type AuthControl =
-  | { kind: "oauth"; issuer: string | null; needsClientId: boolean }
-  | { kind: "header"; headerName: string; prefix?: string }
-  | { kind: "none" }
-  | { kind: "private"; target: string; address: string; range: Extract<ProbeResult, { kind: "private" }>["range"] }
-  | { kind: "steps" };
+/** How the connection signs in, as the dialog's control once the source is known. */
+export type AuthControl = { kind: "oauth"; issuer: string | null; manual: boolean } | { kind: "header" } | { kind: "none" } | { kind: "private" } | { kind: "unknown" };
 
-export function authControl(source: { preset: PresetView } | { probe: ProbeResult }): AuthControl {
+export function authControl(source: { preset: PresetView } | { probe: ConnectionProbe }): AuthControl {
   if ("preset" in source) {
-    const p = source.preset;
-    if (p.auth === "mcp_oauth") return { kind: "oauth", issuer: null, needsClientId: false };
-    if (p.auth === "header") return { kind: "header", headerName: p.headerName ?? "Authorization", prefix: p.headerName ? undefined : "Bearer " };
-    // user_app (WHOOP): its setup steps collect the app's client id and secret; the sign-in follows.
-    if (p.auth === "user_app") return { kind: "steps" };
-    return { kind: "none" };
+    const t = source.preset.authType;
+    // A preset's own setup steps (WHOOP's app id and secret) are inputs; the OAuth sign-in follows them.
+    return t === "oauth" ? { kind: "oauth", issuer: null, manual: false } : t === "header" ? { kind: "header" } : { kind: "none" };
   }
-  const r = source.probe;
-  switch (r.kind) {
-    case "open":
-      return { kind: "none" };
-    case "oauth":
-      return { kind: "oauth", issuer: r.issuer, needsClientId: r.registration === "manual" };
-    case "header":
-      return { kind: "header", headerName: r.headerName, prefix: r.prefix };
-    case "private":
-      return { kind: "private", target: r.target, address: r.address, range: r.range };
+  const p = source.probe;
+  if (p.blocked === "private_target") return { kind: "private" };
+  if (p.auth === "oauth") return { kind: "oauth", issuer: p.issuer ?? null, manual: p.registration === "manual" };
+  if (p.auth === "header") return { kind: "header" };
+  if (p.auth === "none") return { kind: "none" };
+  return { kind: "unknown" };
+}
+
+/** `scheme://host:port` the private-target allow covers (default ports spelled out, as the server pins it). */
+export function exactOrigin(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return null;
   }
 }
 
-const RANGE_WORDS: Record<Extract<ProbeResult, { kind: "private" }>["range"], string> = {
-  loopback: "this computer",
-  private: "your local network",
-  cgnat: "your Tailscale network",
-  ula: "your private network",
-};
-
-/** One or two sentences about what the probe found. */
-export function probeSummary(r: ProbeResult): string {
-  const name = "serverName" in r && r.serverName ? `${r.serverName}: ` : "";
-  switch (r.kind) {
-    case "open":
-      return `${name}an MCP server that needs no sign-in${r.toolCount != null ? `, with ${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : ""}.`;
-    case "oauth": {
-      const host = hostOf(r.issuer);
-      if (r.registration === "manual") return `${name}signs in with ${host}. It doesn't register apps automatically, so you'll paste a client ID you created there.`;
-      return `${name}signs in with ${host}. agentinbox registers itself automatically, so there's nothing to set up there.`;
-    }
-    case "header":
-      return `${name}needs an API key or token. agentinbox keeps it encrypted and sends it in the ${r.headerName} header; agents never see it.`;
-    case "private":
-      return `This server is on ${RANGE_WORDS[r.range]} (${r.address}). agentinbox blocks those addresses unless you allow one.`;
+/** `host:port` of a URL. */
+export function hostPort(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return url;
   }
 }
 
 /** The private-network explanation shown with "Allow host:port". */
-export function privateExplanation(target: string, range: Extract<ProbeResult, { kind: "private" }>["range"]): string {
+export function privateExplanation(url: string): string {
   return (
-    `Allowing ${hostPort(target)} lets agentinbox connect to a server on ${RANGE_WORDS[range]}. ` +
+    `Allowing ${hostPort(url)} lets agentinbox connect to a server on this computer or your private network (like Tailscale). ` +
     "Only this connection gets it, only at this exact address, and only you can turn it on. " +
     "A server there can reach other services on that machine or network, so allow only servers you run or trust."
   );
 }
 
-const hostOf = (url: string) => {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
+/** One or two sentences about what the probe found (the server's words, with ours for the common cases). */
+export function probeSummary(p: ConnectionProbe): string {
+  if (p.blocked === "private_target") return "This server is on this computer or your private network. agentinbox blocks those addresses unless you allow one.";
+  if (p.blocked === "ssrf") return p.message || "agentinbox can't connect to this address.";
+  if (!p.reachable) return p.message || "agentinbox couldn't reach this server.";
+  if (p.auth === "oauth") {
+    const host = p.issuer ? hostPort(p.issuer).replace(/:443$/, "") : "its own sign-in";
+    return p.registration === "manual"
+      ? `Signs in with ${host}, which doesn't register apps automatically. ${p.message}`.trim()
+      : `Signs in with ${host}. agentinbox registers itself automatically, so there's nothing to set up there.`;
   }
-};
-
-/** `host:port` of `scheme://host:port`. */
-export function hostPort(target: string): string {
-  try {
-    const u = new URL(target);
-    return u.port ? `${u.hostname}:${u.port}` : u.hostname;
-  } catch {
-    return target;
-  }
+  if (p.auth === "header") return "Needs an API key or token. agentinbox keeps it encrypted and sends it with every request; agents never see it.";
+  if (p.auth === "none") return "An MCP server that needs no sign-in.";
+  return p.message;
 }
 
 export interface ConnectionDraft {
   preset: PresetView | null;
   url: string;
-  probe: ProbeResult | null;
+  probe: ConnectionProbe | null;
+  /** Created early when the private-target allow is needed (the allow belongs to a connection). */
+  createdId: string | null;
+  privateAllowed: boolean;
   slug: string;
-  displayName: string;
+  name: string;
   level: AccessLevel;
   /** "all" by default. */
   agents: "all" | string[];
+  headerName: string;
   headerValue: string;
-  clientId: string;
   inputs: Record<string, string>;
-  privateTarget: string | null;
 }
 
 export const emptyDraft = (preset: PresetView | null = null): ConnectionDraft => ({
   preset,
   url: preset?.url ?? "",
   probe: null,
+  createdId: null,
+  privateAllowed: false,
   slug: preset?.slug ?? "",
-  displayName: preset?.displayName ?? "",
+  name: preset?.displayName ?? "",
   level: DEFAULT_LEVEL,
   agents: "all",
+  headerName: "Authorization",
   headerValue: "",
-  clientId: "",
   inputs: {},
-  privateTarget: null,
 });
+
+export const draftControl = (d: ConnectionDraft): AuthControl | null => (d.preset ? authControl({ preset: d.preset }) : d.probe ? authControl({ probe: d.probe }) : null);
 
 /** What still blocks "Connect", in the order the dialog shows the fields; empty when ready. */
 export function draftProblems(d: ConnectionDraft, taken: readonly string[]): string[] {
   const out: string[] = [];
   if (!d.preset && !d.probe) out.push("Check the address first.");
-  if (d.probe?.kind === "private") out.push("Allow the private-network address, or use another one.");
-  const slug = slugProblem(d.slug, taken);
+  const control = draftControl(d);
+  if (control?.kind === "private") out.push("Allow the private-network address, or use another one.");
+  if (!d.preset && d.probe && !d.probe.reachable && !d.probe.blocked) out.push("agentinbox couldn't reach this server.");
+  if (d.probe?.blocked === "ssrf") out.push("agentinbox can't connect to this address.");
+  // Created early for the allow: its own slug isn't a clash.
+  const slug = slugProblem(d.slug, d.createdId ? taken.filter((s) => s !== d.slug) : taken);
   if (slug) out.push(slug);
-  const control = d.preset ? authControl({ preset: d.preset }) : d.probe ? authControl({ probe: d.probe }) : null;
-  if (control?.kind === "header" && !d.headerValue.trim()) out.push("Paste the API key or token.");
-  if (control?.kind === "oauth" && control.needsClientId && !d.clientId.trim()) out.push("Paste the client ID.");
+  if (control?.kind === "header" && (!d.headerValue.trim() || !/^[A-Za-z0-9-]{1,100}$/.test(d.headerName.trim()))) out.push("Paste the API key or token.");
   if (d.preset) out.push(...Object.values(inputProblems(d.preset.setupSteps, d.inputs)));
   if (Array.isArray(d.agents) && d.agents.length === 0) out.push("Pick at least one agent, or all of them.");
   return out;
 }
 
-/** The POST /api/connections body for a ready draft. */
+/** POST /api/connections for the draft. "All agents" omits agentIds (the server grants every agent). */
 export function createInput(d: ConnectionDraft): CreateConnectionInput {
-  const control = d.preset ? authControl({ preset: d.preset }) : d.probe ? authControl({ probe: d.probe }) : null;
-  const body: CreateConnectionInput = { slug: d.slug, level: d.level, agents: d.agents };
-  if (d.preset) body.presetId = d.preset.id;
-  else body.url = d.probe?.url ?? d.url.trim();
-  if (d.displayName.trim() && d.displayName.trim() !== d.preset?.displayName) body.name = d.displayName.trim();
-  if (control?.kind === "header") {
+  const body: CreateConnectionInput = { slug: d.slug, levelDefault: d.level };
+  if (d.preset) body.preset = d.preset.id;
+  else body.url = d.url.trim();
+  if (d.name.trim() && d.name.trim() !== d.preset?.displayName) body.name = d.name.trim();
+  if (Array.isArray(d.agents)) body.agentIds = d.agents;
+  return body;
+}
+
+/** POST /api/connections/:id/connect for the draft: the header (bearer prefixed when it's Authorization) and setup inputs. */
+export function connectInput(d: ConnectionDraft): StartConnectInput {
+  const body: StartConnectInput = {};
+  if (draftControl(d)?.kind === "header") {
+    const name = d.headerName.trim() || "Authorization";
     const v = d.headerValue.trim();
-    body.header = { name: control.headerName, value: control.prefix && !v.toLowerCase().startsWith(control.prefix.trim().toLowerCase()) ? control.prefix + v : v };
+    body.header = { name, value: name.toLowerCase() === "authorization" && !/^\w+\s/.test(v) ? `Bearer ${v}` : v };
   }
-  if (control?.kind === "oauth" && control.needsClientId) body.clientId = d.clientId.trim();
-  if (d.privateTarget) body.privateTarget = d.privateTarget;
   if (d.preset && Object.keys(d.inputs).length) body.inputs = Object.fromEntries(Object.entries(d.inputs).map(([k, v]) => [k, v.trim()]));
   return body;
+}
+
+/**
+ * The connection created early (for the private-target allow) gets the rest of the draft before connecting:
+ * the PATCH (name, slug, level) and the grants PUT, or null when nothing changed.
+ */
+export function finishEarlyCreate(
+  d: ConnectionDraft,
+  created: Pick<ConnectionView, "name" | "slug" | "levelDefault">,
+  allAgents: readonly string[],
+): { patch: { name?: string; slug?: string; levelDefault?: AccessLevel } | null; grants: { grants: { agentId: string; level: AccessLevel }[] } } {
+  const patch: { name?: string; slug?: string; levelDefault?: AccessLevel } = {};
+  if (d.name.trim() && d.name.trim() !== created.name) patch.name = d.name.trim();
+  if (d.slug !== created.slug) patch.slug = d.slug;
+  if (d.level !== created.levelDefault) patch.levelDefault = d.level;
+  const ids = d.agents === "all" ? allAgents : d.agents;
+  return { patch: Object.keys(patch).length ? patch : null, grants: { grants: ids.map((agentId) => ({ agentId, level: d.level })) } };
 }

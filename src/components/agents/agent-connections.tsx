@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { CheckCheckIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { QueryError, TimeAgo, ToneBadge } from "@/components/common";
 import { openAddConnection } from "@/components/connections/add-connection";
-import { AGENT_LEVELS, connectionStatusView, LEVEL_INFO } from "@/components/connections/connection-flow";
+import { AGENT_LEVELS, connectionStatusView, grantsWith, LEVEL_INFO } from "@/components/connections/connection-flow";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -11,8 +11,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useNow } from "@/hooks/use-now";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
-import type { ApprovalRule } from "@shared/types";
-import { type AgentConnection, type AgentLevel, keys, queries } from "@/lib/queries";
+import type { ApprovalRule, ConnectionGrant } from "@shared/types";
+import type { AgentConnection, AgentLevel } from "@/lib/broker-dto";
+import { keys, queries } from "@/lib/queries";
 import { escapeInvisible } from "@/components/approvals/mcp-call";
 
 /** The agent's level on each connection (Full / Ask / Read only / No access) and its "Always allowed" rules. */
@@ -81,9 +82,13 @@ function ConnectionLevelRow({ agentId, c }: { agentId: string; c: AgentConnectio
   const now = useNow(60_000);
   const status = connectionStatusView({ ...c, statusReason: null, expiresAt: null }, now);
   const set = useApiMutation({
-    mutationFn: (level: AgentLevel) =>
-      api<AgentConnection>(`/api/agents/${encodeURIComponent(agentId)}/connections/${encodeURIComponent(c.connectionId)}`, { method: "PUT", body: { level } }),
-    invalidate: [keys.agentConnections(agentId)],
+    // The API takes a connection's full grant list: read it fresh, change this agent's entry, put it back.
+    mutationFn: async (level: AgentLevel) => {
+      const base = `/api/connections/${encodeURIComponent(c.connectionId)}/grants`;
+      const grants = await api<ConnectionGrant[]>(base);
+      return api<ConnectionGrant[]>(base, { method: "PUT", body: grantsWith(grants, agentId, level) });
+    },
+    invalidate: [keys.agentConnections(agentId), keys.connections],
     success: (_, level) => `${c.name}: ${LEVEL_INFO[level].label.toLowerCase()}`,
     errorTitle: "Couldn't change the access",
   });

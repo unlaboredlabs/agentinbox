@@ -1,38 +1,35 @@
+import type { ConnectionView, StartConnectResult } from "@shared/types";
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2Icon, ExternalLinkIcon, RotateCwIcon } from "lucide-react";
+import { CheckCircle2Icon, RotateCwIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ErrorAlert } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
-import { Textarea } from "@/components/ui/textarea";
-import { api, ApiError } from "@/lib/api";
-import { type ConnectionAttempt, type ConnectionAuthorize, type ConnectionView, keys } from "@/lib/queries";
-import { oauthMessageFor, pastedProblem } from "./connection-flow";
+import { api } from "@/lib/api";
+import { keys } from "@/lib/queries";
+import { oauthMessageFor } from "./connection-flow";
 
 export interface AuthRequest {
   /** What's being connected ("Notion"), for the dialog. */
   name: string;
   /**
-   * Creates the connection or starts its reconnect. Returns the sign-in to run, or null when none is needed
-   * (header and open servers). Called after the pop-up opens, inside the same click.
+   * Creates or prepares the connection and calls POST /api/connections/:id/connect. Runs after the pop-up opened,
+   * inside the same click (pop-up blockers only allow window.open during a user gesture).
    */
-  run: () => Promise<{ connection: ConnectionView; authorize: ConnectionAuthorize | null }>;
+  run: () => Promise<{ connectionId: string; result: StartConnectResult }>;
   onDone?: (c: ConnectionView) => void;
 }
 
 type Phase =
   | { kind: "starting" }
-  | { kind: "waiting"; connection: ConnectionView; auth: ConnectionAuthorize; popup: Window | null }
+  | { kind: "waiting"; connectionId: string; authorizeUrl: string; popup: Window | null; baseline: string | null }
   | { kind: "done"; connection: ConnectionView }
   | { kind: "error"; error: unknown };
 
-// The mounted host registers its starter so any button can begin the flow inside its click handler
-// (pop-up blockers only allow window.open during a user gesture), as connectAccount does for Google.
 let starter: ((r: AuthRequest) => void) | null = null;
 
-/** Runs a connection's create/reconnect and, for OAuth, the upstream sign-in in a pop-up (or paste mode). */
+/** Runs a connection's create/reconnect and, for OAuth, the upstream sign-in in a pop-up. */
 export function connectConnection(r: AuthRequest) {
   starter?.(r);
 }
@@ -56,7 +53,11 @@ function openPopup(name: string): Window | null {
   return popup;
 }
 
-/** The upstream sign-in dialog. Mounted once in the app layout (and on the wizard), like ConnectAccountHost. */
+const getConnection = (id: string) => api<ConnectionView>(`/api/connections/${encodeURIComponent(id)}`);
+/** What the connection looked like before the sign-in: a change proves the sign-in landed. */
+const fingerprint = (c: ConnectionView) => `${c.status}|${c.updatedAt}|${c.expiresAt ?? ""}`;
+
+/** The upstream sign-in dialog. Mounted once in the app layout, like ConnectAccountHost. */
 export function ConnectionAuthHost() {
   const qc = useQueryClient();
   const [phase, setPhase] = useState<Phase | null>(null);
@@ -69,10 +70,8 @@ export function ConnectionAuthHost() {
   });
 
   const refresh = () => {
-    for (const k of [keys.connections, keys.setupState, keys.overview]) void qc.invalidateQueries({ queryKey: k });
-    void qc.invalidateQueries({ queryKey: ["agent-connections"] });
+    for (const k of [keys.connections, keys.setupState, keys.overview, ["agent-connections"]]) void qc.invalidateQueries({ queryKey: k });
   };
-
   const finish = (c: ConnectionView) => {
     setPhase((p) => {
       if (p?.kind === "waiting") p.popup?.close();
@@ -89,31 +88,28 @@ export function ConnectionAuthHost() {
     });
     refresh();
   };
-  const finishRef = useRef(finish);
-  const failRef = useRef(fail);
-  useEffect(() => {
-    finishRef.current = finish;
-    failRef.current = fail;
-  });
 
   const start = async (r: AuthRequest) => {
     setReq(r);
     reqRef.current = r;
-    // Opened now, in the click; closed again if no sign-in is needed or the server wants paste mode.
     const popup = openPopup(r.name);
     setPhase({ kind: "starting" });
     try {
-      const res = await r.run();
-      if (!res.authorize) {
+      const { connectionId, result } = await r.run();
+      if (result.status === "connected") {
         popup?.close();
-        return finish(res.connection);
+        return finish(result.connection);
       }
-      if (popup && res.authorize.callbackMode === "direct") popup.location.href = res.authorize.authUrl;
-      else popup?.close();
-      setPhase({ kind: "waiting", connection: res.connection, auth: res.authorize, popup: res.authorize.callbackMode === "direct" ? popup : null });
+      if (result.status === "error") {
+        popup?.close();
+        return fail(new Error(result.message));
+      }
+      if (popup) popup.location.href = result.authorizeUrl;
+      const before = await getConnection(connectionId).catch(() => null);
+      setPhase({ kind: "waiting", connectionId, authorizeUrl: result.authorizeUrl, popup, baseline: before ? fingerprint(before) : null });
     } catch (err) {
       popup?.close();
-      setPhase({ kind: "error", error: err });
+      fail(err);
     }
   };
   const startRef = useRef(start);
@@ -127,38 +123,38 @@ export function ConnectionAuthHost() {
     };
   }, []);
 
-  /** Asks the server how this sign-in ended (the callback's message can miss this tab). */
-  const ask = async () => {
+  /**
+   * Reads the connection back. `sure`: the callback said it finished (or the user says so): active means done,
+   * anything else is the error. Otherwise (focus, pop-up closed) only a changed, active connection counts.
+   */
+  const check = async (sure: boolean, messageError?: string | null) => {
     const p = phaseRef.current;
     if (p?.kind !== "waiting") return;
-    let r: ConnectionAttempt;
+    let c: ConnectionView;
     try {
-      r = await api<ConnectionAttempt>("/api/connections/oauth/status", { body: { state: p.auth.state } });
-    } catch {
+      c = await getConnection(p.connectionId);
+    } catch (err) {
+      if (sure) fail(err);
       return;
     }
     const now = phaseRef.current;
-    if (now?.kind !== "waiting" || now.auth.state !== p.auth.state) return;
-    if (r.status === "connected") {
-      const c = await api<ConnectionView>(`/api/connections/${encodeURIComponent(p.connection.id)}`).catch(() => p.connection);
-      finishRef.current(c);
-    } else if (r.status === "failed") failRef.current(new ApiError(400, r.code, r.error, r.hint ?? undefined));
+    if (now?.kind !== "waiting" || now.connectionId !== p.connectionId) return;
+    if (c.status === "active" && (sure || fingerprint(c) !== p.baseline)) return finish(c);
+    if (sure) fail(new Error(messageError ?? c.statusReason ?? `${c.name} didn't finish connecting. Try again.`));
   };
-  const askRef = useRef(ask);
+  const checkRef = useRef(check);
   useEffect(() => {
-    askRef.current = ask;
+    checkRef.current = check;
   });
 
-  // The callback page posts to its opener, or on BroadcastChannel when the opener was severed.
+  // The callback page posts to its opener and on BroadcastChannel "agentinbox-oauth" (server/api/oauth.ts).
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       const p = phaseRef.current;
       if (p?.kind !== "waiting") return;
       if (e.origin && e.origin !== window.location.origin) return;
-      const m = oauthMessageFor(e.data, p.connection.id);
-      if (!m) return;
-      if (m.ok) void askRef.current().then(() => phaseRef.current?.kind === "waiting" && finishRef.current(p.connection));
-      else failRef.current(new ApiError(400, m.code, m.error, m.hint ?? undefined));
+      const m = oauthMessageFor(e.data, p.connectionId);
+      if (m) void checkRef.current(true, m.ok ? null : m.error);
     };
     window.addEventListener("message", onMessage);
     const channel = "BroadcastChannel" in window ? new BroadcastChannel("agentinbox-oauth") : undefined;
@@ -169,22 +165,21 @@ export function ConnectionAuthHost() {
     };
   }, []);
 
-  // Coming back to this tab, or the pop-up closing, is a good moment to look.
   const waiting = phase?.kind === "waiting" ? phase : null;
   const popup = waiting?.popup ?? null;
-  const waitingState = waiting?.auth.state ?? null;
+  const waitingId = waiting?.connectionId ?? null;
   useEffect(() => {
-    if (!waitingState) return;
-    const onFocus = () => void askRef.current();
+    if (!waitingId) return;
+    const onFocus = () => void checkRef.current(false);
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [waitingState]);
+  }, [waitingId]);
   useEffect(() => {
     if (!popup) return;
     const id = setInterval(() => {
       if (popup.closed) {
         clearInterval(id);
-        void askRef.current();
+        void checkRef.current(false);
       }
     }, 600);
     return () => clearInterval(id);
@@ -193,6 +188,7 @@ export function ConnectionAuthHost() {
   const close = () => {
     if (phase?.kind === "waiting") phase.popup?.close();
     setPhase(null);
+    refresh();
   };
   const name = phase?.kind === "done" ? phase.connection.name : (req?.name ?? "the server");
 
@@ -204,13 +200,11 @@ export function ConnectionAuthHost() {
           <DialogDescription>
             {phase?.kind === "done"
               ? "Agents with access see its tools on their next request."
-              : phase?.kind === "waiting" && phase.auth.callbackMode === "paste"
-                ? "Sign in in a new tab, then paste the address you land on."
-                : phase?.kind === "waiting"
-                  ? `Finish signing in to ${name} in the window that opened.`
-                  : phase?.kind === "error"
-                    ? "Nothing was changed on the other side."
-                    : "One moment…"}
+              : phase?.kind === "waiting"
+                ? `Finish signing in to ${name} in the window that opened.`
+                : phase?.kind === "error"
+                  ? "Fix what's below, then try again."
+                  : "One moment…"}
           </DialogDescription>
         </DialogHeader>
 
@@ -219,29 +213,26 @@ export function ConnectionAuthHost() {
             <Spinner className="size-6" />
           </div>
         )}
-        {phase?.kind === "waiting" && phase.auth.callbackMode === "direct" && (
+        {phase?.kind === "waiting" && (
           <div className="space-y-3 text-sm">
             <div className="flex items-center gap-2 text-muted-foreground">
               <Spinner /> Waiting for {name}…
             </div>
             <p className="text-muted-foreground">
               No window?{" "}
-              <a href={phase.auth.authUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-foreground underline underline-offset-4">
+              <a href={phase.authorizeUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-foreground underline underline-offset-4">
                 Open the sign-in
               </a>
               .
             </p>
           </div>
         )}
-        {phase?.kind === "waiting" && phase.auth.callbackMode === "paste" && (
-          <PasteConnection auth={phase.auth} name={name} onConnected={(c) => finish(c)} />
-        )}
         {phase?.kind === "done" && (
           <div className="flex items-start gap-3 rounded-lg border border-success/30 bg-success/[0.06] p-3 text-sm">
             <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
             <p>
-              {phase.connection.toolCount > 0
-                ? `${phase.connection.toolCount} tool${phase.connection.toolCount === 1 ? "" : "s"} found and pinned.`
+              {phase.connection.tools.total > 0
+                ? `${phase.connection.tools.total} tool${phase.connection.tools.total === 1 ? "" : "s"} found and pinned.`
                 : "Its tools are being listed now."}{" "}
               If a tool's definition changes later, agentinbox holds that tool until you accept the change.
             </p>
@@ -256,7 +247,7 @@ export function ConnectionAuthHost() {
             </Button>
           )}
           {phase?.kind === "waiting" && (
-            <Button variant="outline" onClick={() => void ask()}>
+            <Button variant="outline" onClick={() => void check(true)}>
               I'm done, check again
             </Button>
           )}
@@ -266,52 +257,5 @@ export function ConnectionAuthHost() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function PasteConnection({ auth, name, onConnected }: { auth: ConnectionAuthorize; name: string; onConnected: (c: ConnectionView) => void }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState<unknown>();
-  const [pending, setPending] = useState(false);
-  const problem = value.trim() ? pastedProblem(value, auth.state) : null;
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!value.trim() || problem) return;
-    setPending(true);
-    setError(undefined);
-    try {
-      onConnected(await api<ConnectionView>("/api/connections/oauth/paste", { body: { url: value.trim() } }));
-    } catch (err) {
-      setError(err);
-    } finally {
-      setPending(false);
-    }
-  };
-  return (
-    <form onSubmit={submit} className="space-y-3">
-      <Button asChild className="w-full">
-        <a href={auth.authUrl} target="_blank" rel="noopener noreferrer">
-          <ExternalLinkIcon /> Sign in to {name}
-        </a>
-      </Button>
-      <Field>
-        <FieldLabel htmlFor="connection-paste">Address after signing in</FieldLabel>
-        <Textarea
-          id="connection-paste"
-          rows={3}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={`${auth.redirectUri}?code=…&state=…`}
-          className="font-mono text-xs break-all"
-          aria-invalid={!!problem}
-        />
-        <FieldDescription>The page won't load, that's expected: copy its whole address from the address bar.</FieldDescription>
-        {problem && <FieldError>{problem}</FieldError>}
-      </Field>
-      {error !== undefined && <ErrorAlert error={error} />}
-      <Button type="submit" variant="outline" className="w-full" disabled={!value.trim() || !!problem || pending}>
-        {pending && <Spinner />} Finish connecting
-      </Button>
-    </form>
   );
 }

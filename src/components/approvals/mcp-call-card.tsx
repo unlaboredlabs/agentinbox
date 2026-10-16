@@ -12,22 +12,33 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { api, toastError } from "@/lib/api";
+import { api, ApiError, toastError } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { ExpiryCountdown } from "./approval-parts";
-import { argsHaveInvisible, cardWarnings, escapeInvisible, hasInvisible, isCallView, type McpDecision, targetLabel } from "./mcp-call";
+import { alwaysAllowFor, argsHaveInvisible, cardWarnings, escapeInvisible, hasInvisible, isCallView, type McpDecision, type TargetChoice, targetChoices } from "./mcp-call";
 
 /** Approve / Always allow / Reject for an mcp.call, with the optional "only for this target" scope. */
 export function useMcpDecision(view: McpCallApprovalView, onDecided?: (res: Approval, d: McpDecision) => void) {
   const qc = useQueryClient();
   const a = view.approval;
-  const [onlyTarget, setOnlyTarget] = useState(!!view.target);
+  const choices = targetChoices(view);
+  // The tool's own target is preselected; a generic tool's argument is the reviewer's pick (none by default).
+  const [target, setTarget] = useState<TargetChoice | null>(choices[0]?.own ? choices[0] : null);
   const decide = useMutation({
-    mutationFn: (d: McpDecision) => {
-      const body: McpCallApproveInput = d === "always" ? { alwaysAllow: { target: !!view.target && onlyTarget } } : {};
-      return api<Approval>(`/api/approvals/${encodeURIComponent(a.id)}/${d === "reject" ? "reject" : "approve"}`, { body });
+    mutationFn: async (d: McpDecision) => {
+      const body: McpCallApproveInput = d === "always" ? { alwaysAllow: alwaysAllowFor(target) } : {};
+      try {
+        return await api<Approval>(`/api/approvals/${encodeURIComponent(a.id)}/${d === "reject" ? "reject" : "approve"}`, { body });
+      } catch (err) {
+        // A double tap (or another tab) already decided it: 409. Show what happened instead of an error.
+        if (!(err instanceof ApiError) || err.status !== 409) throw err;
+        const fresh = await api<McpCallApprovalView | Approval>(`/api/approvals/${encodeURIComponent(a.id)}`);
+        if (!isCallView(fresh) || fresh.approval.status === "pending") throw err;
+        return fresh.approval;
+      }
     },
     onSuccess: (res, d) => {
       if (res.status !== "pending") qc.setQueryData<Approval[]>([...keys.approvals, "pending"], (list) => list?.filter((x) => x.id !== a.id));
@@ -36,7 +47,7 @@ export function useMcpDecision(view: McpCallApprovalView, onDecided?: (res: Appr
     },
     onError: (err) => toastError(err, "Couldn't record the decision"),
   });
-  return { decide, onlyTarget, setOnlyTarget };
+  return { decide, choices, target, setTarget };
 }
 
 /** The call to decide on: tool and connection, recipients and URLs first, then the exact arguments. */
@@ -147,20 +158,41 @@ function ArgsJson({ text }: { text: string }) {
   );
 }
 
+const ANY = "__any__";
+
 /** Approve / Always allow this (+ "only for <target>") / Reject. `large`: the one-tap page's full-width buttons. */
 export function McpDecisionButtons({ view: v, d, large }: { view: McpCallApprovalView; d: ReturnType<typeof useMcpDecision>; large?: boolean }) {
   const pending = d.decide.isPending ? d.decide.variables : undefined;
   const size = large ? "lg" : "default";
   return (
     <div className={cn("w-full space-y-3")}>
-      {v.target && (
+      {d.choices[0]?.own ? (
         <label className="flex items-start gap-2 text-sm">
-          <Checkbox className="mt-0.5" checked={d.onlyTarget} onCheckedChange={(c) => d.setOnlyTarget(c === true)} />
+          <Checkbox className="mt-0.5" checked={!!d.target} onCheckedChange={(c) => d.setTarget(c === true ? d.choices[0]! : null)} />
           <span className="min-w-0 break-words">
-            {targetLabel(v.target)} <span className="text-muted-foreground">(for “Always allow this”)</span>
+            {d.choices[0].label} <span className="text-muted-foreground">(for “Always allow this”)</span>
           </span>
         </label>
-      )}
+      ) : d.choices.length > 0 ? (
+        <div className="space-y-1 text-sm">
+          <label htmlFor={`always-${v.approval.id}`} className="text-muted-foreground">
+            “Always allow this” applies to
+          </label>
+          <Select value={d.target?.path ?? ANY} onValueChange={(p) => d.setTarget(d.choices.find((c) => c.path === p) ?? null)}>
+            <SelectTrigger id={`always-${v.approval.id}`} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>Any call to {v.approval.call.tool}</SelectItem>
+              {d.choices.map((c) => (
+                <SelectItem key={c.path} value={c.path}>
+                  {c.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
       <div className={cn("flex gap-2", large ? "flex-col" : "flex-col-reverse sm:flex-row sm:justify-end")}>
         <Button size={size} variant="outline" disabled={d.decide.isPending} onClick={() => d.decide.mutate("reject")} className={cn(large && "order-3")}>
           {pending === "reject" ? <Spinner /> : <XIcon />} Reject

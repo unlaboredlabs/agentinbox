@@ -1,5 +1,6 @@
+import type { ConnectionView, StartConnectResult } from "@shared/types";
 import { Link } from "@tanstack/react-router";
-import { AlertTriangleIcon, MoreHorizontalIcon, NetworkIcon, PauseIcon, PlayIcon, Trash2Icon, UnplugIcon, WrenchIcon } from "lucide-react";
+import { AlertTriangleIcon, MoreHorizontalIcon, NetworkIcon, PauseIcon, Trash2Icon, UnplugIcon, WrenchIcon } from "lucide-react";
 import { useState } from "react";
 import { ToneBadge } from "@/components/common";
 import { confirm } from "@/components/confirm";
@@ -9,37 +10,37 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
-import { Spinner } from "@/components/ui/spinner";
+import { Input } from "@/components/ui/input";
 import { useNow } from "@/hooks/use-now";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
-import { type ConnectionView, keys, type ReconnectResult } from "@/lib/queries";
+import { keys } from "@/lib/queries";
 import { connectConnection } from "./connection-auth";
 import { connectionStatusView, hostPort } from "./connection-flow";
 
 const path = (c: Pick<ConnectionView, "id">, rest = "") => `/api/connections/${encodeURIComponent(c.id)}${rest}`;
+const startConnect = (c: ConnectionView, body: { header?: { name: string; value: string } } = {}) =>
+  connectConnection({ name: c.name, run: async () => ({ connectionId: c.id, result: await api<StartConnectResult>(path(c, "/connect"), { body }) }) });
 
-/** Reconnect: OAuth runs a fresh sign-in; a header connection asks for the new key; an open one just retries. */
+/** Reconnect (POST /connect again): OAuth runs a fresh sign-in; a header connection asks for the new key; an open one just retries. */
 export function useReconnect() {
   const [askingKey, setAskingKey] = useState<ConnectionView | null>(null);
-  const reconnect = (c: ConnectionView) => {
-    if (c.authType === "header") return setAskingKey(c);
-    connectConnection({ name: c.name, run: () => api<ReconnectResult>(path(c, "/reconnect"), { body: {} }) });
-  };
+  const reconnect = (c: ConnectionView) => (c.authType === "header" ? setAskingKey(c) : startConnect(c));
   const dialog = <HeaderReconnectDialog connection={askingKey} onClose={() => setAskingKey(null)} />;
   return { reconnect, dialog };
 }
 
 function HeaderReconnectDialog({ connection: c, onClose }: { connection: ConnectionView | null; onClose: () => void }) {
+  const [name, setName] = useState("Authorization");
   const [value, setValue] = useState("");
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!c || !value.trim()) return;
+    const n = name.trim() || "Authorization";
     const v = value.trim();
     onClose();
     setValue("");
-    // The header name stays as connected; the server keeps it.
-    connectConnection({ name: c.name, run: () => api<ReconnectResult>(path(c, "/reconnect"), { body: { header: { value: v } } }) });
+    startConnect(c, { header: { name: n, value: n.toLowerCase() === "authorization" && !/^\w+\s/.test(v) ? `Bearer ${v}` : v } });
   };
   return (
     <Dialog open={!!c} onOpenChange={(o) => !o && onClose()}>
@@ -49,11 +50,17 @@ function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connect
             <DialogTitle>Reconnect {c?.name}</DialogTitle>
             <DialogDescription>Paste the new API key or token. The old one is replaced.</DialogDescription>
           </DialogHeader>
-          <Field>
-            <FieldLabel htmlFor="reconnect-key">API key or token</FieldLabel>
-            <PasswordInput id="reconnect-key" autoFocus autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} />
-            <FieldDescription>Stored encrypted; agents never see it.</FieldDescription>
-          </Field>
+          <div className="grid gap-3 sm:grid-cols-[9rem_1fr]">
+            <Field>
+              <FieldLabel htmlFor="reconnect-name">Header</FieldLabel>
+              <Input id="reconnect-name" className="font-mono" value={name} onChange={(e) => setName(e.target.value)} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="reconnect-key">API key or token</FieldLabel>
+              <PasswordInput id="reconnect-key" autoFocus autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} />
+            </Field>
+            <FieldDescription className="sm:col-span-2">Stored encrypted; agents never see it.</FieldDescription>
+          </div>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
@@ -70,28 +77,41 @@ function HeaderReconnectDialog({ connection: c, onClose }: { connection: Connect
 
 export function useConnectionActions() {
   const invalidate = [keys.connections, ["agent-connections"], keys.approvals, keys.overview] as const;
-  const disable = useApiMutation({
-    mutationFn: (c: ConnectionView) => api<ConnectionView>(path(c, "/disable"), { body: {} }),
+  // The kill switch (POST /kill, the policy's): disabled, credentials deleted, pending calls cancelled. Reconnect brings it back.
+  const kill = useApiMutation({
+    mutationFn: (c: ConnectionView) => api(path(c, "/kill"), { body: {} }),
     invalidate,
-    success: (_, c) => `${c.name} is disabled`,
+    success: (_, c) => `${c.name} is disabled and signed out`,
     errorTitle: "Couldn't disable it",
   });
-  const enable = useApiMutation({
-    mutationFn: (c: ConnectionView) => api<ConnectionView>(path(c, "/enable"), { body: {} }),
-    invalidate,
-    success: (_, c) => `${c.name} is back on`,
-    errorTitle: "Couldn't turn it on",
-  });
+  // DELETE runs the kill switch, then removes the connection.
   const remove = useApiMutation({
-    // The kill switch first (policy: disable, cancel pending calls, delete credentials, close), then the row.
-    mutationFn: async (c: ConnectionView) => {
-      await api(path(c, "/kill"), { body: {} });
-      await api(path(c), { method: "DELETE" });
-    },
+    mutationFn: (c: ConnectionView) => api(path(c), { method: "DELETE" }),
     invalidate,
     success: (_, c) => `${c.name} is removed`,
     errorTitle: "Couldn't remove it",
   });
+  const killList = (c: ConnectionView) => (
+    <ul className="list-disc space-y-1 pl-5">
+      <li>stops every agent from using its tools,</li>
+      <li>cancels its calls waiting for approval,</li>
+      <li>signs out of {c.name} and deletes the stored credentials.</li>
+    </ul>
+  );
+  const askDisable = (c: ConnectionView) =>
+    confirm({
+      title: `Disable ${c.name}?`,
+      destructive: true,
+      confirmLabel: "Disable now",
+      description: (
+        <>
+          <p>This is the kill switch. Right away, agentinbox:</p>
+          {killList(c)}
+          <p>The connection, its access settings and the audit log stay. Reconnect to use it again.</p>
+        </>
+      ),
+      onConfirm: () => kill.mutateAsync(c),
+    });
   const askRemove = (c: ConnectionView, after?: () => void) =>
     confirm({
       title: `Remove ${c.name}?`,
@@ -99,13 +119,9 @@ export function useConnectionActions() {
       confirmLabel: "Remove now",
       description: (
         <>
-          <p>This is the kill switch. Right away, agentinbox:</p>
-          <ul className="list-disc space-y-1 pl-5">
-            <li>stops every agent from using its tools,</li>
-            <li>cancels its calls waiting for approval,</li>
-            <li>signs out of {c.name} and deletes the stored credentials.</li>
-          </ul>
-          <p>The audit log keeps what happened. To pause it instead, use Disable.</p>
+          <p>Right away, agentinbox:</p>
+          {killList(c)}
+          <p>Then the connection and its access settings are deleted. The audit log keeps what happened.</p>
         </>
       ),
       onConfirm: async () => {
@@ -113,15 +129,16 @@ export function useConnectionActions() {
         after?.();
       },
     });
-  return { disable, enable, askRemove };
+  return { askDisable, askRemove };
 }
 
 /** One row of the Connections page: status, private-network badge, tool and held counts, and the fixes. */
 export function ConnectionRow({ connection: c }: { connection: ConnectionView }) {
   const now = useNow(60_000);
   const view = connectionStatusView(c, now);
-  const { disable, enable, askRemove } = useConnectionActions();
+  const { askDisable, askRemove } = useConnectionActions();
   const { reconnect, dialog } = useReconnect();
+  const held = c.tools.held;
   return (
     <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
       <div className="min-w-0 flex-1">
@@ -139,11 +156,14 @@ export function ConnectionRow({ connection: c }: { connection: ConnectionView })
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
           <span className="font-mono">{c.slug}</span>
           <span className="flex items-center gap-1">
-            <WrenchIcon className="size-3" /> {c.toolCount} tool{c.toolCount === 1 ? "" : "s"}
+            <WrenchIcon className="size-3" /> {c.tools.active} tool{c.tools.active === 1 ? "" : "s"}
+          </span>
+          <span>
+            {c.agents} agent{c.agents === 1 ? "" : "s"}
           </span>
           {c.url && <span className="max-w-64 truncate">{c.url}</span>}
         </div>
-        {c.heldCount > 0 && (
+        {held > 0 && (
           <Link
             to="/connections/$connectionId"
             params={{ connectionId: c.id }}
@@ -151,7 +171,7 @@ export function ConnectionRow({ connection: c }: { connection: ConnectionView })
           >
             <AlertTriangleIcon className="mt-px size-3.5 shrink-0 text-warning" />
             <span>
-              {c.name} changed {c.heldCount} tool{c.heldCount === 1 ? "" : "s"}. {c.heldCount === 1 ? "It's" : "They're"} on hold until you review the change.
+              {c.name} changed {held} tool{held === 1 ? "" : "s"}. {held === 1 ? "It's" : "They're"} on hold until you review the change.
             </span>
           </Link>
         )}
@@ -164,13 +184,8 @@ export function ConnectionRow({ connection: c }: { connection: ConnectionView })
       </div>
       <div className="flex shrink-0 items-center gap-2 self-end sm:self-center">
         {view.action === "reconnect" && (
-          <Button size="sm" onClick={() => reconnect(c)}>
+          <Button size="sm" variant={c.status === "disabled" ? "outline" : "default"} onClick={() => reconnect(c)}>
             <UnplugIcon /> Reconnect
-          </Button>
-        )}
-        {view.action === "enable" && (
-          <Button size="sm" variant="outline" disabled={enable.isPending} onClick={() => enable.mutate(c)}>
-            {enable.isPending ? <Spinner /> : <PlayIcon />} Turn on
           </Button>
         )}
         <DropdownMenu>
@@ -183,13 +198,9 @@ export function ConnectionRow({ connection: c }: { connection: ConnectionView })
             <DropdownMenuItem onSelect={() => reconnect(c)}>
               <UnplugIcon /> Reconnect
             </DropdownMenuItem>
-            {c.status === "disabled" ? (
-              <DropdownMenuItem onSelect={() => enable.mutate(c)}>
-                <PlayIcon /> Turn on
-              </DropdownMenuItem>
-            ) : (
-              <DropdownMenuItem onSelect={() => disable.mutate(c)}>
-                <PauseIcon /> Disable
+            {c.status !== "disabled" && (
+              <DropdownMenuItem onSelect={() => askDisable(c)}>
+                <PauseIcon /> Disable…
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />

@@ -1,8 +1,9 @@
+import type { HeldToolView, ToolDiffLine } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftIcon, CheckIcon, CircleCheckIcon, NetworkIcon, PauseIcon, PlayIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { ArrowLeftIcon, CheckIcon, CircleCheckIcon, NetworkIcon, PauseIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { PageHeader, QueryError, TimeAgo, ToneBadge } from "@/components/common";
-import { connectionStatusView, type DiffLine, heldDiff, hostPort, lineDiff } from "@/components/connections/connection-flow";
+import { connectionStatusView, hostPort } from "@/components/connections/connection-flow";
 import { useConnectionActions, useReconnect } from "@/components/connections/connection-row";
 import { hasHidden, HiddenCharsWarning, Visible } from "@/components/hidden-chars";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +14,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { useNow } from "@/hooks/use-now";
 import { api } from "@/lib/api";
 import { useApiMutation } from "@/lib/mutations";
-import type { UpstreamTool } from "@shared/types";
 import { keys, queries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -25,10 +25,9 @@ function ConnectionPage() {
   const { connectionId } = Route.useParams();
   const navigate = useNavigate();
   const conn = useQuery(queries.connection(connectionId));
-  const tools = useQuery(queries.connectionTools(connectionId));
-  const held = (tools.data ?? []).filter((t) => t.state === "held");
+  const held = useQuery(queries.heldTools(connectionId));
   const now = useNow(60_000);
-  const { disable, enable, askRemove } = useConnectionActions();
+  const { askDisable, askRemove } = useConnectionActions();
   const { reconnect, dialog } = useReconnect();
 
   if (conn.isPending) return <Skeleton className="h-64 rounded-xl" />;
@@ -57,21 +56,11 @@ function ConnectionPage() {
         description={view.description}
         actions={
           <>
-            {view.action === "reconnect" ? (
-              <Button onClick={() => reconnect(c)}>
-                <UnplugIcon /> Reconnect
-              </Button>
-            ) : (
-              <Button variant="outline" onClick={() => reconnect(c)}>
-                <UnplugIcon /> Reconnect
-              </Button>
-            )}
-            {c.status === "disabled" ? (
-              <Button variant="outline" onClick={() => enable.mutate(c)} disabled={enable.isPending}>
-                <PlayIcon /> Turn on
-              </Button>
-            ) : (
-              <Button variant="outline" onClick={() => disable.mutate(c)} disabled={disable.isPending}>
+            <Button variant={view.action === "reconnect" ? "default" : "outline"} onClick={() => reconnect(c)}>
+              <UnplugIcon /> Reconnect
+            </Button>
+            {c.status !== "disabled" && (
+              <Button variant="outline" onClick={() => askDisable(c)}>
                 <PauseIcon /> Disable
               </Button>
             )}
@@ -88,7 +77,10 @@ function ConnectionPage() {
           Tools as <code className="font-mono text-foreground">{c.slug}__…</code>
         </span>
         <span>
-          {c.toolCount} tool{c.toolCount === 1 ? "" : "s"}
+          {c.tools.active} tool{c.tools.active === 1 ? "" : "s"}
+        </span>
+        <span>
+          {c.agents} agent{c.agents === 1 ? "" : "s"}
         </span>
         {c.url && <span className="break-all">{c.url}</span>}
         <span>
@@ -106,33 +98,32 @@ function ConnectionPage() {
             accept. The other tools keep working.
           </p>
         </div>
-        {tools.isPending ? (
+        {held.isPending ? (
           <Skeleton className="h-32 rounded-xl" />
-        ) : tools.isError ? (
-          <QueryError error={tools.error} onRetry={() => void tools.refetch()} />
-        ) : held.length === 0 ? (
+        ) : held.isError ? (
+          <QueryError error={held.error} onRetry={() => void held.refetch()} />
+        ) : held.data.length === 0 ? (
           <Card>
             <CardContent className="flex items-center gap-2 text-sm text-muted-foreground">
               <CircleCheckIcon className="size-4 text-success" /> No changes. Every tool matches what was pinned.
             </CardContent>
           </Card>
         ) : (
-          held.map((t) => <HeldToolCard key={t.name} connectionId={c.id} connectionName={c.name} tool={t} />)
+          held.data.map((t) => <HeldToolCard key={t.name} connectionId={c.id} connectionName={c.name} tool={t} />)
         )}
       </section>
     </>
   );
 }
 
-function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId: string; connectionName: string; tool: UpstreamTool }) {
+function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId: string; connectionName: string; tool: HeldToolView }) {
   const accept = useApiMutation({
-    mutationFn: () => api(`/api/connections/${encodeURIComponent(connectionId)}/tools/${encodeURIComponent(t.name)}/accept`, { body: {} }),
+    mutationFn: () => api<HeldToolView[]>(`/api/connections/${encodeURIComponent(connectionId)}/held/${encodeURIComponent(t.name)}/accept`, { body: {} }),
     invalidate: [keys.connections, keys.overview],
     success: `${t.name} is accepted`,
     errorTitle: "Couldn't accept the change",
   });
-  const rows = heldDiff(t);
-  const hidden = hasHidden(t.candidate?.description, t.candidate?.title, JSON.stringify(t.candidate?.inputSchema ?? {}));
+  const hidden = hasHidden(t.candidate.description, t.candidate.title, JSON.stringify(t.candidate.inputSchema));
   return (
     <Card>
       <CardHeader>
@@ -145,17 +136,10 @@ function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId:
           <TimeAgo date={t.updatedAt} />. Agents see it as <code className="font-mono">{t.exposedName}</code>.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-2">
         {hidden && <HiddenCharsWarning what="This definition" />}
-        {rows.map((r) => (
-          <div key={r.label} className="space-y-1">
-            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              {r.label}
-              {!r.changed && <span className="font-normal">(unchanged)</span>}
-            </div>
-            <Diff lines={lineDiff(r.before, r.after)} />
-          </div>
-        ))}
+        <div className="text-xs font-medium text-muted-foreground">{t.pinned ? "Before (−) and after (+): description, arguments and the rest" : "The new definition"}</div>
+        <Diff lines={t.diff} />
       </CardContent>
       <CardFooter className="justify-end border-t">
         <Button disabled={accept.isPending} onClick={() => accept.mutate()}>
@@ -166,20 +150,17 @@ function HeldToolCard({ connectionId, connectionName, tool: t }: { connectionId:
   );
 }
 
-/** Before/after lines, wrapped (no horizontal scroll), with hidden characters made visible. */
-function Diff({ lines }: { lines: DiffLine[] }) {
+/** The server's line diff, wrapped (no horizontal scroll), with hidden characters made visible. */
+function Diff({ lines }: { lines: ToolDiffLine[] }) {
   if (!lines.length) return <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground italic">(empty)</div>;
   return (
-    <pre className="rounded-md border bg-muted/30 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
+    <pre className="max-h-[70svh] overflow-y-auto rounded-md border bg-muted/30 py-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
       {lines.map((l, i) => (
-        <div
-          key={i}
-          className={cn("px-3", l.kind === "add" && "bg-success/10 text-foreground", l.kind === "del" && "bg-critical/10 text-muted-foreground line-through")}
-        >
+        <div key={i} className={cn("px-3", l.op === "+" && "bg-success/10 text-foreground", l.op === "-" && "bg-critical/10 text-muted-foreground line-through")}>
           <span aria-hidden className="mr-2 inline-block w-3 select-none">
-            {l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}
+            {l.op === "-" ? "−" : l.op}
           </span>
-          <span className="sr-only">{l.kind === "add" ? "Added: " : l.kind === "del" ? "Removed: " : ""}</span>
+          <span className="sr-only">{l.op === "+" ? "Added: " : l.op === "-" ? "Removed: " : ""}</span>
           <Visible text={l.text} />
         </div>
       ))}
