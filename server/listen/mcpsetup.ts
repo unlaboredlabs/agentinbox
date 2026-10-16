@@ -10,6 +10,7 @@ import { DEFAULT_PROFILE } from "./paths.ts";
 import { mcpServerName } from "./recipes.ts";
 import { NPX } from "./version.ts";
 import { safeText } from "./ui.ts";
+import { removeYamlServers } from "../connections-cli/yaml.ts";
 
 /**
  * `--setup-mcp`: registers the agentinbox MCP server in the agent's own tool without the key ever
@@ -32,12 +33,31 @@ export interface McpSetupResult {
   dryRun?: boolean;
   /** Things to know afterwards, e.g. which Node.js the setup depends on. */
   notes?: string[];
+  /** `removeServers` entries that were taken out. */
+  removed?: string[];
 }
 
 export interface McpSetupOptions {
   /** Print what would change; change nothing. */
   dryRun?: boolean;
+  /**
+   * Other entries to take out in the same write (`import --from`: servers now served through the broker). For the
+   * file-based tools it's all or nothing: if one can't be removed safely, nothing is changed.
+   */
+  removeServers?: RemoveServer[];
 }
+
+export interface RemoveServer {
+  name: string;
+  /** Claude Code: the scope it's defined in, and for local/project scope the project directory. */
+  scope?: "user" | "local" | "project";
+  projectDir?: string;
+}
+
+/** The entries to remove, never the agentinbox entry itself. */
+const removals = (t: McpSetupTarget, opts: McpSetupOptions) => (opts.removeServers ?? []).filter((r) => r.name !== t.name);
+const removedNote = (extra: RemoveServer[]) => (extra.length ? ` Removed ${extra.map((r) => `"${r.name}"`).join(", ")} (now served through agentinbox).` : "");
+const removedLine = (name: string, file: string) => `remove ${name} from ${file} (it's now served through agentinbox)`;
 
 /** Placeholder shown wherever the key would go in printed file contents. */
 const KEY_SHOWN = "<the key from your agentinbox profile>";
@@ -101,11 +121,13 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
   const verify = [`claude mcp list   (shows "${t.name}" as connected; inside Claude Code: /mcp)`];
   // The helper command names a node binary: say which, and how to recover when it goes away.
   const notes = [helperNodeNote(profile, `${NPX} setup-mcp --tool claude-code${profile === DEFAULT_PROFILE ? "" : ` --profile ${profile}`}`)];
+  const removeArgs = removals(t, opts).map((r) => ({ r, args: ["mcp", "remove", r.name, "--scope", r.scope ?? "user"], cwd: r.projectDir }));
   const changes = [
     `write the header helper ${helperScriptPath()} (0600; reads the key from your profile when Claude Code connects)`,
     backupLine(file),
     `run: claude mcp remove ${t.name} --scope user   (drops an earlier "${t.name}" entry, if any)`,
     `run: ${addCommand}`,
+    ...removeArgs.map((x) => `run: claude ${x.args.join(" ")}${x.cwd ? `   (in ${x.cwd})` : ""}   (now served through agentinbox)`),
     `the key stays in your agentinbox profile: neither the command line nor ${file} contains it`,
   ];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Claude Code: nothing was changed. setup-mcp would:`, changes, verify, notes };
@@ -119,14 +141,22 @@ function setupClaude(t: McpSetupTarget, profile: string, opts: McpSetupOptions):
     const out = redact(`${r.stderr ?? ""}${r.stdout ?? ""}`, t.key).trim();
     return { ok: false, message: `claude mcp add-json failed${out ? `: ${safeText(out, 300)}` : ""}`, backup, manual };
   }
+  // Only after the broker entry is in: a failed removal leaves a duplicate, never a gap.
+  const done: string[] = [];
+  for (const x of removeArgs) {
+    const rr = spawnSync("claude", x.args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: x.cwd });
+    if (rr.status === 0) done.push(`ran: claude ${x.args.join(" ")}`);
+    else notes.push(`Couldn't remove "${x.r.name}" (${x.r.scope ?? "user"} scope): remove it yourself with claude ${x.args.join(" ")}${x.cwd ? ` in ${x.cwd}` : ""}.`);
+  }
   if (existsSync(file) && isTooOpen(file)) chmodSync(file, 0o600);
   return {
     ok: true,
     message: `Registered MCP server "${t.name}" in Claude Code (user scope). The key stays in your agentinbox profile; Claude Code asks for it through a header helper.`,
     backup,
-    changes: [`ran: ${addCommand}`, `${file} now lists "${t.name}" (user scope)`],
+    changes: [`ran: ${addCommand}`, `${file} now lists "${t.name}" (user scope)`, ...done],
     verify,
     notes,
+    removed: removeArgs.filter((x) => done.includes(`ran: claude ${x.args.join(" ")}`)).map((x) => x.r.name),
   };
 }
 
@@ -178,16 +208,28 @@ function setupCodex(t: McpSetupTarget, profileFile: string, opts: McpSetupOption
     `  default_tools_approval_mode = "approve"`,
   ];
   const current = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const without = removeTomlServer(current, t.name);
-  if (without === null) return { ok: false, message: `${file} defines mcp_servers inline; not rewriting it automatically.`, manual };
+  const withoutOurs = removeTomlServer(current, t.name);
+  if (withoutOurs === null) return { ok: false, message: `${file} defines mcp_servers inline; not rewriting it automatically.`, manual };
+  let without = withoutOurs;
+  const extra = removals(t, opts);
+  for (const r of extra) {
+    const next = removeTomlServer(without, r.name);
+    if (next === null || next === without) return { ok: false, message: `Couldn't remove [mcp_servers.${r.name}] from ${file} safely; nothing was changed.`, manual };
+    without = next;
+  }
   const verify = [`codex mcp list   (shows "${t.name}")`];
-  const replaces = without !== current.replace(/\n{3,}/g, "\n\n") ? `replace [mcp_servers.${t.name}] in` : `add [mcp_servers.${t.name}] to`;
-  const changes = [backupLine(file), `${replaces} ${file} (other tables are kept) and set the file to 0600, since it will hold the key:`, ...indent(codexBlock({ ...t, key: KEY_SHOWN }))];
+  const replaces = withoutOurs !== current.replace(/\n{3,}/g, "\n\n") ? `replace [mcp_servers.${t.name}] in` : `add [mcp_servers.${t.name}] to`;
+  const changes = [
+    backupLine(file),
+    ...extra.map((r) => removedLine(`[mcp_servers.${r.name}]`, file)),
+    `${replaces} ${file} (other tables are kept) and set the file to 0600, since it will hold the key:`,
+    ...indent(codexBlock({ ...t, key: KEY_SHOWN })),
+  ];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Codex: nothing was changed. setup-mcp would:`, changes, verify };
   const backup = backupFile(file);
   const base = without.replace(/\s*$/, "");
   writePrivateFile(file, `${base ? `${base}\n\n` : ""}${codexBlock(t)}`, { privateDir: false });
-  return { ok: true, message: `Added [mcp_servers.${t.name}] to ${file} (now mode 0600: it holds the key).`, backup, verify };
+  return { ok: true, message: `Added [mcp_servers.${t.name}] to ${file} (now mode 0600: it holds the key).${removedNote(extra)}`, backup, verify, removed: extra.map((r) => r.name) };
 }
 
 // ───────────── Cursor (~/.cursor/mcp.json) ─────────────
@@ -215,17 +257,28 @@ function setupCursor(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
   const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? (doc.mcpServers as Record<string, unknown>) : {};
   const verify = [`agent mcp list   (Cursor CLI; or Cursor Settings → MCP shows "${t.name}")`];
   const entry = (key: string) => ({ url: t.url, headers: { Authorization: `Bearer ${key}` } });
+  const extra = removals(t, opts);
+  const absent = extra.find((r) => !(r.name in servers));
+  if (absent) return { ok: false, message: `"mcpServers.${absent.name}" isn't in ${file}; nothing was changed.`, manual };
   const changes = [
     backupLine(file),
+    ...extra.map((r) => removedLine(`"mcpServers.${r.name}"`, file)),
     `${t.name in servers ? "replace" : "add"} "mcpServers.${t.name}" ${t.name in servers ? "in" : "to"} ${file} (other servers are kept) and set the file to 0600, since it will hold the key:`,
     ...indent(`"${t.name}": ${JSON.stringify(entry(KEY_SHOWN), null, 2)}`),
   ];
   if (opts.dryRun) return { ok: true, dryRun: true, message: `Dry run for Cursor: nothing was changed. setup-mcp would:`, changes, verify };
+  for (const r of extra) delete servers[r.name];
   servers[t.name] = entry(t.key);
   doc.mcpServers = servers;
   const backup = backupFile(file);
   writePrivateFile(file, JSON.stringify(doc, null, 2) + "\n", { privateDir: false });
-  return { ok: true, message: `Added "${t.name}" to ${file} (now mode 0600: it holds the key). Cursor may ask you to enable it once.`, backup, verify };
+  return {
+    ok: true,
+    message: `Added "${t.name}" to ${file} (now mode 0600: it holds the key).${removedNote(extra)} Cursor may ask you to enable it once.`,
+    backup,
+    verify,
+    removed: extra.map((r) => r.name),
+  };
 }
 
 // ───────────── Hermes (~/.hermes/config.yaml + ~/.hermes/.env) ─────────────
@@ -345,12 +398,19 @@ function setupHermes(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
     `then check it with: hermes mcp test ${t.name}`,
   ];
   const current = existsSync(configFile) ? readFileSync(configFile, "utf8") : "";
-  const next = upsertYamlServer(current, t.name, entry);
+  const extra = removals(t, opts);
+  const upserted = upsertYamlServer(current, t.name, entry);
+  // Removed in the same write, before anything touches the disk: one entry we can't cut out cleanly changes nothing.
+  const next = upserted === null ? null : removeYamlServers(upserted, extra.map((r) => r.name));
+  if (upserted !== null && next === null) {
+    return { ok: false, message: `Couldn't remove ${extra.map((r) => `"${r.name}"`).join(", ")} from ${configFile} safely; nothing was changed.`, manual };
+  }
   if (next === null) return { ok: false, message: `${configFile} uses a layout we won't rewrite automatically.`, manual };
   const verify = [`hermes mcp test ${t.name}`];
   const changes = [
     backupLine(configFile),
     backupLine(envFile),
+    ...extra.map((r) => removedLine(`"mcp_servers.${r.name}"`, configFile)),
     `add (or replace) "mcp_servers.${t.name}" in ${configFile} (0600):`,
     ...indent(["mcp_servers:", `  ${t.name}:`, ...entry.map((e) => `    ${e}`)].join("\n")),
     `set ${envVar}=${KEY_SHOWN} in ${envFile} (0600; Hermes' place for secrets)`,
@@ -363,8 +423,9 @@ function setupHermes(t: McpSetupTarget, profileFile: string, opts: McpSetupOptio
   writePrivateFile(configFile, next.endsWith("\n") ? next : `${next}\n`, { privateDir: false });
   return {
     ok: true,
-    message: `Added "${t.name}" to ${configFile}; the key is in ${envFile} as ${envVar} (0600).`,
+    message: `Added "${t.name}" to ${configFile}; the key is in ${envFile} as ${envVar} (0600).${removedNote(extra)}`,
     backup: [backup, envBackup].filter(Boolean).join(", ") || null,
     verify,
+    removed: extra.map((r) => r.name),
   };
 }
