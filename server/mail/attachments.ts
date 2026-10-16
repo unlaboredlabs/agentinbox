@@ -4,6 +4,7 @@
 
 import { createHash } from "node:crypto";
 import { detectExtension, detectMimeType } from "nodemailer/lib/mime-funcs";
+import { decodeMimeWords } from "../google/mime.ts";
 import { escapeDelimiters, formatSize, stripInvisible } from "./content.ts";
 
 /** The tool argument, one item per file. */
@@ -62,6 +63,9 @@ const BASE64 = /^[A-Za-z0-9+/_-]*={0,2}$/;
 const CONTROL_OR_MARK = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u061c]/g;
 /** An extension worth keeping when the name is cut: short, letters/digits (and "_" for "ex_"). */
 const EXTENSION = /\.([\p{L}\p{N}_]{1,16})$/u;
+// Alternation, not a class: U+1160 and U+FE0F would combine with a neighbour inside one.
+const TRAILING_JUNK = /(?:[\s.\u115F\u180E\u3164\uFFA0]|\u1160|\uFE0F)+$/u;
+const NTFS_STREAM = /(?::[^:/\\]*)?:\$[A-Za-z_]+$/;
 
 export class AttachmentError extends Error {
   constructor(
@@ -86,9 +90,16 @@ function extensionFor(mimeType: string): string | null {
 export function sanitizeFilename(name: string, mimeType = "application/octet-stream"): string {
   // Bounded input: anything past a few times the cap is never shown.
   let s = String(name ?? "").slice(0, MAX_FILENAME_CHARS * 8);
+  // Mail clients decode RFC 2047 encoded-words in filenames ("=?UTF-8?B?ZXZpbC5leGU=?=" is evil.exe), so
+  // every check below must see the decoded name. Nested encodings are unwrapped too, a few rounds at most.
+  for (let round = 0; round < 5; round++) {
+    const decoded = decodeMimeWords(s);
+    if (decoded === s) break;
+    s = decoded.slice(0, MAX_FILENAME_CHARS * 8);
+  }
   s = stripInvisible(s).text.replace(CONTROL_OR_MARK, "");
   s = s.split(/[/\\]/).at(-1) ?? "";
-  s = escapeDelimiters(s).replace(/\s+/g, " ").trim().replace(/[. ]+$/, "");
+  s = trimTail(escapeDelimiters(s).replace(/\s+/g, " ").trim());
   if (s === "." || s === ".." || !s.replace(/\./g, "")) s = "";
   if (!s) {
     const ext = extensionFor(mimeType);
@@ -101,9 +112,22 @@ export function sanitizeFilename(name: string, mimeType = "application/octet-str
   return `${chars.slice(0, keep).join("").trimEnd()}…${ext}`;
 }
 
+/**
+ * Trailing characters that hide the real extension: whitespace, dots, invisible fillers (variation selector
+ * U+FE0F, Hangul fillers U+115F/U+1160/U+3164/U+FFA0, Mongolian vowel separator U+180E) and an NTFS stream
+ * suffix ("::$DATA", ":name:$DATA"). Removed until none is left.
+ */
+function trimTail(s: string): string {
+  for (;;) {
+    const next = s.replace(TRAILING_JUNK, "").replace(NTFS_STREAM, "");
+    if (next === s) return s;
+    s = next;
+  }
+}
+
 /** The extension Gmail would block this file for, or null. Looks through one layer of compression. */
 export function blockedExtension(filename: string): string | null {
-  const parts = filename.toLowerCase().split(".").slice(1);
+  const parts = trimTail(filename).toLowerCase().split(".").slice(1);
   let ext = parts.at(-1);
   if (ext && COMPRESSED.has(ext) && parts.length >= 2) {
     const inner = parts.at(-2)!;
@@ -153,7 +177,9 @@ export function prepareAttachments(input: AttachmentInput[] | undefined, bodyByt
     if (given && !MIME_TYPE.test(given)) {
       throw new AttachmentError("invalid_attachment", `${label}: mime_type "${escapeDelimiters(given.slice(0, 80))}" isn't a type/subtype such as application/pdf (leave out parameters like "; charset").`);
     }
-    if (/^multipart\//i.test(given)) throw new AttachmentError("invalid_attachment", `${label}: ${given} can't be the type of an attached file.`);
+    if (/^(multipart|message)\//i.test(given)) {
+      throw new AttachmentError("invalid_attachment", `${label}: ${given} can't be the type of an attached file; use application/octet-stream for a saved email.`);
+    }
     const raw = typeof a.filename === "string" ? a.filename : "";
     // Without mime_type: from the extension, else application/octet-stream.
     const contentType = (given || detectMimeType(sanitizeFilename(raw)) || "application/octet-stream").toLowerCase();
