@@ -5,7 +5,8 @@ import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
 import { isMcpToolAction } from "../shared/types.ts";
 import { overviewStats } from "../server/api/overview.ts";
-import { chooseMode, hotToolNames, SEARCH_MODE_THRESHOLD, setAgentSearchSettings } from "../server/broker/search/mode.ts";
+import { agentToolMode } from "../server/api/agents.ts";
+import { agentSearchSettings, chooseMode, hotToolNames, pinExistingAgentsDirect, SEARCH_MODE_THRESHOLD, setAgentSearchSettings } from "../server/broker/search/mode.ts";
 import { SEARCH_AUDIT_ACTION, SEARCH_INSTRUCTIONS } from "../server/broker/search/tools.ts";
 import type { BrokerCalls, RegisteredTool, ToolResult } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
@@ -273,6 +274,150 @@ describe("search mode: the meta-tools", () => {
       ["get_message", "error", "invalid_arguments"],
       ["get_message", "error", "not_found"],
     ]);
+  });
+});
+
+describe("search mode: calling a tool by name", () => {
+  /** A tools/call answer as text: a protocol error (e.g. -32602) by its message. */
+  const outcome = async (c: Awaited<ReturnType<ReturnType<typeof setup>["connect"]>>, name: string, args: Record<string, unknown> = {}) =>
+    c.call(name, args).then(
+      (r) => `${r.isError ? "error" : "ok"}: ${r.text}`,
+      (err: Error) => `throws: ${err.message}`,
+    );
+
+  it("runs an unlisted tool called by name exactly like direct mode; unknown and ungranted names fail the same way", async () => {
+    const { ctx, connect, reader, auditRows } = setup();
+    enableBroker(ctx);
+    const f = fakeBroker(ctx, registered(100));
+    const strip = (rows: ReturnType<typeof auditRows>) => rows.map(({ id: _i, ts: _t, durationMs: _d, ...rest }) => rest);
+    // send_message: no send grant; github__nope: no such connection tool; get_mesage: a typo.
+    const names = ["search_threads", "get_message", "send_message", "github__nope", "get_mesage"] as const;
+    const args: Record<string, Record<string, unknown>> = { search_threads: { query: "" }, get_message: { message_id: "m1" } };
+
+    setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "direct" });
+    const direct = await connect();
+    const d = [];
+    for (const n of names) d.push(await outcome(direct, n, args[n]));
+    const directAudit = strip(auditRows());
+
+    setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "search" });
+    const search = await connect();
+    expect(await search.names()).toEqual([...META, "get_call_status"].sort());
+    const s = [];
+    for (const n of names) s.push(await outcome(search, n, args[n]));
+
+    expect(s).toEqual(d);
+    expect(s[0]).toMatch(/^ok: .*Hi/s);
+    expect(s[1]).toMatch(/^ok: /);
+    for (const r of s.slice(2)) expect(r).toMatch(/^error: MCP error -32602: Tool \S+ not found/);
+    expect(s[0]).not.toContain("-32602");
+    expect(strip(auditRows()).slice(directAudit.length)).toEqual(directAudit);
+    expect(f.calls).toEqual([]);
+  });
+
+  it("runs a broker tool called by name through BrokerCalls: a risky one is still pending approval", async () => {
+    const { ctx, connect, reader } = setup();
+    enableBroker(ctx);
+    const f = fakeBroker(ctx, registered(100));
+    setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "search" });
+    const c = await connect();
+    expect(await c.names()).not.toContain("slack__post_message");
+
+    const r = await c.call("slack__post_message", { channel_id: "C1", text: "Ship it" });
+    expect(JSON.parse(r.text)).toEqual({ status: "pending_approval", approval_id: "apr_1" });
+    expect((await c.call("notion__search", { query: "roadmap" })).text).toBe("ran notion__search");
+    expect(f.calls.map((x) => [x.agentId, x.name])).toEqual([
+      [reader.agent.id, "slack__post_message"],
+      [reader.agent.id, "notion__search"],
+    ]);
+  });
+});
+
+describe("search mode: agents keep their mode", () => {
+  /** /mcp over HTTP as the agent: the real route, which records an `auto` agent's first mode. */
+  const viaHttp = async (ctx: AppContext, apiKey: string) => {
+    const root = new Hono().route("/", mcpRoutes(ctx));
+    const transport = new StreamableHTTPClientTransport(new URL("http://xaq.test/mcp"), {
+      requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
+      fetch: async (url, init) => root.request(String(url), init as RequestInit),
+    });
+    const client = new Client({ name: "test", version: "1" });
+    await client.connect(transport);
+    cleanup.push(() => client.close());
+    return {
+      names: async () => (await client.listTools()).tools.map((x) => x.name).sort(),
+      call: async (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args }),
+    };
+  };
+
+  it("upgrade: agents from before search mode are pinned to direct once; new agents follow auto; explicit settings stay", async () => {
+    const { ctx, reader, addAgent } = setup();
+    enableBroker(ctx);
+    // Hermes before the upgrade: no setting, 9 native + 40 broker tools, over the threshold.
+    fakeBroker(ctx, registered(40));
+    const explicit = addAgent("explicit", [grantInput("acc_a", { capabilities: ["read"] })]);
+    setAgentSearchSettings(ctx.db, explicit.agent.id, { mode: "search" });
+    // The marker is unset, as on an install upgrading to this release.
+    expect(ctx.settings.getState("broker.searchDirectPinned")).toBeNull();
+
+    expect(pinExistingAgentsDirect(ctx.db, ctx.settings)).toBe(1);
+    expect(agentSearchSettings(ctx.db, reader.agent.id).mode).toBe("direct");
+    expect(agentSearchSettings(ctx.db, explicit.agent.id).mode).toBe("search");
+    const before = ctx.db.all("SELECT key, value FROM settings WHERE key LIKE 'broker.search:%' ORDER BY key");
+
+    const hermes = await viaHttp(ctx, reader.apiKey);
+    const listed = await hermes.names();
+    expect(listed).toContain("search_threads");
+    expect(listed).toHaveLength(READER_TOOLS.length + 40 + 1);
+    const r = await hermes.call("search_threads", { query: "" });
+    expect(r.isError).toBeFalsy();
+    expect((r.content as { text: string }[])[0]!.text).toContain("Hi");
+    expect(await (await viaHttp(ctx, explicit.apiKey)).names()).toEqual([...META, "get_call_status"].sort());
+
+    // Running the step again (every later start) changes nothing.
+    expect(pinExistingAgentsDirect(ctx.db, ctx.settings)).toBe(0);
+    expect(ctx.db.all("SELECT key, value FROM settings WHERE key LIKE 'broker.search:%' ORDER BY key")).toEqual(before);
+
+    // An agent created after the upgrade: auto, so above the threshold it starts in search mode (and keeps it).
+    const fresh = addAgent("fresh", [grantInput("acc_a", { capabilities: ["read"] })]);
+    expect(agentSearchSettings(ctx.db, fresh.agent.id).mode).toBe("auto");
+    expect(await (await viaHttp(ctx, fresh.apiKey)).names()).toEqual([...META, "get_call_status"].sort());
+    expect(agentSearchSettings(ctx.db, fresh.agent.id).mode).toBe("search");
+  });
+
+  it("the broker's start runs the step; a new install pins nobody", async () => {
+    const upgraded = setup();
+    await upgraded.ctx.broker.start?.();
+    expect(agentSearchSettings(upgraded.ctx.db, upgraded.reader.agent.id).mode).toBe("direct");
+
+    const t = mailTestContext();
+    cleanup.push(t.dispose);
+    await t.ctx.broker.start?.();
+    expect(t.ctx.settings.getState("broker.searchDirectPinned")).not.toBeNull();
+    const later = t.addAgent("later", []);
+    expect(t.ctx.db.get("SELECT value FROM settings WHERE key = ?", `broker.search:${later.agent.id}`)).toBeUndefined();
+  });
+
+  it("auto is decided on the first /mcp request: a direct agent that later crosses the threshold stays direct", async () => {
+    const { ctx, reader } = setup();
+    enableBroker(ctx);
+    fakeBroker(ctx, registered(5));
+    // Console probes (the agent page, Test connection) don't decide it.
+    expect(agentToolMode(ctx, reader.agent.id)).toEqual({ setting: "auto", mode: "direct", tools: READER_TOOLS.length + 5, threshold: SEARCH_MODE_THRESHOLD });
+    expect(agentSearchSettings(ctx.db, reader.agent.id).mode).toBe("auto");
+
+    expect(await (await viaHttp(ctx, reader.apiKey)).names()).toContain("search_threads");
+    expect(agentSearchSettings(ctx.db, reader.agent.id).mode).toBe("direct");
+
+    // A big connection later: still every tool, and the agent page has what it needs for its hint.
+    fakeBroker(ctx, registered(80));
+    const names = await (await viaHttp(ctx, reader.apiKey)).names();
+    expect(names).toHaveLength(READER_TOOLS.length + 80 + 1);
+    expect(agentToolMode(ctx, reader.agent.id)).toEqual({ setting: "direct", mode: "direct", tools: READER_TOOLS.length + 80, threshold: SEARCH_MODE_THRESHOLD });
+
+    // Search mode only when the user turns it on.
+    setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "search" });
+    expect(await (await viaHttp(ctx, reader.apiKey)).names()).toEqual([...META, "get_call_status"].sort());
   });
 });
 

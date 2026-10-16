@@ -329,6 +329,16 @@ The design:
    - 3–5 "hot" tools exposed directly.
 
    Every inner call is audited and governed under its real name, so search mode loses nothing on the broker side.
+   Search mode only trims `tools/list`: every tool the agent could call in direct mode stays callable by its real
+   name (scripts and prompts that call `search_threads` keep working), through the same handler, policy, approvals
+   and audit; a name the agent can't use still gets -32602.
+
+   An agent's mode never changes under it. The per-agent setting (`broker.search:<agentId>`) is `direct` or
+   `search`; `auto` (no choice yet) is resolved on the agent's first `/mcp` request by the 30-tool threshold and
+   recorded, so a connection that adds 80 tools later leaves a direct agent direct. The agent page shows the mode,
+   lets the user switch it, and suggests search mode once a direct agent is over the threshold. On upgrade, a
+   one-time startup step (marker `broker.searchDirectPinned`) pins every existing agent without a setting to
+   `direct`: search mode is opt-in for them. A new install pins nobody.
 3. **Code mode is deferred.** It cuts tokens the most
    ([Cloudflare](https://blog.cloudflare.com/enterprise-mcp/),
    [Anthropic](https://www.anthropic.com/engineering/code-execution-with-mcp)), but it needs a sandbox and hides each
@@ -763,7 +773,9 @@ All questions are decided. Building proceeds M0 → M1 → M2 → M3.
 6. **Approvals on the phone:** a link to the one-tap approve page goes out in `approval.requested`. Chat replies can't
    approve.
 7. **Keys and data directory** (decision 6): `aib_` for every key; `~/.agentinbox` kept, with no automatic move.
-8. **Search mode:** on automatically for any agent with more than about 30 tools. Real names are kept below that.
+8. **Search mode:** on automatically for a new agent with more than about 30 tools when it first connects. Real
+   names are kept below that, and for agents that existed before search mode. The mode then changes only when the
+   user changes it.
 9. **Order:** M2 WHOOP, then M3 search mode. If Hermes has more than about 50 tools after M1, M3 comes first.
 10. **T3 refresh tokens:** dated warnings and one-click Reconnect in M1, and a request to T3 Code to add the
     `refresh_token` grant.

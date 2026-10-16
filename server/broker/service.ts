@@ -34,6 +34,7 @@ import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGr
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
+import { pinExistingAgentsDirect } from "./search/mode.ts";
 import {
   type BrokerCalls,
   type CredentialStore,
@@ -505,6 +506,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     pollEvents,
 
     start() {
+      // Agents from before search mode keep their full tool list (once per install; docs/MCP-BROKER.md).
+      try {
+        const pinned = pinExistingAgentsDirect(ctx.db, ctx.settings);
+        if (pinned) ctx.log.child("broker").info("Kept the full tool list for existing agents", { agents: pinned });
+      } catch (err) {
+        ctx.log.error("Couldn't keep the full tool list for existing agents", { error: errorMessage(err) });
+      }
       policy.start();
       ctx.bus.on("settings", onSettings);
       wasOn = enabled();

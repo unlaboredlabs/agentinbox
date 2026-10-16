@@ -49,7 +49,7 @@ export function brokerInstructions(view: AgentBrokerView | null): string {
 type Handler = (request: unknown, extra: unknown) => Promise<unknown>;
 
 /** The handler McpServer installed for `method` (SDK 1.x keeps them in Protocol._requestHandlers). */
-function installedHandler(server: McpServer, method: string): Handler {
+export function installedHandler(server: McpServer, method: string): Handler {
   const handler = (server.server as unknown as { _requestHandlers?: Map<string, Handler> })._requestHandlers?.get(method);
   if (!handler) throw new Error(`MCP SDK internals changed: no ${method} handler to extend (server/mcp/broker.ts)`);
   return handler;
@@ -109,11 +109,6 @@ export interface BrokerToolState {
   /** Exposed names listed to this agent. */
   dynamic: Set<string>;
   signal?: AbortSignal;
-  /**
-   * Search mode (M3): list only these exposed names directly; null or absent lists every tool. get_call_status
-   * is always listed.
-   */
-  only?: ReadonlySet<string> | null;
 }
 
 export function registerBrokerTools(ctx: AppContext, server: McpServer, principal: AgentPrincipal, view: AgentBrokerView, state: BrokerToolState): void {
@@ -156,10 +151,8 @@ export function registerBrokerTools(ctx: AppContext, server: McpServer, principa
 
   // ───────────── upstream tools ─────────────
 
-  const tools = listableTools(
-    view.tools.filter((t) => !state.only || state.only.has(t.exposedName)),
-    (msg, meta) => log.warn(msg, meta),
-  );
+  // Every tool is registered, in search mode too (exposeTools trims the listing there), so a call by name works alike.
+  const tools = listableTools(view.tools, (msg, meta) => log.warn(msg, meta));
   if (!tools.length) return;
   let listNative: Handler;
   let callNative: Handler;

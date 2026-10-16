@@ -8,6 +8,7 @@ import { AgentConnections } from "@/components/agents/agent-connections";
 import { AgentHeader } from "@/components/agents/agent-header";
 import { AgentListeners } from "@/components/agents/agent-listeners";
 import { AgentTools } from "@/components/agents/agent-tools";
+import { AgentToolMode } from "@/components/agents/agent-tool-mode";
 import { AgentWebhooks } from "@/components/agents/agent-webhooks";
 import { GrantEditor } from "@/components/agents/grant-editor";
 import { KeyReveal } from "@/components/agents/key-reveal";
@@ -100,6 +101,8 @@ function AgentPage() {
       </section>
 
       {broker && <AgentConnections agentId={a.id} />}
+
+      {broker && <AgentToolMode agentId={a.id} />}
 
       <AgentTools agent={a} apiKey={apiKey} />
 

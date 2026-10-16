@@ -54,8 +54,12 @@ key; the broker holds every upstream credential and lists only the tools the age
   means it never asks twice; the rules are listed on the agent's page.
 - **Tool changes**: every tool's definition is pinned when you connect. If a server later changes or adds a tool,
   that tool is held until you accept the change (Connections shows a diff).
-- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`. Agents with more than about 30 tools get
-  search mode (`search_tools`, `call_read_tool`, `call_write_tool`), or any agent with `/mcp?mode=search`.
+- **Tool names**: `<connection>__<tool>`, e.g. `notion__notion-search`.
+- **Search mode**: the tool list shows only `search_tools`, `call_read_tool`, `call_write_tool` and `get_call_status`;
+  the agent finds the rest by searching. Calling a tool by its name still works, with the same access, approvals and
+  audit. A new agent gets search mode if it has more than about 30 tools the first time it connects. After that its
+  mode changes only when you change it (agent page → Tool list), never because a connection added tools. Agents
+  created before search mode keep every tool listed. Any agent can ask for it with `/mcp?mode=search`.
 - **Import**: `npx xaq-cli import --from hermes|claude-code|cursor|codex [--dry-run]` moves a client's remote
   MCP servers into connections and replaces them with the single xaq entry, after a backup. Entries that don't
   work yet (an OAuth sign-in to finish, a rejected key) stay in the client until they do.

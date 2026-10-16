@@ -634,6 +634,18 @@ export interface AgentTestResult {
   message: string;
 }
 
+/** GET /api/agents/:id/tool-mode: how /mcp lists this agent's tools (docs/MCP-BROKER.md, search mode). */
+export interface AgentToolMode {
+  /** The stored choice; "auto" until the agent's first /mcp request decides it. */
+  setting: "auto" | "direct" | "search";
+  /** What /mcp serves it now (without ?mode=search). */
+  mode: "direct" | "search";
+  /** Tools the agent can use (mail, calendar and connections). */
+  tools: number;
+  /** Above this many tools a new agent starts in search mode. */
+  threshold: number;
+}
+
 /** Returned once on create and on key rotation. */
 export interface AgentWithKey {
   agent: Agent;

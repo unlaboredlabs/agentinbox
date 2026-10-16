@@ -230,7 +230,8 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 
 ### Search mode (#58)
 - Delete orphaned `broker.search:<agentId>` settings rows when an agent is deleted.
-- Console control for the per-agent search mode and hot list, plus the plan's automatic suggestion above about 30 tools.
+- Console control for the hot list (the mode has one on the agent page, with the suggestion above about 30 tools).
+- An agent created with the CLI before the daemon's first start is pinned to direct by the upgrade step, like an existing one.
 - The plan's "10K tokens" trigger isn't implemented; only the tool count is.
 - The done-when "at least as often as listing every tool" needs a model-in-the-loop eval; the offline eval measures retrieval only.
 - `INSTRUCTIONS` says "Start with list_accounts", which is hidden in search mode (reachable through search).
