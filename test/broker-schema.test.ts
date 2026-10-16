@@ -138,8 +138,8 @@ describe("migration 8 on an install at migration 7", () => {
     expect(plain(approvalIndexes)).toEqual([{ name: "approvals_status" }]);
 
     const db = new Db(path);
-    expect(db.get<{ v: number }>("SELECT MAX(version) AS v FROM _migrations")!.v).toBe(8);
-    expect(MIGRATIONS).toHaveLength(8);
+    expect(db.get<{ v: number }>("SELECT MAX(version) AS v FROM _migrations")!.v).toBe(MIGRATIONS.length);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(8);
     db.close();
 
     const after = new DatabaseSync(path, { readOnly: true });
@@ -149,6 +149,9 @@ describe("migration 8 on an install at migration 7", () => {
         if (table === "_migrations") continue;
         if (table === "approvals") {
           expect(now.get(table)).toEqual(rows.map((r) => ({ ...r, connection_id: null, tool_call: null })));
+        } else if (table === "oauth_states") {
+          // Migration 9 adds oauth_states.connection_id (upstream OAuth); Google's rows keep NULL.
+          expect(now.get(table)).toEqual(rows.map((r) => ({ ...r, connection_id: null })));
         } else {
           expect([table, now.get(table)]).toEqual([table, rows]);
         }
@@ -370,6 +373,7 @@ describe("migration 8 on a fresh database", () => {
       "discovery_enc",
       "created_at",
       "updated_at",
+      "issued_at", // migration 9
     ]);
     expect(cols("connection_grants")).toEqual(["agent_id", "connection_id", "level", "created_at", "updated_at"]);
     expect(cols("approval_rules")).toEqual(["id", "agent_id", "connection_id", "tool", "target_path", "target_value", "created_at"]);

@@ -233,6 +233,8 @@ export interface StoredTokens {
   expiresAt: number | null;
   scope: string | null;
   issuer: string | null;
+  /** Epoch ms when the access token was issued (for the 10 %-of-lifetime refresh window). Additive. */
+  issuedAt?: number | null;
 }
 
 /** Encrypted per-connection credentials. FROZEN. */
