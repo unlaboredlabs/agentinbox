@@ -19,6 +19,7 @@ import { upstreams } from "../server/broker/upstream/runtime.ts";
 import { Approvals } from "../server/mail/approvals.ts";
 import { buildMcpServer, INSTRUCTIONS, rejectedCall } from "../server/mcp/server.ts";
 import { type RunningServer, startServer } from "../server/server.ts";
+import { parseTypes } from "../server/listen/options.ts";
 import { matchesFilter, webhookInputSchema } from "../server/webhooks/filter.ts";
 import type { StoredEvent } from "../server/events/types.ts";
 import { testConfig, testContext } from "./helpers.ts";
@@ -300,6 +301,12 @@ describe("connection events", () => {
     expect(feed).not.toContain("\u200b");
     expect(feed).not.toContain("whoop");
     await s.close();
+  });
+
+  it("still accepts connection.tool_changed (never emitted since the hold was removed) in saved listener and webhook filters", () => {
+    expect(parseTypes("message.received,connection.tool_changed")).toEqual(["message.received", "connection.tool_changed"]);
+    const base = { agentId: "agt_x", name: "n", url: "https://example.com/h" };
+    expect(webhookInputSchema.safeParse({ ...base, eventTypes: ["connection.tool_changed"] }).success).toBe(true);
   });
 
   it("webhook filters accept the new types; an account filter excludes connection events", () => {

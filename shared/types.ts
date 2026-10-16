@@ -79,6 +79,9 @@ export type NativeEventType = (typeof EVENT_TYPES)[number];
  */
 export const BROKER_EVENT_TYPES = [
   "connection.auth_failed", // the upstream's credential stopped working; the owner must reconnect
+  // Never emitted since the tool-change hold was removed (2026-10-16): a changed tool is only audited. Kept as an
+  // accepted type so saved listener `--types` and webhook filters naming it stay valid.
+  "connection.tool_changed",
   "connection.expiring", // the credential stops working on a known date (no refresh, or a cap): reconnect before it
   "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
 ] as const;
