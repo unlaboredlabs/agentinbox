@@ -55,6 +55,16 @@ describe("sanitizeFilename", () => {
     expect(sanitizeFilename(word("../../x/run.bat"))).toBe("run.bat");
   });
 
+  it("refuses a name still encoded after the bounded unwrapping (a mail client would decode it into an unchecked name)", () => {
+    const word = (s: string) => `=?UTF-8?B?${Buffer.from(s).toString("base64")}?=`;
+    let deep = "a.js";
+    for (let i = 0; i < 6; i++) deep = word(deep);
+    expect(fail(() => prepareAttachments([{ filename: deep, mime_type: "application/pdf", content_base64: b64("x") }])).message).toMatch(/MIME-encoded/);
+    let ok = "lease.pdf";
+    for (let i = 0; i < 3; i++) ok = word(ok);
+    expect(prepareAttachments([{ filename: ok, mime_type: "application/pdf", content_base64: b64("x") }])[0]!.filename).toBe("lease.pdf");
+  });
+
   it("drops trailing characters that hide the extension", () => {
     expect(sanitizeFilename("evil.exe\uFE0F")).toBe("evil.exe");
     expect(sanitizeFilename("evil.exe \u3164\u115F\u1160\u180E\uFFA0 ")).toBe("evil.exe");
@@ -139,6 +149,9 @@ describe("prepareAttachments", () => {
     expect(fail(() => prepareAttachments([{ filename: "a.txt", mime_type: "text/plain; charset=utf-8", content_base64: b64("x") }])).message).toMatch(/leave out parameters/);
     expect(fail(() => prepareAttachments([{ filename: "a", mime_type: "multipart/mixed", content_base64: b64("x") }])).message).toMatch(/can't be the type/);
     expect(fail(() => prepareAttachments([{ filename: "a.eml", mime_type: "message/rfc822", content_base64: b64("x") }])).message).toMatch(/can't be the type/);
+    // Without mime_type, a .eml or .mht name doesn't make it message/* or multipart/*: it goes out as plain bytes.
+    expect(prepareAttachments([{ filename: "saved.eml", content_base64: b64("x") }])[0]!.contentType).toBe("application/octet-stream");
+    expect(prepareAttachments([{ filename: "page.mht", content_base64: b64("x") }])[0]!.contentType).toBe("application/octet-stream");
   });
 
   it("refuses the file types Gmail blocks", () => {

@@ -82,6 +82,9 @@ function extensionFor(mimeType: string): string | null {
   return ext && ext !== "bin" && ext !== "*" && /^[a-z0-9]{1,10}$/i.test(ext) ? ext.toLowerCase() : null;
 }
 
+/** An RFC 2047 encoded-word ("=?charset?B|Q?text?="). */
+const ENCODED_WORD = /=\?[^?\s]+\?[bq]\?[^?\s]*\?=/i;
+
 /**
  * The filename as it will appear in the message: no path, no control, zero-width, bidi or tag characters,
  * our delimiter tags defused, at most MAX_FILENAME_CHARS with the extension kept. Falls back to
@@ -182,8 +185,15 @@ export function prepareAttachments(input: AttachmentInput[] | undefined, bodyByt
     }
     const raw = typeof a.filename === "string" ? a.filename : "";
     // Without mime_type: from the extension, else application/octet-stream.
-    const contentType = (given || detectMimeType(sanitizeFilename(raw)) || "application/octet-stream").toLowerCase();
+    const inferred = detectMimeType(sanitizeFilename(raw));
+    // An inferred message/* or multipart/* type (x.eml, x.mht) would be embedded raw; attach those as plain bytes.
+    const contentType = (given || (inferred && !/^(multipart|message)\//i.test(inferred) ? inferred : "") || "application/octet-stream").toLowerCase();
     const filename = sanitizeFilename(raw, contentType);
+    // Still an encoded-word after the bounded unwrapping: a mail client would decode it once more, into a name
+    // nothing here has checked. Refuse rather than send a name the approval card can't show.
+    if (ENCODED_WORD.test(filename)) {
+      throw new AttachmentError("invalid_attachment", `${label}: the filename is MIME-encoded (=?…?=); pass the plain file name.`);
+    }
     const blocked = blockedExtension(filename);
     if (blocked) {
       throw new AttachmentError(
