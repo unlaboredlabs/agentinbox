@@ -36,6 +36,7 @@ function ProjectSaved({ index, onBack, onNext, projectId }: StepProps & { projec
       <div className="flex flex-wrap gap-2">
         <CloudLink href={cloudUrl.dashboard(projectId)}>Open the project</CloudLink>
         <CloudLink href={cloudUrl.enableGmail(projectId)}>Check the Gmail API is enabled</CloudLink>
+        <CloudLink href={cloudUrl.enableCalendar(projectId)}>Check the Calendar API is enabled</CloudLink>
       </div>
       <p className="text-xs text-muted-foreground">
         To move to another project, create an OAuth client there and import it in step 4; the project ID comes with it.
@@ -144,7 +145,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 <CloudLink href={cloudUrl.cloudShell}>Open Cloud Shell</CloudLink>
               </GuideStep>
               <GuideStep title="Paste this command and press Enter">
-                <p>It creates the project and turns on the Gmail API in it.</p>
+                <p>It creates the project and turns on the Gmail and Google Calendar APIs in it.</p>
                 <div className="flex items-start gap-2">
                   <Checkbox id="project-in-org" checked={inOrg} onCheckedChange={(v) => updateDraft({ projectInOrg: v === true })} className="mt-0.5" />
                   <Label htmlFor="project-in-org" className="flex-1 text-sm leading-snug font-normal text-foreground">
@@ -184,9 +185,13 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                       admin for the “Project Creator” role.
                     </li>
                     <li>
-                      The project was created but enabling failed: run only the second part again, or use the{" "}
+                      The project was created but enabling failed: run only the second part again, or use the enable links for{" "}
                       <a className="underline" href={cloudUrl.enableGmail(id)} target="_blank" rel="noopener noreferrer">
-                        enable link
+                        Gmail
+                      </a>{" "}
+                      and{" "}
+                      <a className="underline" href={cloudUrl.enableCalendar(id)} target="_blank" rel="noopener noreferrer">
+                        Calendar
                       </a>
                       .
                     </li>
@@ -224,15 +229,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 </p>
                 <CloudLink href={cloudUrl.createProject}>Open Create a project</CloudLink>
               </GuideStep>
-              <GuideStep title="Turn on the Gmail API" expect="a confirmation that the API is enabled.">
-                <p>
-                  The link opens in your new project. Confirm the project, then click <strong className="text-foreground">Next</strong> and{" "}
-                  <strong className="text-foreground">Enable</strong>.
-                </p>
-                <CloudLink href={valid ? cloudUrl.enableGmail(id) : "#"} disabled={!valid} disabledReason="Fix the project ID above first">
-                  Enable the Gmail API
-                </CloudLink>
-              </GuideStep>
+              <EnableApis id={id} valid={valid} disabledReason="Fix the project ID above first" />
             </Guide>
           )}
 
@@ -282,15 +279,7 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
                 </div>
               </Field>
             </GuideStep>
-            <GuideStep title="Turn on the Gmail API" expect="a confirmation that the API is enabled (or that it already was).">
-              <p>
-                Confirm the project, then click <strong className="text-foreground">Next</strong> and{" "}
-                <strong className="text-foreground">Enable</strong>.
-              </p>
-              <CloudLink href={valid ? cloudUrl.enableGmail(id) : "#"} disabled={!valid} disabledReason="Enter the project ID first">
-                Enable the Gmail API
-              </CloudLink>
-            </GuideStep>
+            <EnableApis id={id} valid={valid} disabledReason="Enter the project ID first" existing />
           </Guide>
           <Button variant="link" className="h-auto px-0" onClick={() => updateDraft({ projectMode: "new" })}>
             Create a new project instead (recommended)
@@ -298,6 +287,29 @@ function ProjectSetup({ index, onBack, onNext }: StepProps) {
         </>
       )}
     </StepCard>
+  );
+}
+
+/** The console path for step 2's APIs: one enable link each (Gmail is required, Calendar adds the calendar tools). */
+function EnableApis({ id, valid, disabledReason, existing }: { id: string; valid: boolean; disabledReason: string; existing?: boolean }) {
+  return (
+    <GuideStep
+      title="Turn on the Gmail and Google Calendar APIs"
+      expect={existing ? "a confirmation that each API is enabled (or that it already was)." : "a confirmation that each API is enabled."}
+    >
+      <p>
+        {existing ? "Each link opens in that project." : "Each link opens in your new project."} Confirm the project, then click{" "}
+        <strong className="text-foreground">Next</strong> and <strong className="text-foreground">Enable</strong>. Do both.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <CloudLink href={valid ? cloudUrl.enableGmail(id) : "#"} disabled={!valid}>
+          Enable the Gmail API
+        </CloudLink>
+        <CloudLink href={valid ? cloudUrl.enableCalendar(id) : "#"} disabled={!valid} disabledReason={disabledReason}>
+          Enable the Calendar API
+        </CloudLink>
+      </div>
+    </GuideStep>
   );
 }
 
