@@ -516,3 +516,122 @@ describe("16: account connect options", () => {
     expect((await connect({ scopes: ["gmail"] })).status).toBe(400);
   });
 });
+
+// ───────────── 3b: service install on launchd ─────────────
+
+const PLIST = "units/com.unlaboredlabs.agentinbox.plist";
+
+/**
+ * Fake launchd. `bootout` returns at once but the old job stays loaded for `lingers` more `launchctl print`
+ * calls (launchd tears it down asynchronously), and `bootstrap` fails with launchd's "5: Input/output error"
+ * while a job with the label is loaded, or for the first `bootstrapFailures` calls. A bootstrapped job is
+ * the running service: it holds the data directory's lock as pid SERVICE_PID.
+ */
+function fakeLaunchdOps(dir: string, opts: { lingers?: number; bootstrapFailures?: number; loaded?: boolean } = {}): FakeOps & { loaded: boolean } {
+  let linger = 0;
+  let failures = opts.bootstrapFailures ?? 0;
+  let starts = 0;
+  const eio = () => Object.assign(new Error("Command failed: launchctl bootstrap"), { stderr: "Bootstrap failed: 5: Input/output error\n" });
+  const bootstrap = () => {
+    if (ops.loaded || failures-- > 0) throw eio();
+    ops.loaded = true;
+    ops.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: `start-${++starts}`, service: true };
+  };
+  const ops: FakeOps & { loaded: boolean } = {
+    ...fakeOps(dir),
+    platform: "darwin",
+    uid: 501,
+    loaded: opts.loaded ?? false,
+    instance: () => ops.owner,
+    portInUse: async () => ops.busyPort,
+    exec(cmd, args) {
+      ops.calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd === "launchctl" && args[0] === "bootout") {
+        if (!ops.loaded) throw new Error("Boot-out failed: 3: No such process");
+        linger = opts.lingers ?? 0;
+        if (ops.owner?.service) ops.owner = null;
+        if (linger === 0) ops.loaded = false;
+      }
+      if (cmd === "launchctl" && args[0] === "bootstrap") bootstrap();
+    },
+    capture(cmd, args) {
+      ops.calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd !== "launchctl") return "";
+      if (args[0] === "print") {
+        if (ops.loaded && linger > 0) {
+          if (--linger === 0) ops.loaded = false;
+          return "state = stopping\n";
+        }
+        if (!ops.loaded) throw new Error('Could not find service "com.unlaboredlabs.agentinbox" in domain for port');
+        return ops.owner?.service ? `state = running\n\tpid = ${SERVICE_PID}\n` : "state = waiting\n";
+      }
+      if (args[0] === "bootstrap") bootstrap();
+      return "";
+    },
+  };
+  return ops;
+}
+
+describe("3b: service install on launchd", () => {
+  const setup = () => {
+    const config = testConfig();
+    cleanup.push(() => rmSync(config.dataDir, { recursive: true, force: true }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mkdirSync(join(config.dataDir, "units"), { recursive: true });
+    writeFileSync(join(config.dataDir, PLIST), "previous plist\n");
+    mkdirSync(join(config.dataDir, "app"), { recursive: true });
+    writeFileSync(join(config.dataDir, "app/marker"), "old app");
+    return config;
+  };
+  const bootstraps = (ops: FakeOps) => ops.calls.filter((c) => c.startsWith("launchctl bootstrap"));
+  const running = (ops: FakeOps) => {
+    ops.owner = { pid: SERVICE_PID, host: "127.0.0.1", port: 0, startedAt: "old", service: true };
+  };
+
+  it("an update waits for the old job to finish unloading (bootout returns early) before bootstrapping the new one", async () => {
+    const config = setup();
+    const ops = fakeLaunchdOps(config.dataDir, { loaded: true, lingers: 3 });
+    running(ops);
+    await installService(config, ops, { launchdPollMs: 1 });
+    const first = ops.calls.findIndex((c) => c.startsWith("launchctl bootstrap"));
+    expect(ops.calls.slice(0, first).filter((c) => c.startsWith("launchctl print")).length).toBeGreaterThanOrEqual(3);
+    expect(bootstraps(ops)).toEqual([`launchctl bootstrap gui/501 ${join(config.dataDir, PLIST)}`]);
+    expect(readFileSync(join(config.dataDir, PLIST), "utf8")).not.toBe("previous plist\n");
+    expect(existsSync(join(config.dataDir, "app/node_modules/agentinbox-cli/dist/cli.js"))).toBe(true);
+  });
+
+  it("retries a bootstrap that fails with launchd's error 5, then succeeds", async () => {
+    const config = setup();
+    const ops = fakeLaunchdOps(config.dataDir, { loaded: true, bootstrapFailures: 2 });
+    running(ops);
+    await installService(config, ops, { launchdPollMs: 1 });
+    expect(bootstraps(ops)).toHaveLength(3);
+    expect(ops.loaded).toBe(true);
+  });
+
+  it("a bootstrap that keeps failing is reported with launchd's reason and rolled back to the previous install", async () => {
+    const config = setup();
+    // All five attempts for the new plist fail; the restored plist's bootstrap works.
+    const ops = fakeLaunchdOps(config.dataDir, { loaded: true, bootstrapFailures: 5 });
+    running(ops);
+    await expect(installService(config, ops, { launchdPollMs: 1 })).rejects.toThrow(
+      /Starting the service failed \(launchctl bootstrap failed: Bootstrap failed: 5: Input\/output error\)\. Rolled back to the previous install/,
+    );
+    expect(bootstraps(ops)).toHaveLength(6);
+    expect(ops.loaded).toBe(true);
+    expect(readFileSync(join(config.dataDir, PLIST), "utf8")).toBe("previous plist\n");
+    expect(readFileSync(join(config.dataDir, "app/marker"), "utf8")).toBe("old app");
+  });
+
+  it("the restore after a failed update also waits for the failed job to unload", async () => {
+    const config = setup();
+    const ops = fakeLaunchdOps(config.dataDir, { loaded: true, lingers: 2 });
+    running(ops);
+    ops.waitReady = async () => false;
+    await expect(installService(config, ops, { launchdPollMs: 1 })).rejects.toThrow(/did not answer on port .*Rolled back to the previous install/s);
+    expect(bootstraps(ops)).toHaveLength(2);
+    expect(ops.loaded).toBe(true);
+    expect(readFileSync(join(config.dataDir, PLIST), "utf8")).toBe("previous plist\n");
+  });
+});

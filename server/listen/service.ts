@@ -3,6 +3,8 @@ import { delimiter, dirname, join } from "node:path";
 import pc from "picocolors";
 import {
   assertSupported,
+  bootstrapLaunchd,
+  commandFailure,
   enableLinger,
   installedEntry,
   launchdTarget,
@@ -179,23 +181,9 @@ export async function waitListenerStarted(profile: string, since: number, timeou
   return null;
 }
 
-/** First line of a failed command's stderr (what launchctl / systemctl said), else of the error. */
-const why = (err: unknown) => {
-  const stderr = String((err as { stderr?: unknown })?.stderr ?? "").trim();
-  return (stderr || (err instanceof Error ? err.message : String(err))).split("\n")[0]!;
-};
+const why = commandFailure;
 
 const launchdJob = (ops: ServiceOps, profile: string) => `${launchdTarget(ops)}/${launchdLabel(profile)}`;
-
-/** Whether launchd has a job with this profile's label loaded (`launchctl print` fails when it hasn't). */
-function launchdLoaded(ops: ServiceOps, profile: string): boolean {
-  try {
-    ops.capture("launchctl", ["print", launchdJob(ops, profile)]);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** What the service manager says about the profile's listener: running (with its pid), or why not. */
 export function managerState(ops: ServiceOps, profile: string): { running: boolean; pid: number | null; detail: string } {
@@ -219,11 +207,7 @@ export function managerState(ops: ServiceOps, profile: string): { running: boole
   return { running: active === "active" && pid !== null, pid, detail: `systemd ${active || "unknown"}${pid ? `, MainPID ${pid}` : ""}` };
 }
 
-/**
- * (Re)starts the profile's unit with the file just written. launchd: a job with the same label still
- * loaded (or still being torn down after `bootout`, which returns early) makes `bootstrap` fail with
- * "5: Input/output error", so wait until it is really gone before each bootstrap attempt.
- */
+/** (Re)starts the profile's unit with the file just written (launchd: see bootstrapLaunchd). */
 async function startUnit(ops: ServiceOps, profile: string, file: string, pollMs = 250): Promise<void> {
   if (ops.platform === "linux") {
     systemctl(ops, "daemon-reload");
@@ -232,25 +216,7 @@ async function startUnit(ops: ServiceOps, profile: string, file: string, pollMs 
     systemctl(ops, "restart", unitName(profile));
     return;
   }
-  let last: unknown = null;
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      ops.exec("launchctl", ["bootout", launchdJob(ops, profile)], { quiet: true });
-    } catch {
-      // Not loaded.
-    }
-    const deadline = Date.now() + 10_000;
-    while (launchdLoaded(ops, profile) && Date.now() < deadline) await sleep(pollMs);
-    try {
-      ops.capture("launchctl", ["bootstrap", launchdTarget(ops), file]);
-      return;
-    } catch (err) {
-      last = err;
-      await sleep(pollMs * 4);
-    }
-  }
-  const stillLoaded = launchdLoaded(ops, profile);
-  throw new Error(`launchctl bootstrap failed: ${why(last)}${stillLoaded ? ` (a job labelled ${launchdLabel(profile)} is still loaded and wouldn't unload)` : ""}`);
+  await bootstrapLaunchd(ops, launchdLabel(profile), file, { pollMs });
 }
 
 /** Stages the listeners' install (no web console needed). */

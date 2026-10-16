@@ -178,3 +178,8 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `server/listen/admin.ts:81`: `listen status` reads HERMES_HOME from the calling shell, which may differ from the service's.
 - `docs/listen.md` Upgrading: says a placeholder-free route "that runs its own --script or fires a cron job" gets no warning; the code needs only the placeholder-free prompt.
 - `server/skill/SKILL.md:49` still says Read only covers "get events" (same mail-vs-calendar ambiguity as the old pairing copy).
+
+### #48 launchd bootstrap race (review)
+- `bootstrapLaunchd` prints nothing while it waits for launchd to unload the old job (up to 30 s, plus retries); a "waiting for launchd…" line would help.
+- No test covers the unload budget expiring ("still loaded and wouldn't unload"), and no listener test covers the new backoff.
+- `server/listen/service.ts`: `const why = commandFailure;` is a leftover alias.

@@ -308,7 +308,7 @@ export function userManagerConfigHome(ops: Pick<ServiceOps, "capture">): string 
 
 const unitFile = (ops: ServiceOps) => join(ops.unitDir(), ops.platform === "darwin" ? `${LAUNCHD_LABEL}.plist` : `${SERVICE_NAME}.service`);
 export const systemctl = (ops: ServiceOps, ...args: string[]) => ops.exec("systemctl", ops.root ? args : ["--user", ...args]);
-export const launchdTarget = (ops: ServiceOps) => `gui/${ops.uid}`;
+export const launchdTarget = (ops: Pick<ServiceOps, "uid">) => `gui/${ops.uid}`;
 
 export function assertSupported(ops: ServiceOps): void {
   if (ops.platform !== "linux" && ops.platform !== "darwin") {
@@ -344,6 +344,59 @@ export function serviceHints(ops: ServiceOps, env: NodeJS.ProcessEnv = process.e
 }
 
 const firstLine = (err: unknown) => (err instanceof Error ? err.message : String(err)).split("\n")[0];
+
+/** First line of a failed command's stderr (what launchctl / systemctl said), else of the error. */
+export const commandFailure = (err: unknown) => {
+  const stderr = String((err as { stderr?: unknown })?.stderr ?? "").trim();
+  return (stderr || (err instanceof Error ? err.message : String(err))).split("\n")[0]!;
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Whether launchd has a job with this label loaded (any `launchctl print` failure counts as not loaded). */
+export function launchdLoaded(ops: Pick<ServiceOps, "capture" | "uid">, label: string): boolean {
+  try {
+    ops.capture("launchctl", ["print", `${launchdTarget(ops)}/${label}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Loads the launchd job in `file`, replacing a loaded job with the same label. `launchctl bootout` returns
+ * before the old job is torn down (launchd gives it up to 20 s to exit), and `bootstrap` of that label fails
+ * with "5: Input/output error" until it is. So: boot it out, wait until `launchctl print` no longer finds it,
+ * then bootstrap; on failure, retry with growing delays. Throws launchd's reason when every attempt failed.
+ */
+export async function bootstrapLaunchd(
+  ops: Pick<ServiceOps, "exec" | "capture" | "uid">,
+  label: string,
+  file: string,
+  opts: { attempts?: number; pollMs?: number; unloadTimeoutMs?: number } = {},
+): Promise<void> {
+  const { attempts = 5, pollMs = 250, unloadTimeoutMs = 30_000 } = opts;
+  let last: unknown = null;
+  // One unload budget for all attempts: a job that never unloads costs 30 s, not 30 s per attempt.
+  const deadline = Date.now() + unloadTimeoutMs;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      ops.exec("launchctl", ["bootout", `${launchdTarget(ops)}/${label}`], { quiet: true });
+    } catch {
+      // Not loaded.
+    }
+    while (launchdLoaded(ops, label) && Date.now() < deadline) await sleep(pollMs);
+    try {
+      ops.capture("launchctl", ["bootstrap", launchdTarget(ops), file]);
+      return;
+    } catch (err) {
+      last = err;
+      if (attempt < attempts) await sleep(pollMs * 4 * Math.min(2 ** (attempt - 1), 4));
+    }
+  }
+  const stillLoaded = launchdLoaded(ops, label);
+  throw new Error(`launchctl bootstrap failed: ${commandFailure(last)}${stillLoaded ? ` (a job labelled ${label} is still loaded and wouldn't unload)` : ""}`);
+}
 
 /** Fails before anything is touched when systemd can't be reached (e.g. no user bus over su). */
 export function preflight(ops: ServiceOps): void {
@@ -423,7 +476,7 @@ export function notTheService(owner: InstanceInfo | null, before: InstanceInfo |
   return null;
 }
 
-export async function installService(config: ServiceConfig, ops: ServiceOps = systemOps()): Promise<void> {
+export async function installService(config: ServiceConfig, ops: ServiceOps = systemOps(), opts: { launchdPollMs?: number } = {}): Promise<void> {
   assertSupported(ops);
   if (ops.platform === "linux" && /\s/.test(config.dataDir)) {
     throw new Error(`The data directory "${config.dataDir}" contains whitespace, which systemd can't load settings from. Choose another one with --data.`);
@@ -458,14 +511,14 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
     } else {
       // 0600: the plist may carry AGENTINBOX_MASTER_KEY.
       writeFileSync(file, renderLaunchdPlist(spec), { mode: 0o600 });
-      ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
+      await bootstrapLaunchd(ops, LAUNCHD_LABEL, file, { pollMs: opts.launchdPollMs });
     }
     if (!(await ops.waitReady(config))) throw new Error(`it did not answer on port ${config.port}`);
     // Something else (a foreground agentinbox started meanwhile) may have answered instead.
     const wrong = notTheService(ops.instance(config.dataDir), before, serviceMainPid(ops));
     if (wrong) throw new Error(wrong);
   } catch (err) {
-    rollback();
+    await rollback();
     const hints = serviceHints(ops).map((h) => `    ${h}`).join("\n");
     throw new Error(
       `Starting the service failed (${firstLine(err)}). Rolled back to ${previousUnit ? "the previous install" : "no service"}.\n  To find out why:\n${hints}`,
@@ -473,28 +526,28 @@ export async function installService(config: ServiceConfig, ops: ServiceOps = sy
   }
   swap!.commit();
 
-  function rollback(): void {
-    const quietly = (fn: () => void) => {
+  async function rollback(): Promise<void> {
+    const quietly = async (fn: () => void | Promise<void>) => {
       try {
-        fn();
+        await fn();
       } catch {
         // Best effort: report the original failure.
       }
     };
-    quietly(() => uninstallService(config, ops, { quiet: true, keepApp: true }));
-    quietly(() => rmSync(file, { force: true }));
-    if (ops.platform === "linux") quietly(() => systemctl(ops, "daemon-reload"));
-    quietly(() => rmSync(staging, { recursive: true, force: true }));
-    if (swap) quietly(() => swap!.restore());
-    quietly(() => (previousEnv === null ? rmSync(serviceEnvPath(config.dataDir), { force: true }) : writeFileSync(serviceEnvPath(config.dataDir), previousEnv, { mode: 0o600 })));
+    await quietly(() => uninstallService(config, ops, { quiet: true, keepApp: true }));
+    await quietly(() => rmSync(file, { force: true }));
+    if (ops.platform === "linux") await quietly(() => systemctl(ops, "daemon-reload"));
+    await quietly(() => rmSync(staging, { recursive: true, force: true }));
+    if (swap) await quietly(() => swap!.restore());
+    await quietly(() => (previousEnv === null ? rmSync(serviceEnvPath(config.dataDir), { force: true }) : writeFileSync(serviceEnvPath(config.dataDir), previousEnv, { mode: 0o600 })));
     if (previousUnit !== null) {
-      quietly(() => {
+      await quietly(async () => {
         writeFileSync(file, previousUnit, { mode: ops.platform === "darwin" ? 0o600 : 0o644 });
         if (ops.platform === "linux") {
           systemctl(ops, "daemon-reload");
           systemctl(ops, "enable", "--now", SERVICE_NAME);
         } else {
-          ops.exec("launchctl", ["bootstrap", launchdTarget(ops), file]);
+          await bootstrapLaunchd(ops, LAUNCHD_LABEL, file, { pollMs: opts.launchdPollMs });
         }
       });
     }
