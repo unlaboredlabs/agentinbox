@@ -390,3 +390,13 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - A held tool returns "Tool … not found" instead of the documented `tool_on_hold`.
 - "The next step checks that it works" after creating the agent, but Finish setup goes straight to Overview; an abandoned pairing request stays as a banner until it expires.
 - Disable deletes the stored bearer key; the CLI help ("turn it back on in the console") doesn't say so.
+
+### Walk fixes (#71) and re-walk
+- Approve page says "This action cannot be undone" for tools that move to Trash (notion-delete-pages); make the copy depend on the tool, or say "may not be reversible".
+- The console create-agent form doesn't list the "All agents" connections the new agent will inherit; no console control to see or turn off "All agents" on a connection (API only).
+- The refresh route calls `attach()` (aborting an in-progress listing) then `refresh()`; `refresh()` alone suffices when attached.
+- The `/approve/<id>` pending text has a stray space before the period.
+- A direct `/mcp` call to a killed connection's tool says "No tool named…" (dynamic dispatch only holds listed tools), not the "turned off" message; `service.ts:233` comments say otherwise. Same in search mode.
+- `/mcp` instructions still list a disabled connection (from grants).
+- Upstream `notifications/tools/list_changed` → `requestRefresh` isn't wired (the remote source has no notification hook); tool changes surface on the 10-minute timer or the Refresh tools button.
+- `/me` lists grants on turned-off connections with no status (`listen status` shows them as usable).
