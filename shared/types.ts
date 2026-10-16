@@ -78,6 +78,7 @@ export type NativeEventType = (typeof EVENT_TYPES)[number];
 export const BROKER_EVENT_TYPES = [
   "connection.auth_failed", // the upstream's credential stopped working; the owner must reconnect
   "connection.tool_changed", // an upstream tool changed or appeared and is held until the owner accepts it
+  "connection.expiring", // the credential stops working on a known date (no refresh, or a cap): reconnect before it
   "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
 ] as const;
 export type BrokerEventType = (typeof BROKER_EVENT_TYPES)[number];
@@ -1311,6 +1312,10 @@ export interface ConnectionProbe {
   /** OAuth: the authorization server's issuer and how the client registers. */
   issuer?: string;
   registration?: "preregistered" | "metadata_document" | "dcr" | "manual";
+  /** OAuth: the server issues refresh tokens (false: dated reconnect warnings). */
+  refresh?: boolean;
+  /** blocked: the exact scheme://host:port an admin could allow for this connection, when an allow would help. */
+  privateTarget?: string | null;
   /** Plain words for the console. */
   message: string;
 }
@@ -1325,8 +1330,11 @@ export interface StartConnectInput {
 
 export type StartConnectResult =
   | { status: "connected"; connection: ConnectionView }
-  /** Open this URL (the OAuth popup); the callback finishes the connection. */
-  | { status: "authorize"; authorizeUrl: string }
+  /**
+   * Open this URL (the OAuth popup). direct: /oauth/connections/callback finishes the connection; paste: the user
+   * copies the landing URL into POST /api/connections/finish.
+   */
+  | { status: "authorize"; authorizeUrl: string; callbackMode?: "direct" | "paste"; redirectUri?: string }
   | { status: "error"; message: string; probe?: ConnectionProbe };
 
 /** One step of a preset's guided setup (server/broker/types.ts SetupStep), resolved for this install. */
@@ -1515,6 +1523,7 @@ export interface ApiError {
 //   DELETE /api/connections/:id                       → 204 (kill switch, then removal)
 //   POST   /api/connections/:id/kill                  → 204 (disabled; onKill hooks, then credentials deleted and pending calls cancelled)
 //   POST   /api/connections/:id/connect StartConnectInput → StartConnectResult
+//   POST   /api/connections/finish {url}               → StartConnectResult (paste mode: the copied landing URL)
 //   GET    /api/connections/:id/grants                → ConnectionGrant[]
 //   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
 //   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView

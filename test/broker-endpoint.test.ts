@@ -13,6 +13,7 @@ import { type BrokerParts, createBrokerService } from "../server/broker/service.
 import type { AccessLevel, IntegrationPreset, RegisteredTool, ToolClass, ToolDef, ToolResult } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
 import { exposedName } from "../server/broker/catalog/index.ts";
+import { upstreams } from "../server/broker/upstream/runtime.ts";
 import { Approvals } from "../server/mail/approvals.ts";
 import { buildMcpServer, INSTRUCTIONS, rejectedCall } from "../server/mcp/server.ts";
 import { type RunningServer, startServer } from "../server/server.ts";
@@ -566,7 +567,7 @@ describe("/api/connections", () => {
       new Date(Date.now() + 86_400_000).toISOString(),
       con.id,
     );
-    (await import("../server/broker/credentials-table.ts")).tableCredentials(ctx).setHeader(con.id, "Authorization", "Bearer old-server-token");
+    upstreams(ctx).store.setHeader(con.id, "Authorization", "Bearer old-server-token");
     ctx.db.run(
       `INSERT INTO approvals (id, agent_id, connection_id, kind, status, payload, tool_call, created_at, expires_at) VALUES ('apr_url', ?, ?, 'mcp.call', 'pending', '{}', '{}', ?, ?)`,
       a.id, con.id, now, new Date(Date.now() + 3_600_000).toISOString(),
@@ -599,13 +600,20 @@ describe("/api/connections", () => {
     expect(ctx.db.get("SELECT status FROM approvals WHERE id = 'apr_b'")).toEqual({ status: "rejected" });
     expect((await req(`/connections/${con.id}/grants`, { method: "PUT", json: { grants: [{ agentId: "agt_nope", level: "read" }] } })).status).toBe(400);
 
-    // Probe and connect go to the upstream runtime (inert until it lands).
-    expect(await json(await req("/connections/probe", { method: "POST", json: { url: "https://x.example.com/mcp" } }))).toMatchObject({ reachable: false, auth: "unknown" });
-    expect(await json(await req(`/connections/${con.id}/connect`, { method: "POST", json: { header: { name: "Authorization", value: "Bearer s3cret" } } }))).toMatchObject({ status: "error" });
+    // Probe and connect go to the upstream runtime: a loopback URL without an allow is blocked (no network needed).
+    expect(await json(await req("/connections/probe", { method: "POST", json: { url: "http://127.0.0.1:1/mcp" } }))).toMatchObject({
+      reachable: false,
+      blocked: "private_target",
+      privateTarget: "http://127.0.0.1:1",
+    });
+    expect(await json(await req(`/connections/${con.id}/connect`, { method: "POST", json: { header: { name: "Authorization", value: "Bearer s3cret" } } }))).toMatchObject({
+      status: "connected",
+      connection: { status: "active", authType: "header" },
+    });
+    expect(upstreams(ctx).store.header(con.id)).toEqual({ name: "Authorization", value: "Bearer s3cret" });
     expect(JSON.stringify(ctx.db.all("SELECT detail FROM audit_log"))).not.toContain("s3cret");
 
     // Kill switch, then delete.
-    ctx.db.run("INSERT INTO connection_credentials (connection_id, header_value_enc, created_at, updated_at) VALUES (?, 'x', ?, ?)", con.id, now, now);
     expect((await req(`/connections/${con.id}/kill`, { method: "POST" })).status).toBe(204);
     expect(killHook).toEqual([{ credentialsPresent: true }]); // hooks (a revoke) run before the credentials go
     expect(await json(await req(`/connections/${con.id}`))).toMatchObject({ status: "disabled" });

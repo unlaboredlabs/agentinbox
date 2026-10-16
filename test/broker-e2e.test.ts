@@ -1,0 +1,118 @@
+// M1 done-when #1, the core path, end to end and offline: an admin adds a connection to a fake upstream MCP server
+// with OAuth + DCR through /api/connections (connect, then the real /oauth/connections/callback), grants an agent
+// "ask", the agent sees `slug__tool` on /mcp, a read tool runs at once, a risky tool waits for approval
+// (pending → approve → get_call_status returns the result), and after the kill switch the agent can't call it.
+
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { upstreams } from "../server/broker/upstream/runtime.ts";
+import { type FakeMcpUpstream, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
+import { CSRF, harness, json } from "./platform-helpers.ts";
+
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => {
+  for (const fn of cleanup.splice(0).reverse()) await fn().catch(() => {});
+});
+
+const text = (r: unknown) => (r as { content: { text?: string }[] }).content.map((c) => c.text ?? "").join("\n");
+
+describe("broker end to end (fake upstream, OAuth + DCR)", () => {
+  it("connect, list, read, approve a risky call, get_call_status, kill", async () => {
+    const deleted: string[] = [];
+    const up: FakeMcpUpstream = await startFakeMcpUpstream({
+      auth: { kind: "oauth", dcr: true },
+      tools: [
+        {
+          name: "get_page",
+          description: "Read a page.",
+          inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+          annotations: { readOnlyHint: true },
+          handler: (args) => ({ content: [{ type: "text", text: `Page ${(args as { id: string }).id}: hello` }] }),
+        },
+        {
+          name: "delete_page",
+          description: "Delete a page.",
+          inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+          handler: (args) => {
+            deleted.push((args as { id: string }).id);
+            return { content: [{ type: "text", text: `Deleted ${(args as { id: string }).id}` }] };
+          },
+        },
+      ],
+    });
+    cleanup.push(() => up.close());
+    const h = harness();
+    cleanup.push(() => h.dispose());
+    const { ctx } = h;
+    const cookie = await h.claim();
+    const api = (path: string, init: RequestInit & { json?: unknown } = {}) => h.request(`/api${path}`, { cookie, ...init, headers: { ...CSRF, ...(init.headers as object) } });
+    ctx.settings.update({ brokerUpstreams: true });
+    const { agent, apiKey } = ctx.policy.createAgent({ name: "Hermes" });
+
+    // Add the connection (the agent at "ask"), allow its loopback host, connect: probe → OAuth (DCR) → authorize URL.
+    const con = await json(await api("/connections", { method: "POST", json: { url: up.url, slug: "fake", name: "Fake", agentIds: [agent.id], levelDefault: "ask" } }));
+    expect(await json(await api(`/connections/${con.id}/private-target`, { method: "PUT", json: { allow: true } }))).toMatchObject({ privateTarget: up.origin });
+    const started = await json(await api(`/connections/${con.id}/connect`, { method: "POST", json: {} }));
+    expect(started).toMatchObject({ status: "authorize", callbackMode: "direct" });
+    expect(up.requests.some((r) => r.method === "POST" && r.path.endsWith("/register"))).toBe(true); // DCR
+
+    // The fake auto-approves and redirects to our callback, which finishes the connection.
+    const cb = await up.oauth!.followAuthorize(started.authorizeUrl);
+    expect(cb.pathname).toBe("/oauth/connections/callback");
+    const landing = await h.request(`${cb.pathname}${cb.search}`);
+    expect(landing.status).toBe(200);
+    expect(await landing.text()).toContain("Fake connected");
+    expect(await json(await api(`/connections/${con.id}`))).toMatchObject({ status: "active", authType: "oauth" });
+
+    // The catalog lists and pins the tools.
+    const listed = await ctx.broker.catalog.refresh(con.id);
+    expect(listed).toMatchObject({ ok: true });
+    expect((await json(await api(`/connections/${con.id}`))).tools).toMatchObject({ total: 2, active: 2, held: 0 });
+
+    // The agent, over HTTP with its key.
+    const client = new Client({ name: "e2e", version: "1" });
+    const app = h.app;
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL("http://agentinbox.test/mcp"), {
+        requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
+        fetch: async (url, init) => app.request(String(url), init as RequestInit, { incoming: { socket: { remoteAddress: "127.0.0.1" } } }),
+      }),
+    );
+    cleanup.push(() => client.close());
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(["list_accounts", "get_call_status", "fake__get_page", "fake__delete_page"]));
+
+    // A read tool runs at once; its output comes wrapped as untrusted.
+    const read = await client.callTool({ name: "fake__get_page", arguments: { id: "p1" } });
+    expect(read.isError).toBeFalsy();
+    expect(text(read)).toContain("Page p1: hello");
+    expect(text(read)).toContain("<tool_output");
+
+    // A risky tool at "ask": pending at once, nothing sent upstream yet.
+    const pending = await client.callTool({ name: "fake__delete_page", arguments: { id: "p2" } });
+    expect(text(pending)).toContain("pending_approval");
+    const approvalId = /apr_[a-z0-9]+/.exec(text(pending))![0];
+    expect(deleted).toEqual([]);
+    expect(text(await client.callTool({ name: "get_call_status", arguments: { approval_id: approvalId } }))).toMatch(/pending/);
+
+    // The owner approves in the console: the exact stored call runs once.
+    const approved = await json(await api(`/approvals/${approvalId}/approve`, { method: "POST", json: {} }));
+    expect(approved).toMatchObject({ status: "sent" });
+    expect(deleted).toEqual(["p2"]);
+    expect(text(await client.callTool({ name: "get_call_status", arguments: { approval_id: approvalId } }))).toContain("Deleted p2");
+
+    // Kill switch: disabled, credentials gone, and the agent can't call the tools any more.
+    expect((await api(`/connections/${con.id}/kill`, { method: "POST" })).status).toBe(204);
+    expect(upstreams(ctx).store.tokens(con.id)).toBeNull();
+    const before = up.requests.filter((r) => r.rpcMethod === "tools/call").length;
+    const after = await client.callTool({ name: "fake__get_page", arguments: { id: "p3" } });
+    expect(after.isError).toBe(true);
+    expect(up.requests.filter((r) => r.rpcMethod === "tools/call").length).toBe(before);
+    expect(audit(ctx.db.all<{ action: string; outcome: string }>("SELECT action, outcome FROM audit_log WHERE actor_id = ? ORDER BY id", agent.id))).toEqual(
+      expect.arrayContaining(["fake__get_page:ok", "fake__delete_page:ok"]),
+    );
+  }, 20_000);
+});
+
+const audit = (rows: { action: string; outcome: string }[]) => rows.map((r) => `${r.action}:${r.outcome}`);
