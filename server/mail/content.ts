@@ -113,10 +113,17 @@ const visibleText = (s: string | null) => stripInvisible(s ?? "").text.trim();
 export type UntrustedTag = "email_content" | "calendar_content";
 
 /**
- * Neutralizes our delimiters and look-alikes (`</ email_content >`, turndown's `calendar\_content`) in
- * untrusted text. Both tags are escaped everywhere: an event description must not close a mail wrapper either.
+ * Every delimiter agentinbox wraps untrusted text in: mail bodies, calendar descriptions and upstream MCP
+ * tool output (server/broker/policy/output.ts). escapeDelimiters neutralizes all of them everywhere.
  */
-export const escapeDelimiters = (s: string) => s.replace(/<(?=\s{0,16}\/?\s{0,16}(?:email|calendar)\\?_content)/gi, "&lt;");
+export const DELIMITER_TAGS = ["email_content", "calendar_content", "tool_output"] as const;
+
+/**
+ * Neutralizes our delimiters and look-alikes (`</ email_content >`, turndown's `calendar\_content`) in
+ * untrusted text. Every tag is escaped everywhere: an event description or a tool's output must not close
+ * a mail wrapper either.
+ */
+export const escapeDelimiters = (s: string) => s.replace(/<(?=\s{0,16}\/?\s{0,16}(?:email\\?_content|calendar\\?_content|tool\\?_output))/gi, "&lt;");
 
 // ───────────── HTML cleaning ─────────────
 
