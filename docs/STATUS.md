@@ -47,6 +47,22 @@ anything earlier in that doc.
 - Persona walk tooling: `/tmp/personas/BRIEF.md`; user-space headless Chromium in `~/.cache/aib-browser` (needs a
   font via `FONTCONFIG_FILE`); T3's preview browser needs `sudo t3 browser setup` on this host.
 
+## After the round (2026-10-16)
+
+- #48: macOS `service install` waits for launchd to unload the old job and retries error 5 (server, rollback and
+  listener). `list_calendar_events` no longer shows a false "(UTC)" label or "You organize it" for imported
+  calendars.
+- #49: the repo moved to `wynn-dev/agentinbox` and the URLs were updated. The launchd labels deliberately stay
+  `com.unlaboredlabs.*`.
+- #50: attachments on `create_draft`, `reply` and `send_message` (25 MB per message, at most 10 files, Gmail-blocked
+  types refused, filenames cleaned and decoded, shown on approval cards, audited). Published as `nightly.48`.
+
+## Current: MCP broker (building)
+
+Plan: [docs/MCP-BROKER.md](MCP-BROKER.md). All decided on 2026-10-16 (Wynn: GO), including his simpler approval model.
+Building milestone by milestone. The rename (M0) is PR `chore/rename-xaq` (draft until the switch). Milestones: M0 rename, M1
+broker core with the Notion preset, M2 WHOOP, M3 search mode, M4 hardening.
+
 ## Rules (Wynn / Adri)
 
 - Finite exit, blockers-only gates. Nits go to `docs/FOLLOWUPS.md`.
