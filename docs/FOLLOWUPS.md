@@ -412,3 +412,12 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 
 ### WHOOP without webhooks (blocker round)
 - The Funnel command was checked against Tailscale's docs and source, not on a real tailnet.
+
+### Blocker round (#75 review)
+- `reachability.ts` matches the Funnel target exactly against `http://127.0.0.1:<port>`; a `localhost` target isn't detected, so the offer keeps showing.
+- A launchd PATH may not include Homebrew's `tailscale`: no Funnel offer then (polling still works).
+- `GET /api/agents/:id/tool-mode` builds a full MCP server just to read the mode.
+- `broker.search:<agentId>` rows aren't deleted with the agent.
+- The tool-mode PUT can't set an agent back to `auto`; document it.
+- `handleWebhook` marks a record pushed before the route has emitted it; a failed emit relies on WHOOP's retry.
+- A re-score WHOOP stamps within 5 minutes of a push isn't announced again (`PUSH_SLACK_MS`).
