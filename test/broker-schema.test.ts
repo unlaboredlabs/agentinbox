@@ -365,6 +365,7 @@ describe("migration 8 on a fresh database", () => {
       "events_cursor",
       "created_at",
       "updated_at",
+      "all_agents", // migration 10
     ]);
     expect(cols("connection_credentials")).toEqual([
       "connection_id",

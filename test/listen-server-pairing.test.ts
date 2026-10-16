@@ -153,7 +153,8 @@ describe("pairing poll", () => {
   it("validates approval grants", async () => {
     const s = await setup();
     const p = await started(s);
-    expect((await s.approve(p.id, { grants: [] })).status).toBe(400);
+    // No mailbox grant is fine (installs with only connections), but an unknown connection isn't.
+    expect((await s.approve(p.id, { grants: [], connections: [{ connectionId: "con_nope", level: "read" }] })).status).toBe(400);
     expect((await s.approve(p.id, { grants: [{ ...readGrant("acc_a"), capabilities: ["fly"] }] })).status).toBe(400);
     expect((await s.approve(p.id, { grants: [readGrant("acc_missing")] })).status).toBe(404);
     expect((await s.approve(p.id, { grants: [readGrant("acc_a"), readGrant("acc_a")] })).status).toBe(400);

@@ -230,7 +230,20 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     preset: (id) => presetFor(getConnection(ctx, id)?.preset ?? null),
   });
   catalog.onChange(() => catalogRegistry.invalidate());
-  const base = { registry: catalogRegistry as ToolRegistry, connector: upstreamConnector(ctx, up, presetFor), ...given };
+  // A disabled (killed) connection's tools aren't listed; resolve still finds them, so a direct call gets the
+  // policy's clear "turned off" answer. needs_reauth ones stay listed (calls say how to reconnect).
+  const disabledIds = () => new Set(ctx.db.all<{ id: string }>("SELECT id FROM connections WHERE status = 'disabled'").map((r) => r.id));
+  const visibleRegistry: ToolRegistry = {
+    forAgent: (agentId) => {
+      const off = disabledIds();
+      const all = catalogRegistry.forAgent(agentId);
+      return off.size ? all.filter((t) => !off.has(t.connectionId)) : all;
+    },
+    resolve: (agentId, name) => catalogRegistry.resolve(agentId, name),
+    // The catalog registry's additive lookups (tool_on_hold) pass through.
+    held: (agentId: string, name: string) => catalogRegistry.held(agentId, name),
+  } as ToolRegistry;
+  const base = { registry: visibleRegistry, connector: upstreamConnector(ctx, up, presetFor), ...given };
   const invalidate = (scope: InvalidateScope) => {
     if (given.invalidate) return given.invalidate(scope);
     if (typeof scope === "object" && "agentId" in scope) catalogRegistry.invalidateAgent(scope.agentId);
@@ -532,6 +545,7 @@ interface ConnectionRow {
   url: string | null;
   auth_type: ConnectionAuthType;
   level_default: AccessLevel;
+  all_agents: number | null;
   private_target: string | null;
   status: Connection["status"];
   status_reason: string | null;
@@ -554,6 +568,7 @@ function toConnection(r: ConnectionRow): Connection {
     url: r.url,
     authType: r.auth_type,
     levelDefault: r.level_default,
+    allAgents: r.all_agents === 1,
     privateTarget: r.private_target,
     status: r.status,
     statusReason: r.status_reason,

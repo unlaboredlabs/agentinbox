@@ -59,7 +59,9 @@ const createSchema = z
   })
   .strict();
 
-const patchSchema = z.object({ name: name.optional(), slug: slug.optional(), url: httpUrl.optional(), levelDefault: level.optional() }).strict();
+const patchSchema = z
+  .object({ name: name.optional(), slug: slug.optional(), url: httpUrl.optional(), levelDefault: level.optional(), allAgents: z.boolean().optional() })
+  .strict();
 const grantsSchema = z.object({ grants: z.array(z.object({ agentId: z.string().min(1), level })).max(1000) }).strict();
 const privateTargetSchema = z.object({ allow: z.boolean() }).strict();
 const acceptSchema = z.object({ candidateHash: z.string().min(1).max(128) }).strict();
@@ -221,8 +223,8 @@ export function connectionsApi(ctx: AppContext) {
     const t = now();
     ctx.db.tx(() => {
       ctx.db.run(
-        `INSERT INTO connections (id, kind, preset, slug, name, url, auth_type, level_default, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        `INSERT INTO connections (id, kind, preset, slug, name, url, auth_type, level_default, all_agents, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
         id,
         kind,
         preset?.id ?? null,
@@ -231,6 +233,8 @@ export function connectionsApi(ctx: AppContext) {
         url,
         preset ? authTypeOf(preset.auth) : "none",
         levelDefault,
+        // "All agents" (no agentIds): agents created later get it too (policy.createAgent).
+        body.agentIds === undefined ? 1 : null,
         t,
         t,
       );
@@ -252,6 +256,7 @@ export function connectionsApi(ctx: AppContext) {
     const before = requireConnection(id);
     const body = await readBody(c, patchSchema);
     const changed: string[] = [];
+    const granted: string[] = [];
     let credentialsCleared = false;
     let cancelled = 0;
     ctx.db.tx(() => {
@@ -259,6 +264,22 @@ export function connectionsApi(ctx: AppContext) {
       if (body.name !== undefined && body.name !== before.name) {
         ctx.db.run("UPDATE connections SET name = ?, updated_at = ? WHERE id = ?", body.name, t, id);
         changed.push("name");
+      }
+      if (body.allAgents !== undefined && body.allAgents !== before.allAgents) {
+        ctx.db.run("UPDATE connections SET all_agents = ?, updated_at = ? WHERE id = ?", body.allAgents ? 1 : null, t, id);
+        changed.push("allAgents");
+      }
+      if (body.allAgents === true && !before.allAgents) {
+        // Turning "All agents" on: every agent without access gets it now (at the default level); existing
+        // per-agent levels stay. Only on the off→on change, so a repeat never re-grants agents set to No access.
+        const level = body.levelDefault ?? before.levelDefault;
+        for (const { id: agentId } of ctx.db.all<{ id: string }>(
+          "SELECT id FROM agents WHERE id NOT IN (SELECT agent_id FROM connection_grants WHERE connection_id = ?)",
+          id,
+        )) {
+          ctx.db.run("INSERT INTO connection_grants (agent_id, connection_id, level, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", agentId, id, level, t, t);
+          granted.push(agentId);
+        }
       }
       if (body.levelDefault !== undefined && body.levelDefault !== before.levelDefault) {
         ctx.db.run("UPDATE connections SET level_default = ?, updated_at = ? WHERE id = ?", body.levelDefault, t, id);
@@ -311,7 +332,11 @@ export function connectionsApi(ctx: AppContext) {
       if (before.privateTarget) audit("connection.private_target.revoke", id, { target: before.privateTarget, why: "url_changed" });
     }
     if (changed.includes("slug") || changed.includes("url")) ctx.broker.invalidate({ connectionId: id });
-    if (changed.length) audit("connection.update", id, { changed, ...(changed.includes("url") ? { credentialsCleared, cancelled } : {}) });
+    for (const agentId of granted) ctx.broker.invalidate({ agentId });
+    for (const agentId of granted) notifyAgent(ctx, agentId);
+    if (changed.length || granted.length) {
+      audit("connection.update", id, { changed, ...(granted.length ? { granted } : {}), ...(changed.includes("url") ? { credentialsCleared, cancelled } : {}) });
+    }
     return c.json<ConnectionView>(view(id));
   });
 
@@ -408,6 +433,22 @@ export function connectionsApi(ctx: AppContext) {
       audit(allow ? "connection.private_target.allow" : "connection.private_target.revoke", id, { target: target ?? conn.privateTarget });
     }
     return c.json<ConnectionView>(view(id));
+  });
+
+  // "Refresh tools": list the upstream's tools again now (changes are held as usual).
+  app.post("/connections/:id/refresh", async (c) => {
+    const id = c.req.param("id");
+    const conn = requireConnection(id);
+    if (conn.status === "disabled") throw conflict(`${conn.name} is disabled`, "Reconnect it first.");
+    // Refresh alone when it's attached (attaching again would abort a listing in progress); attach only if not.
+    let r = await ctx.broker.catalog.refresh(id);
+    if (!r.ok && r.error === "not_attached") {
+      ctx.broker.attach(id);
+      r = await ctx.broker.catalog.refresh(id);
+    }
+    ctx.broker.invalidate({ connectionId: id });
+    audit("connection.refresh", id, { ok: r.ok, held: r.held.length, removed: r.removed.length });
+    return c.json({ ok: r.ok, error: r.error ?? null, connection: view(id) });
   });
 
   app.get("/connections/:id/held", (c) => {

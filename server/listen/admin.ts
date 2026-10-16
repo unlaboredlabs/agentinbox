@@ -1,6 +1,6 @@
 import pc from "picocolors";
 import { ApiError, getSelf } from "./api.ts";
-import { describeGrants } from "./grants.ts";
+import { describeGrants, hasAccess } from "./grants.ts";
 import { Dispatcher, type Job, type Target } from "./dispatcher.ts";
 import { runCommand } from "./exec.ts";
 import { ensurePrivateDir } from "./fsutil.ts";
@@ -94,8 +94,8 @@ export async function printStatus(profileName: string): Promise<void> {
     const self = await getSelf(profile.url, profile.apiKey, 5000);
     out(`${pc.bold("Key")}       ${pc.green("valid")}`);
     // The access the console actually granted, in plain words (what the agent should report to its human).
-    const lines = describeGrants(self.grants);
-    out(`${pc.bold("Access")}    ${self.grants.length ? lines[0] : pc.yellow(lines[0]!)}`);
+    const lines = describeGrants(self.grants, self.connections);
+    out(`${pc.bold("Access")}    ${hasAccess(self) ? lines[0] : pc.yellow(lines[0]!)}`);
     for (const l of lines.slice(1)) out(`          ${l}`);
   } catch (err) {
     const revoked = err instanceof ApiError && (err.status === 401 || err.status === 403);
