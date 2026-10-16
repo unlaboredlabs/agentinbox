@@ -3,6 +3,9 @@
 // Risky = irreversible only. Deleting pages or databases moves them to Trash, but the plan treats them as risky;
 // deleting a comment has no Trash at all. The list has no share/publish tool today; a future one is unknown here and
 // falls back to the generic heuristic, whose word list catches "share" and "publish".
+// Spawning a Custom Agent session or messaging one is risky too: those agents act on their own and can hold Mail Send
+// or Slack posting, so letting them through at the "ask" level would be an approval bypass by delegation. Stopping
+// a session is only a write.
 // Everything else either reads (`read`) or creates/edits (`write`), which goes through without asking.
 
 export type NotionToolClass = "read" | "write" | "risky";
@@ -63,11 +66,11 @@ export const NOTION_TOOLS: Readonly<Record<string, NotionToolSpec>> = {
   "notion-search-agents": { cls: "read" },
   "notion-query-sessions": { cls: "read" },
   "notion-search-sessions": { cls: "read" },
-  "notion-spawn-session": { cls: "write" },
+  "notion-spawn-session": { cls: "risky", target: ["agent_url", "custom_agent_url", "agent", "agent_id", "url"] },
   "notion-get-session-status": { cls: "read" },
   "notion-wait-session": { cls: "read" },
   "notion-stop-session": { cls: "write" },
-  "notion-send-message-to-session": { cls: "write" },
+  "notion-send-message-to-session": { cls: "risky", target: ["session_url", "session", "session_id", "url"] },
   "notion-list-session-events": { cls: "read" },
   "notion-read-session-event": { cls: "read" },
   // Comments
@@ -88,4 +91,5 @@ export const NOTION_TOOLS: Readonly<Record<string, NotionToolSpec>> = {
 export const NOTION_ALIASES: Readonly<Record<string, string>> = {
   "ai-search": "notion-ai-search",
   fetch: "notion-fetch",
+  search: "notion-search",
 };

@@ -60,15 +60,20 @@ const WRITE = [
   "notion-update-data-source",
   "notion-create-view",
   "notion-update-view",
-  "notion-spawn-session",
   "notion-stop-session",
-  "notion-send-message-to-session",
   "notion-create-comment",
   "notion-update-comment",
   "notion-set-discussion-resolved",
   "notion-set-comment-reaction",
 ];
-const RISKY = ["notion-delete-pages", "notion-delete-databases", "notion-delete-comment"];
+const RISKY = [
+  "notion-delete-pages",
+  "notion-delete-databases",
+  "notion-delete-comment",
+  // Custom Agents act on their own (Mail Send, Slack): delegating to one must ask like the action itself.
+  "notion-spawn-session",
+  "notion-send-message-to-session",
+];
 
 describe("Notion preset", () => {
   it("has the documented shape", () => {
@@ -101,10 +106,14 @@ describe("Notion preset", () => {
     expect(classifyNotionTool(tool(name))).toMatchObject({ risky: true, read: false, source: "preset" });
   });
 
-  it("takes the delete target from the tool's schema", () => {
-    expect(classifyNotionTool(tool("notion-delete-pages", { page_ids: {}, user_confirmed: {} }))?.targetPath).toBe("page_ids");
-    expect(classifyNotionTool(tool("notion-delete-databases", { database_ids: {} }))?.targetPath).toBe("database_ids");
-    expect(classifyNotionTool(tool("notion-delete-comment", { comment_id: {} }))?.targetPath).toBe("comment_id");
+  it("takes the target from the tool's schema as a JSON Pointer", () => {
+    const target = (name: string, props: Record<string, unknown>) => classifyNotionTool(tool(name, props))?.targetPath;
+    expect(target("notion-delete-pages", { page_ids: {}, user_confirmed: {} })).toBe("/page_ids");
+    expect(target("notion-delete-databases", { database_ids: {} })).toBe("/database_ids");
+    expect(target("notion-delete-comment", { comment_id: {} })).toBe("/comment_id");
+    expect(target("notion-spawn-session", { agent_url: {}, message: {} })).toBe("/agent_url");
+    expect(target("notion-send-message-to-session", { session_url: {}, message: {} })).toBe("/session_url");
+    expect(target("notion-stop-session", { session_url: {} })).toBeUndefined();
     // No known id argument: no target rather than a wrong one.
     expect(classifyNotionTool(tool("notion-delete-pages", { user_confirmed: {} }))?.targetPath).toBeUndefined();
     expect(classifyNotionTool({ name: "notion-delete-pages", description: "", inputSchema: {} })?.targetPath).toBeUndefined();
@@ -115,6 +124,7 @@ describe("Notion preset", () => {
   it("maps the documented short aliases", () => {
     expect(classifyNotionTool(tool("fetch"))).toEqual({ risky: false, read: true, source: "preset" });
     expect(classifyNotionTool(tool("ai-search"))?.read).toBe(true);
+    expect(classifyNotionTool(tool("search"))).toEqual({ risky: false, read: true, source: "preset" });
   });
 
   it("returns null for tools it doesn't know", () => {

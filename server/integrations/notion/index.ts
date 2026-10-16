@@ -9,11 +9,15 @@ function specFor(name: string): NotionToolSpec | undefined {
   return alias ? NOTION_TOOLS[alias] : undefined;
 }
 
-/** The first candidate argument the tool's input schema declares (Notion doesn't document these names). */
+/** RFC 6901 pointer to one top-level argument. */
+const pointer = (key: string): string => `/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`;
+
+/** JSON Pointer to the first candidate argument the tool's live input schema declares (Notion doesn't document them). */
 function targetPath(tool: ToolDef, candidates: string[] | undefined): string | undefined {
   const props = tool.inputSchema.properties;
   if (!candidates || !props || typeof props !== "object") return undefined;
-  return candidates.find((c) => Object.hasOwn(props, c));
+  const key = candidates.find((c) => Object.hasOwn(props, c));
+  return key === undefined ? undefined : pointer(key);
 }
 
 /** Preset classification; null for tools Notion hadn't documented (generic heuristic applies). */
