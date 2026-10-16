@@ -55,7 +55,7 @@ export interface ConnectionStatusView {
 
 /** A connection's badge: active / needs reconnect / expiring in N days / disabled. Warns from 7 days before expiresAt. */
 export function connectionStatusView(
-  c: Pick<ConnectionView, "status" | "statusReason" | "expiresAt" | "name"> & Partial<Pick<ConnectionView, "authType" | "toolsCachedAt" | "tools">>,
+  c: Pick<ConnectionView, "status" | "statusReason" | "expiresAt" | "name"> & Partial<Pick<ConnectionView, "authType" | "toolsCachedAt" | "tools" | "expired">>,
   now: number,
 ): ConnectionStatusView {
   // Never got as far as listing tools: an OAuth sign-in that was abandoned (or a credential that never worked).
@@ -72,6 +72,15 @@ export function connectionStatusView(
         action: "reconnect",
       };
     case "needs_reauth":
+      // Past the credential's lifetime (T3 Code: 30 days, no refresh): only a fresh sign-in helps.
+      if (c.expired || (c.expiresAt && daysLeft(c.expiresAt, now) <= 0)) {
+        return {
+          label: "Expired",
+          tone: "bad",
+          description: `Its sign-in expired${c.expiresAt ? ` on ${c.expiresAt.slice(0, 10)}` : ""}. Agents are told to ask you to reconnect ${c.name}. Reconnect keeps its name, agents and access.`,
+          action: "reconnect",
+        };
+      }
       return {
         label: "Needs reconnect",
         tone: "bad",
@@ -92,12 +101,42 @@ export function connectionStatusView(
           action: "reconnect",
         };
       }
-      return { label: "Active", tone: "good", description: `Working. Needs a reconnect in ${days} days.`, action: null };
+      // Whole days left (as the server's expiresInDays): a fresh 30-day sign-in reads 29, never 31 on a stale clock.
+      const whole = Math.max(0, Math.floor((Date.parse(c.expiresAt) - now) / DAY));
+      return { label: "Active", tone: "good", description: `Working. Needs a reconnect in ${whole} days.`, action: null };
     }
   }
 }
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** T3 Code's scopes that only its Full access grants (server/integrations/t3code/tools.ts T3_FULL_ACCESS_SCOPES). */
+const T3_FULL_ACCESS_SCOPES = ["settings:write", "source-control:write"];
+
+/**
+ * What the server granted with the current sign-in: the scopes and, for T3 Code, the access level they mean. null
+ * when nothing is recorded (not OAuth, or not signed in).
+ */
+export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "preset">): { scopes: string[]; note: string | null } | null {
+  if (!c.grantedScopes) return null;
+  const scopes = c.grantedScopes;
+  if (c.preset !== "t3code") return { scopes, note: null };
+  if (scopes.some((s) => T3_FULL_ACCESS_SCOPES.includes(s))) {
+    return {
+      scopes,
+      note:
+        "Full access in T3: agents can also add and change projects, T3's settings and source control, and T3's browser preview runs in your browser profile with its saved logins. If they don't need that, reconnect and pick a lower level.",
+    };
+  }
+  if (scopes.includes("orchestration:operate")) {
+    return {
+      scopes,
+      note: "Agents can read, start, message and stop T3 threads. T3's browser preview runs in your browser profile on that computer, with its saved logins.",
+    };
+  }
+  if (scopes.includes("orchestration:read")) return { scopes, note: "Read only in T3: agents can read projects and threads, nothing more." };
+  return { scopes, note: null };
+}
 
 // ───────────── Agent access (adapter over per-connection grants) ─────────────
 
@@ -169,6 +208,78 @@ export function suggestSlug(url: string): string {
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return base.slice(0, 24);
+}
+
+/**
+ * The MCP URL for a preset whose server the user names (T3 Code): as typed, with the preset's path when only an origin
+ * was given (http://100.104.249.49:3773 → http://100.104.249.49:3773/mcp). Same rule as the server's presetServerUrl.
+ */
+export function presetServerUrl(raw: string, defaultPath: string): string {
+  const text = raw.trim();
+  try {
+    const u = new URL(text);
+    if (u.pathname === "/" || u.pathname === "") u.pathname = defaultPath;
+    return u.toString();
+  } catch {
+    return text;
+  }
+}
+
+/** The default slug for a user-named server: `<preset slug>-<host>` (t3-forge, t3-100-104-249-49), as the server's. */
+export function presetServerSlug(presetSlug: string, url: string): string {
+  let host: string;
+  try {
+    host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    return presetSlug;
+  }
+  const part = (/^[\d.]+$/.test(host) || host.includes(":") ? host : (host.split(".")[0] ?? host)).replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `${presetSlug}-${part}`.slice(0, 24).replace(/-+$/, "");
+}
+
+/** The name a connection gets when none is typed: the preset's, or the server's `host[:port]` (as the server does). */
+export function defaultName(d: Pick<ConnectionDraft, "preset" | "url">): string {
+  if (d.preset && !d.preset.userServer) return d.preset.displayName;
+  try {
+    return new URL(draftUrl(d)).host;
+  } catch {
+    return d.preset?.displayName ?? "";
+  }
+}
+
+/** The slug suggested once the address is checked: `<preset>-<host>` for a user-named server, else from the host. */
+export function suggestDraftSlug(d: Pick<ConnectionDraft, "preset" | "url">, taken: readonly string[] = []): string {
+  const url = draftUrl(d);
+  const base = d.preset?.userServer ? presetServerSlug(d.preset.slug, url) : suggestSlug(url);
+  if (!base || !taken.includes(base)) return base;
+  // Free like the server's freeSlug: a second server on the same IP or first DNS label gets -2, -3…
+  const root = base.slice(0, 20).replace(/-+$/, "");
+  for (let n = 2; ; n++) if (!taken.includes(`${root}-${n}`)) return `${root}-${n}`;
+}
+
+/**
+ * The connection this draft would duplicate, offered as "Reconnect it instead": for a user-named server (T3 Code) the
+ * one of that preset at the same `scheme://host:port`, for other presets the one with that preset and slug. Never the
+ * connection this dialog created itself (for the private-network allow).
+ */
+export function duplicateOf<C extends Pick<ConnectionView, "id" | "preset" | "slug" | "url">>(
+  d: Pick<ConnectionDraft, "preset" | "url" | "slug" | "createdId">,
+  connections: readonly C[],
+): C | null {
+  const p = d.preset;
+  if (!p) return null;
+  const others = connections.filter((c) => c.preset === p.id && c.id !== d.createdId);
+  if (p.userServer) {
+    const origin = d.url.trim() ? exactOrigin(draftUrl(d)) : null;
+    return origin ? (others.find((c) => c.url && exactOrigin(c.url) === origin) ?? null) : null;
+  }
+  return others.find((c) => c.slug === d.slug) ?? null;
+}
+
+/** The draft's MCP URL: a preset's fixed one, a user-named server's (path added), or the custom URL as typed. */
+export function draftUrl(d: Pick<ConnectionDraft, "preset" | "url">): string {
+  if (d.preset?.userServer) return presetServerUrl(d.url, d.preset.userServer.defaultPath);
+  return d.preset?.url ?? d.url.trim();
 }
 
 /** A slug from the name the user typed: "Notes server" → "notes-server". */
@@ -305,8 +416,9 @@ export const emptyDraft = (preset: PresetView | null = null): ConnectionDraft =>
   createdId: null,
   privateAllowed: false,
   slugEdited: false,
-  slug: preset?.slug ?? "",
-  name: preset?.displayName ?? "",
+  // A user-named server (T3 Code): slug and name come from its address once it's checked.
+  slug: preset?.userServer ? "" : (preset?.slug ?? ""),
+  name: preset?.userServer ? "" : (preset?.displayName ?? ""),
   level: DEFAULT_LEVEL,
   agents: "all",
   headerName: "Authorization",
@@ -314,15 +426,21 @@ export const emptyDraft = (preset: PresetView | null = null): ConnectionDraft =>
   inputs: {},
 });
 
-export const draftControl = (d: ConnectionDraft): AuthControl | null => (d.preset ? authControl({ preset: d.preset }) : d.probe ? authControl({ probe: d.probe }) : null);
+/** A preset's own control, except a user-named server's (T3 Code), which is probed like a custom URL first. */
+export const draftControl = (d: ConnectionDraft): AuthControl | null =>
+  d.preset && !d.preset.userServer ? authControl({ preset: d.preset }) : d.probe ? authControl({ probe: d.probe }) : null;
+
+/** The address must be checked (and maybe allowed) before Connect: a custom URL, or a user-named server (T3 Code). */
+export const needsProbe = (d: Pick<ConnectionDraft, "preset">): boolean => !d.preset || !!d.preset.userServer;
 
 /** What still blocks "Connect", in the order the dialog shows the fields; empty when ready. */
 export function draftProblems(d: ConnectionDraft, taken: readonly string[]): string[] {
   const out: string[] = [];
-  if (!d.preset && !d.probe) out.push("Check the address first.");
+  if (needsProbe(d) && !d.probe) out.push("Check the address first.");
   const control = draftControl(d);
   if (control?.kind === "private") out.push("Allow the private-network address, or use another one.");
-  if (!d.preset && d.probe && !d.probe.reachable && !d.probe.blocked) out.push("xaq couldn't reach this server.");
+  if (needsProbe(d) && d.probe && !d.probe.reachable && !d.probe.blocked) out.push("xaq couldn't reach this server.");
+  if (d.preset?.userServer && d.probe?.reachable && d.probe.auth !== "oauth") out.push(`This doesn't look like a ${d.preset.displayName} server: it doesn't ask for a sign-in.`);
   if (d.probe?.blocked === "ssrf") out.push("xaq can't connect to this address.");
   // Created early for the allow: its own slug isn't a clash.
   const slug = slugProblem(d.slug, d.createdId ? taken.filter((s) => s !== d.slug) : taken);
@@ -337,8 +455,8 @@ export function draftProblems(d: ConnectionDraft, taken: readonly string[]): str
 export function createInput(d: ConnectionDraft): CreateConnectionInput {
   const body: CreateConnectionInput = { slug: d.slug, levelDefault: d.level };
   if (d.preset) body.preset = d.preset.id;
-  else body.url = d.url.trim();
-  if (d.name.trim() && d.name.trim() !== d.preset?.displayName) body.name = d.name.trim();
+  if (needsProbe(d)) body.url = draftUrl(d);
+  if (d.name.trim() && (d.preset?.userServer || d.name.trim() !== d.preset?.displayName)) body.name = d.name.trim();
   if (Array.isArray(d.agents)) body.agentIds = d.agents;
   return body;
 }

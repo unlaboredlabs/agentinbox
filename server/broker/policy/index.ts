@@ -15,7 +15,7 @@ import { SourceError } from "../types.ts";
 import { fingerprint, redactArgs } from "./audit.ts";
 import { argumentPaths, atPointer, canonicalJson, isPointer } from "./canonical.ts";
 import { createBrokerPolicy, type BrokerPolicyImpl, RISKY_COUNTED } from "./decide.ts";
-import { describeFailure, type DescribedFailure } from "./errors.ts";
+import { connectionLabel, describeFailure, type DescribedFailure } from "./errors.ts";
 import { connectionSecrets, makeScrubber, type OutputSignals, processResult, resultBytes, type Scrubber } from "./output.ts";
 import {
   addRule,
@@ -264,7 +264,9 @@ export class BrokerPolicyRuntime implements BrokerCalls {
       raw = await source.callTool(tool.def.name, args, { agentId: opts.agentId, connectionId, signal: opts.signal, auditDetail: sourceDetail });
     } catch (err) {
       const scrubber = this.scrubberFor(connectionId);
-      const failure = describeFailure(err, connectionName, scrubber);
+      // Read after the failure: a 401 without a refresh token has just marked the connection expired.
+      const now = connectionInfo(this.ctx.db, connectionId);
+      const failure = describeFailure(err, now ? connectionLabel(now, this.ctx.settings.publicUrl()) : connectionName, scrubber);
       if (failure.reason === "internal") this.log.warn("Upstream call failed", { connection: connectionId, tool: tool.def.name, error: scrubber.scrub(errorMessage(err)).text });
       return { result: text(failure.message, true), signals: null, failure, sourceDetail };
     }

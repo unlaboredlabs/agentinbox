@@ -101,14 +101,16 @@ function riskyDescription(text: string): boolean {
 }
 
 /** Classifies one cleaned definition. `preset` is the connection's preset, if any. */
-export function classifyTool(def: ToolDef, preset?: Pick<IntegrationPreset, "classify"> | null): ToolClass {
+export function classifyTool(def: ToolDef, preset?: Pick<IntegrationPreset, "classify" | "nameCheckExempt"> | null): ToolClass {
   const core = nameCore(def.name);
   const riskyByName = riskyName(core);
 
-  // 1. The preset says so itself. The name check still applies: a renamed upstream tool can't escape it.
+  // 1. The preset says so itself. The name check still applies (a renamed upstream tool can't escape it), except for
+  //    the exact names the preset lists as reviewed false positives (T3's t3_thread_send stays inside T3).
   const fromPreset = preset?.classify(def) ?? null;
   if (fromPreset) {
-    const risky = fromPreset.risky || riskyByName;
+    const exempt = preset?.nameCheckExempt?.includes(def.name) === true;
+    const risky = fromPreset.risky || (riskyByName && !exempt);
     return { ...fromPreset, risky, read: fromPreset.read && !risky, source: "preset" };
   }
 

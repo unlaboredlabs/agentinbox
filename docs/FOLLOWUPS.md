@@ -418,3 +418,24 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - The tool-mode PUT can't set an agent back to `auto`; document it.
 - `handleWebhook` marks a record pushed before the route has emitted it; a failed emit relies on WHOOP's retry.
 - A re-score WHOOP stamps within 5 minutes of a push isn't announced again (`PUSH_SLACK_MS`).
+
+### T3 Code preset (#76 reviews)
+- `t3_project_create` (normal write) takes the same `scripts`/`runOnWorktreeCreate` that makes `t3_project_update` risky; make them consistent, or note that T3's Full access gates it.
+- `t3_project_clone` writes a directory anywhere on T3's machine (`destinationPath`); note it or make it risky.
+- `html_preview`/`html_render` inline local files by absolute path and load any URL; `preview_navigate` + `preview_snapshot` can read internal web UIs; `preview_snapshot` (a read) can read tabs the user opened. Document as accepted.
+- `request_secret` can show the user a misleading secret card (the value never reaches the agent).
+- `requireSameOrigin` skips `revocation_endpoint`; add it before revocation lands.
+- Unique names have no unique index (concurrent creates can race); the create check uses `owner_id IS NULL` while PATCH uses `before.ownerId`.
+- Switching an expired OAuth connection to a static header doesn't clear `expires_at`, so the policy keeps saying "expired".
+- `connectionStatusView` shows "Error", not "Expired", for an `error` connection past its date.
+- The non-expired reconnect message renders "…work again: <url> . Nothing was sent…".
+- `presetServerUrl` throws `SourceError` in the create handler: a URL with userinfo probably returns 500, not 400.
+- For up to 60 s (until the sweep), `connections list` shows `active` for a connection past its date.
+- `registry.ts:24`/`catalog.ts:43` type the preset as `Pick<…,"classify">`; add `nameCheckExempt` to the Pick.
+- The list card shows neither the scopes, the expiry date, nor that it's T3 Code; the detail page says "in N days", never the date.
+- A fresh connection reads "Needs a reconnect in 30 days" while `expiresInDays` is 29.
+- The generic "Ask before risky actions" copy says sending waits for approval; T3 thread sends don't. Add a T3 line.
+- Setup step 4 says "not a failure in the middle of a task", but the call does fail (cleanly). Reword.
+- The CLI prints "Enter your T3 Code server's address" even after `--url`.
+- A CLI t3code add interrupted during sign-in leaves a "not signed in" connection; re-running gives a 409. Point to `connections reconnect`.
+- T3 default connection name is `host:port`; "T3 Code (host:port)" would read clearer (one line server + console).

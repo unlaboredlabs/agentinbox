@@ -27,6 +27,8 @@ export interface CredentialStoreDeps {
   log: Logger;
   emit: EmitConnectionEvent;
   now?: () => number;
+  /** The console page of a connection (`<publicUrl>/connections/<id>`), put in events as the one-click Reconnect link. */
+  consoleUrl?: (connectionId: string) => string;
 }
 
 interface CredRow {
@@ -262,15 +264,22 @@ export class SqliteCredentialStore implements CredentialStore {
     return [r.header_value_enc, r.access_token_enc, r.refresh_token_enc].map((v) => this.dec(v) ?? "").concat(typeof client?.client_secret === "string" ? [client.client_secret] : []).filter(Boolean);
   }
 
-  /** Sets status `needs_reauth` with the reason; the first transition emits `connection.auth_failed` and audits. */
-  markNeedsReauth(connectionId: string, rawReason: string): void {
+  /**
+   * Sets status `needs_reauth` with the reason; the first transition emits `connection.auth_failed` and audits.
+   * `expired`: the credential's lifetime is over (no refresh token: past its expiry, or rejected with a 401). The
+   * connection's `expires_at` moves to now if it was later, so it reads as expired everywhere (console, agents' errors).
+   */
+  markNeedsReauth(connectionId: string, rawReason: string, opts: { expired?: boolean } = {}): void {
     const ts = new Date(this.now()).toISOString();
     // The reason may quote upstream text: scrub it before it's stored, emitted or audited.
     const reason = scrubText(rawReason, this.secrets(connectionId), 300);
     const { changes } = this.deps.db.run(
-      "UPDATE connections SET status = 'needs_reauth', status_reason = ?, updated_at = ? WHERE id = ? AND status IN ('active', 'error')",
+      `UPDATE connections SET status = 'needs_reauth', status_reason = ?, updated_at = ?${
+        opts.expired ? ", expires_at = CASE WHEN expires_at IS NULL OR expires_at > ? THEN ? ELSE expires_at END" : ""
+      } WHERE id = ? AND status IN ('active', 'error')`,
       reason,
       ts,
+      ...(opts.expired ? [ts, ts] : []),
       connectionId,
     );
     if (!changes) return;
@@ -281,7 +290,13 @@ export class SqliteCredentialStore implements CredentialStore {
       this.deps.emit({
         type: "connection.auth_failed",
         connectionId,
-        detail: { slug: conn?.slug ?? null, name: conn?.name ?? null, error: reason },
+        detail: {
+          slug: conn?.slug ?? null,
+          name: conn?.name ?? null,
+          error: reason,
+          ...(opts.expired ? { expired: true } : {}),
+          ...(this.deps.consoleUrl ? { reconnectUrl: this.deps.consoleUrl(connectionId) } : {}),
+        },
         // Once per credential: a reconnect stores new tokens, and their next failure is a new event.
         dedupeKey: `${connectionId}:auth_failed:${sha256(r?.refresh_token_enc ?? r?.access_token_enc ?? ts).slice(0, 12)}`,
       });
@@ -293,7 +308,7 @@ export class SqliteCredentialStore implements CredentialStore {
       action: "connection.auth_failed",
       target: connectionId,
       outcome: "error",
-      detail: { slug: conn?.slug ?? null, error: reason },
+      detail: { slug: conn?.slug ?? null, error: reason, ...(opts.expired ? { expired: true } : {}) },
     });
   }
 

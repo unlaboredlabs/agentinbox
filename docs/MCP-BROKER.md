@@ -235,7 +235,9 @@ and payments. Creating and editing goes through without asking. Classification, 
    - Notion: `notion-delete-pages`, `notion-delete-databases`, and anything that shares or publishes outside the
      workspace;
    - Gmail: sending (already native);
-   - WHOOP: none, since everything is read.
+   - WHOOP: none, since everything is read;
+   - T3 Code: deleting a project or scheduled task, project and environment settings, schedules, and, in the browser
+     preview (the user's profile, saved logins), running page JavaScript and uploading local files (see [T3 Code](#t3-code-the-users-own-server-30-days-no-refresh)).
 2. **Generic MCP servers with annotations:** `destructiveHint: true` is risky, and `readOnlyHint: true` is a read
    tool.
 3. **Generic MCP servers, either way** (the code's single source is `CLASSIFICATION_WORDS` in
@@ -475,6 +477,65 @@ This gives a "morning recovery is in" trigger for Hermes.
 
 One thing to verify at build time: whether WHOOP accepts an `http://localhost` redirect. Guides disagree. The fallback
 is an https public URL, or paste mode with `https://localhost`.
+
+### T3 Code: the user's own server, 30 days, no refresh
+
+As built (`server/integrations/t3code/`), on the generic MCP OAuth upstream, checked against a live
+`t3@nightly 0.1.1-nightly.20261016.3218` on 2026-10-16:
+
+- **OAuth is standard.** Discovery at `/.well-known/oauth-protected-resource[/mcp]` and
+  `/.well-known/oauth-authorization-server`; DCR at `/oauth/mcp/register` (public client, `none`; the `client_id` is
+  a signed, stateless token, so registering again orphans nothing); PKCE S256; `iss` on the redirect. T3 accepts
+  `resource` (its own MCP URL) and refuses any other with `invalid_target`, so no special handling.
+- **No refresh token.** `expires_in` is 2,592,000 (30 days). xaq records it as the connection's `expires_at`.
+- **Scopes follow T3's own approval page, not the request.** The page asks for a one-time pairing code and an access
+  level: Read only grants `orchestration:read`; Supervised (Limited on older versions) adds `orchestration:operate`;
+  Full access adds `settings:write` and `source-control:write`. T3 also refuses project changes unless the client has
+  Full access. xaq accepts whatever comes back, stores it (`connection_credentials.scope`), audits it on connect and
+  shows it on the connection page. The setup recommends Supervised.
+- **The pairing code** comes from T3 → Settings → Connections, `t3 auth pairing create` on T3's machine, or the
+  `Token:` line `t3 serve` prints (also the `#token=` part of its `Pairing URL`). The setup steps say so.
+- **One connection per server.** The preset has no URL (`userServer`): the user gives the address, `/mcp` is added to
+  a bare origin, the name defaults to `host:port` and the slug to `t3-<host>` (`t3-100-104-249-49`, `t3-forge`).
+  Connection names are now unique per owner (case-insensitive) for every connection: a default name gets ` (2)`, a
+  chosen one that's taken is a 409.
+- **Plain http only on private addresses.** T3 usually runs on http over Tailscale or on loopback. That goes through
+  the existing admin-only private-target allow, pinned to `scheme://host:port`, with no new mechanism. The guard
+  re-checks every hop, so the MCP URL, the 401's `resource_metadata` URL, the issuer, every endpoint and every
+  redirect get http only on that one allowed origin and only when it resolves to loopback, RFC 1918, CGNAT or ULA.
+  A hostname that resolves publicly needs https. On top of that, the preset sets `sameOriginIssuer`: the issuer, the
+  authorization, token and registration endpoints and the resource must all be on the server's own origin, so the
+  page that takes the pairing code is never on another host, even an https one.
+- **Expiry.** Generic, and T3 is its first user. `connection.expiring` is emitted at 7 days and 1 day, with a
+  `reconnectUrl` to the connection's console page. Past `expires_at`, or after a 401 with no refresh token, the
+  connection is Expired: status `needs_reauth`, `expires_at` moved to then, `expired: true` in the view, and
+  `connection.auth_failed` with `expired: true`. The policy refuses calls to it even before the sweep runs, so the
+  agent gets "The T3 Code connection '<name>' expired; ask your user to reconnect it in xaq at <link>", never a
+  401. Reconnect runs a new sign-in on the same connection and keeps its name, slug, agents and levels.
+- **Risk table.** `server/integrations/t3code/tools.ts` covers all 83 tools, one group per comment:
+  - **Reads (free):** projects, threads, queues, environment, worktrees, schedules, pull requests, devices.
+  - **Normal writes:** thread launch, send, interrupt and the rest of a thread's life; creating, cloning and handing
+    off to worktrees; pull-request bookkeeping; opening, navigating, clicking and typing in previews; devices. T3
+    marks almost all of these `destructiveHint`, so without the table the annotation rule would ask before nearly
+    everything.
+  - **Risky:** deleting a project or scheduled task, project and environment settings, schedules (persistent
+    unattended turns, webhook URLs), `preview_evaluate` (JavaScript in a page, returning up to 64 KB) and
+    `preview_upload` (local files to a web page).
+
+  **Decision: T3 access is close to acting as the user on that machine.** A launched thread runs whatever T3's
+  access level allows (commands and file edits, up to Full access), and the owner decided thread launch is a normal
+  write. T3's browser preview runs in the user's own browser profile on T3's machine, with its saved logins (by
+  default), so preview tools browse websites as the user. We keep the other `preview_*` actions as normal writes on
+  the same reasoning: the T3 access level is the real limit, and asking before every click would make the preview
+  unusable. Only the two that move data out as the user ask: `preview_evaluate` (arbitrary JavaScript in a signed-in
+  page, whose result comes back to the agent) and `preview_upload`. The setup step and the connection page say
+  plainly that previews use the browser profile and its saved logins.
+
+  `t3_thread_send`, `t3_thread_send_attachments` and `t3_thread_merge_back` are exempt from the name check by exact
+  name (`nameCheckExempt`), because their `send`/`merge` stays inside T3. Unknown tools fall back to the generic
+  rules: T3's annotations, then the verb list, which catches a future `t3_thread_delete` or `t3_worktree_remove`.
+- **Contract additions (additive, optional):** `IntegrationPreset.userServer`, `IntegrationPreset.nameCheckExempt`
+  and `CredentialStore.markNeedsReauth(…, { expired })`.
 
 ## Setup UX (no external docs)
 

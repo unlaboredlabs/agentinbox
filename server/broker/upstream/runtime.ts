@@ -8,7 +8,7 @@ import { Refresher } from "../credentials/refresher.ts";
 import { scrubText } from "../credentials/scrub.ts";
 import { type EmitConnectionEvent, type PendingAuth, SqliteCredentialStore } from "../credentials/store.ts";
 import { type IntegrationPreset, type RefreshFn, SourceError, type StoredTokens, type ToolSource } from "../types.ts";
-import { type ConnectionRow, getConnection, requireRemote } from "./connection.ts";
+import { connectionConsoleUrl, type ConnectionRow, getConnection, requireRemote } from "./connection.ts";
 import { discover, parseWwwAuthenticate } from "./discovery.ts";
 import { allowFromColumn, canonicalPrivateTarget, checkTarget, type GuardedFetch, type GuardedFetchOptions, guardedFetch, originKey, validateUpstreamUrl } from "./fetch.ts";
 import { authorizationUrl, ensureClient, exchangeCode, pkcePair, refreshGrant, requestedScope, type StoredClient } from "./oauth.ts";
@@ -51,6 +51,42 @@ export interface StartConnectOptions {
    * tokens once the consent completes.
    */
   nativeClient?: Record<string, unknown> | null;
+  /**
+   * The authorization server and every endpoint the browser or xaq is sent to must be on the connection URL's own
+   * origin (a preset's `userServer.sameOriginIssuer`: T3 Code serves its own OAuth, and its approval page takes a
+   * pairing code that must never be typed into another host).
+   */
+  sameOriginIssuer?: boolean;
+}
+
+/**
+ * With `sameOriginIssuer`: the issuer, the authorization, token and registration endpoints and the resource must all
+ * be on the MCP URL's exact `scheme://host:port`. Throws SourceError("blocked_target").
+ */
+export function requireSameOrigin(
+  serverUrl: URL,
+  d: { issuer: string; resource: string; metadata: { authorization_endpoint: string; token_endpoint: string; registration_endpoint?: string } },
+): void {
+  const origin = originKey(serverUrl);
+  const named: [string, string | undefined][] = [
+    ["authorization server", d.issuer],
+    ["authorization endpoint", d.metadata.authorization_endpoint],
+    ["token endpoint", d.metadata.token_endpoint],
+    ["registration endpoint", d.metadata.registration_endpoint],
+    ["resource", d.resource],
+  ];
+  for (const [what, value] of named) {
+    if (value === undefined) continue;
+    let o: string;
+    try {
+      o = originKey(value);
+    } catch {
+      throw new SourceError("protocol", `The server's ${what} isn't a valid URL`);
+    }
+    if (o !== origin) {
+      throw new SourceError("blocked_target", `The server's ${what} is on ${o}, not on ${origin}. Its sign-in has to be on the server you named.`);
+    }
+  }
 }
 
 export interface StartConnectResult {
@@ -123,8 +159,21 @@ export class UpstreamRuntime {
         // Until the events PR opens EventType to connection.* events: logged, and audited by the caller.
         log.warn(`Connection event ${e.type} (events outbox not wired yet)`, { connectionId: e.connectionId });
       });
-    this.store = new SqliteCredentialStore({ db: ctx.db, crypto: ctx.crypto, audit: ctx.audit, log: ctx.log, emit: this.emit, now: this.now });
+    this.store = new SqliteCredentialStore({
+      db: ctx.db,
+      crypto: ctx.crypto,
+      audit: ctx.audit,
+      log: ctx.log,
+      emit: this.emit,
+      now: this.now,
+      consoleUrl: (id) => this.consoleUrl(id),
+    });
     this.refresher = new Refresher(this.store, { log: ctx.log, now: this.now, sweepIntervalMs: opts.sweepIntervalMs });
+  }
+
+  /** The connection's page in the console: where the owner reconnects it (events and agents' errors link here). */
+  consoleUrl(connectionId: string): string {
+    return connectionConsoleUrl(this.ctx.settings.publicUrl(), connectionId);
   }
 
   enabled(): boolean {
@@ -295,6 +344,7 @@ export class UpstreamRuntime {
       const w = parseWwwAuthenticate(ch.www);
       const allow = allowFromColumn(conn.private_target, conn.url);
       const d = await discover(fetch, url, w.resourceMetadata, allow);
+      if (o.sameOriginIssuer) requireSameOrigin(url, d);
       // Step-up: ask for the union of what the 401 wants and what this issuer already granted.
       const stored = this.store.tokens(connectionId);
       const granted = stored?.issuer === d.issuer ? (stored.scope ?? "") : "";
@@ -437,7 +487,15 @@ export class UpstreamRuntime {
       action: "connection.connect",
       target: connectionId,
       outcome: "ok",
-      detail: { slug: conn.slug, ...(conn.url ? { origin: originKey(conn.url) } : {}), registration, refresh: !!tokens.refreshToken, expiresAt: fresh.expires_at },
+      detail: {
+        slug: conn.slug,
+        ...(conn.url ? { origin: originKey(conn.url) } : {}),
+        registration,
+        refresh: !!tokens.refreshToken,
+        expiresAt: fresh.expires_at,
+        // What the server granted, which may be more (T3's Full access) or less than asked for. Never a secret.
+        scope: tokens.scope ?? pending.scope,
+      },
     });
     return { connectionId, slug: conn.slug, name: conn.name };
   }
@@ -524,7 +582,15 @@ export class UpstreamRuntime {
   async sweep(): Promise<void> {
     if (!this.enabled()) return;
     await this.refresher.sweep();
-    checkExpiries({ db: this.ctx.db, audit: this.ctx.audit, log: this.ctx.log, emit: this.emit, store: this.store, now: this.now });
+    checkExpiries({
+      db: this.ctx.db,
+      audit: this.ctx.audit,
+      log: this.ctx.log,
+      emit: this.emit,
+      store: this.store,
+      now: this.now,
+      consoleUrl: (id) => this.consoleUrl(id),
+    });
   }
 
   /** Tracks every refreshable connection and starts the sweep timer. */

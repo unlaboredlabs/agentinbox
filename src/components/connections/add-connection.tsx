@@ -23,18 +23,22 @@ import {
   type ConnectionDraft,
   connectInput,
   createInput,
+  defaultName,
   draftControl,
   draftProblems,
+  draftUrl,
   emptyDraft,
   finishEarlyCreate,
   hostPort,
   inputProblems,
   LEVEL_INFO,
   nameChange,
+  needsProbe,
   privateExplanation,
   probeSummary,
   slugProblem,
-  suggestSlug,
+  suggestDraftSlug,
+  duplicateOf,
 } from "./connection-flow";
 
 interface Request {
@@ -203,7 +207,7 @@ export function AddConnectionHost() {
               draft={draft}
               set={set}
               taken={taken}
-              existing={draft.preset ? (connections.data ?? []).find((c) => c.preset === draft.preset!.id && c.slug === draft.slug) ?? null : null}
+              existing={duplicateOf(draft, connections.data ?? [])}
               onReuse={(c) => {
                 onOpenChange(false);
                 startConnect(c);
@@ -259,6 +263,7 @@ function PresetPicker({ presets, onPick }: { presets: PresetView[]; onPick: (p: 
             <span className="min-w-0 flex-1">
               <span className="block font-medium">{p.displayName}</span>
               {p.url && <span className="block truncate text-xs text-muted-foreground">{p.url}</span>}
+              {p.userServer && <span className="block text-xs text-muted-foreground">Your own server, by its address. One connection per server.</span>}
             </span>
             <ArrowRightIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />
           </button>
@@ -303,7 +308,11 @@ function SetupPage({
   const control = draftControl(draft);
   const slugIssue = draft.slug && !existing ? slugProblem(draft.slug, created ? taken.filter((s) => s !== created.slug) : taken) : null;
   const stepIssues = draft.preset ? inputProblems(draft.preset.setupSteps, draft.inputs) : {};
-  const ready = !!draft.preset || (!!draft.probe && control?.kind !== "private");
+  const probed = needsProbe(draft);
+  const ready = !probed || (!!draft.probe && control?.kind !== "private");
+  const probeForm = <ProbeForm draft={draft} set={set} taken={taken} created={created} onCreated={onCreated} onDropCreated={onDropCreated} />;
+  // A user-named server (T3 Code): the address field sits in the step that explains it.
+  const inStep = !!draft.preset?.userServer && !!draft.preset.setupSteps.some((s) => s.id === "server");
   return (
     <FieldGroup>
       {existing && (
@@ -311,14 +320,18 @@ function SetupPage({
           <PlugIcon />
           <AlertTitle>You already have {existing.name}</AlertTitle>
           <AlertDescription className="space-y-3">
-            <p>Use it again: reconnecting signs in anew and keeps its access settings. To add a second one, give it another short name below.</p>
+            <p>
+              {draft.preset?.userServer
+                ? `${existing.name} is this same server (${hostPort(existing.url ?? "")}). Reconnecting signs in anew and keeps its access settings. For another server, enter its address instead.`
+                : "Use it again: reconnecting signs in anew and keeps its access settings. To add a second one, give it another short name below."}
+            </p>
             <Button size="sm" onClick={() => onReuse(existing)}>
               Reconnect {existing.name}
             </Button>
           </AlertDescription>
         </Alert>
       )}
-      {!draft.preset && <ProbeForm draft={draft} set={set} created={created} onCreated={onCreated} onDropCreated={onDropCreated} />}
+      {probed && !inStep && probeForm}
 
       {draft.preset?.setupSteps.length ? (
         <ol className="space-y-4">
@@ -330,7 +343,9 @@ function SetupPage({
               value={s.input ? (draft.inputs[s.input.key] ?? "") : ""}
               problem={s.input && draft.inputs[s.input.key] ? stepIssues[s.input.key] : undefined}
               onChange={(v) => s.input && set({ inputs: { ...draft.inputs, [s.input.key]: v } })}
-            />
+            >
+              {inStep && s.id === "server" ? probeForm : null}
+            </SetupStepItem>
           ))}
         </ol>
       ) : null}
@@ -362,7 +377,7 @@ function SetupPage({
         <div className="grid gap-3 sm:grid-cols-2">
           <Field>
             <FieldLabel htmlFor="conn-name">Name</FieldLabel>
-            <Input id="conn-name" value={draft.name} maxLength={100} placeholder={draft.preset?.displayName ?? hostPort(draft.url)} onChange={(e) => set(nameChange(draft, e.target.value))} />
+            <Input id="conn-name" value={draft.name} maxLength={100} placeholder={defaultName(draft)} onChange={(e) => set(nameChange(draft, e.target.value))} />
           </Field>
           <Field>
             <FieldLabel htmlFor="conn-slug">Short name</FieldLabel>
@@ -391,25 +406,28 @@ function SetupPage({
 function ProbeForm({
   draft,
   set,
+  taken,
   created,
   onCreated,
   onDropCreated,
 }: {
   draft: ConnectionDraft;
   set: (p: Partial<ConnectionDraft>) => void;
+  /** Slugs in use: the suggestion skips them (a second server on the same IP gets -2). */
+  taken: readonly string[];
   created: ConnectionView | null;
   onCreated: (c: ConnectionView) => void;
   onDropCreated: () => void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
-  const probe = async (connectionId?: string) => {
+  const probe = async (connectionId?: string, slug?: string) => {
     setPending(true);
     setError(undefined);
     try {
-      const url = draft.url.trim();
+      const url = draftUrl(draft);
       const r = await api<ConnectionProbe>("/api/connections/probe", { body: { url, ...(connectionId ? { connectionId } : {}) } });
-      set({ probe: r, slug: draft.slug || suggestSlug(url) });
+      set({ probe: r, slug: slug ?? (draft.slug || suggestDraftSlug(draft, taken)) });
     } catch (err) {
       setError(err);
       set({ probe: null });
@@ -422,13 +440,13 @@ function ProbeForm({
     setPending(true);
     setError(undefined);
     try {
-      const slug = draft.slug || suggestSlug(draft.url) || "local";
+      const slug = draft.slug || suggestDraftSlug(draft, taken) || "local";
       // No grants until the user picks access (Connect sets them): nothing can reach an allowed private host before.
       const c = created ?? (await api<ConnectionView>("/api/connections", { body: { ...createInput({ ...draft, slug }), agentIds: [] } }));
       onCreated(await api<ConnectionView>(`/api/connections/${enc(c.id)}/private-target`, { method: "PUT", body: { allow: true } }));
       set({ createdId: c.id, privateAllowed: true, slug });
       setPending(false);
-      await probe(c.id);
+      await probe(c.id, slug);
     } catch (err) {
       setError(err);
       setPending(false);
@@ -451,10 +469,11 @@ function ProbeForm({
               id="conn-url"
               inputMode="url"
               autoComplete="off"
-              placeholder="https://mcp.example.com/mcp"
+              placeholder={draft.preset?.userServer ? "http://100.101.102.103:3773" : "https://mcp.example.com/mcp"}
               value={draft.url}
               disabled={!!created}
-              onChange={(e) => set({ url: e.target.value, probe: null })}
+              // A user-named server's suggested slug follows its address (until typed by hand).
+              onChange={(e) => set({ url: e.target.value, probe: null, ...(draft.preset?.userServer && !draft.slugEdited ? { slug: "" } : {}) })}
             />
             <Button type="submit" variant="outline" disabled={!draft.url.trim() || pending}>
               {pending ? <Spinner /> : <SearchIcon />} Check
@@ -475,7 +494,11 @@ function ProbeForm({
               </button>
             </FieldDescription>
           ) : (
-            <FieldDescription>The address you'd give an MCP client, usually ending in /mcp.</FieldDescription>
+            <FieldDescription>
+              {draft.preset?.userServer
+                ? `The address you open ${draft.preset.displayName} at. xaq adds ${draft.preset.userServer.defaultPath} and checks how it signs in.`
+                : "The address you'd give an MCP client, usually ending in /mcp."}
+            </FieldDescription>
           )}
         </Field>
       </form>
@@ -520,7 +543,22 @@ function StepBody({ text }: { text: string }) {
 }
 
 /** One preset setup step, rendered generically: title, body, link, copy, input. */
-function SetupStepItem({ n, step, value, problem, onChange }: { n: number; step: SetupStepView; value: string; problem?: string; onChange: (v: string) => void }) {
+function SetupStepItem({
+  n,
+  step,
+  value,
+  problem,
+  onChange,
+  children,
+}: {
+  n: number;
+  step: SetupStepView;
+  value: string;
+  problem?: string;
+  onChange: (v: string) => void;
+  /** Extra controls under the step's text (a user-named server's address field). */
+  children?: React.ReactNode;
+}) {
   const id = `setup-${step.id}`;
   return (
     <li className="flex gap-3">
@@ -534,6 +572,7 @@ function SetupStepItem({ n, step, value, problem, onChange }: { n: number; step:
             <StepBody text={step.body} />
           </p>
         )}
+        {children}
         {step.link && <ExternalLink href={step.link.url}>{step.link.label}</ExternalLink>}
         {step.copy && (
           <div className="space-y-1">

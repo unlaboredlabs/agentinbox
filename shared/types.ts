@@ -1275,6 +1275,17 @@ export interface ConnectionView extends Connection {
   };
   /** Whole days until expiresAt (0 = today or past), or null when not known to expire. */
   expiresInDays: number | null;
+  /**
+   * The credential's lifetime is over (expiresAt is past: T3 Code's 30 days without refresh, or a preset's cap, or a
+   * 401 with no refresh token). Only Reconnect brings it back; agents are told so. The stored status is needs_reauth.
+   */
+  expired: boolean;
+  /**
+   * OAuth scopes the server granted with the current sign-in (space-separated token response `scope`, split), or null
+   * when not signed in with OAuth. May hold more than was asked for (T3 Code's Full access adds settings:write and
+   * source-control:write) or less (its Read only grants orchestration:read alone).
+   */
+  grantedScopes: string[] | null;
   /** Agents with a grant on this connection. */
   agents: number;
 }
@@ -1283,11 +1294,14 @@ export interface ConnectionView extends Connection {
 export interface CreateConnectionInput {
   /** IntegrationPreset.id (GET /api/connections/presets). */
   preset?: string;
-  /** Required without a preset. */
+  /** Required without a preset, and with a preset whose server the user names (PresetView.userServer). */
   url?: string;
-  /** Default: the preset's display name, else the URL's host. */
+  /**
+   * Default: the preset's display name, else the URL's host (`host:port`), with " (2)", " (3)"… when taken. Names are
+   * unique per owner (case-insensitive): a name given here that's taken is a 409.
+   */
   name?: string;
-  /** Default: the preset's slug, else derived from the host. */
+  /** Default: the preset's slug (`<slug>-<host>` for PresetView.userServer), else derived from the host. */
   slug?: string;
   levelDefault?: AccessLevel;
   /** Agents that get the connection at levelDefault. Default: every agent, including ones created later (allAgents). */
@@ -1372,6 +1386,11 @@ export interface PresetView {
   authType: ConnectionAuthType;
   setupSteps: SetupStepView[];
   reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number } | null;
+  /**
+   * The user names the server (T3 Code): `url` is null, CreateConnectionInput.url is required, and `defaultPath` is
+   * appended when only an origin is given. One connection per server, named after its host unless named.
+   */
+  userServer: { defaultPath: string } | null;
 }
 
 // ───────────────────────────── Audit ─────────────────────────────

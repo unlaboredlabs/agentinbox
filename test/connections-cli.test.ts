@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exactOrigin as serverExactOrigin } from "../server/api/connections.ts";
 import type { IntegrationPreset } from "../server/broker/types.ts";
+import { t3codePreset } from "../server/integrations/t3code/index.ts";
 import { SessionStore } from "../server/auth/sessions.ts";
 import { sha256 } from "../server/crypto.ts";
 import { AdminApiError, CLI_SESSION_TTL_MS, createCliSession, daemonOrigin, openAdminChannel } from "../server/connections-cli/admin.ts";
@@ -95,6 +96,36 @@ describe("the local admin channel", () => {
     expect(() => openAdminChannel({ dataDir: "/nonexistent/xaq" })).toThrow(/No xaq data/);
     expect(daemonOrigin({ host: "::", port: 9 })).toBe("http://127.0.0.1:9");
     expect(daemonOrigin({ host: "100.64.1.2", port: 9 })).toBe("http://100.64.1.2:9");
+  });
+});
+
+describe("connections add: names are unique, so the CLI only sends one you chose", () => {
+  let d: Daemon;
+  beforeEach(async () => {
+    d = await startDaemon();
+  });
+  afterEach(() => d.dispose());
+  const deps = (p: ScriptedPrompter) => ({ api: d.api, prompter: p, env: {}, pollMs: 1, timeoutMs: 2000 });
+  const names = () => d.h.ctx.db.all<{ slug: string; name: string }>("SELECT slug, name FROM connections ORDER BY created_at, rowid").map((r) => `${r.slug}=${r.name}`);
+
+  it("the same host twice (another port or path) and the same preset twice get the server's suffixed defaults", async () => {
+    const yes = () => new ScriptedPrompter([], true);
+    expect(await addConnection("http://127.0.0.1:8787/mcp", { yes: true }, deps(yes()))).toBe(0);
+    expect(await addConnection("http://127.0.0.1:8788/mcp", { yes: true, slug: "local-b" }, deps(yes()))).toBe(0);
+    expect(await addConnection("https://mcp.example.com/a/mcp", { yes: true }, deps(yes()))).toBe(0);
+    expect(await addConnection("https://mcp.example.com/b/mcp", { yes: true, slug: "example-b" }, deps(yes()))).toBe(0);
+    expect(await addConnection("notion", { yes: true }, deps(yes()))).toBe(0);
+    expect(await addConnection("notion", { yes: true, slug: "notion-work" }, deps(yes()))).toBe(0);
+    expect(names().map((n) => n.slice(n.indexOf("=") + 1))).toEqual(["127.0.0.1", "127.0.0.1 (2)", "mcp.example.com", "mcp.example.com (2)", "Notion", "Notion (2)"]);
+  });
+
+  it("--name is used as given; a taken one (any case) fails before any question", async () => {
+    expect(await addConnection("notion", { yes: true, name: "Work wiki" }, deps(new ScriptedPrompter([], true)))).toBe(0);
+    expect(names()).toEqual(["notion=Work wiki"]);
+    const p = new ScriptedPrompter([]); // no answers: any prompt would throw
+    await expect(addConnection("https://mcp.example.com/mcp", { name: "work WIKI" }, deps(p))).rejects.toThrow(/already have a connection named "Work wiki"/);
+    expect(d.upstreams.probes).toEqual([]);
+    expect(names()).toEqual(["notion=Work wiki"]);
   });
 });
 
@@ -248,6 +279,36 @@ describe("connections add", () => {
     expect(d.upstreams.connects).toEqual([{ slug: "whoop", input: { inputs: { clientId: "0f8e2c1a-1111", clientSecret: "whsecret" } }, privateTarget: null }]);
     expect(p.text).not.toContain("whsecret");
     expect(p.text).toContain('Connected "whoop": 7 tools');
+  });
+
+  it("t3code: the server's address (path added), the private allow, the steps, and a host-named connection", async () => {
+    const t3 = await startDaemon({ presets: [t3codePreset] });
+    try {
+      t3.upstreams.probe = (_u, allow) =>
+        allow ? { reachable: true, auth: "oauth", message: "OAuth", issuer: "http://100.104.249.49:3773", registration: "dcr", refresh: false } : { reachable: false, auth: "unknown", blocked: "private_target", message: "blocked" };
+      t3.upstreams.connect = (conn) => {
+        t3.giveTools(conn.slug, 83);
+        return { status: "connected" };
+      };
+      const p = new ScriptedPrompter([], true);
+      const flags = { yes: true, url: "http://100.104.249.49:3773", allowPrivate: "http://100.104.249.49:3773" };
+      expect(await addConnection("t3code", flags, { api: t3.api, prompter: p, env: {}, pollMs: 1, timeoutMs: 2000 })).toBe(0);
+      expect(t3.h.ctx.db.get("SELECT preset, name, url, private_target FROM connections WHERE slug = 't3-100-104-249-49'")).toEqual({
+        preset: "t3code",
+        name: "100.104.249.49:3773",
+        url: "http://100.104.249.49:3773/mcp",
+        private_target: "http://100.104.249.49:3773",
+      });
+      expect(p.text).toContain("Settings → Connections");
+      expect(p.text).toContain('Connected "t3-100-104-249-49": 83 tools');
+      // Something that doesn't sign in isn't T3.
+      t3.upstreams.probe = () => ({ reachable: true, auth: "none", message: "" });
+      await expect(addConnection("t3code", { yes: true, url: "https://other.example.com" }, { api: t3.api, prompter: new ScriptedPrompter([], true), env: {}, pollMs: 1, timeoutMs: 2000 })).rejects.toThrow(
+        /doesn't look like a T3 Code server/,
+      );
+    } finally {
+      await t3.dispose();
+    }
   });
 
   it("an unknown integration names the presets", async () => {

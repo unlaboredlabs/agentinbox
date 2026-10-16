@@ -59,6 +59,8 @@ export type PlanItem =
       action: "create";
       entry: ClientEntry;
       slug: string;
+      /** The connection's name: the entry's, with " (2)", " (3)"… when an existing connection or an earlier item has it. */
+      name: string;
       url: string;
       /** header: moved into the broker; oauth: the client says so; none: no credential (the connect finds out). */
       auth: { type: "header"; name: string; value: string } | { type: "oauth" } | { type: "none" };
@@ -92,6 +94,8 @@ const sameUrl = (a: string | null | undefined, b: string) => {
 export async function planImport(config: ClientConfig, ctx: { existing?: ConnectionView[]; lookup?: LookupFn; selfOrigins?: string[] } = {}): Promise<PlanItem[]> {
   const label = CLIENT_LABELS[config.client];
   const taken = new Set((ctx.existing ?? []).map((c) => c.slug));
+  // Connection names are unique per owner (case-insensitive), like slugs: de-dupe before anything is created.
+  const takenNames = new Set((ctx.existing ?? []).map((c) => c.name.toLowerCase()));
   const items: PlanItem[] = [];
   for (const entry of config.entries) {
     if (isSelf(entry, ctx.selfOrigins ?? [])) {
@@ -147,12 +151,15 @@ export async function planImport(config: ClientConfig, ctx: { existing?: Connect
     let slug = slugify(entry.name);
     for (let n = 2; taken.has(slug); n++) slug = `${slugify(entry.name).slice(0, 21)}-${n}`;
     taken.add(slug);
+    let name = entry.name;
+    for (let n = 2; takenNames.has(name.toLowerCase()); n++) name = `${entry.name} (${n})`;
+    takenNames.add(name.toLowerCase());
     const auth = headerNames.length
       ? { type: "header" as const, name: headerNames[0]!, value: entry.headers[headerNames[0]!]! }
       : entry.oauth
         ? { type: "oauth" as const }
         : { type: "none" as const };
-    items.push({ action: "create", entry, slug, url: entry.url!.trim(), auth, privateTarget: target.kind === "private" ? target.origin : null });
+    items.push({ action: "create", entry, slug, name, url: entry.url!.trim(), auth, privateTarget: target.kind === "private" ? target.origin : null });
   }
   return items;
 }
@@ -372,7 +379,7 @@ export async function runImport(flags: ImportFlags, deps: ImportDeps): Promise<n
   for (const item of creates) {
     let created: ConnectionView | null = null;
     try {
-      created = await api.create({ slug: item.slug, name: item.entry.name, url: item.url, levelDefault: level, ...(agents === "all" ? {} : { agentIds: agents }) });
+      created = await api.create({ slug: item.slug, name: item.name, url: item.url, levelDefault: level, ...(agents === "all" ? {} : { agentIds: agents }) });
       if (item.privateTarget) await api.allowPrivateTarget(created.id, true);
       const r = await api.connect(created.id, item.auth.type === "header" ? { header: { name: item.auth.name, value: item.auth.value } } : {});
       if (r.status === "connected") {

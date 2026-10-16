@@ -34,6 +34,7 @@ import { brokerConnections, Catalog, CatalogRegistry, connectionGrants, SqliteCa
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
+import { isExpired } from "./policy/store.ts";
 import { type ReachabilityDeps, type WebhookReachability, reachabilityCache } from "./reachability.ts";
 import { pinExistingAgentsDirect } from "./search/mode.ts";
 import {
@@ -627,5 +628,9 @@ export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = 
   const total = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM upstream_tools WHERE connection_id = ?", c.id)!.n;
   const agents = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM connection_grants WHERE connection_id = ?", c.id)!.n;
   const expiresInDays = c.expiresAt ? Math.max(0, Math.floor((Date.parse(c.expiresAt) - at) / DAY_MS)) : null;
-  return { ...c, tools: { total }, expiresInDays, agents };
+  // Scopes aren't secret (the token is): the plaintext column, as granted by the last sign-in.
+  const scope = c.authType === "oauth" ? ctx.db.get<{ scope: string | null }>("SELECT scope FROM connection_credentials WHERE connection_id = ? AND access_token_enc IS NOT NULL", c.id)?.scope : null;
+  const grantedScopes = typeof scope === "string" ? scope.split(/\s+/).filter(Boolean) : null;
+  const expired = c.status !== "disabled" && isExpired(c, at);
+  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, agents };
 }

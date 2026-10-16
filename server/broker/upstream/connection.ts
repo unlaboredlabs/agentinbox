@@ -18,6 +18,11 @@ export interface ConnectionRow {
   protocol_checked_at: string | null;
 }
 
+/** `<publicUrl>/connections/<id>`: the console page with the connection's Reconnect button. */
+export function connectionConsoleUrl(publicUrl: string, connectionId: string): string {
+  return `${publicUrl.replace(/\/+$/, "")}/connections/${encodeURIComponent(connectionId)}`;
+}
+
 export function getConnection(db: Db, id: string): ConnectionRow | null {
   return db.get<ConnectionRow>("SELECT id, kind, slug, name, url, auth_type, private_target, status, status_reason, preset, expires_at, protocol, protocol_checked_at FROM connections WHERE id = ?", id) ?? null;
 }

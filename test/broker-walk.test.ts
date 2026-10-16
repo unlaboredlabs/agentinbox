@@ -29,7 +29,9 @@ async function setup() {
 
 /** A Notion connection whose tools are already pinned (no upstream needed). Loopback URL: never dialled here. */
 async function notion(s: Awaited<ReturnType<typeof setup>>, body: Record<string, unknown> = {}) {
-  const res = await s.api("/connections", { method: "POST", json: { url: "http://127.0.0.1:9/mcp", slug: "notion", name: "Notion", levelDefault: "ask", ...body } });
+  // Names are unique per owner: a second connection (another slug) gets its own name.
+  const name = typeof body.slug === "string" ? body.slug : "Notion";
+  const res = await s.api("/connections", { method: "POST", json: { url: "http://127.0.0.1:9/mcp", slug: "notion", name, levelDefault: "ask", ...body } });
   expect(res.status).toBe(201);
   const con = await json(res);
   s.ctx.broker.catalog.applyListing(con.id, {

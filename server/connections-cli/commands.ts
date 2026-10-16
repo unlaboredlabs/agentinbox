@@ -56,10 +56,12 @@ export function registerConnectionsCommands(program: Command): void {
   dataOption(
     connections
       .command("add")
-      .description("connect an integration (notion, whoop) or any MCP server URL, interactively")
-      .argument("<integration-or-url>", "notion, whoop, or an MCP server URL such as https://mcp.example.com/mcp"),
+      .description("connect an integration (notion, whoop, t3code) or any MCP server URL, interactively")
+      .argument("<integration-or-url>", "notion, whoop, t3code, or an MCP server URL such as https://mcp.example.com/mcp"),
   )
-    .option("--slug <name>", "its name: agents see its tools as <name>__<tool>")
+    .option("--url <address>", "t3code: your T3 Code server's address, e.g. http://100.101.102.103:3773 (asked when omitted)")
+    .option("--slug <name>", "its short name: agents see its tools as <name>__<tool>")
+    .option("--name <name>", "its display name (unique; default: the server's host, or the integration's name)")
     .option("--access <level>", "full, ask (ask before risky actions; the default) or read")
     .option("--agent <name>", 'an agent that gets it (repeatable; default: all agents; "all")', collect)
     .option("--header <name>", "header for a server that wants a static key (default Authorization)")
@@ -71,6 +73,7 @@ export function registerConnectionsCommands(program: Command): void {
       `
 Examples:
   ${NPX} connections add notion
+  ${NPX} connections add t3code --url http://100.101.102.103:3773   # one per T3 server; have a T3 pairing code ready
   ${NPX} connections add https://mcp.example.com/mcp --access read
   ${NPX} connections add http://127.0.0.1:8787/mcp      # asks before allowing a server on this machine`,
     )

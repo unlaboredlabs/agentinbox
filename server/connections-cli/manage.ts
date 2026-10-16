@@ -4,6 +4,7 @@ import { safeText } from "../listen/ui.ts";
 import { NPX } from "../listen/version.ts";
 import { accessLabel, agentsLabel, chooseAccess, chooseAgents, parseAccess } from "./access.ts";
 import type { ConnectionProbe, ConnectionsApi, ConnectionView, PresetView } from "./api.ts";
+import { presetServerSlug, presetServerUrl } from "../integrations/user-server.ts";
 import { exactOrigin } from "./private.ts";
 import type { Prompter } from "./prompt.ts";
 import { reconnectHint, slugify, validSlug } from "./util.ts";
@@ -21,6 +22,10 @@ export interface AddFlags {
   /** The exact `scheme://host:port` to allow without asking (--yes never allows one). */
   allowPrivate?: string;
   yes?: boolean;
+  /** The server's address, for an integration whose server you name (t3code). */
+  url?: string;
+  /** The connection's name (unique per owner); without it the server picks one (host or preset name, " (2)" when taken). */
+  name?: string;
 }
 
 export interface ManageDeps {
@@ -205,7 +210,8 @@ function printResult(p: Prompter, c: ConnectionView): void {
 
 interface Pending {
   slug: string;
-  name: string;
+  /** Only when the user gave one (--name): otherwise the server's default, which never collides. */
+  name?: string;
   preset?: string;
   url?: string;
 }
@@ -247,7 +253,7 @@ async function addPreset(preset: PresetView, flags: AddFlags, deps: ManageDeps, 
   }
   const slug = await askSlug(p, flags.slug, preset.slug, taken);
   const input: StartConnectInput = { ...(header ? { header } : {}), ...(Object.keys(inputs).length ? { inputs } : {}) };
-  return createThen({ slug, name: preset.displayName, preset: preset.id }, flags, deps, (c) => connectNow(c, input, deps, flags));
+  return createThen({ slug, ...(flags.name ? { name: flags.name } : {}), preset: preset.id }, flags, deps, (c) => connectNow(c, input, deps, flags));
 }
 
 async function headerFor(p: Prompter, flags: { header?: string }): Promise<NonNullable<StartConnectInput["header"]>> {
@@ -266,13 +272,20 @@ function describeProbe(p: Prompter, probe: ConnectionProbe): void {
 
 const MANUAL_CLIENT = "It needs a client ID from the provider; finish it in the console's Connections page.";
 
-async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set<string>): Promise<number> {
+/** `preset`: an integration whose server you name (t3code): its steps first, then the same check as a custom URL. */
+async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set<string>, preset: PresetView | null = null): Promise<number> {
   const { api, prompter: p } = deps;
   let url: URL;
   try {
-    url = new URL(raw.trim());
+    url = new URL(preset?.userServer ? presetServerUrl(raw, preset.userServer.defaultPath) : raw.trim());
   } catch {
     throw new Error(`"${raw}" isn't a URL. Use the server's full MCP address, e.g. https://mcp.example.com/mcp.`);
+  }
+  if (preset) {
+    p.print(pc.bold(`Connect ${safeText(preset.displayName, 60)}`));
+    preset.setupSteps.forEach((step, i) => {
+      for (const l of renderStep(step, i + 1)) p.print(l);
+    });
   }
   p.print(`Checking ${pc.cyan(url.href)}…`);
   const probe = await api.probe(url.href);
@@ -298,12 +311,15 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
     if (probe.auth === "oauth" && probe.registration === "manual") throw new Error(MANUAL_CLIENT);
     if (probe.auth === "header") header = await headerFor(p, flags);
   }
-  const slug = await askSlug(p, flags.slug, slugFromUrl(url), taken);
-  return createThen({ slug, name: url.hostname, url: url.href }, flags, deps, async (c) => {
+  if (preset && !allowPrivate && probe.auth !== "oauth") throw new Error(`${url.host} doesn't look like a ${preset.displayName} server: it doesn't ask for a sign-in.`);
+  const slug = await askSlug(p, flags.slug, preset ? presetServerSlug(preset.slug, url.href) : slugFromUrl(url), taken);
+  const base: Pending = { slug, ...(flags.name ? { name: flags.name } : {}), ...(preset ? { preset: preset.id } : {}), url: url.href };
+  return createThen(base, flags, deps, async (c) => {
     if (allowPrivate) {
       await api.allowPrivateTarget(c.id, true);
       const again = await api.probe(url.href, c.id);
       if (again.blocked || !again.reachable) throw new Error(again.message);
+      if (preset && again.auth !== "oauth") throw new Error(`${url.host} doesn't look like a ${preset.displayName} server: it doesn't ask for a sign-in.`);
       describeProbe(p, again);
       if (again.auth === "oauth" && again.registration === "manual") throw new Error(MANUAL_CLIENT);
       if (again.auth === "header") header = await headerFor(p, flags);
@@ -315,10 +331,22 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
 export async function addConnection(target: string, flags: AddFlags, deps: ManageDeps): Promise<number> {
   const existing = await deps.api.list();
   const taken = new Set(existing.map((c) => c.slug));
+  // A name you chose that's taken fails now, before any question (names are unique per owner, case-insensitive).
+  if (flags.name !== undefined) {
+    const name = flags.name.trim();
+    if (!name) throw new Error("--name can't be empty.");
+    const clash = existing.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (clash) throw new Error(`You already have a connection named "${safeText(clash.name, 100)}" ("${clash.slug}"). Pick another --name, or leave it out.`);
+    flags = { ...flags, name };
+  }
   if (isUrl(target)) return addUrl(target, flags, deps, taken);
   const presets = await deps.api.presets();
   const preset = presets.find((x) => x.id === target.trim().toLowerCase());
   if (!preset) throw new Error(`Unknown integration "${target}". Use ${[...presets.map((x) => x.id), "<an MCP server URL>"].join(", ")}.`);
+  if (preset.userServer) {
+    const raw = flags.url ?? (await deps.prompter.ask(`Address of your ${preset.displayName} server (e.g. http://100.101.102.103:3773)`));
+    return addUrl(raw, flags, deps, taken, preset);
+  }
   return addPreset(preset, flags, deps, taken);
 }
 
