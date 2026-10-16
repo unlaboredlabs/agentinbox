@@ -1,7 +1,7 @@
-# Status: Calendar + listener-recipe round (paused 2026-10-16)
+# Status: Calendar + listener-recipe round (resumed on forge 2026-10-16)
 
-The work paused when Wynn's Claude usage ran out, and it is being moved from anvil to forge. Everything below is pushed to GitHub,
-and no work exists only on a local disk.
+The work paused when Wynn's Claude usage ran out on anvil and resumed on forge under a new lead. Everything below is pushed
+to GitHub, and no work exists only on a local disk. This file is the source of truth; update it at every checkpoint.
 
 **Goal (from Wynn, via Adri):**
 - Google Calendar support, plus a clean "Add Google Calendar" upgrade for installs that already exist.
@@ -68,17 +68,4 @@ anything earlier in that doc.
 - Tier L (2 reviewers, one of them security) for anything touching scopes, auth or grants; tier M otherwise.
 - Use opus at high effort, a worktree per writer, and one serial merge train.
 
-## Follow-ups to add to docs/FOLLOWUPS.md
-
-- The calendar scheduler runs two SQL queries per second, even on mail-only installs.
-- B:
-  - an RSVP retry after a 5xx can email the organizer twice;
-  - some retry-message edge cases;
-  - switch to `isOutcomeUnknown` now that A is on main.
-- D: tests use their own fakes rather than A's fake Calendar; account removal waits behind push reconcile.
-- Listener:
-  - `python3` is required, and the macOS Xcode stub is an issue;
-  - any loopback `/webhooks/<name>` path gets the wrapped body;
-  - Homebrew's `/usr/local/bin` (group-writable) is rejected for the service node;
-  - Hermes plugin and native toolsets can still be added to a confined route.
-- The daemon's own `service install` still records the shell's node.
+The follow-ups from the anvil round are now in [docs/FOLLOWUPS.md](FOLLOWUPS.md).
