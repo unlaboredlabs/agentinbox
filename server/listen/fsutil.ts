@@ -9,13 +9,35 @@ export function ensurePrivateDir(dir: string): void {
 }
 
 /**
- * Writes a file with mode 0600 atomically (temp file + rename), so a crash never leaves a
- * half-written profile and the secret is never briefly world-readable.
+ * Throws when `path` exists but isn't ours. Another program is also called xaq and may own `~/.config/xaq`
+ * (or `~/.local/share/xaq`, `~/.xaq`): there we only create paths, or rewrite ones we wrote ourselves.
  */
-export function writePrivateFile(linkOrPath: string, content: string, opts: { privateDir?: boolean } = {}): void {
+export function assertOurs(path: string, ours: (path: string) => boolean, what: string): void {
+  try {
+    lstatSync(path);
+  } catch {
+    return; // Not there: ours to create.
+  }
+  let mine = false;
+  try {
+    mine = ours(path);
+  } catch {
+    // Unreadable: not provably ours.
+  }
+  if (!mine) throw new Error(`${path} already exists and isn't xaq's ${what}, so it was left alone. Move it away, then run this again.`);
+}
+
+/**
+ * Writes a file with mode 0600 atomically (temp file + rename), so a crash never leaves a
+ * half-written profile and the secret is never briefly world-readable. `privateDir`: true (default)
+ * creates the directory 0700 and tightens an existing one; "new" only creates it 0700 (an existing
+ * directory, which may not be ours, keeps its mode); false creates it with the default mode.
+ */
+export function writePrivateFile(linkOrPath: string, content: string, opts: { privateDir?: boolean | "new" } = {}): void {
   // A symlinked config (dotfiles repos) is updated at its real location instead of being replaced by a plain file.
   const path = resolveLink(linkOrPath);
-  if (opts.privateDir !== false) ensurePrivateDir(dirname(path));
+  if (opts.privateDir === "new") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  else if (opts.privateDir !== false) ensurePrivateDir(dirname(path));
   else mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${randomBytes(4).toString("hex")}.tmp`;
   try {

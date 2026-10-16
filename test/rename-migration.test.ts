@@ -3,7 +3,7 @@
 // the old service is stopped (and gone) before the new one starts, put back exactly as it was on failure,
 // and a second run is a plain reinstall. launchd and systemd are fakes that know which job is which.
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,7 +32,7 @@ import {
   uninstallService,
   unitDataDir,
 } from "../server/service.ts";
-import { removeLegacySkill, skillPath, writeSkill } from "../server/skill/index.ts";
+import { isOurSkill, removeLegacySkill, renderSkill, SKILL_MARKER, skillPath, writeSkill } from "../server/skill/index.ts";
 import { readClientConfig } from "../server/connections-cli/clients.ts";
 import { planImport } from "../server/connections-cli/import.ts";
 import { confinedRoutes } from "../server/connections-cli/routes.ts";
@@ -134,7 +134,33 @@ describe("environment: XAQ_* first, then AGENTINBOX_*", () => {
 
 // ───────────── Data directory ─────────────
 
-describe("data directory: ~/.xaq, or an existing ~/.agentinbox", () => {
+/** Every path under `dir` with its bytes (directories as "dir"), to show a foreign tree wasn't touched. */
+const snapshot = (dir: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  const walk = (d: string) => {
+    for (const name of readdirSync(d).sort()) {
+      const p = join(d, name);
+      const st = lstatSync(p);
+      if (st.isDirectory()) {
+        out[p] = `dir ${st.mode} ${st.mtimeMs}`;
+        walk(p);
+      } else out[p] = `${st.mode} ${st.mtimeMs} ${readFileSync(p, "base64")}`;
+    }
+  };
+  walk(dir);
+  return out;
+};
+/** What the other program called xaq keeps in `dir` (its config: credentials, settings, history, threads). */
+const foreignXaq = (dir: string) => {
+  mkdirSync(join(dir, "threads"), { recursive: true });
+  writeFileSync(join(dir, "auth.json"), '{"provider":"x","token":"not-ours"}\n', { mode: 0o600 });
+  writeFileSync(join(dir, "settings.json"), '{"theme":"dark"}\n');
+  writeFileSync(join(dir, "state.json"), "{}\n");
+  writeFileSync(join(dir, "history.jsonl"), '{"q":"hi"}\n');
+  writeFileSync(join(dir, "threads", "t1.json"), "{}\n");
+};
+
+describe("data directory: ~/.xaq when ours, an existing ~/.agentinbox, else ~/.xaq", () => {
   const home = () => {
     const h = tmp("xaq-home-");
     withEnv({ HOME: h, XAQ_DATA: undefined, AGENTINBOX_DATA: undefined });
@@ -169,23 +195,59 @@ describe("data directory: ~/.xaq, or an existing ~/.agentinbox", () => {
     expect(readFileSync(join(old, "master.key"), "utf8")).toBe("k\n");
   });
 
-  it("~/.xaq wins once it exists; --data and the variables always win", () => {
+  it("a foreign ~/.xaq (another program called xaq) with ~/.agentinbox: agentinbox, and ~/.xaq stays byte-identical", () => {
     const h = home();
+    foreignXaq(join(h, ".xaq"));
+    const before = snapshot(join(h, ".xaq"));
     mkdirSync(join(h, ".agentinbox"));
-    mkdirSync(join(h, ".xaq"));
-    expect(defaultDataDir()).toBe(join(h, ".xaq"));
+    writeFileSync(join(h, ".agentinbox", "agentinbox.db"), "");
+    expect(loadConfig({}).dataDir).toBe(join(h, ".agentinbox"));
+    expect(snapshot(join(h, ".xaq"))).toEqual(before);
+  });
+
+  it("a foreign ~/.xaq alone: our files go in beside its own, which stay untouched (not even its mode)", async () => {
+    const h = home();
+    foreignXaq(join(h, ".xaq"));
+    chmodSync(join(h, ".xaq"), 0o755);
+    const before = snapshot(join(h, ".xaq"));
+    const c = loadConfig({});
+    expect(c.dataDir).toBe(join(h, ".xaq"));
+    expect(statSync(join(h, ".xaq")).mode & 0o777).toBe(0o755);
+    // Every foreign path is still there, unchanged; whatever is new is ours.
+    const after = snapshot(join(h, ".xaq"));
+    for (const [p, v] of Object.entries(before)) if (p !== join(h, ".xaq")) expect(after[p]).toBe(v);
+    // A foreign service.env or setup-token is never replaced.
+    writeFileSync(join(h, ".xaq", "setup-token"), "not a token: the other program's\n");
+    const { ensureSetupToken } = await import("../server/auth/setup-token.ts");
+    expect(() => ensureSetupToken(c.dataDir)).toThrow(/isn't xaq's setup token, so it was left alone/);
+    expect(readFileSync(join(h, ".xaq", "setup-token"), "utf8")).toBe("not a token: the other program's\n");
+  });
+
+  it("a ~/.xaq with our files (nightly.71/72) is ours, even next to ~/.agentinbox", () => {
+    for (const marker of ["xaq.db", "agentinbox.db", "master.key", "xaq.lock"]) {
+      const h = home();
+      mkdirSync(join(h, ".agentinbox"));
+      mkdirSync(join(h, ".xaq"));
+      writeFileSync(join(h, ".xaq", marker), "");
+      expect(defaultDataDir()).toBe(join(h, ".xaq"));
+    }
+  });
+
+  it("--data and the variables always win", () => {
+    home();
     expect(resolveDataDir("/srv/x")).toBe("/srv/x");
     withEnv({ AGENTINBOX_DATA: "/srv/old" });
     expect(resolveDataDir()).toBe("/srv/old");
   });
 });
 
-describe("listener XDG dirs: …/xaq, or existing …/agentinbox ones", () => {
+describe("listener XDG dirs: …/xaq when ours, existing …/agentinbox ones, else …/xaq", () => {
   let env: ReturnType<typeof isolateXdg>;
   beforeEach(() => {
     env = isolateXdg();
   });
   afterEach(() => env.restore());
+  const profileJson = JSON.stringify({ url: "https://mail.example.com", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c" });
 
   it("new machines use …/xaq", () => {
     expect(configDir()).toBe(join(env.root, "config", "xaq"));
@@ -193,14 +255,70 @@ describe("listener XDG dirs: …/xaq, or existing …/agentinbox ones", () => {
     expect(listenDataDir()).toBe(join(env.root, "data", "xaq"));
   });
 
-  it("each existing …/agentinbox dir stays in use while its …/xaq one doesn't exist", () => {
+  it("each existing …/agentinbox dir stays in use until its …/xaq one holds our files", () => {
     for (const d of ["config", "state", "data"]) mkdirSync(join(env.root, d, "agentinbox"), { recursive: true });
     expect(configDir()).toBe(join(env.root, "config", "agentinbox"));
     expect(stateDir()).toBe(join(env.root, "state", "agentinbox"));
     expect(listenAppDir()).toBe(join(env.root, "data", "agentinbox", "app"));
     mkdirSync(join(env.root, "data", "xaq"), { recursive: true });
+    expect(listenAppDir()).toBe(join(env.root, "data", "agentinbox", "app")); // an empty xaq isn't ours
+    mkdirSync(join(env.root, "data", "xaq", "app"));
     expect(listenAppDir()).toBe(join(env.root, "data", "xaq", "app"));
     expect(configDir()).toBe(join(env.root, "config", "agentinbox"));
+  });
+
+  it("foreign …/xaq dirs plus …/agentinbox: the profile resolves to agentinbox, and the foreign dirs stay byte-identical", () => {
+    for (const d of ["config", "state", "data"]) {
+      foreignXaq(join(env.root, d, "xaq"));
+      mkdirSync(join(env.root, d, "agentinbox"), { recursive: true, mode: 0o700 });
+    }
+    const before = Object.fromEntries(["config", "state", "data"].map((d) => [d, snapshot(join(env.root, d, "xaq"))]));
+    mkdirSync(join(env.root, "config", "agentinbox", "profiles"), { mode: 0o700 });
+    writeFileSync(join(env.root, "config", "agentinbox", "profiles", "default.json"), profileJson, { mode: 0o600 });
+    expect(configDir()).toBe(join(env.root, "config", "agentinbox"));
+    expect(loadProfile("default").agentId).toBe("a");
+    expect(mcpServerName("default")).toBe("agentinbox");
+    expect(stateDir()).toBe(join(env.root, "state", "agentinbox"));
+    expect(listenDataDir()).toBe(join(env.root, "data", "agentinbox"));
+    saveProfile("work", { url: "https://mail.example.com", apiKey: FAKE_KEY, agentId: "b", agentName: "n", consumer: "w" });
+    writeClaudeMcpConfig("work", "https://mail.example.com/mcp");
+    expect(existsSync(join(env.root, "config", "agentinbox", "profiles", "work.json"))).toBe(true);
+    for (const d of ["config", "state", "data"]) expect(snapshot(join(env.root, d, "xaq"))).toEqual(before[d]);
+  });
+
+  it("a foreign …/xaq alone: our subpaths are added beside its files, which (and its mode) stay untouched", () => {
+    foreignXaq(join(env.root, "config", "xaq"));
+    chmodSync(join(env.root, "config", "xaq"), 0o755);
+    const before = snapshot(join(env.root, "config", "xaq"));
+    expect(configDir()).toBe(join(env.root, "config", "xaq"));
+    saveProfile("default", { url: "https://mail.example.com", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c" });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    writeClaudeMcpConfig("default", "https://mail.example.com/mcp");
+    const after = snapshot(join(env.root, "config", "xaq"));
+    for (const [p, v] of Object.entries(before)) if (p !== join(env.root, "config", "xaq")) expect(after[p]).toBe(v);
+    expect(statSync(join(env.root, "config", "xaq")).mode & 0o777).toBe(0o755);
+    const added = Object.keys(after).filter((p) => !(p in before)).map((p) => p.slice(join(env.root, "config", "xaq").length + 1).split("/")[0]);
+    expect([...new Set(added)].sort()).toEqual(["bin", "mcp", "profiles"]);
+    // From now on it holds our marker, so it is ours.
+    expect(configDir()).toBe(join(env.root, "config", "xaq"));
+  });
+
+  it("never overwrites a file of the same name it didn't write (header helper, Claude MCP config)", () => {
+    mkdirSync(join(env.root, "config", "xaq", "bin"), { recursive: true });
+    writeFileSync(join(env.root, "config", "xaq", "bin", "mcp-header.mjs"), "// someone else's script\n");
+    saveProfile("default", { url: "https://mail.example.com", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "c" });
+    expect(() => writeClaudeMcpConfig("default", "https://mail.example.com/mcp")).toThrow(/mcp-header\.mjs already exists and isn't xaq's MCP header helper/);
+    expect(readFileSync(join(env.root, "config", "xaq", "bin", "mcp-header.mjs"), "utf8")).toBe("// someone else's script\n");
+  });
+
+  it("…/xaq dirs that nightly.71/72 set up (profiles/, listen/, app/) are ours, even next to …/agentinbox", () => {
+    mkdirSync(join(env.root, "config", "xaq", "profiles"), { recursive: true });
+    mkdirSync(join(env.root, "state", "xaq", "listen"), { recursive: true });
+    mkdirSync(join(env.root, "data", "xaq", "app"), { recursive: true });
+    for (const d of ["config", "state", "data"]) mkdirSync(join(env.root, d, "agentinbox"), { recursive: true });
+    expect(configDir()).toBe(join(env.root, "config", "xaq"));
+    expect(stateDir()).toBe(join(env.root, "state", "xaq"));
+    expect(listenDataDir()).toBe(join(env.root, "data", "xaq"));
   });
 });
 
@@ -304,6 +422,25 @@ describe("agent-side names: new profiles are xaq, profiles from before the renam
   it("re-running Codex setup drops the old marker comment too", () => {
     const old = "# Added by `agentinbox setup-mcp`. The key is also in your agentinbox profile; rotate it in the console.\n[mcp_servers.agentinbox]\nurl = \"x\"\n\n[other]\na = 1\n";
     expect(removeTomlServer(old, "agentinbox")).toBe("[other]\na = 1\n");
+  });
+});
+
+describe("skill install never overwrites a xaq skill that isn't ours", () => {
+  it("refuses a foreign xaq/SKILL.md and leaves it as it was; replaces our own (marker, or nightly.71/72's description)", () => {
+    const dir = tmp("xaq-skills-");
+    mkdirSync(join(dir, "xaq"));
+    const foreign = "---\nname: xaq\ndescription: The other xaq's own skill.\n---\n# xaq\n";
+    writeFileSync(join(dir, "xaq", "SKILL.md"), foreign);
+    expect(() => writeSkill(skillPath(dir), renderSkill("http://localhost:8425"))).toThrow(/isn't the xaq-cli skill .*left alone.*--target/);
+    expect(readFileSync(join(dir, "xaq", "SKILL.md"), "utf8")).toBe(foreign);
+    // Ours: written by this version (marker) or by nightly.71/72 (the description says "formerly agentinbox").
+    writeFileSync(join(dir, "xaq", "SKILL.md"), "---\nname: xaq\ndescription: Gmail through a xaq server (formerly agentinbox).\n---\n");
+    writeSkill(skillPath(dir), renderSkill("http://localhost:8425"));
+    const ours = readFileSync(join(dir, "xaq", "SKILL.md"), "utf8");
+    expect(isOurSkill(ours)).toBe(true);
+    expect(ours).toContain(SKILL_MARKER);
+    writeSkill(skillPath(dir), renderSkill("https://mail.example.com"));
+    expect(readFileSync(join(dir, "xaq", "SKILL.md"), "utf8")).toContain("https://mail.example.com/mcp");
   });
 });
 
@@ -752,6 +889,44 @@ describe("listen service install: an agentinbox listener moves to xaq", () => {
     expect(p).toMatchObject({ consumer: "default", forward: { url: "http://127.0.0.1:8644/webhooks/agentinbox-mail" }, mcpServer: "agentinbox" });
     expect(existsSync(join(env.root, "config", "xaq"))).toBe(false);
     expect(isServiceInstalled("default", ops)).toBe(true);
+  });
+
+  it("launchd, with another program's ~/.config/xaq (and state, share): migrates from the agentinbox dirs and leaves those byte-identical", async () => {
+    for (const d of ["config", "state", "data"]) foreignXaq(join(env.root, d, "xaq"));
+    const before = Object.fromEntries(["config", "state", "data"].map((d) => [d, snapshot(join(env.root, d, "xaq"))]));
+    const { units, files } = oldSetup("darwin");
+    const ops = fakeLaunchd(units, { loaded: ["com.unlaboredlabs.agentinbox.listen.default"], lingers: 1 });
+    await installListenService({}, { ops, stage: stageXaq, waitStarted: ok, node, pollMs: 1, gatewayCheck });
+    expect(ops.overlaps).toEqual([]);
+    expect(existsSync(files.default!.file)).toBe(false);
+    expect(readFileSync(join(units, "sh.xaq.listen.default.plist"), "utf8")).toContain(join(env.root, "data", "agentinbox", "app", "node_modules", "xaq-cli", "dist", "cli.js"));
+    expect(loadProfile()).toMatchObject({ consumer: "default", mcpServer: "agentinbox" });
+    for (const d of ["config", "state", "data"]) {
+      expect(snapshot(join(env.root, d, "xaq"))).toEqual(before[d]);
+    }
+  });
+
+  it("launchd, with another program's …/xaq dirs and no agentinbox: installs beside its files, which (and their modes) stay untouched", async () => {
+    for (const d of ["config", "state", "data"]) {
+      foreignXaq(join(env.root, d, "xaq"));
+      chmodSync(join(env.root, d, "xaq"), 0o755);
+    }
+    const before = Object.fromEntries(["config", "state", "data"].map((d) => [d, snapshot(join(env.root, d, "xaq"))]));
+    saveProfile("default", { url: "https://mail.example.com", apiKey: FAKE_KEY, agentId: "a", agentName: "n", consumer: "default", exec: "cat > /dev/null" });
+    const units = join(env.root, "units");
+    mkdirSync(units, { recursive: true });
+    const ops = fakeLaunchd(units);
+    await installListenService({}, { ops, stage: stageXaq, waitStarted: ok, node, pollMs: 1, gatewayCheck });
+    expect(readFileSync(join(units, "sh.xaq.listen.default.plist"), "utf8")).toContain(join(env.root, "data", "xaq", "app", "node_modules", "xaq-cli", "dist", "cli.js"));
+    for (const d of ["config", "state", "data"]) {
+      const after = snapshot(join(env.root, d, "xaq"));
+      for (const [p, v] of Object.entries(before[d]!)) if (p !== join(env.root, d, "xaq")) expect(after[p]).toBe(v);
+      expect(statSync(join(env.root, d, "xaq")).mode & 0o777).toBe(0o755);
+    }
+    // A foreign app.old next to it is never removed: the next install refuses instead.
+    mkdirSync(join(env.root, "data", "xaq", "app.old", "x"), { recursive: true });
+    await expect(installListenService({}, { ops, stage: stageXaq, waitStarted: ok, node, pollMs: 1, gatewayCheck })).rejects.toThrow(/app\.old already exists and isn't a xaq install/);
+    expect(existsSync(join(env.root, "data", "xaq", "app.old", "x"))).toBe(true);
   });
 
   it("launchd: when the new listener doesn't start, the old one is put back (unit, install, settings) and running", async () => {

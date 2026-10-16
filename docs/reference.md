@@ -95,7 +95,10 @@ agent pairing) is set in the console under **Settings**.
 <!-- rename-xaq: keep-start -->
 Installs from before the rename to xaq keep working unchanged: every `XAQ_*` variable is also read under its old
 name (`AGENTINBOX_DATA`, `AGENTINBOX_MASTER_KEY`, …) when the new one isn't set, and while `~/.xaq` doesn't exist an
-existing `~/.agentinbox` stays the default data directory (xaq says so once at startup; nothing is moved). See
+existing `~/.agentinbox` stays the default data directory (xaq says so once at startup; nothing is moved). A `~/.xaq`
+counts as xaq's only when it holds its files (`xaq.db`, `agentinbox.db`, `master.key` or the lock); one that belongs
+to another program called xaq is skipped when `~/.agentinbox` exists, and otherwise only gets xaq's files added
+beside its own (nothing of it is changed, renamed or deleted, not even its permissions). See
 [Upgrading from agentinbox](../README.md#upgrading-from-agentinbox).
 <!-- rename-xaq: keep-end -->
 

@@ -35,14 +35,19 @@ export const DEFAULT_PORT = 8425;
 
 /** New installs keep their data here. */
 export const newDataDir = () => join(homedir(), `.${PRODUCT}`);
-/** Where installs from before the rename keep theirs; still used while `~/.xaq` doesn't exist. */
+/** Where installs from before the rename keep theirs; still used unless `~/.xaq` holds our files. */
 export const legacyDataDir = () => join(homedir(), `.${LEGACY_PRODUCT}`);
+/** Files only our daemon creates in its data directory: a `~/.xaq` holding one is ours. */
+const DATA_MARKERS = [`${PRODUCT}.db`, `${LEGACY_PRODUCT}.db`, "master.key", `${PRODUCT}.lock`, `${LEGACY_PRODUCT}.lock`];
+const pickDataDir = () => pickDir(homedir(), DATA_MARKERS, { dot: true });
 
 /**
- * The data directory when neither --data nor XAQ_DATA / AGENTINBOX_DATA says: `~/.xaq`, or `~/.agentinbox`
- * when only that one exists (an install from before the rename). Nothing is moved: master.key stays put.
+ * The data directory when neither --data nor XAQ_DATA / AGENTINBOX_DATA says: `~/.xaq` when it holds our
+ * files; else an existing `~/.agentinbox` (from before the rename); else `~/.xaq`. A `~/.xaq` without our
+ * files belongs to another program called xaq: then our files only go in beside its own (see restrictDir).
+ * Nothing is moved: master.key stays put.
  */
-export const defaultDataDir = () => resolve(pickDir(newDataDir(), legacyDataDir()).dir);
+export const defaultDataDir = () => resolve(pickDataDir().dir);
 
 let toldLegacy = false;
 
@@ -53,8 +58,8 @@ let toldLegacy = false;
 export function resolveDataDir(flag?: string, opts: { quiet?: boolean } = {}): string {
   const given = flag ?? (envVar("DATA") || undefined);
   if (given !== undefined) return resolve(given);
-  const { dir, legacy } = pickDir(newDataDir(), legacyDataDir());
-  if (legacy && !opts.quiet && !toldLegacy) {
+  const { dir, kind } = pickDataDir();
+  if (kind === "legacy" && !opts.quiet && !toldLegacy) {
     toldLegacy = true;
     process.stderr.write(`${PRODUCT}: using the existing data directory ${dir} (from before agentinbox was renamed to ${PRODUCT}; new installs use ${newDataDir()}).\n`);
   }
@@ -77,7 +82,8 @@ export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
   // Only a directory that already had files in it can have exposed anything.
   const existed = hasFiles(dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  restrictDir(dataDir, existed);
+  // A ~/.xaq that also holds another program's files (it is called xaq too) isn't ours to chmod.
+  if (!hasForeignFiles(dataDir)) restrictDir(dataDir, existed);
   return {
     dataDir,
     dbPath: dataFiles(dataDir).db,
@@ -97,6 +103,19 @@ export function loadConfig(input: ConfigInput = {}, version = "0.0.0"): Config {
     },
   };
 }
+
+/** What our daemon keeps in its data directory (names only; nothing is read). */
+// (install.lock: the listeners' shared install directory holds app* and that lock; same rule there.)
+const OWN_ENTRY = /^(?:(?:xaq|agentinbox)\.(?:db(?:-wal|-shm|-journal)?|lock|log)|master\.key|setup-token|service\.env|app(?:\.new|\.old)?|install\.lock|units|backups?)$/;
+
+/** Whether the directory holds anything our daemon didn't put there. */
+export const hasForeignFiles = (dir: string) => {
+  try {
+    return readdirSync(dir).some((n) => !OWN_ENTRY.test(n));
+  } catch {
+    return false;
+  }
+};
 
 const hasFiles = (dir: string) => {
   try {

@@ -51,12 +51,18 @@ and is delivered once the listener is back: nothing is lost or delivered twice.
   `master.key`, `agentinbox.db` and settings. Nothing is moved; `~/.xaq` is only for new installs.
 - every agent key (`aib_…`), Gmail and Calendar connection, grant, webhook and Pub/Sub setup;
 - the listener's profiles, keys, logs and event cursor (`~/.config/agentinbox`, `~/.local/state/agentinbox`,
-  `~/.local/share/agentinbox` stay in use while the `…/xaq` ones don't exist);
+  `~/.local/share/agentinbox` stay in use until the matching `…/xaq` directory holds xaq's own files);
 - the names your agents already use: a profile set up with agentinbox keeps its MCP server name `agentinbox`
   (`agentinbox-<profile>`), so Hermes routes confined to `["mcp-agentinbox"]`, cron jobs limited to
   `["agentinbox"]`, the Hermes route `/webhooks/agentinbox…` and Claude Code's `mcp__agentinbox` keep working;
 - `AGENTINBOX_*` environment variables: still read when the `XAQ_*` one isn't set, and `--exec` commands still get
   `AGENTINBOX_EVENT_FILE` and the other ids next to the new `XAQ_*` ones.
+
+Another, unrelated program is also called xaq and may have its own `~/.config/xaq` (or `~/.xaq`). xaq counts such
+a directory as its own only when it holds xaq's files (`profiles/`, `listen/`, `app/`; in `~/.xaq` its database or
+`master.key`), checked without reading anything. Otherwise an existing agentinbox directory is used; and where there
+is none, xaq only adds its own files next to the other program's and never changes, renames or deletes anything it
+didn't create.
 
 **Changes:**
 - the command is `xaq` (`npx xaq-cli …`); `agentinbox` (from the `agentinbox-cli` package, now a shim) and

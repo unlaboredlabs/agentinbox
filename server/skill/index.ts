@@ -69,7 +69,36 @@ export function removeLegacySkill(target: string): string | null {
   return file;
 }
 
+/** The line in our SKILL.md that marks it as written by xaq-cli. */
+export const SKILL_MARKER = "<!-- xaq-cli skill: written by `xaq skill install`, which may replace it. -->";
+
+/**
+ * Whether a SKILL.md is ours: `name: xaq` in its frontmatter, plus our marker line, or (written by
+ * nightly.71/72, before the marker) the description's "(formerly agentinbox)".
+ */
+export function isOurSkill(text: string): boolean {
+  const front = /^---\s*\n([\s\S]*?)\n---/.exec(text)?.[1] ?? "";
+  if (!/^name:\s*xaq\s*$/m.test(front)) return false;
+  return text.includes(SKILL_MARKER) || /^description:.*\(formerly agentinbox\)/m.test(front);
+}
+
+/**
+ * Writes SKILL.md, but never over a `xaq` skill that isn't ours: another program called xaq may have one.
+ * Throws instead, saying what to do.
+ */
 export function writeSkill(path: string, content: string): void {
+  let existing: string | null = null;
+  try {
+    existing = readFileSync(path, "utf8");
+  } catch {
+    // Nothing there yet.
+  }
+  if (existing !== null && !isOurSkill(existing)) {
+    throw new Error(
+      `${path} already exists and isn't the xaq-cli skill (another program called xaq may have put it there), so it was left alone. ` +
+        "Install into another skills directory with --target <dir>, or move that file away first.",
+    );
+  }
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content);
 }

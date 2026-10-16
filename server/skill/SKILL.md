@@ -2,6 +2,7 @@
 name: xaq
 description: Read, search, draft, send and organize Gmail, and read and schedule Google Calendar events, through a xaq server (formerly agentinbox); react to new mail and calendar changes via its event feed or webhooks. Use whenever a task involves email in a mailbox connected to xaq (checking the inbox, finding a message, replying, following up on a thread, triaging labels, waiting for a reply), the calendar of such an account (what's on it, finding a free slot, scheduling or moving a meeting, answering an invitation), or when handling a xaq webhook payload.
 ---
+<!-- xaq-cli skill: written by `xaq skill install`, which may replace it. -->
 
 # xaq
 

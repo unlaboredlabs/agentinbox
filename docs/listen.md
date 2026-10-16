@@ -517,8 +517,10 @@ profiles get `xaq` / `xaq-<profile>`. To move an old profile to the new names, d
 re-run `setup-mcp` and `listen hermes`.
 
 Its files stay where they are too: `~/.config/agentinbox`, `~/.local/state/agentinbox` and
-`~/.local/share/agentinbox` (each `$XDG_*_HOME/agentinbox`) are used as long as the matching `…/xaq` directory
-doesn't exist. Nothing is moved.
+`~/.local/share/agentinbox` (each `$XDG_*_HOME/agentinbox`) are used until the matching `…/xaq` directory holds
+xaq's own files (`profiles/`, `listen/` or `app/`). Nothing is moved. Another program is also called xaq and may own a
+`…/xaq` directory such as `~/.config/xaq`: without xaq's files in it, it is skipped while the agentinbox one exists,
+and otherwise xaq only adds its own subdirectories to it, leaving everything else (permissions included) as it was.
 
 `npx xaq-cli listen service install [--profile <name>]` replaces the profile's agentinbox service
 (`agentinbox-listen-<profile>` on Linux, `com.unlaboredlabs.agentinbox.listen.<profile>` on macOS): it stops it and
@@ -634,8 +636,8 @@ After updating xaq (for example from a `0.1.0-nightly.34` listener):
 
 The same paths are used on macOS.
 <!-- rename-xaq: keep-start -->
-A machine set up before the rename keeps using each `…/agentinbox` directory while the matching `…/xaq` one doesn't
-exist (see [Profiles from before the rename](#profiles-from-before-the-rename)).
+A machine set up before the rename keeps using each `…/agentinbox` directory until the matching `…/xaq` one holds
+xaq's own files (see [Profiles from before the rename](#profiles-from-before-the-rename)).
 <!-- rename-xaq: keep-end -->
 
 ## Troubleshooting

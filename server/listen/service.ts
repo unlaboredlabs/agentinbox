@@ -351,6 +351,7 @@ export async function installListenService(flags: ListenFlags, deps: ListenServi
   const releaseInstallLock = acquireFileLock(
     join(shared, "install.lock"),
     (holder) => new Error(`Another listener service install is running (pid ${holder.pid}, since ${holder.startedAt}). Try again when it has finished.`),
+    { privateDir: false },
   );
   try {
     await installLocked();

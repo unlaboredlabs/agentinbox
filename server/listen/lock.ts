@@ -1,4 +1,4 @@
-import { closeSync, constants, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, constants, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensurePrivateDir } from "./fsutil.ts";
 import { profileStateDir } from "./paths.ts";
@@ -30,6 +30,14 @@ export class ProfileLockedError extends Error {
   }
 }
 
+function rawLength(path: string): number {
+  try {
+    return readFileSync(path).length;
+  } catch {
+    return 0;
+  }
+}
+
 function readLock(path: string): LockInfo | null {
   try {
     const info = JSON.parse(readFileSync(path, "utf8")) as LockInfo;
@@ -46,8 +54,10 @@ const held = new Set<string>();
  * Takes an exclusive lock file (pid + start time, created with O_EXCL) or throws `busy(holder)`. A lock
  * whose process is gone is stale and taken over. Returns a release function (also run on process exit).
  */
-export function acquireFileLock(path: string, busy: (holder: LockInfo) => Error): () => void {
-  ensurePrivateDir(dirname(path));
+export function acquireFileLock(path: string, busy: (holder: LockInfo) => Error, opts: { privateDir?: boolean } = {}): () => void {
+  // privateDir false: the directory may be one another program called xaq owns, so it keeps its mode.
+  if (opts.privateDir === false) mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  else ensurePrivateDir(dirname(path));
   const mine: LockInfo = { pid: process.pid, startedAt: new Date().toISOString() };
   if (held.has(path)) throw busy(readLock(path) ?? mine);
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -72,7 +82,9 @@ export function acquireFileLock(path: string, busy: (holder: LockInfo) => Error)
     }
     const holder = readLock(path);
     if (holder && holder.pid !== process.pid && pidAlive(holder.pid)) throw busy(holder);
-    // Stale (crashed process) or unreadable: take it over.
+    // Something else under this name (not a lock we wrote, and not the empty file a crash mid-write leaves): leave it.
+    if (!holder && rawLength(path) > 0) throw new Error(`${path} already exists and isn't a xaq lock, so it was left alone. Move it away, then run this again.`);
+    // Stale (crashed process) or empty: take it over.
     rmSync(path, { force: true });
   }
   throw new Error(`Could not take the lock ${path}.`);
