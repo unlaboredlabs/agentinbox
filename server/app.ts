@@ -141,7 +141,8 @@ export function createApp(ctx: AppContext, opts: AppOptions = {}): Hono<AppEnv> 
   // ── Admin console API ──
   app.use("/api/*", requireAdmin(ctx));
   // brokerApprovalsApi before approvalsApi: it answers /approvals/:id for mcp.call and passes the rest on.
-  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi, connectionsApi]) {
+  // connectionsApi before brokerApprovalsApi: its /connections/:id/kill runs the service's kill (hooks first).
+  for (const api of [setupApi, authApi, settingsApi, systemApi, googleApi, accountsApi, agentsApi, connectionsApi, brokerApprovalsApi, approvalsApi, webhooksApi, eventsApi, auditApi, overviewApi, pairingsApi]) {
     app.route("/api", api(ctx));
   }
 

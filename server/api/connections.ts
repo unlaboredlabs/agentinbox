@@ -20,13 +20,15 @@ import {
   type ToolHeldReason,
   type UpstreamToolDefinition,
 } from "../../shared/types.ts";
+import { exposedName } from "../broker/catalog/index.ts";
 import { connectionView, getConnection, listConnections, notifyAgent } from "../broker/service.ts";
+import { Approvals } from "../mail/approvals.ts";
 import { connectionHookUrl } from "../integrations/hooks.ts";
 import type { IntegrationPreset, PresetAuth } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { json, now } from "../db/index.ts";
 import { badRequest, conflict, HttpError, notFound } from "../util/errors.ts";
-import { newId } from "../util/ids.ts";
+import { newId, randomToken } from "../util/ids.ts";
 import { ADMIN_ACTOR, readBody, router } from "./util.ts";
 
 const httpUrl = z
@@ -53,6 +55,7 @@ const createSchema = z
 const patchSchema = z.object({ name: name.optional(), slug: slug.optional(), url: httpUrl.optional(), levelDefault: level.optional() }).strict();
 const grantsSchema = z.object({ grants: z.array(z.object({ agentId: z.string().min(1), level })).max(1000) }).strict();
 const privateTargetSchema = z.object({ allow: z.boolean() }).strict();
+const acceptSchema = z.object({ candidateHash: z.string().min(1).max(128) }).strict();
 const probeSchema = z.object({ url: httpUrl, connectionId: z.string().optional() }).strict();
 const connectSchema = z
   .object({
@@ -104,6 +107,7 @@ export function definitionDiff(before: UpstreamToolDefinition | null, after: Ups
 
 export function connectionsApi(ctx: AppContext) {
   const app = router();
+  const approvals = new Approvals(ctx);
   const audit = (action: string, target: string, detail: Record<string, unknown> | null = null) =>
     ctx.audit.record({ ...ADMIN_ACTOR, action, target, outcome: "ok", detail });
 
@@ -134,14 +138,23 @@ export function connectionsApi(ctx: AppContext) {
   };
   const heldOf = (connectionId: string): HeldToolView[] =>
     ctx.db
-      .all<{ name: string; exposed_name: string; held_reason: ToolHeldReason; definition: string | null; candidate_definition: string; updated_at: string }>(
-        "SELECT name, exposed_name, held_reason, definition, candidate_definition, updated_at FROM upstream_tools WHERE connection_id = ? AND state = 'held' ORDER BY name",
+      .all<{ name: string; exposed_name: string; held_reason: ToolHeldReason; definition: string | null; candidate_definition: string; candidate_hash: string; updated_at: string }>(
+        "SELECT name, exposed_name, held_reason, definition, candidate_definition, candidate_hash, updated_at FROM upstream_tools WHERE connection_id = ? AND state = 'held' ORDER BY name",
         connectionId,
       )
       .map((r) => {
         const pinned = json.parse<UpstreamToolDefinition | null>(r.definition, null);
         const candidate = json.parse<UpstreamToolDefinition>(r.candidate_definition, { inputSchema: {} });
-        return { name: r.name, exposedName: r.exposed_name, heldReason: r.held_reason, pinned, candidate, diff: definitionDiff(pinned, candidate), updatedAt: r.updated_at };
+        return {
+          name: r.name,
+          exposedName: r.exposed_name,
+          heldReason: r.held_reason,
+          pinned,
+          candidate,
+          candidateHash: r.candidate_hash,
+          diff: definitionDiff(pinned, candidate),
+          updatedAt: r.updated_at,
+        };
       });
 
   const presetView = (p: IntegrationPreset): PresetView => {
@@ -211,6 +224,8 @@ export function connectionsApi(ctx: AppContext) {
         ctx.db.run("INSERT INTO connection_grants (agent_id, connection_id, level, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", agentId, id, levelDefault, t, t);
       }
     });
+    ctx.broker.invalidate("all");
+    ctx.broker.attach(id);
     audit("connection.create", id, { slug: chosenSlug, preset: preset?.id ?? null, agents: agentIds.length, level: levelDefault });
     for (const agentId of new Set(agentIds)) notifyAgent(ctx, agentId);
     return c.json<ConnectionView>(view(id), 201);
@@ -223,6 +238,8 @@ export function connectionsApi(ctx: AppContext) {
     const before = requireConnection(id);
     const body = await readBody(c, patchSchema);
     const changed: string[] = [];
+    let credentialsCleared = false;
+    let cancelled = 0;
     ctx.db.tx(() => {
       const t = now();
       if (body.name !== undefined && body.name !== before.name) {
@@ -236,26 +253,46 @@ export function connectionsApi(ctx: AppContext) {
       if (body.slug !== undefined && body.slug !== before.slug) {
         if (ctx.db.get("SELECT 1 FROM connections WHERE slug = ? AND id <> ?", body.slug, id)) throw conflict(`The slug ${body.slug} is taken`);
         ctx.db.run("UPDATE connections SET slug = ?, updated_at = ? WHERE id = ?", body.slug, t, id);
-        // Exposed names follow the slug; approval rules keep the upstream name, so they survive.
-        try {
-          ctx.db.run("UPDATE upstream_tools SET exposed_name = ? || '__' || name WHERE connection_id = ?", body.slug, id);
-        } catch {
-          throw badRequest(`With the slug ${body.slug}, a tool name would be too long or clash with another; pick a shorter slug`);
+        // Exposed names follow the slug, by the catalog's rule (sanitised, cut to 64 with a hash suffix); the
+        // registry recomputes them from the slug anyway. Approval rules keep the upstream name, so they survive.
+        const tools = ctx.db.all<{ name: string }>("SELECT name FROM upstream_tools WHERE connection_id = ?", id);
+        // Two passes so a rename can't collide with this connection's own old names midway.
+        for (const tool of tools) ctx.db.run("UPDATE upstream_tools SET exposed_name = ? WHERE connection_id = ? AND name = ?", `x_renaming_${randomToken(20)}`, id, tool.name);
+        for (const tool of tools) {
+          const exposed = exposedName(body.slug, tool.name);
+          if (!exposed) throw badRequest(`With the slug ${body.slug}, the tool ${tool.name.slice(0, 64)} can't be named; pick another slug`);
+          try {
+            ctx.db.run("UPDATE upstream_tools SET exposed_name = ? WHERE connection_id = ? AND name = ?", exposed, id, tool.name);
+          } catch {
+            throw conflict(`With the slug ${body.slug}, the tool name ${exposed} is already taken; pick another slug`);
+          }
         }
         changed.push("slug");
       }
       if (body.url !== undefined && body.url !== before.url) {
-        if (before.kind !== "remote_http") throw badRequest("Only custom MCP connections have an editable URL");
-        // Editing the URL clears the private-target allow (it was granted for the old host).
-        ctx.db.run("UPDATE connections SET url = ?, private_target = NULL, updated_at = ? WHERE id = ?", body.url, t, id);
+        if (before.kind !== "remote_http" || before.preset) throw badRequest("Only custom MCP connections have an editable URL", "Add a new connection instead.");
+        // A new URL is a new server: the old credentials must never be sent to it. They're deleted, the
+        // connection needs reconnecting, its cached negotiation and expiry go, the private-target allow (granted
+        // for the old host) goes, and pending calls (approved against the old server) are cancelled.
+        ctx.db.run(
+          `UPDATE connections SET url = ?, private_target = NULL, status = 'needs_reauth', status_reason = 'URL changed; reconnect',
+             expires_at = NULL, protocol = NULL, protocol_checked_at = NULL, updated_at = ? WHERE id = ?`,
+          body.url,
+          t,
+          id,
+        );
+        credentialsCleared = ctx.db.run("DELETE FROM connection_credentials WHERE connection_id = ?", id).changes > 0;
+        cancelled = approvals.cancelForConnection(id, null, `${before.name}'s URL changed`);
         changed.push("url");
       }
     });
     if (changed.includes("url")) {
+      ctx.broker.catalog.detach(id);
       await ctx.broker.reload(id);
       if (before.privateTarget) audit("connection.private_target.revoke", id, { target: before.privateTarget, why: "url_changed" });
     }
-    if (changed.length) audit("connection.update", id, { changed });
+    if (changed.includes("slug") || changed.includes("url")) ctx.broker.invalidate({ connectionId: id });
+    if (changed.length) audit("connection.update", id, { changed, ...(changed.includes("url") ? { credentialsCleared, cancelled } : {}) });
     return c.json<ConnectionView>(view(id));
   });
 
@@ -264,7 +301,14 @@ export function connectionsApi(ctx: AppContext) {
     return c.body(null, 204);
   });
 
-  // POST /connections/:id/kill is the policy's (server/api/broker-approvals.ts, mounted first).
+  // Mounted before the policy's own /connections/:id/kill (server/api/broker-approvals.ts): the service runs the
+  // onKill hooks (a revoke needs the token) before the policy clears the credentials.
+  app.post("/connections/:id/kill", async (c) => {
+    const id = c.req.param("id");
+    requireConnection(id);
+    await ctx.broker.kill(id, "killed by the owner");
+    return c.body(null, 204);
+  });
 
   app.post("/connections/:id/connect", async (c) => {
     const id = c.req.param("id");
@@ -272,6 +316,7 @@ export function connectionsApi(ctx: AppContext) {
     const body = await readBody(c, connectSchema);
     const r = await ctx.broker.connector.startConnect(conn, body, c.req.raw.signal);
     await ctx.broker.reload(id);
+    if (r.status === "connected") ctx.broker.attach(id);
     audit("connection.connect", id, { status: r.status, header: !!body.header });
     if (r.status === "connected") return c.json<StartConnectResult>({ status: "connected", connection: view(id) });
     return c.json<StartConnectResult>(r);
@@ -307,7 +352,9 @@ export function connectionsApi(ctx: AppContext) {
         );
       }
     });
-    // The policy cancels pending calls and deletes "always allow" rules of removed grants, and re-checks changed ones.
+    // Fresh tool views first, then the policy cancels pending calls and deletes "always allow" rules of removed
+    // grants, and re-checks changed ones.
+    for (const agentId of new Set([...removed, ...changed])) ctx.broker.invalidate({ agentId });
     for (const agentId of removed) ctx.broker.onGrantRemoved(agentId, id);
     for (const agentId of changed.filter((a) => before.has(a))) ctx.broker.onGrantChanged(agentId, id);
     if (removed.length || changed.length) audit("connection.grants", id, { removed, changed });
@@ -335,12 +382,13 @@ export function connectionsApi(ctx: AppContext) {
     return c.json<HeldToolView[]>(heldOf(id));
   });
 
-  app.post("/connections/:id/held/:name/accept", (c) => {
+  app.post("/connections/:id/held/:name/accept", async (c) => {
     const id = c.req.param("id");
     requireConnection(id);
     const toolName = c.req.param("name");
-    ctx.broker.acceptTool(id, toolName);
-    audit("connection.tool_accept", id, { tool: toolName.slice(0, 128) });
+    // The hash of the candidate the owner saw: a tool that changed again since is refused (409), never accepted blind.
+    const { candidateHash } = await readBody(c, acceptSchema);
+    ctx.broker.acceptTool(id, toolName, candidateHash);
     return c.json<HeldToolView[]>(heldOf(id));
   });
 

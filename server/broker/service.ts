@@ -27,9 +27,10 @@ import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { presets } from "../integrations/index.ts";
-import { Approvals } from "../mail/approvals.ts";
-import { conflict, errorMessage, notFound } from "../util/errors.ts";
+import { conflict, errorMessage, HttpError, notFound } from "../util/errors.ts";
+import { randomToken } from "../util/ids.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
+import { brokerConnections, Catalog, CatalogError, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
 import { tableCredentials } from "./credentials-table.ts";
 import { type BrokerPolicyRuntime, createBrokerPolicyRuntime } from "./policy/index.ts";
 import {
@@ -76,15 +77,23 @@ export interface BrokerParts {
   connector: Connector;
   /** Native presets' source dependencies (credential store + token refresher). */
   nativeDeps?(connection: Connection): NativeSourceDeps;
-  /** Accepts a held tool (re-pin + re-classify). Absent: the fallback re-pins the candidate as is. */
-  acceptTool?(connectionId: string, name: string): void;
-  /** Kill switch extras, run after the policy's kill (e.g. RFC 7009 revoke). */
+  /** Accepts a held tool (re-pin + re-classify), only if its candidate still has this hash. Default: the catalog. */
+  acceptTool?(connectionId: string, name: string, candidateHash: string): void;
+  /**
+   * Drops cached per-agent tool views after connections, slugs, grants or pins changed. Default: the catalog
+   * registry's invalidate (whole cache, or one agent's view).
+   */
+  invalidate?(scope: InvalidateScope): void;
+  /** Kill switch extras, run before the credentials are cleared (e.g. RFC 7009 revoke needs the token). */
   onKill?: ((connectionId: string) => void | Promise<void>)[];
   /** The preset registry; default server/integrations presets(). */
   presets?: () => IntegrationPreset[];
   /** The credential store. Absent: tableCredentials (no refresh logic) until server/broker/credentials lands. */
   credentials?: CredentialStore;
 }
+
+/** What changed: one agent's grants, one connection (slug, URL, pins, kill), or everything. */
+export type InvalidateScope = { agentId: string } | { connectionId: string } | "all";
 
 export interface BrokerOptions {
   /** How often the native-preset event poll checks which connections are due (each polls every pollIntervalMs). Default 60 s. */
@@ -122,11 +131,17 @@ export interface BrokerService extends Lifecycle {
   presets(): IntegrationPreset[];
   /** Closes the connection's source (after its URL or credential changed); the next use builds a new one. */
   reload(connectionId: string): Promise<void>;
-  /** Kill switch: disable, cancel pending calls, close the source, run onKill, delete the credentials. Audited. */
+  /** Kill switch: disable, run onKill, then the policy's kill (cancel pending calls, clear credentials, close the source). Audited. */
   kill(connectionId: string, reason: string): Promise<void>;
   /** The kill switch, then the row (grants, pins, rules and approvals cascade). Audited. */
   remove(connectionId: string): Promise<void>;
-  acceptTool(connectionId: string, name: string): void;
+  /** Accepts a held tool; 409 when the candidate changed since `candidateHash` was shown, 404 when nothing is held. */
+  acceptTool(connectionId: string, name: string, candidateHash: string): void;
+  invalidate(scope: InvalidateScope): void;
+  /** The pinned catalog (W5). */
+  catalog: Catalog;
+  /** (Re)starts the catalog's tool listing for a connection (create, connect, URL change); no-op while off or disabled. */
+  attach(connectionId: string): void;
   /** Emits a connection event (connection.*, approval.requested, `<preset>.*`) through the events outbox. */
   emitConnectionEvent(e: { type: EventType; connectionId: string; dedupeKey: string; detail?: Record<string, unknown> }): MailEvent | null;
   /** Inbound webhooks of native presets (POST /hooks/connections/:id, server/integrations/hooks.ts). */
@@ -164,12 +179,43 @@ function unavailableSource(connectionId: string): ToolSource {
 }
 
 export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts> = {}, opts: BrokerOptions = {}): BrokerService {
-  const base = { ...stubParts(), ...given };
   const log = ctx.log.child("broker");
   const sources = new Map<string, ToolSource>();
-  const approvals = new Approvals(ctx);
   const enabled = () => ctx.settings.get().brokerUpstreams;
   const credentials = given.credentials ?? tableCredentials(ctx);
+  const presetList = () => (given.presets ?? presets)();
+  const presetFor = (presetId: string | null) => (presetId ? (presetList().find((p) => p.id === presetId) ?? null) : null);
+
+  // The catalog (W5): pins, holds and the per-agent registry over upstream_tools.
+  const store = new SqliteCatalogStore(ctx.db);
+  const catalog = new Catalog({
+    store,
+    connection: (id) => {
+      const c = getConnection(ctx, id);
+      return c ? { slug: c.slug, preset: presetFor(c.preset) } : null;
+    },
+    connections: () => brokerConnections(ctx.db).map((c) => ({ id: c.id, slug: c.slug })),
+    audit: (input) => ctx.audit.record(input),
+    emit: (ev) => {
+      const { type, connectionId, ...detail } = ev;
+      ctx.events.emit({ type, connectionId, dedupeKey: `${connectionId}:${type}:${randomToken(12)}`, detail });
+    },
+    log,
+    enabled,
+  });
+  const catalogRegistry = new CatalogRegistry({
+    store,
+    connections: () => brokerConnections(ctx.db),
+    grants: (agentId) => connectionGrants(ctx.db, agentId),
+    preset: (id) => presetFor(getConnection(ctx, id)?.preset ?? null),
+  });
+  catalog.onChange(() => catalogRegistry.invalidate());
+  const base = { ...stubParts(), registry: catalogRegistry as ToolRegistry, ...given };
+  const invalidate = (scope: InvalidateScope) => {
+    if (given.invalidate) return given.invalidate(scope);
+    if (typeof scope === "object" && "agentId" in scope) catalogRegistry.invalidateAgent(scope.agentId);
+    else catalogRegistry.invalidate();
+  };
 
   // The policy runtime (W6): BrokerCalls, get_call_status, approved calls, grant hooks and the kill switch.
   const policy = createBrokerPolicyRuntime(ctx, {
@@ -185,6 +231,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       }
     },
   });
+  // A tool that left the upstream: its pending calls fail closed and its allow rules go.
+  catalog.onToolRemoved((e) => void policy.onToolRemoved(e.connectionId, e.name));
   const parts: BrokerParts = {
     calls: policy,
     callStatus: (agentId, id) => policy.getCallStatus(agentId, id),
@@ -219,11 +267,26 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     };
   }
 
+  /** Catalog listing per connection: the source is built on first use. */
+  const attach = (connectionId: string) => {
+    if (!enabled()) return;
+    const source = service.source(connectionId);
+    if (source) void catalog.attach(source);
+  };
+  const attachAll = () => {
+    for (const c of listConnections(ctx)) if (c.status !== "disabled") attach(c.id);
+  };
+  let wasOn = false;
   const onSettings = (s: { brokerUpstreams: boolean }) => {
-    if (!s.brokerUpstreams && sources.size) void closeAll();
+    if (s.brokerUpstreams && !wasOn) attachAll();
+    if (!s.brokerUpstreams && wasOn) {
+      catalog.close();
+      void closeAll();
+    }
+    wasOn = s.brokerUpstreams;
   };
 
-  const presetOf = (c: Connection): IntegrationPreset | null => (c.preset ? ((parts.presets ?? presets)().find((p) => p.id === c.preset) ?? null) : null);
+  const presetOf = (c: Connection): IntegrationPreset | null => presetFor(c.preset);
 
   /** The client registration (e.g. WHOOP's pasted client id and secret). */
   const clientRecord = (connectionId: string): Record<string, unknown> | null => credentials.client(connectionId);
@@ -343,12 +406,10 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     async kill(connectionId, reason) {
       const c = getConnection(ctx, connectionId);
       if (!c) throw notFound("Connection");
-      // The policy's kill: disable, cancel pending calls, clear credentials, untrack refresh, close the source. Audited.
-      await policy.killConnection(connectionId);
-      if (reason) ctx.db.run("UPDATE connections SET status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), connectionId);
-      // Belt and braces for approvals the policy doesn't own (none today) and a source opened meanwhile.
-      approvals.cancelForConnection(connectionId, null, `the connection ${c.name} was disabled`);
-      await closeSource(connectionId);
+      // Disabled first, so nothing new starts; then the hooks, which may still need the credentials (a revoke).
+      ctx.db.run("UPDATE connections SET status = 'disabled', status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), connectionId);
+      catalog.detach(connectionId);
+      invalidate({ connectionId });
       for (const hook of parts.onKill ?? []) {
         try {
           await hook(connectionId);
@@ -356,6 +417,10 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
           log.warn("A kill switch hook failed", { connection: connectionId, error: errorMessage(err) });
         }
       }
+      // The policy's kill: cancel pending calls, clear credentials, untrack refresh, close the source. Audited.
+      await policy.killConnection(connectionId);
+      ctx.db.run("UPDATE connections SET status_reason = ? WHERE id = ?", reason, connectionId);
+      await closeSource(connectionId);
     },
 
     async remove(connectionId) {
@@ -364,21 +429,28 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       const agents = ctx.db.all<{ agent_id: string }>("SELECT agent_id FROM connection_grants WHERE connection_id = ?", connectionId);
       await this.kill(connectionId, "deleted");
       ctx.db.run("DELETE FROM connections WHERE id = ?", connectionId);
+      invalidate("all");
       ctx.audit.record({ actorType: "admin", actorId: null, action: "connection.delete", target: connectionId, outcome: "ok", detail: { slug: c.slug } });
       for (const { agent_id } of agents) notifyAgent(ctx, agent_id);
     },
 
-    acceptTool(connectionId, name) {
-      if (parts.acceptTool) return parts.acceptTool(connectionId, name);
-      const { changes } = ctx.db.run(
-        `UPDATE upstream_tools SET definition = candidate_definition, pin_hash = candidate_hash, candidate_definition = NULL,
-           candidate_hash = NULL, state = 'active', held_reason = NULL, updated_at = ? WHERE connection_id = ? AND name = ? AND state = 'held'`,
-        now(),
-        connectionId,
-        name,
-      );
-      if (!changes) throw notFound("Held tool");
+    acceptTool(connectionId, name, candidateHash) {
+      try {
+        if (parts.acceptTool) parts.acceptTool(connectionId, name, candidateHash);
+        // The catalog re-classifies the candidate: the old risky/read class never carries over.
+        else catalog.acceptHeldTool(connectionId, name, { candidateHash });
+      } catch (err) {
+        if (err instanceof CatalogError && err.code === "stale") throw conflict(err.message, "Reload the page to see the latest change.");
+        if (err instanceof CatalogError && err.code === "not_held") throw new HttpError(404, "not_found", err.message);
+        throw err;
+      } finally {
+        invalidate({ connectionId });
+      }
     },
+
+    invalidate,
+    catalog,
+    attach,
 
     emitConnectionEvent(e) {
       return ctx.events.emit({ type: e.type, connectionId: e.connectionId, dedupeKey: e.dedupeKey, detail: e.detail });
@@ -391,11 +463,14 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     start() {
       policy.start();
       ctx.bus.on("settings", onSettings);
+      wasOn = enabled();
+      if (wasOn) attachAll();
       pollTimer = setInterval(() => void pollEvents(), opts.pollTickMs ?? 60_000);
       pollTimer.unref();
     },
 
     async stop() {
+      catalog.close();
       ctx.bus.off("settings", onSettings);
       if (pollTimer) clearInterval(pollTimer);
       await closeAll();

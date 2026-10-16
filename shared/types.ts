@@ -1280,7 +1280,10 @@ export interface CreateConnectionInput {
   agentIds?: string[];
 }
 
-/** PATCH /api/connections/:id. Changing the URL clears the private-target allow. */
+/**
+ * PATCH /api/connections/:id. Changing the URL (custom connections only) deletes the credentials, clears the
+ * private-target allow, cancels pending calls and sets status needs_reauth: reconnect afterwards.
+ */
 export interface UpdateConnectionInput {
   name?: string;
   slug?: string;
@@ -1362,6 +1365,8 @@ export interface HeldToolView {
   /** null for a new tool. */
   pinned: UpstreamToolDefinition | null;
   candidate: UpstreamToolDefinition;
+  /** Pass back to accept: a candidate that changed since is refused (409). */
+  candidateHash: string;
   diff: ToolDiffLine[];
   updatedAt: string;
 }
@@ -1508,13 +1513,13 @@ export interface ApiError {
 //   GET    /api/connections/:id                       → ConnectionView
 //   PATCH  /api/connections/:id UpdateConnectionInput → ConnectionView
 //   DELETE /api/connections/:id                       → 204 (kill switch, then removal)
-//   POST   /api/connections/:id/kill                  → 204 (disabled; credentials deleted, pending calls cancelled; server/api/broker-approvals.ts)
+//   POST   /api/connections/:id/kill                  → 204 (disabled; onKill hooks, then credentials deleted and pending calls cancelled)
 //   POST   /api/connections/:id/connect StartConnectInput → StartConnectResult
 //   GET    /api/connections/:id/grants                → ConnectionGrant[]
 //   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
 //   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView
 //   GET    /api/connections/:id/held                  → HeldToolView[]
-//   POST   /api/connections/:id/held/:name/accept     → HeldToolView[] (the rest still held)
+//   POST   /api/connections/:id/held/:name/accept {candidateHash} → HeldToolView[] (the rest still held; 409 if it changed again)
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval
