@@ -54,7 +54,15 @@ export interface ConnectionStatusView {
 }
 
 /** A connection's badge: active / needs reconnect / expiring in N days / disabled. Warns from 7 days before expiresAt. */
-export function connectionStatusView(c: Pick<ConnectionView, "status" | "statusReason" | "expiresAt" | "name">, now: number): ConnectionStatusView {
+export function connectionStatusView(
+  c: Pick<ConnectionView, "status" | "statusReason" | "expiresAt" | "name"> & Partial<Pick<ConnectionView, "authType" | "toolsCachedAt" | "tools">>,
+  now: number,
+): ConnectionStatusView {
+  // Never got as far as listing tools: an OAuth sign-in that was abandoned (or a credential that never worked).
+  const neverListed = c.toolsCachedAt === null && (c.tools?.total ?? 0) === 0;
+  if (neverListed && (c.status === "needs_reauth" || (c.status === "active" && c.authType === "oauth"))) {
+    return { label: "Not signed in", tone: "warn", description: `The sign-in to ${c.name} wasn't finished. Agents can't use it until you sign in.`, action: "reconnect" };
+  }
   switch (c.status) {
     case "disabled":
       return {
@@ -170,6 +178,24 @@ export function suggestSlug(url: string): string {
   return base.slice(0, 24);
 }
 
+/** A slug from the name the user typed: "Notes server" → "notes-server". */
+export function slugFromName(name: string): string {
+  return name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+/, "")
+    .slice(0, 24)
+    .replace(/-+$/, "");
+}
+
+/** The draft change for a typed name: a custom connection's slug follows it until the slug is edited by hand. */
+export function nameChange(d: Pick<ConnectionDraft, "preset" | "slugEdited" | "slug">, name: string): Partial<ConnectionDraft> {
+  if (d.preset || d.slugEdited) return { name };
+  return { name, slug: slugFromName(name) || d.slug };
+}
+
 /** Why a slug can't be used, or null. Native-name collisions are checked by the server. */
 export function slugProblem(slug: string, taken: readonly string[]): string | null {
   if (!slug) return "Give it a short name.";
@@ -267,6 +293,8 @@ export interface ConnectionDraft {
   /** Created early when the private-target allow is needed (the allow belongs to a connection). */
   createdId: string | null;
   privateAllowed: boolean;
+  /** The user typed a slug: the name no longer drives it. */
+  slugEdited: boolean;
   slug: string;
   name: string;
   level: AccessLevel;
@@ -283,6 +311,7 @@ export const emptyDraft = (preset: PresetView | null = null): ConnectionDraft =>
   probe: null,
   createdId: null,
   privateAllowed: false,
+  slugEdited: false,
   slug: preset?.slug ?? "",
   name: preset?.displayName ?? "",
   level: DEFAULT_LEVEL,

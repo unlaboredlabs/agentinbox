@@ -33,13 +33,16 @@ import {
   hostPort,
   inputProblems,
   LEVEL_INFO,
+  nameChange,
   oauthMessageFor,
+  pastedProblem,
   privateExplanation,
   probeSummary,
+  slugFromName,
   slugProblem,
   suggestSlug,
 } from "../src/components/connections/connection-flow.ts";
-import { brokerStatuses, firstRunView } from "../src/components/setup/first-run.ts";
+import { brokerStatuses, firstRunView, shownWizard } from "../src/components/setup/first-run.ts";
 import { stepStatuses } from "../src/components/setup/steps.ts";
 
 const NOW = Date.parse("2026-10-16T12:00:00.000Z");
@@ -389,5 +392,48 @@ describe("First run with Google optional", () => {
       warnings: [],
     } as unknown as SetupState;
     expect(stepStatuses(state, { firstConnect: "google" })).toEqual(stepStatuses(state, {}));
+  });
+});
+
+describe("Review fixes (#65)", () => {
+  it("checks a pasted landing address for paste mode", () => {
+    expect(pastedProblem("nope")).toMatch(/full address/);
+    expect(pastedProblem("http://box:8425/oauth/connections/callback?error=access_denied")).toMatch(/cancelled/);
+    expect(pastedProblem("http://box:8425/oauth/connections/callback?state=s1")).toMatch(/no authorization code/);
+    expect(pastedProblem("http://box:8425/oauth/connections/callback?code=c&state=s1")).toBeNull();
+  });
+
+  it("derives a custom connection's slug from its name until the slug is edited", () => {
+    expect(slugFromName("Notes server")).toBe("notes-server");
+    expect(slugFromName("  Héllo, World!! ")).toBe("hello-world");
+    expect(slugFromName("a".repeat(30))).toHaveLength(24);
+    const d = { ...emptyDraft(), slug: "local-38399" };
+    expect(nameChange(d, "Notes server")).toEqual({ name: "Notes server", slug: "notes-server" });
+    expect(nameChange({ ...d, slugEdited: true }, "Notes server")).toEqual({ name: "Notes server" });
+    expect(nameChange(emptyDraft(notion), "My Notion")).toEqual({ name: "My Notion" });
+    expect(nameChange(d, "!!!")).toEqual({ name: "!!!", slug: "local-38399" });
+  });
+
+  it("says 'Not signed in' for an OAuth connection whose sign-in was abandoned", () => {
+    const fresh = conn({ tools: { total: 0, active: 0, held: 0 }, toolsCachedAt: null });
+    expect(connectionStatusView(fresh, NOW)).toMatchObject({ label: "Not signed in", action: "reconnect" });
+    expect(connectionStatusView({ ...fresh, status: "needs_reauth", authType: "header" }, NOW).label).toBe("Not signed in");
+    expect(connectionStatusView({ ...fresh, authType: "none" }, NOW).label).toBe("Active");
+    expect(connectionStatusView(conn({ toolsCachedAt: inDays(-1) }), NOW).label).toBe("Active");
+  });
+
+  it("escapes controls in one-line places and in target names; an empty array target offers no 'only for'", () => {
+    expect(escapeInvisible("a\nb\tc\u0007")).toBe("a\nb\tc\\u0007");
+    expect(escapeInvisible("a\nb\tc", true)).toBe("a\\u000Ab\\u0009c");
+    expect(targetName(`/to${ch(0x202e)}x`)).toBe("to\\u202Ex");
+    expect(targetLabel({ path: "/to", value: "a@b.c\nBcc: evil@x.y" })).toBe("Only for to a@b.c\\u000ABcc: evil@x.y");
+    expect(targetChoices(view({ target: { path: "/page_ids", value: [] } }))).toEqual([]);
+  });
+
+  it("a ?step= link always opens the Google wizard, whatever first run chose", () => {
+    expect(shownWizard("broker", "client")).toBe("google");
+    expect(shownWizard("choose", "accounts")).toBe("google");
+    expect(shownWizard("broker", undefined)).toBe("broker");
+    expect(shownWizard("google", undefined)).toBe("google");
   });
 });

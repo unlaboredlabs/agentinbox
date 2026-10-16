@@ -17,6 +17,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
 import { connectConnection } from "./connection-auth";
+import { startConnect } from "./connection-row";
 import {
   ACCESS_LEVELS,
   type ConnectionDraft,
@@ -29,6 +30,7 @@ import {
   hostPort,
   inputProblems,
   LEVEL_INFO,
+  nameChange,
   privateExplanation,
   probeSummary,
   slugProblem,
@@ -201,6 +203,11 @@ export function AddConnectionHost() {
               draft={draft}
               set={set}
               taken={taken}
+              existing={draft.preset ? (connections.data ?? []).find((c) => c.preset === draft.preset!.id && c.slug === draft.slug) ?? null : null}
+              onReuse={(c) => {
+                onOpenChange(false);
+                startConnect(c);
+              }}
               created={created}
               onCreated={setCreated}
               onDropCreated={() => {
@@ -280,6 +287,8 @@ function SetupPage({
   created,
   onCreated,
   onDropCreated,
+  existing,
+  onReuse,
 }: {
   draft: ConnectionDraft;
   set: (p: Partial<ConnectionDraft>) => void;
@@ -287,13 +296,28 @@ function SetupPage({
   created: ConnectionView | null;
   onCreated: (c: ConnectionView) => void;
   onDropCreated: () => void;
+  /** A connection of this preset with the same slug already exists: offer it instead of a failing duplicate. */
+  existing: ConnectionView | null;
+  onReuse: (c: ConnectionView) => void;
 }) {
   const control = draftControl(draft);
-  const slugIssue = draft.slug ? slugProblem(draft.slug, created ? taken.filter((s) => s !== created.slug) : taken) : null;
+  const slugIssue = draft.slug && !existing ? slugProblem(draft.slug, created ? taken.filter((s) => s !== created.slug) : taken) : null;
   const stepIssues = draft.preset ? inputProblems(draft.preset.setupSteps, draft.inputs) : {};
   const ready = !!draft.preset || (!!draft.probe && control?.kind !== "private");
   return (
     <FieldGroup>
+      {existing && (
+        <Alert variant="info">
+          <PlugIcon />
+          <AlertTitle>You already have {existing.name}</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>Use it again: reconnecting signs in anew and keeps its access settings. To add a second one, give it another short name below.</p>
+            <Button size="sm" onClick={() => onReuse(existing)}>
+              Reconnect {existing.name}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
       {!draft.preset && <ProbeForm draft={draft} set={set} created={created} onCreated={onCreated} onDropCreated={onDropCreated} />}
 
       {draft.preset?.setupSteps.length ? (
@@ -338,7 +362,7 @@ function SetupPage({
         <div className="grid gap-3 sm:grid-cols-2">
           <Field>
             <FieldLabel htmlFor="conn-name">Name</FieldLabel>
-            <Input id="conn-name" value={draft.name} maxLength={100} placeholder={draft.preset?.displayName ?? hostPort(draft.url)} onChange={(e) => set({ name: e.target.value })} />
+            <Input id="conn-name" value={draft.name} maxLength={100} placeholder={draft.preset?.displayName ?? hostPort(draft.url)} onChange={(e) => set(nameChange(draft, e.target.value))} />
           </Field>
           <Field>
             <FieldLabel htmlFor="conn-slug">Short name</FieldLabel>
@@ -346,7 +370,7 @@ function SetupPage({
               id="conn-slug"
               value={draft.slug}
               maxLength={24}
-              onChange={(e) => set({ slug: e.target.value.toLowerCase() })}
+              onChange={(e) => set({ slug: e.target.value.toLowerCase(), slugEdited: true })}
               aria-invalid={!!slugIssue}
               className="font-mono"
             />

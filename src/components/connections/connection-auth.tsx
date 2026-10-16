@@ -71,6 +71,7 @@ export function ConnectionAuthHost() {
   const qc = useQueryClient();
   const [phase, setPhase] = useState<Phase | null>(null);
   const [req, setReq] = useState<AuthRequest | null>(null);
+  const [pasteFallback, setPasteFallback] = useState(false);
   const phaseRef = useRef<Phase | null>(null);
   const reqRef = useRef<AuthRequest | null>(null);
   useEffect(() => {
@@ -100,6 +101,7 @@ export function ConnectionAuthHost() {
 
   const start = async (r: AuthRequest) => {
     setReq(r);
+    setPasteFallback(false);
     reqRef.current = r;
     const popup = openPopup(r.name);
     setPhase({ kind: "starting" });
@@ -262,6 +264,14 @@ export function ConnectionAuthHost() {
               </a>
               .
             </p>
+            {/* WHOOP without an https address (and any server that can't redirect back): the browser ends on an error page. */}
+            {pasteFallback ? (
+              <PasteFinish authorizeUrl={phase.authorizeUrl} redirectUri={phase.redirectUri} name={name} onSubmit={finishPasted} />
+            ) : (
+              <Button variant="link" size="sm" className="h-auto px-0" onClick={() => setPasteFallback(true)}>
+                Ended on an error page? Paste its address
+              </Button>
+            )}
           </div>
         )}
         {phase?.kind === "done" && (
