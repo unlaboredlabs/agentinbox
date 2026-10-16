@@ -1088,13 +1088,12 @@ export type Approval = GoogleApproval | McpCallApproval;
 // ───────────────────────────── MCP broker: connections ─────────────────────────────
 // docs/MCP-BROKER.md. Stored since migration 8; nothing serves these until the broker PRs land (behind the
 // brokerUpstreams setting). Credentials never cross the API boundary: there's no DTO for them.
+// AccessLevel and ToolAnnotations mirror server/broker/types.ts: the console can't import that file (it uses
+// Node's Buffer, and tsconfig.app has no Node types). Keep them in step.
 
 /** native_whoop (M2), stdio (M4) and native_google are reserved; M1 creates remote_http only. */
 export const CONNECTION_KINDS = ["remote_http", "native_whoop", "stdio", "native_google"] as const;
 export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
-
-export const CONNECTION_PRESETS = ["notion", "whoop"] as const;
-export type ConnectionPreset = (typeof CONNECTION_PRESETS)[number];
 
 export const CONNECTION_AUTH_TYPES = ["none", "header", "oauth"] as const;
 export type ConnectionAuthType = (typeof CONNECTION_AUTH_TYPES)[number];
@@ -1122,7 +1121,8 @@ export interface Connection {
   /** null = the install's single owner. */
   ownerId: string | null;
   kind: ConnectionKind;
-  preset: ConnectionPreset | null;
+  /** IntegrationPreset.id (server/broker/types.ts), checked against the preset registry in code; null = custom. */
+  preset: string | null;
   slug: string;
   name: string;
   /** The MCP endpoint (remote_http). */
@@ -1151,7 +1151,6 @@ export interface ToolAnnotations {
   destructiveHint?: boolean;
   idempotentHint?: boolean;
   openWorldHint?: boolean;
-  [key: string]: unknown;
 }
 
 /** A tool definition as pinned (upstream_tools.definition). The pin hashes this plus the tool's name. */

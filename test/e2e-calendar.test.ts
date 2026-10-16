@@ -284,6 +284,10 @@ function rewindToPreCalendar(path: string): void {
   const db = new DatabaseSync(path);
   // A test rewind, not a migration: no cascades, and renaming a table doesn't rewrite references to it.
   db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
+  // Later indexes first, so their columns can be dropped (e.g. migration 8's events.connection_id).
+  const refIndexes = new Set(ddl.filter((d) => d.type === "index").map((d) => d.sql));
+  const indexes = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL").all() as { name: string; sql: string }[];
+  for (const { name, sql } of indexes) if (!refIndexes.has(sql)) db.exec(`DROP INDEX "${name}"`);
   for (const [table, cols] of columns(db)) {
     const keep = want.get(table);
     if (!keep) {
