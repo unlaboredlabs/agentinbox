@@ -183,3 +183,21 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - `bootstrapLaunchd` prints nothing while it waits for launchd to unload the old job (up to 30 s, plus retries); a "waiting for launchd…" line would help.
 - No test covers the unload budget expiring ("still loaded and wouldn't unload"), and no listener test covers the new backoff.
 - `server/listen/service.ts`: `const why = commandFailure;` is a leftover alias.
+
+### #50 mail attachments
+- A valid key can send a 36 MB `/mcp` body even when that agent has no draft or send grant; consider a capability-aware or per-agent concurrency limit.
+- Peak memory for a 25 MB send is several copies of the file (~150–200 MB); stream the composer output.
+- The 512 KB switch to Gmail's `/upload/` endpoint is a guess (Google doesn't document the JSON `raw` limit); check against real Gmail.
+- Workspace accounts can have admin-set or 50 MB limits; the fixed 25 MB cap ignores them.
+- `create_draft` doesn't echo the cleaned filenames back to the agent.
+- Forwarded original filenames aren't run through the new filename cleaning.
+- `formatSize` uses MiB while the 25 MB cap is decimal ("23.8 MB" for a file just over the cap).
+- SKILL.md: an empty filename becomes `attachment.<ext>` when the type is known, not `attachment`.
+- `uploadTimeout`: a full 25 MB message gets ~161 s (needs ~1.7 Mbit/s upload); slower links report "may have been sent".
+- No test for a timeout/status 0 on the `/upload/` path, or a threaded reply/send through multipart end to end.
+- `server/mcp/index.ts` keeps its own `bearer` helper; `app.ts` uses the one in `agentapi/auth.ts`.
+- A near-25 MB message with lots of `\uXXXX`-escaped non-ASCII body text can exceed the 36 MiB MCP limit (413 instead of the plain-words size error).
+- Any valid key gets the 36 MB body limit (read-only agents too); one request peaks at ~250–300 MB and concurrency is unlimited. Limit large bodies to agents with a draft or send grant, or cap concurrent large requests.
+- `mime_type` isn't compared with the extension (an `.html` file can be labelled `application/pdf`).
+- Look-alike dots (U+FF0E) in filenames pass the blocklist (Gmail's own content check is the backstop).
+- `draftFingerprint` doesn't hash attachment bytes, so a same-size swap made in the Gmail UI wouldn't be caught (pre-existing; no agent tool can do it).
