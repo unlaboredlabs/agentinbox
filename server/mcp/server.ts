@@ -3,6 +3,9 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult, JSONRPCMessage, RequestId, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type Capability, EVENT_TYPES, type GmailLabel, type MailEvent } from "../../shared/types.ts";
+import { agentSearchSettings, brokerUpstreamsEnabled, chooseMode, hotToolNames } from "../broker/search/mode.ts";
+import { isMetaTool, META_TOOL_SHAPES, type NativeEntry, registerSearchTools, SEARCH_INSTRUCTIONS } from "../broker/search/tools.ts";
+import type { BrokerCalls, ToolRegistry } from "../broker/types.ts";
 import type { AppContext } from "../context.ts";
 import { classifyCalendarError } from "../google/calendar.ts";
 import { AccountNeedsReauthError, GoogleApiError } from "../google/types.ts";
@@ -162,6 +165,18 @@ const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
 export interface BuildOptions {
   /** Aborted when the HTTP client disconnects (cancels wait_for_events). */
   signal?: AbortSignal;
+  /** `?mode=` on /mcp ("search" asks for search mode). Ignored while the brokerUpstreams setting is off. */
+  mode?: string;
+  /** Broker tools (the endpoint aggregation wires these). Ignored while the brokerUpstreams setting is off. */
+  broker?: {
+    registry: ToolRegistry;
+    calls: BrokerCalls;
+    /**
+     * Registers the broker's own MCP tools (each broker tool, get_call_status) on the server: all of them when
+     * `only` is null (direct mode), else only those names (search mode's hot tools).
+     */
+    registerTools?(server: McpServer, only: ReadonlySet<string> | null): void;
+  };
 }
 
 /**
@@ -224,7 +239,9 @@ export function rejectedCall(
   const name = typeof p.name === "string" ? p.name : null;
   const shape = name === null ? undefined : shapes.get(name);
   // Only catalog names are the action (TOOL_NAMES); keep a short, cleaned copy of any other.
-  const action = name !== null && CATALOG.has(name) ? name : name === null ? "invalid_request" : "unknown_tool";
+  // Search mode's meta-tools aren't tool calls themselves (isMcpToolAction): their rejections get a dotted action.
+  const action =
+    name !== null && CATALOG.has(name) ? name : name === null ? "invalid_request" : isMetaTool(name) && shape ? `mcp.${name}` : "unknown_tool";
   const named = name !== null && action !== name ? { tool: cleanLine(name).slice(0, 64) } : {};
   if (response.error) return { action, reason: "invalid_request", detail: { ...named, code: response.error.code } };
   if (!shape) return { action, reason: "unknown_tool", detail: Object.keys(named).length ? named : null };
@@ -261,20 +278,12 @@ function auditRejections(
 
 /** One McpServer per request (stateless), with only the tools this agent's grants allow. */
 export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts: BuildOptions = {}): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: ctx.config.version }, { instructions: INSTRUCTIONS });
   const can = abilities(ctx, principal.agentId);
   const log = ctx.log.child("mcp");
-  // Calls a tool handler ran for (and audited), and each registered tool's schema, for auditRejections.
+  // Calls a tool handler ran for (and audited), for auditRejections.
   const handled = new Set<RequestId>();
-  const shapes = new Map<string, z.ZodRawShape>();
-  const connect = server.connect.bind(server);
-  server.connect = async (transport) => {
-    auditRejections(transport, handled, (params, response) => {
-      const r = rejectedCall(params, response, shapes);
-      if (r) ctx.audit.record({ actorType: "agent", actorId: principal.agentId, action: r.action, outcome: "error", reason: r.reason, detail: r.detail });
-    });
-    await connect(transport);
-  };
+  // Each native tool the agent can use, captured at registration; exposeTools puts them on the server.
+  const natives = new Map<string, NativeTool>();
 
   const register = <S extends z.ZodRawShape>(
     name: ToolName,
@@ -312,12 +321,7 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
         trace.release?.();
       }
     };
-    shapes.set(name, config.input);
-    server.registerTool(
-      name,
-      { title: config.title, description: config.description, inputSchema: config.input, annotations: { title: config.title, ...config.annotations } },
-      run as never,
-    );
+    natives.set(name, { config, run: run as NativeTool["run"] });
   };
 
   /** Label names for the mail events of a feed page (calendar events have none). */
@@ -743,5 +747,89 @@ export function buildMcpServer(ctx: AppContext, principal: AgentPrincipal, opts:
 
   registerCalendarTools(ctx, register, can);
 
+  return exposeTools(ctx, principal, opts, natives, handled);
+}
+
+// ───────────── Exposure: direct or search mode ─────────────
+
+/** A registered native tool: its definition and the audited handler (the one a direct call runs). */
+interface NativeTool {
+  config: { title: string; description: string; input: z.ZodRawShape; annotations: ToolAnnotations };
+  run: (args: unknown, extra: Extra) => Promise<CallToolResult>;
+}
+
+/**
+ * Builds the server from the captured tools: every tool directly (the default), or search mode
+ * (server/broker/search: search_tools, call_read_tool, call_write_tool and a few hot tools). Search mode needs the
+ * brokerUpstreams setting, then applies for `?mode=search`, the agent's setting, or above SEARCH_MODE_THRESHOLD tools.
+ */
+function exposeTools(
+  ctx: AppContext,
+  principal: AgentPrincipal,
+  opts: BuildOptions,
+  natives: ReadonlyMap<string, NativeTool>,
+  handled: Set<RequestId>,
+): McpServer {
+  const enabled = brokerUpstreamsEnabled(ctx.settings);
+  const broker = enabled ? (opts.broker ?? null) : null;
+  const brokerCount = broker ? broker.registry.forAgent(principal.agentId).length : 0;
+  const prefs = enabled ? agentSearchSettings(ctx.db, principal.agentId) : null;
+  const mode = prefs ? chooseMode({ query: opts.mode, preference: prefs.mode, nativeCount: natives.size, brokerCount }) : "direct";
+
+  const instructions = mode === "search" ? `${INSTRUCTIONS}\n\n${SEARCH_INSTRUCTIONS}` : INSTRUCTIONS;
+  const server = new McpServer({ name: SERVER_NAME, version: ctx.config.version }, { instructions });
+  // Each directly registered tool's schema, for auditRejections.
+  const shapes = new Map<string, z.ZodRawShape>();
+  const connect = server.connect.bind(server);
+  server.connect = async (transport) => {
+    auditRejections(transport, handled, (params, response) => {
+      const r = rejectedCall(params, response, shapes);
+      if (r) ctx.audit.record({ actorType: "agent", actorId: principal.agentId, action: r.action, outcome: "error", reason: r.reason, detail: r.detail });
+    });
+    await connect(transport);
+  };
+  const expose = (name: string, { config, run }: NativeTool) => {
+    shapes.set(name, config.input);
+    server.registerTool(
+      name,
+      { title: config.title, description: config.description, inputSchema: config.input, annotations: { title: config.title, ...config.annotations } },
+      run as never,
+    );
+  };
+
+  if (mode === "direct") {
+    for (const [name, tool] of natives) expose(name, tool);
+    broker?.registerTools?.(server, null);
+    return server;
+  }
+
+  const entries = new Map<string, NativeEntry>();
+  for (const [name, { config, run }] of natives) {
+    entries.set(name, {
+      tool: {
+        name,
+        title: config.title,
+        description: config.description,
+        // The JSON Schema the SDK lists for a direct registration (zod v4: draft-7, input side).
+        inputSchema: z.toJSONSchema(z.object(config.input), { target: "draft-7", io: "input" }) as Record<string, unknown>,
+        read: config.annotations.readOnlyHint === true,
+        risky: config.annotations.destructiveHint === true,
+      },
+      shape: config.input,
+      run,
+    });
+  }
+  registerSearchTools(server, {
+    agentId: principal.agentId,
+    natives: entries,
+    registry: broker?.registry ?? null,
+    calls: broker?.calls ?? null,
+    audit: (input) => ctx.audit.record(input),
+    handled: (id) => handled.add(id),
+  });
+  for (const [name, shape] of Object.entries(META_TOOL_SHAPES)) shapes.set(name, shape);
+  const hot = new Set(hotToolNames(brokerCount, prefs!.hot));
+  for (const [name, tool] of natives) if (hot.has(name)) expose(name, tool);
+  broker?.registerTools?.(server, hot);
   return server;
 }
