@@ -1,10 +1,10 @@
 # Google Calendar: design and work split
 
-Status: **contract landed** on `feat/calendar-contract`. The types, migration 7, scope constants, event
-storage, grant fields, event visibility and approval dispatch work today and are tested
-(`test/calendar-contract.test.ts`). Everything else is a typed stub that names its workstream:
-`notImplemented(…, "A")` and friends, in `server/calendar/todo.ts`. The app runs mail-only until the
-workstreams land: calendar sync is a no-op, push answers 404, and no calendar tools are registered.
+Status: **shipped.** Calendar sync, the MCP calendar tools, grants (`calendar.read`/`calendar.write`),
+approvals for calendar writes, calendar events for webhooks and the listener, and the console's "Add Google
+Calendar" setup are all on `main` (#37–#46). The rest of this document is the design they implement; the
+"Review amendments" section at the end overrides earlier sections where they differ. "Contract map" and "Work split"
+record how it was built (as of the contract PR), not what is stubbed now.
 
 ## Google facts
 

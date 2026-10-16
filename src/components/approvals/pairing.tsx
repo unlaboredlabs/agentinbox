@@ -316,9 +316,9 @@ interface AccountChoice {
 const NEW_CHOICE: AccountChoice = { on: false, preset: "read", fields: PAIRING_DEFAULT };
 const presetById = (id: string) => GRANT_PRESETS.find((p) => p.id === id);
 const PAIRING_CHOICES: Choice<string>[] = [
-  { value: "read", title: "Read only", description: "Search and read mail, get events. Can't change or send anything.", badge: <Badge variant="secondary">Default</Badge> },
-  { value: "drafts", title: "Read and draft", description: "Anything it sends becomes a Gmail draft for you to send." },
-  { value: "approval", title: "Send with my approval", description: "Each send waits in Approvals until you approve it." },
+  { value: "read", title: "Read only", description: "Search and read mail. Can't change or send anything. No calendar access (choose Custom to add it).", badge: <Badge variant="secondary">Default</Badge> },
+  { value: "drafts", title: "Read and draft", description: "Anything it sends becomes a Gmail draft for you to send. No calendar access (choose Custom to add it)." },
+  { value: "approval", title: "Send with my approval", description: "Each send waits in Approvals until you approve it. No calendar access (choose Custom to add it)." },
   { value: "custom", title: "Custom", description: "Pick capabilities, labels, calendars, recipients and limits." },
 ];
 

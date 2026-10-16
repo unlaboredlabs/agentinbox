@@ -5,6 +5,7 @@ import { Dispatcher, type Job, type Target } from "./dispatcher.ts";
 import { runCommand } from "./exec.ts";
 import { ensurePrivateDir } from "./fsutil.ts";
 import { forwardEvent } from "./forward.ts";
+import { routeWarning } from "./hermes.ts";
 import { describeFilter, type ListenFlags, MAX_BATCH, resolveListen } from "./options.ts";
 import { outputLine } from "./listen.ts";
 import { isHermesRoute } from "./recipes.ts";
@@ -77,6 +78,8 @@ export async function printStatus(profileName: string): Promise<void> {
   out(`${pc.bold("Filters")}   ${(alive && st?.filters) || (saved ? describeFilter(saved) : "?")}`);
   const batchSeconds = alive && st && st.batchSeconds !== undefined ? st.batchSeconds : (saved?.batchSeconds ?? 0);
   if (batchSeconds) out(`${pc.bold("Batch")}     ${formatDuration(batchSeconds * 1000)} window, up to ${MAX_BATCH} events per --exec run`);
+  const route = forward && isHermesRoute(forward) ? routeWarning(name, forward) : null;
+  if (route?.level === "warn") out(`${pc.bold("Route")}     ${pc.yellow(route.message)}`);
   out(`${pc.bold("Output")}    ${outputLine(name, { exec: exec ?? null, forward: forward ? { url: forward } : null }, logPath(name))}`);
 
   let svc = "not installed";

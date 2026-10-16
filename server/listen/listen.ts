@@ -10,10 +10,10 @@ import { ensurePrivateDir } from "./fsutil.ts";
 import { claudeMcpConfigPath, writeClaudeMcpConfig } from "./mcpheader.ts";
 import { forwardEvent } from "./forward.ts";
 import { createListenLogger, type ListenLogger } from "./logfile.ts";
-import { describeFilter, type EffectiveConfig, type ListenFlags, MAX_BATCH, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
+import { categoryNote, describeFilter, type EffectiveConfig, type ListenFlags, MAX_BATCH, resolveListen, THROWAWAY_SUFFIXES, throwawayConsumer, typesNotes } from "./options.ts";
 import { oneOffLogPath, DEFAULT_PROFILE, logPath, validProfileName } from "./paths.ts";
 import { describeGrants, grantsKey } from "./grants.ts";
-import { gatewayWarning } from "./hermes.ts";
+import { gatewayWarning, routeWarning } from "./hermes.ts";
 import { hermesChangeNote, isHermesRoute, recipeOf, recipeToolFor, shellQuote, SILENT_MARKER, TOOL_LABELS } from "./recipes.ts";
 import { loadProfile, type Profile, saveProfile } from "./profile.ts";
 import { acquireBackfillLock, acquireProfileLock } from "./lock.ts";
@@ -201,10 +201,14 @@ export async function runListener(opts: RunListenerOptions): Promise<number> {
     const notes = typesNotes(config);
     for (const m of notes.info) log.info(m);
     for (const m of notes.warn) log.warn(m);
+    const categories = categoryNote(profileName, profile, opts.flags, config);
+    if (categories) log.info(categories);
     const change = hermesChangeNote(opts.flags.recipe, config.exec);
     if (change) log.info(change);
     if (config.forward && isHermesRoute(config.forward.url) && !dryRun) {
       void gatewayWarning(config.forward.url).then((w) => w && log.warn(w));
+      const route = routeWarning(profileName, config.forward.url);
+      if (route) log[route.level](route.message);
     }
     if (backfill && backfillHead === 0) {
       log.info(`Nothing to backfill: the listener (consumer "${config.consumer}") started with the oldest stored mail, so it handles all of it.`);

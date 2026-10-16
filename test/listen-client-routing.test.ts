@@ -9,11 +9,11 @@ import { Dispatcher, type DispatcherOptions, type Job } from "../server/listen/d
 import { skipReason } from "../server/listen/event.ts";
 import { commandStdin } from "../server/listen/exec.ts";
 import { retryAfter } from "../server/listen/forward.ts";
-import { hermesSubscribe } from "../server/listen/hermes.ts";
+import { hermesRouteName, hermesSubscribe, routeWarning } from "../server/listen/hermes.ts";
 import { isSilent, runListener } from "../server/listen/listen.ts";
-import { describeFilter, parseDuration, resolveListen } from "../server/listen/options.ts";
+import { categoryNote, describeFilter, parseDuration, resolveListen } from "../server/listen/options.ts";
 import { logPath } from "../server/listen/paths.ts";
-import { loadProfile, saveProfile } from "../server/listen/profile.ts";
+import { loadProfile, type Profile, saveProfile } from "../server/listen/profile.ts";
 import { hermesHome as hermesHomeOf, yamlMcpServerState } from "../server/listen/mcpsetup.ts";
 import { HERMES_ROUTE_PROMPT, hermesChangeNote, isHermesRoute, recipe } from "../server/listen/recipes.ts";
 import { readDead, readStatus } from "../server/listen/state.ts";
@@ -55,6 +55,21 @@ describe("noise filters", () => {
     expect(back.config.skipCategories).toEqual(["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"]);
     expect(back.next.skipCategories).toBeUndefined();
     expect(() => resolveListen("default", base, { defaultCategories: true, allCategories: true })).toThrow(/can't be combined/);
+  });
+
+  it("says once that the category skip is new when the profile predates it and no category flag is given", () => {
+    const note = (profile: Profile, flags = {}) => categoryNote("default", profile, flags, resolveListen("default", profile, flags).config);
+    expect(note(base)).toBe(
+      "New: mail in Gmail's Promotions, Social and Forums tabs is now skipped by default. To get it back: `npx agentinbox-cli listen --all-categories --save` (or one tab: `--include-category forums --save`; for the service: `npx agentinbox-cli listen service install --all-categories`).",
+    );
+    expect(categoryNote("work", base, {}, resolveListen("work", base, {}).config)).toMatch(/`npx agentinbox-cli listen --profile work --all-categories --save`/);
+    expect(note({ ...base, skipCategories: [] })).toBeNull();
+    expect(note({ ...base, skipCategories: ["CATEGORY_SOCIAL"] })).toBeNull();
+    expect(note(base, { allCategories: true })).toBeNull();
+    expect(note(base, { includeCategory: ["forums"] })).toBeNull();
+    expect(note(base, { defaultCategories: true })).toBeNull();
+    // Nothing is skipped when --label asks for all three.
+    expect(note({ ...base, filter: { labelIds: ["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"] } })).toBeNull();
   });
 
   it("--not-from and --not-label skip matching mail; events without a message (account, future types) pass them", () => {
@@ -523,5 +538,49 @@ describe("listen hermes", () => {
     expect(isHermesRoute("http://127.0.0.1:8644/%77ebhooks/agentinbox")).toBe(true);
     expect(isHermesRoute("http://127.0.0.1:8787/agentinbox")).toBe(false);
     expect(isHermesRoute("http://127.0.0.1:8644/webhooks/a/b")).toBe(false);
+  });
+  describe("the route the listener forwards to", () => {
+    const fwd = (name: string) => `http://127.0.0.1:8644/webhooks/${name}`;
+    const route = (r: Record<string, unknown>) => writeFileSync(subsFile(), JSON.stringify({ "agentinbox-mail": { secret: "whsec_x", deliver: "telegram", ...r } }), { mode: 0o600 });
+
+    it("warns when the event reaches an unconfined route's prompt, with the commands to move off it", () => {
+      route({ prompt: "New email from agentinbox: {__raw__}. Triage it." });
+      const w = routeWarning("default", fwd("agentinbox-mail"));
+      expect(w?.level).toBe("warn");
+      expect(w?.message).toMatch(/^The Hermes route agentinbox-mail this listener forwards to puts the email into its prompt but isn't limited to the agentinbox tools \(toolsets: null\)/);
+      expect(w?.message).toMatch(/every MCP server, including any calendar access granted/);
+      expect(w?.message).toContain("`npx agentinbox-cli listen hermes --deliver telegram --run` creates the confined route agentinbox");
+      expect(w?.message).toContain("`npx agentinbox-cli listen --save --recipe hermes`");
+      expect(w?.message).toContain("`hermes webhook remove agentinbox-mail`");
+      // A field placeholder, other toolsets, or no prompt at all count the same.
+      route({ prompt: "Mail from {event.data.message.from.email}", toolsets: ["mcp-agentinbox", "web"] });
+      expect(routeWarning("default", fwd("agentinbox-mail"))?.level).toBe("warn");
+      route({});
+      expect(routeWarning("default", fwd("agentinbox-mail"))?.level).toBe("warn");
+    });
+
+    it("doesn't warn for a confined route, or one whose prompt never sees the event", () => {
+      route({ prompt: "{__raw__}", toolsets: ["mcp-agentinbox"] });
+      expect(routeWarning("default", fwd("agentinbox-mail"))).toBeNull();
+      // A zero-LLM trigger: a filter script and a cron job, a prompt without placeholders.
+      route({ prompt: "agentinbox push: new mail just arrived. Run the normal email check now.", script: "agentinbox-mail-filter.py", cron_job: "a9fe00ee8238", deliver: "log" });
+      expect(routeWarning("default", fwd("agentinbox-mail"))?.level).toBe("debug");
+      route({ prompt: "{__raw__}", cron_job: "a9fe00ee8238" });
+      expect(routeWarning("default", fwd("agentinbox-mail"))?.level).toBe("debug");
+      route({ prompt: "Check your mail." });
+      expect(routeWarning("default", fwd("agentinbox-mail"))?.level).toBe("debug");
+      // Missing route, unreadable file, or a URL shape whose route can't be looked up: debug only.
+      expect(routeWarning("default", fwd("other"))?.level).toBe("debug");
+      expect(routeWarning("default", fwd("agentinbox-mail"), join(hermesHome, "nope.json"))?.level).toBe("debug");
+      expect(routeWarning("default", "http://127.0.0.1:8644/p/work/webhooks/agentinbox-mail")?.level).toBe("debug");
+      expect(hermesRouteName(fwd("agentinbox%2Dmail"))).toBe("agentinbox-mail");
+    });
+
+    it("on the listener's own route, the fix is `listen hermes --run` alone", () => {
+      writeFileSync(subsFile(), JSON.stringify({ "agentinbox-work": { prompt: "{__raw__}" } }));
+      const w = routeWarning("work", fwd("agentinbox-work"));
+      expect(w?.message).toContain("Fix: `npx agentinbox-cli listen hermes --profile work --deliver <platform> --run` limits it to mcp-agentinbox-work.");
+      expect(w?.message).not.toContain("webhook remove");
+    });
   });
 });

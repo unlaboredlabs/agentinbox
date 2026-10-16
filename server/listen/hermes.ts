@@ -189,19 +189,83 @@ with open(lock, "a+b") as lf:
         raise
 `;
 
+interface HermesRouteEntry {
+  secret?: string;
+  toolsets?: unknown;
+  enabled?: unknown;
+  prompt?: unknown;
+  cron_job?: unknown;
+  deliver?: unknown;
+}
+
+/** One route from the subscriptions file (undefined when it has none by that name); throws when the file can't be read. */
+const readRoute = (name: string, file: string): HermesRouteEntry | undefined =>
+  (JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as Record<string, HermesRouteEntry>)[name];
+
+/** Whether a route's toolsets are exactly the confined `["mcp-<server>"]` for this profile. */
+const isConfined = (route: HermesRouteEntry, profileName: string) => JSON.stringify(route.toolsets) === JSON.stringify([hermesRouteToolset(profileName)]);
+
 /** Re-reads the subscriptions file: the route must have the real secret, exactly our toolsets, and the file must be 0600. */
-export function verifyRoute(profileName: string, secret: string, file = subscriptionsPath()): string | null {
+export function verifyRoute(profileName: string, secret: string, file = subscriptionsPath(), name = hermesRoute(profileName)): string | null {
   try {
     if ((statSync(file).mode & 0o077) !== 0) return `${file} is readable by other users`;
-    const route = (JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as Record<string, { secret?: string; toolsets?: unknown }>)[hermesRoute(profileName)];
-    if (!route) return `route ${hermesRoute(profileName)} is missing`;
+    const route = readRoute(name, file);
+    if (!route) return `route ${name} is missing`;
     if (route.secret !== secret) return "the route's secret isn't the listener's";
-    if ((route as { enabled?: unknown }).enabled === false) return "the route is disabled";
-    if (JSON.stringify(route.toolsets) !== JSON.stringify([hermesRouteToolset(profileName)])) return `the route's toolsets are ${JSON.stringify(route.toolsets ?? null)}`;
+    if (route.enabled === false) return "the route is disabled";
+    if (!isConfined(route, profileName)) return `the route's toolsets are ${JSON.stringify(route.toolsets ?? null)}`;
     return null;
   } catch (err) {
     return (err as Error).message.split("\n")[0]!;
   }
+}
+
+/** The route name in a Hermes forward URL (`/webhooks/<name>`); null for other shapes such as `/p/<profile>/webhooks/<name>`. */
+export function hermesRouteName(forwardUrl: string): string | null {
+  try {
+    const m = /^\/webhooks\/([^/]+)\/?$/.exec(decodeURIComponent(new URL(forwardUrl).pathname));
+    return m ? m[1]! : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The route the listener forwards to, checked in <HERMES_HOME>/webhook_subscriptions.json: a warning when
+ * email content may reach its agent's prompt (no cron_job, and a prompt with a `{…}` placeholder, or no
+ * prompt at all, treated the same) while its toolsets aren't the confined `["mcp-<server>"]`.
+ * Anything else, including a missing route or an unreadable file, is a debug line at most.
+ */
+export function routeWarning(profileName: string, forwardUrl: string, file = subscriptionsPath()): { level: "warn" | "debug"; message: string } | null {
+  const name = hermesRouteName(forwardUrl);
+  if (!name) return { level: "debug", message: `Hermes route in ${forwardUrl} not checked (not a /webhooks/<name> URL)` };
+  let route: HermesRouteEntry | undefined;
+  try {
+    route = readRoute(name, file);
+  } catch (err) {
+    return { level: "debug", message: `Hermes route ${name} not checked: ${(err as Error).message.split("\n")[0]}` };
+  }
+  if (!route) return { level: "debug", message: `Hermes route ${name} isn't in ${file}` };
+  if (isConfined(route, profileName)) return null;
+  const prompt = typeof route.prompt === "string" ? route.prompt : "";
+  if (route.cron_job || (prompt && !/\{[^{}\s]+\}/.test(prompt))) {
+    return { level: "debug", message: `Hermes route ${name} isn't limited to the agentinbox tools, but the event doesn't reach its prompt (${route.cron_job ? "it fires a cron job" : "no placeholders"})` };
+  }
+  const p = profileName === DEFAULT_PROFILE ? "" : ` --profile ${profileName}`;
+  const deliver = typeof route.deliver === "string" && /^[a-z0-9][a-z0-9_-]{0,40}$/i.test(route.deliver) ? route.deliver : "<platform>";
+  const own = hermesRoute(profileName);
+  const fix =
+    name === own
+      ? `Fix: \`${NPX} listen hermes${p} --deliver ${deliver} --run\` limits it to ${hermesRouteToolset(profileName)}.`
+      : `Fix: \`${NPX} listen hermes${p} --deliver ${deliver} --run\` creates the confined route ${own}; ` +
+        `\`${NPX} listen${p} --save --recipe hermes\` points this listener at it (or --forward <its URL> --save; as a service: \`${NPX} listen service install${p} --recipe hermes\`); ` +
+        `then \`hermes webhook remove ${name}\`.`;
+  return {
+    level: "warn",
+    message:
+      `The Hermes route ${name} this listener forwards to puts the email into its prompt but isn't limited to the agentinbox tools (toolsets: ${JSON.stringify(route.toolsets ?? null)}): ` +
+      `email-triggered runs there get Hermes' web tools and every MCP server, including any calendar access granted. ${fix}`,
+  };
 }
 
 export interface HermesDeps {
