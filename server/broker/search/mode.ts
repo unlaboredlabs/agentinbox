@@ -1,6 +1,5 @@
 // When /mcp serves search mode instead of every tool (docs/MCP-BROKER.md, "One endpoint with 100+ tools").
 import { type Db, json } from "../../db/index.ts";
-import type { SettingsStore } from "../../settings.ts";
 
 /** Above this many visible tools (native + broker), an agent gets search mode unless its setting says otherwise. */
 export const SEARCH_MODE_THRESHOLD = 30;
@@ -48,14 +47,6 @@ export function setAgentSearchSettings(db: Db, agentId: string, patch: Partial<A
     JSON.stringify(next),
   );
   return next;
-}
-
-/**
- * The `brokerUpstreams` feature flag (default off until the console PR). Read loosely: Settings doesn't declare
- * it on this branch, and SettingsStore.get() passes stored keys through.
- */
-export function brokerUpstreamsEnabled(settings: SettingsStore): boolean {
-  return (settings.get() as { brokerUpstreams?: unknown }).brokerUpstreams === true;
 }
 
 export interface ModeInput {

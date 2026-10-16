@@ -6,8 +6,9 @@ import type { CallToolResult, RequestId } from "@modelcontextprotocol/sdk/types.
 import { z } from "zod";
 import type { AuditInput } from "../../audit.ts";
 import { cleanLine } from "../../mail/content.ts";
+import { safeResult } from "../../mcp/broker.ts";
 import { errorMessage } from "../../util/errors.ts";
-import type { BrokerCalls, RegisteredTool, ToolRegistry } from "../types.ts";
+import type { BrokerCalls, RegisteredTool } from "../types.ts";
 import { type SearchableTool, ToolIndex } from "./bm25.ts";
 
 export const META_TOOL_NAMES = ["search_tools", "call_read_tool", "call_write_tool"] as const;
@@ -53,9 +54,13 @@ export interface NativeEntry {
 export interface SearchDeps {
   agentId: string;
   natives: ReadonlyMap<string, NativeEntry>;
-  registry: ToolRegistry | null;
-  calls: BrokerCalls | null;
+  /** The agent's broker tools (AgentBrokerView.tools: ToolRegistry.forAgent, levels applied). */
+  brokerTools: readonly RegisteredTool[];
+  calls: BrokerCalls;
+  /** Aborted when the HTTP client disconnects. */
+  signal?: AbortSignal;
   audit(input: AuditInput): void;
+  log: { error(msg: string, meta?: Record<string, unknown>): void };
   /** Marks a tools/call as answered by a handler, so the rejection audit doesn't record it again. */
   handled(requestId: RequestId): void;
 }
@@ -73,9 +78,8 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
 const text = (t: string, isError = false): CallToolResult => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });
 
 export function registerSearchTools(server: McpServer, deps: SearchDeps): void {
-  const brokerTools = () => (deps.registry ? deps.registry.forAgent(deps.agentId) : []);
   let index: ToolIndex | null = null;
-  const catalog = () => (index ??= new ToolIndex([...[...deps.natives.values()].map((n) => n.tool), ...brokerTools().map(brokerSearchable)]));
+  const catalog = () => (index ??= new ToolIndex([...[...deps.natives.values()].map((n) => n.tool), ...deps.brokerTools.map(brokerSearchable)]));
 
   server.registerTool(
     "search_tools",
@@ -121,7 +125,7 @@ export function registerSearchTools(server: McpServer, deps: SearchDeps): void {
       deps.audit({ actorType: "agent", actorId: deps.agentId, action, outcome, reason, detail });
 
     const native = deps.natives.get(args.name);
-    const broker = native ? null : (deps.registry?.resolve(deps.agentId, args.name) ?? null);
+    const broker = native ? null : (deps.brokerTools.find((t) => t.exposedName === args.name) ?? null);
     const tool = native?.tool ?? (broker ? brokerSearchable(broker) : null);
     if (!tool) {
       record("unknown_tool", "error", "unknown_tool", { tool: cleanLine(args.name).slice(0, 64) });
@@ -148,12 +152,16 @@ export function registerSearchTools(server: McpServer, deps: SearchDeps): void {
       return native.run(parsed.data, extra);
     }
 
-    // Broker tools: BrokerCalls resolves, decides (levels, approvals, caps) and audits under the real name.
-    if (!deps.calls) return text("Broker tools are not available right now. Retry later.", true);
+    // Broker tools: BrokerCalls resolves, decides (levels, approvals, caps) and audits under the real name, once.
+    // Same handling as a direct call (server/mcp/broker.ts).
+    const started = Date.now();
+    const signal = deps.signal ? AbortSignal.any([extra.signal, deps.signal]) : extra.signal;
     try {
-      return (await deps.calls.call(deps.agentId, tool.name, inner, extra.signal)) as CallToolResult;
+      return safeResult(await deps.calls.call(deps.agentId, tool.name, inner, signal));
     } catch (err) {
-      return text(`${tool.name} failed: ${errorMessage(err)}. Retry later.`, true);
+      deps.log.error(`Tool ${tool.name} failed`, { agent: deps.agentId, error: errorMessage(err) });
+      deps.audit({ actorType: "agent", actorId: deps.agentId, action: tool.name, outcome: "error", reason: "internal", durationMs: Date.now() - started });
+      return text(`Internal error: ${errorMessage(err)}. Retry later; if it persists, tell the operator.`, true);
     }
   };
 

@@ -297,7 +297,7 @@ export const MIGRATIONS: string[] = [
     SELECT 'calendar.setup', '{"enabled":false}'
     WHERE EXISTS (SELECT 1 FROM accounts);
   `,
-  /* 8: MCP broker (docs/MCP-BROKER.md, M1 PR 2). New tables only, plus the approvals rebuild; nothing reads them yet. */ `
+  /* 8: MCP broker (docs/MCP-BROKER.md, M1 PR 2). New tables, events.connection_id and the approvals rebuild; nothing reads them yet. */ `
   -- One upstream with its credential. Gmail/Calendar stay in accounts (M1 doesn't move them).
   CREATE TABLE connections (
     id TEXT PRIMARY KEY,                       -- con_…
@@ -306,7 +306,9 @@ export const MIGRATIONS: string[] = [
     -- as a connection kind, docs "Code impact"): CHECKs can't be widened without rebuilding a table that
     -- other tables reference.
     kind TEXT NOT NULL CHECK (kind IN ('remote_http', 'native_whoop', 'stdio', 'native_google')),
-    preset TEXT CHECK (preset IS NULL OR preset IN ('notion', 'whoop')),
+    -- The preset id (notion, whoop, …) or NULL for a custom server. Deliberately no CHECK: presets are validated
+    -- in code against the registry, so adding one never needs a rebuild of this table.
+    preset TEXT,
     -- Operator-chosen; tools are exposed as <slug>__<tool>. No "_" in a slug, so the split is unambiguous.
     slug TEXT NOT NULL UNIQUE CHECK (length(slug) BETWEEN 1 AND 24 AND slug NOT GLOB '*[^a-z0-9-]*'),
     name TEXT NOT NULL,
@@ -316,19 +318,26 @@ export const MIGRATIONS: string[] = [
     level_default TEXT NOT NULL DEFAULT 'ask' CHECK (level_default IN ('full', 'ask', 'read')),
     -- Admin-only private-target allow: the exact scheme://host:port the admin entered, or NULL (off).
     -- Editing the URL clears it.
-    -- (No path, query, userinfo or blanks; ends in the port.) The guard itself validates host and ranges.
+    -- (No path, query, userinfo, blanks, backslash, percent-encoding, brackets or control characters; ends in
+    -- the port.) The code canonicalises it, and the guard itself validates host and ranges.
     private_target TEXT CHECK (private_target IS NULL OR (
       (private_target GLOB 'http://?*:[0-9]*' OR private_target GLOB 'https://?*:[0-9]*')
       AND private_target NOT GLOB '*://*[/?#@ ]*' AND private_target NOT GLOB '*[^0-9]'
+      AND private_target NOT GLOB '*[\\%[]*'
+      AND private_target NOT GLOB '*[' || char(1) || '-' || char(31) || char(127) || ']*'
     )),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'needs_reauth', 'error', 'disabled')),
     status_reason TEXT,
     -- When the credential stops working without a human (no refresh grant, or a hard cap such as Notion's
     -- 180 days): drives the "expires in N days" warnings. NULL = not known to expire.
     expires_at TEXT,
-    protocol TEXT,                             -- negotiated protocol generation, cached (e.g. '2025-11-25')
+    -- Negotiated protocol era and transport, cached (see the SDK ADR), and when it was last negotiated: the
+    -- cache expires from protocol_checked_at (the expiry is the code's).
+    protocol TEXT,
+    protocol_checked_at TEXT,
     tools_cached_at TEXT,                      -- last successful tools/list
     instructions_hash TEXT,                    -- sha256 of the server's instructions, pinned separately from tools
+    events_cursor TEXT,                        -- native presets: where the event poll resumes (e.g. WHOOP without a webhook URL)
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (kind <> 'remote_http' OR url IS NOT NULL)
@@ -450,5 +459,18 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE approvals_new RENAME TO approvals;
   CREATE INDEX approvals_status ON approvals(status, created_at);
   CREATE INDEX approvals_connection ON approvals(connection_id);
+
+  -- Events from connections (connection.auth_failed, connection.tool_changed, approval.requested, whoop.*) carry
+  -- their connection here. account_id stays NOT NULL: connection events store '' there. Additive, no rebuild.
+  ALTER TABLE events ADD COLUMN connection_id TEXT;
+  CREATE INDEX events_connection_seq ON events(connection_id, seq) WHERE connection_id IS NOT NULL;
+  `,
+  /* 9: broker upstream OAuth (M1 PRs 3/4). Additive columns only. */ `
+  -- When the stored access token was issued: proactive refresh runs at expires_at - max(60 s, 10 % of the lifetime).
+  ALTER TABLE connection_credentials ADD COLUMN issued_at TEXT;
+  -- An upstream connection's authorization in flight (/oauth/connections/callback): state -> connection. NULL for
+  -- Google's flow. code_verifier is '' for these rows: the verifier is kept encrypted, keyed by state, in
+  -- connection_credentials.pkce_verifier_enc.
+  ALTER TABLE oauth_states ADD COLUMN connection_id TEXT REFERENCES connections(id) ON DELETE CASCADE;
   `,
 ];

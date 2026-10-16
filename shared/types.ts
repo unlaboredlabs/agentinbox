@@ -67,7 +67,41 @@ export const EVENT_TYPES = [
   "calendar.event_cancelled", // the event was cancelled or deleted
   "calendar.invitation_received", // someone else's event now lists the account as an attendee awaiting a response
 ] as const;
-export type EventType = (typeof EVENT_TYPES)[number];
+/** Gmail, Calendar and account events: the closed set that existed before the broker. */
+export type NativeEventType = (typeof EVENT_TYPES)[number];
+
+/**
+ * MCP broker events (docs/MCP-BROKER.md "Events from integrations"). They concern a connection, not an
+ * account: MailEvent.connectionId is set and accountId/accountEmail are "". Visible to agents with a grant
+ * on that connection, while the brokerUpstreams setting is on.
+ */
+export const BROKER_EVENT_TYPES = [
+  "connection.auth_failed", // the upstream's credential stopped working; the owner must reconnect
+  "connection.tool_changed", // an upstream tool changed or appeared and is held until the owner accepts it
+  "connection.expiring", // the credential stops working on a known date (no refresh, or a cap): reconnect before it
+  "approval.requested", // a risky upstream tool call waits for a human (detail.approvalUrl: the one-tap page)
+] as const;
+export type BrokerEventType = (typeof BROKER_EVENT_TYPES)[number];
+/**
+ * Events a native integration emits: `<preset>.<name>`, e.g. `whoop.recovery_updated` (IntegrationPreset.id and
+ * NativeEvents.types). Open-ended, so EventType as a whole is too: code that needs the known set uses
+ * EVENT_TYPES and BROKER_EVENT_TYPES.
+ */
+export type PresetEventType = `${string}.${string}`;
+export type EventType = NativeEventType | BrokerEventType | PresetEventType;
+
+const PRESET_EVENT_RE = /^([a-z0-9-]{1,24})\.[a-z0-9_]{1,64}$/;
+/** Prefixes of agentinbox's own events: a preset can't be named like one. */
+const RESERVED_EVENT_PREFIXES = new Set(["message", "thread", "label", "account", "sync", "calendar", "connection", "approval"]);
+export const isPresetEventType = (t: string): t is PresetEventType => {
+  const m = PRESET_EVENT_RE.exec(t);
+  return !!m && !RESERVED_EVENT_PREFIXES.has(m[1]!);
+};
+/** Events about a connection (broker or preset), never an account. */
+export const isConnectionEventType = (t: string): t is BrokerEventType | PresetEventType =>
+  (BROKER_EVENT_TYPES as readonly string[]).includes(t) || isPresetEventType(t);
+/** Any event type the server accepts in filters (webhooks, the listener stream, the console). */
+export const isEventType = (t: string): t is EventType => (EVENT_TYPES as readonly string[]).includes(t) || isConnectionEventType(t);
 
 export const CALENDAR_EVENT_TYPES = [
   "calendar.event_created",
@@ -269,6 +303,11 @@ export interface Settings {
   webhookAllowlist: string[];
   /** Accept device-flow pairing requests from `npx agentinbox-cli connect` (each still needs approval). */
   pairingEnabled: boolean;
+  /**
+   * MCP broker upstream connections (docs/MCP-BROKER.md). Off by default until the console PR turns it on;
+   * while off, the broker's upstream runtime and /oauth/connections/callback refuse to run.
+   */
+  brokerUpstreams: boolean;
 }
 
 export interface GoogleClientConfig {
@@ -780,8 +819,11 @@ export interface MailEvent {
   id: string; // evt_…
   seq: number; // monotonic, used as cursor
   type: EventType;
+  /** "" on connection events (BROKER_EVENT_TYPES and `<preset>.*`), which carry connectionId instead. */
   accountId: string;
   accountEmail: string;
+  /** Connection events only. */
+  connectionId?: string;
   message: MessageSummary | null;
   /** calendar.* events only (absent on mail events, so their payloads are unchanged). */
   calendarEvent?: CalendarEventSummary;
@@ -973,6 +1015,47 @@ export interface McpCallApprovalDetail {
   pinHash: string;
   /** The upstream's result once the approved call ran (what get_call_status returns). */
   result?: McpCallResult | null;
+  /** When the approved call was last forwarded upstream (set right before it is). */
+  attemptedAt?: string | null;
+  /**
+   * The approved call was interrupted (crash, timeout, lost answer): it may or may not have run upstream.
+   * Status is "failed"; it is never retried automatically.
+   */
+  outcomeUnknown?: boolean;
+}
+
+/**
+ * GET /api/approvals/:id for an mcp.call: the card. `approval.call.args` holds the exact bytes that run on approve.
+ * `tool` is the tool as the agent can reach it now (null when it no longer can: access removed, on hold).
+ */
+export interface McpCallApprovalView {
+  approval: McpCallApproval;
+  connection: { id: string; slug: string; name: string; status: ConnectionStatus } | null;
+  tool: { exposedName: string; name: string; title: string | null; risky: boolean; read: boolean; targetPath: string | null; level: AccessLevel; pinMatches: boolean } | null;
+  /** The exact argument bytes with invisible and control characters shown as \u escapes. */
+  argsDisplay: string;
+  /** The same arguments indented (escaped the same way). */
+  pretty: string;
+  /** Email addresses and URLs found anywhere in the arguments: shown first on the card. */
+  recipients: string[];
+  urls: string[];
+  /** The tool's target argument (ToolClass.targetPath, a JSON Pointer) and its value in this call, if any. */
+  target: { path: string; value: unknown } | null;
+  /** JSON Pointers a generic tool's "always allow for this argument" may pick from. */
+  argumentPaths: string[];
+  /** sha256 of the stored bytes still matches the fingerprint taken when the call was queued. */
+  argsIntact: boolean;
+}
+
+/** POST /api/approvals/:id/approve for an mcp.call. */
+export interface McpCallApproveInput {
+  note?: string | null;
+  /**
+   * "Always allow this": a rule for this agent and tool, created when the call is approved. `target` limits it
+   * to this call's target value (one rule per id when the target is an array); `targetPath` picks the argument
+   * for generic tools (defaults to the tool's own targetPath).
+   */
+  alwaysAllow?: { target?: boolean; targetPath?: string };
 }
 
 /** An upstream CallToolResult as stored for get_call_status. */
@@ -1042,13 +1125,12 @@ export type Approval = GoogleApproval | McpCallApproval;
 // ───────────────────────────── MCP broker: connections ─────────────────────────────
 // docs/MCP-BROKER.md. Stored since migration 8; nothing serves these until the broker PRs land (behind the
 // brokerUpstreams setting). Credentials never cross the API boundary: there's no DTO for them.
+// AccessLevel and ToolAnnotations mirror server/broker/types.ts: the console can't import that file (it uses
+// Node's Buffer, and tsconfig.app has no Node types). Keep them in step.
 
 /** native_whoop (M2), stdio (M4) and native_google are reserved; M1 creates remote_http only. */
 export const CONNECTION_KINDS = ["remote_http", "native_whoop", "stdio", "native_google"] as const;
 export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
-
-export const CONNECTION_PRESETS = ["notion", "whoop"] as const;
-export type ConnectionPreset = (typeof CONNECTION_PRESETS)[number];
 
 export const CONNECTION_AUTH_TYPES = ["none", "header", "oauth"] as const;
 export type ConnectionAuthType = (typeof CONNECTION_AUTH_TYPES)[number];
@@ -1076,7 +1158,8 @@ export interface Connection {
   /** null = the install's single owner. */
   ownerId: string | null;
   kind: ConnectionKind;
-  preset: ConnectionPreset | null;
+  /** IntegrationPreset.id (server/broker/types.ts), checked against the preset registry in code; null = custom. */
+  preset: string | null;
   slug: string;
   name: string;
   /** The MCP endpoint (remote_http). */
@@ -1105,7 +1188,6 @@ export interface ToolAnnotations {
   destructiveHint?: boolean;
   idempotentHint?: boolean;
   openWorldHint?: boolean;
-  [key: string]: unknown;
 }
 
 /** A tool definition as pinned (upstream_tools.definition). The pin hashes this plus the tool's name. */
@@ -1165,6 +1247,136 @@ export interface ApprovalRule {
   targetPath: string | null;
   targetValue: string | null;
   createdAt: string;
+}
+
+// ───────────────────── MCP broker: connections admin API (/api/connections) ─────────────────────
+
+/** A connection as the Connections list shows it. */
+export interface ConnectionView extends Connection {
+  tools: {
+    /** Every pinned or held tool. */
+    total: number;
+    active: number;
+    /** Waiting for the owner to accept a changed or new definition. */
+    held: number;
+  };
+  /** Whole days until expiresAt (0 = today or past), or null when not known to expire. */
+  expiresInDays: number | null;
+  /** Agents with a grant on this connection. */
+  agents: number;
+}
+
+/** POST /api/connections: a custom MCP URL, or a preset (its URL and auth come from the preset). */
+export interface CreateConnectionInput {
+  /** IntegrationPreset.id (GET /api/connections/presets). */
+  preset?: string;
+  /** Required without a preset. */
+  url?: string;
+  /** Default: the preset's display name, else the URL's host. */
+  name?: string;
+  /** Default: the preset's slug, else derived from the host. */
+  slug?: string;
+  levelDefault?: AccessLevel;
+  /** Agents that get the connection at levelDefault. Default: every agent. */
+  agentIds?: string[];
+}
+
+/**
+ * PATCH /api/connections/:id. Changing the URL (custom connections only) deletes the credentials, clears the
+ * private-target allow, cancels pending calls and sets status needs_reauth: reconnect afterwards.
+ */
+export interface UpdateConnectionInput {
+  name?: string;
+  slug?: string;
+  url?: string;
+  levelDefault?: AccessLevel;
+}
+
+/** PUT /api/connections/:id/grants: the full list; agents not listed lose access. */
+export interface ConnectionGrantsInput {
+  grants: { agentId: string; level: AccessLevel }[];
+}
+
+/** PUT /api/connections/:id/private-target. Admin-only: the allow is pinned to the URL's exact scheme://host:port. */
+export interface PrivateTargetInput {
+  allow: boolean;
+}
+
+/** What probing an MCP URL found (POST /api/connections/probe), so the console shows the right button or field. */
+export interface ConnectionProbe {
+  reachable: boolean;
+  /** none: open; header: needs an API key or bearer; oauth: OAuth discovered; unknown: couldn't tell. */
+  auth: "none" | "header" | "oauth" | "unknown";
+  /** private_target: the host is on loopback or a private network and the connection has no allow for it. */
+  blocked?: "private_target" | "ssrf";
+  /** OAuth: the authorization server's issuer and how the client registers. */
+  issuer?: string;
+  registration?: "preregistered" | "metadata_document" | "dcr" | "manual";
+  /** OAuth: the server issues refresh tokens (false: dated reconnect warnings). */
+  refresh?: boolean;
+  /** blocked: the exact scheme://host:port an admin could allow for this connection, when an allow would help. */
+  privateTarget?: string | null;
+  /** Plain words for the console. */
+  message: string;
+}
+
+/** POST /api/connections/:id/connect. */
+export interface StartConnectInput {
+  /** Static header auth (bearer or API key). Stored encrypted; never returned. */
+  header?: { name: string; value: string };
+  /** Setup inputs (e.g. a pasted client id and secret), keyed by SetupStepView.input.key. */
+  inputs?: Record<string, string>;
+}
+
+export type StartConnectResult =
+  | { status: "connected"; connection: ConnectionView }
+  /**
+   * Open this URL (the OAuth popup). direct: /oauth/connections/callback finishes the connection; paste: the user
+   * copies the landing URL into POST /api/connections/finish.
+   */
+  | { status: "authorize"; authorizeUrl: string; callbackMode?: "direct" | "paste"; redirectUri?: string }
+  | { status: "error"; message: string; probe?: ConnectionProbe };
+
+/** One step of a preset's guided setup (server/broker/types.ts SetupStep), resolved for this install. */
+export interface SetupStepView {
+  id: string;
+  title: string;
+  body: string;
+  link?: { label: string; url: string };
+  copy?: { label: string; value: string };
+  input?: { key: string; label: string; secret?: boolean; pattern?: string; placeholder?: string };
+}
+
+/** GET /api/connections/presets. */
+export interface PresetView {
+  id: string;
+  displayName: string;
+  slug: string;
+  kind: "remote_http" | "native";
+  url: string | null;
+  authType: ConnectionAuthType;
+  setupSteps: SetupStepView[];
+  reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number } | null;
+}
+
+/** One line of a held tool's diff: pinned (-) against the candidate (+), on pretty-printed JSON. */
+export interface ToolDiffLine {
+  op: " " | "-" | "+";
+  text: string;
+}
+
+/** GET /api/connections/:id/held: a tool waiting for the owner to accept its new definition. */
+export interface HeldToolView {
+  name: string;
+  exposedName: string;
+  heldReason: ToolHeldReason;
+  /** null for a new tool. */
+  pinned: UpstreamToolDefinition | null;
+  candidate: UpstreamToolDefinition;
+  /** Pass back to accept: a candidate that changed since is refused (409). */
+  candidateHash: string;
+  diff: ToolDiffLine[];
+  updatedAt: string;
 }
 
 // ───────────────────────────── Audit ─────────────────────────────
@@ -1301,6 +1513,22 @@ export interface ApiError {
 //   GET    /api/pairings?status                       → PairingRequest[]
 //   POST   /api/pairings/:id/approve ApprovePairingInput → Agent   (the key goes to the polling CLI, never to the console)
 //   POST   /api/pairings/:id/deny {note?}             → PairingRequest
+//   (MCP broker, 404 unless Settings.brokerUpstreams)
+//   GET    /api/connections                           → ConnectionView[]
+//   POST   /api/connections CreateConnectionInput     → ConnectionView
+//   GET    /api/connections/presets                   → PresetView[]
+//   POST   /api/connections/probe {url, connectionId?} → ConnectionProbe
+//   GET    /api/connections/:id                       → ConnectionView
+//   PATCH  /api/connections/:id UpdateConnectionInput → ConnectionView
+//   DELETE /api/connections/:id                       → 204 (kill switch, then removal)
+//   POST   /api/connections/:id/kill                  → 204 (disabled; onKill hooks, then credentials deleted and pending calls cancelled)
+//   POST   /api/connections/:id/connect StartConnectInput → StartConnectResult
+//   POST   /api/connections/finish {url}               → StartConnectResult (paste mode: the copied landing URL)
+//   GET    /api/connections/:id/grants                → ConnectionGrant[]
+//   PUT    /api/connections/:id/grants ConnectionGrantsInput → ConnectionGrant[]
+//   PUT    /api/connections/:id/private-target PrivateTargetInput → ConnectionView
+//   GET    /api/connections/:id/held                  → HeldToolView[]
+//   POST   /api/connections/:id/held/:name/accept {candidateHash} → HeldToolView[] (the rest still held; 409 if it changed again)
 //   GET    /api/approvals?status                      → Approval[]
 //   POST   /api/approvals/:id/approve {note?}         → Approval
 //   POST   /api/approvals/:id/reject {note?}          → Approval

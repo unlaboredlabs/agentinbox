@@ -1,15 +1,13 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
-import { z } from "zod";
 import { isMcpToolAction } from "../shared/types.ts";
 import { overviewStats } from "../server/api/overview.ts";
 import { chooseMode, hotToolNames, SEARCH_MODE_THRESHOLD, setAgentSearchSettings } from "../server/broker/search/mode.ts";
 import { SEARCH_AUDIT_ACTION, SEARCH_INSTRUCTIONS } from "../server/broker/search/tools.ts";
-import type { BrokerCalls, RegisteredTool, ToolRegistry, ToolResult } from "../server/broker/types.ts";
+import type { BrokerCalls, RegisteredTool, ToolResult } from "../server/broker/types.ts";
 import type { AppContext } from "../server/context.ts";
 import { mcpRoutes } from "../server/mcp/index.ts";
 import { type BuildOptions, buildMcpServer, INSTRUCTIONS } from "../server/mcp/server.ts";
@@ -27,10 +25,7 @@ const META = ["call_read_tool", "call_write_tool", "search_tools"];
 const READER_TOOLS = ["ack_events", "get_attachment", "get_message", "get_thread", "list_accounts", "list_events", "list_labels", "search_threads", "wait_for_events"];
 
 function enableBroker(ctx: AppContext, on = true) {
-  ctx.db.run(
-    "INSERT INTO settings (key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    JSON.stringify({ brokerUpstreams: on }),
-  );
+  ctx.settings.update({ brokerUpstreams: on });
 }
 
 /** Broker tools from the eval catalog as the registry would serve them. */
@@ -50,20 +45,21 @@ function registered(n: number): RegisteredTool[] {
 }
 
 /**
- * A fake ToolRegistry + BrokerCalls (mocked via the contracts until the catalog and policy branches land). Like the real
- * one, `call` audits under the real name; risky tools come back pending_approval at once.
+ * Stubs the broker's view and BrokerCalls on ctx.broker (the real /mcp seam, registerBrokerTools, stays). Like the real
+ * BrokerCalls, `call` audits under the real name; risky tools come back pending_approval at once. The real wiring is
+ * exercised end to end in the last test.
  */
 function fakeBroker(ctx: AppContext, tools: RegisteredTool[]) {
   const calls: { agentId: string; name: string; args: Record<string, unknown>; signal: AbortSignal }[] = [];
-  const registerCalls: (ReadonlySet<string> | null)[] = [];
-  const registry: ToolRegistry = {
-    forAgent: () => tools,
-    resolve: (_a, name) => tools.find((t) => t.exposedName === name) ?? null,
-  };
+  const slugs = [...new Set(tools.map((t) => t.slug))];
+  ctx.broker.view = () =>
+    ctx.settings.get().brokerUpstreams
+      ? { connections: slugs.map((slug) => ({ connectionId: `con_${slug}`, slug, name: slug, level: "ask" as const })), tools }
+      : null;
   const brokerCalls: BrokerCalls = {
     async call(agentId, name, args, signal): Promise<ToolResult> {
       calls.push({ agentId, name, args, signal });
-      const tool = registry.resolve(agentId, name)!;
+      const tool = tools.find((t) => t.exposedName === name)!;
       if (tool.cls.risky) {
         ctx.audit.record({ actorType: "agent", actorId: agentId, action: name, outcome: "ok", reason: "pending_approval" });
         return { content: [{ type: "text", text: JSON.stringify({ status: "pending_approval", approval_id: "apr_1" }) }] };
@@ -72,15 +68,8 @@ function fakeBroker(ctx: AppContext, tools: RegisteredTool[]) {
       return { content: [{ type: "text", text: `ran ${name}` }] };
     },
   };
-  const registerTools = (server: McpServer, only: ReadonlySet<string> | null) => {
-    registerCalls.push(only);
-    const names = ["get_call_status", ...tools.map((t) => t.exposedName)];
-    for (const name of names) {
-      if (only && !only.has(name)) continue;
-      server.registerTool(name, { description: name, inputSchema: { id: z.string().optional() } }, async () => ({ content: [{ type: "text", text: name }] }));
-    }
-  };
-  return { broker: { registry, calls: brokerCalls, registerTools }, calls, registerCalls };
+  ctx.broker.calls = brokerCalls;
+  return { calls };
 }
 
 function setup() {
@@ -132,11 +121,10 @@ describe("search mode: when it applies", () => {
 
   it("changes nothing while brokerUpstreams is off, even with ?mode=search and 100 broker tools", async () => {
     const { ctx, connect } = setup();
-    const f = fakeBroker(ctx, registered(100));
-    const c = await connect({ mode: "search", broker: f.broker });
+    fakeBroker(ctx, registered(100));
+    const c = await connect({ mode: "search" });
     expect(await c.names()).toEqual(READER_TOOLS);
     expect(c.client.getInstructions()).toBe(INSTRUCTIONS);
-    expect(f.registerCalls).toEqual([]);
   });
 
   it("?mode=search turns it on (also over HTTP), with the flow in the instructions", async () => {
@@ -170,33 +158,31 @@ describe("search mode: when it applies", () => {
     setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "search" });
     expect(await (await connect()).names()).toEqual(META);
     setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "direct" });
-    const f = fakeBroker(ctx, registered(60));
-    expect(await (await connect({ broker: f.broker })).names()).toEqual([...READER_TOOLS, "get_call_status", ...registered(60).map((t) => t.exposedName)].sort());
-    expect(f.registerCalls).toEqual([null]);
+    fakeBroker(ctx, registered(60));
+    expect(await (await connect()).names()).toEqual([...READER_TOOLS, "get_call_status", ...registered(60).map((t) => t.exposedName)].sort());
   });
 
   it("turns on above SEARCH_MODE_THRESHOLD visible tools (native + broker), with get_call_status and the configured hot tools exposed", async () => {
     const { ctx, connect, reader } = setup();
     enableBroker(ctx);
-    const at = fakeBroker(ctx, registered(SEARCH_MODE_THRESHOLD - READER_TOOLS.length));
-    expect(await (await connect({ broker: at.broker })).names()).toHaveLength(SEARCH_MODE_THRESHOLD + 1); // + get_call_status
+    fakeBroker(ctx, registered(SEARCH_MODE_THRESHOLD - READER_TOOLS.length));
+    expect(await (await connect()).names()).toHaveLength(SEARCH_MODE_THRESHOLD + 1); // + get_call_status
 
-    const over = fakeBroker(ctx, registered(SEARCH_MODE_THRESHOLD - READER_TOOLS.length + 1));
-    const c = await connect({ broker: over.broker });
+    fakeBroker(ctx, registered(SEARCH_MODE_THRESHOLD - READER_TOOLS.length + 1));
+    const c = await connect();
     expect(await c.names()).toEqual([...META, "get_call_status"].sort());
-    expect([...over.registerCalls[0]!]).toEqual(["get_call_status"]);
 
     setAgentSearchSettings(ctx.db, reader.agent.id, { hot: ["list_accounts", "notion__search"] });
-    expect(await (await connect({ broker: over.broker })).names()).toEqual([...META, "get_call_status", "list_accounts", "notion__search"].sort());
+    expect(await (await connect()).names()).toEqual([...META, "get_call_status", "list_accounts", "notion__search"].sort());
   });
 });
 
 describe("search mode: the meta-tools", () => {
   it("search_tools returns the top 5 (max 10) native and broker tools with full schemas and read/risky flags", async () => {
-    const { ctx, connect } = setup();
+    const { ctx, connect, reader } = setup();
     enableBroker(ctx);
-    const f = fakeBroker(ctx, registered(100));
-    const c = await connect({ broker: f.broker });
+    fakeBroker(ctx, registered(100));
+    const c = await connect();
     const found = (r: { text: string }) => (JSON.parse(r.text) as { tools: { name: string; kind: string; risky: boolean; inputSchema: Record<string, unknown> }[] }).tools;
 
     const refund = found(await c.call("search_tools", { query: "refund the customer's payment" }));
@@ -210,6 +196,7 @@ describe("search mode: the meta-tools", () => {
     const mail = found(await c.call("search_tools", { query: "read the email message", limit: 10 }));
     const getMessage = mail.find((t) => t.name === "get_message")!;
     expect(getMessage).toMatchObject({ kind: "read", risky: false });
+    setAgentSearchSettings(ctx.db, reader.agent.id, { mode: "direct" });
     const direct = await connect();
     const listed = (await direct.client.listTools()).tools.find((t) => t.name === "get_message")!;
     expect(getMessage.inputSchema).toEqual(listed.inputSchema);
@@ -219,7 +206,7 @@ describe("search mode: the meta-tools", () => {
     const { ctx, connect, auditRows } = setup();
     enableBroker(ctx);
     const f = fakeBroker(ctx, registered(100));
-    const c = await connect({ broker: f.broker });
+    const c = await connect();
 
     const a = await c.call("call_write_tool", { name: "notion__search", arguments: { query: "x" } });
     expect(a).toMatchObject({ isError: true, text: "notion__search is a read tool: run it with call_read_tool." });
@@ -240,7 +227,7 @@ describe("search mode: the meta-tools", () => {
     const { ctx, connect, reader } = setup();
     enableBroker(ctx);
     const f = fakeBroker(ctx, registered(100));
-    const c = await connect({ broker: f.broker });
+    const c = await connect();
 
     const args = { channel_id: "C1", text: "Ship it" };
     const r = await c.call("call_write_tool", { name: "slack__post_message", arguments: args });
@@ -291,8 +278,8 @@ describe("search mode: audit", () => {
   it("audits the query's length only, and counts inner calls (not the meta-tools) as tool calls", async () => {
     const { ctx, connect, auditRows } = setup();
     enableBroker(ctx);
-    const f = fakeBroker(ctx, registered(100));
-    const c = await connect({ broker: f.broker });
+    fakeBroker(ctx, registered(100));
+    const c = await connect();
     const query = "secret plans for the merger";
     await c.call("search_tools", { query });
     await c.call("call_read_tool", { name: "list_accounts" });

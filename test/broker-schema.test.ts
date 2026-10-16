@@ -138,8 +138,8 @@ describe("migration 8 on an install at migration 7", () => {
     expect(plain(approvalIndexes)).toEqual([{ name: "approvals_status" }]);
 
     const db = new Db(path);
-    expect(db.get<{ v: number }>("SELECT MAX(version) AS v FROM _migrations")!.v).toBe(8);
-    expect(MIGRATIONS).toHaveLength(8);
+    expect(db.get<{ v: number }>("SELECT MAX(version) AS v FROM _migrations")!.v).toBe(MIGRATIONS.length);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(8);
     db.close();
 
     const after = new DatabaseSync(path, { readOnly: true });
@@ -149,6 +149,9 @@ describe("migration 8 on an install at migration 7", () => {
         if (table === "_migrations") continue;
         if (table === "approvals") {
           expect(now.get(table)).toEqual(rows.map((r) => ({ ...r, connection_id: null, tool_call: null })));
+        } else if (table === "events" || table === "oauth_states") {
+          // events.connection_id (migration 8); oauth_states.connection_id (migration 9, upstream OAuth).
+          expect(now.get(table)).toEqual(rows.map((r) => ({ ...r, connection_id: null })));
         } else {
           expect([table, now.get(table)]).toEqual([table, rows]);
         }
@@ -177,6 +180,11 @@ describe("migration 8 on an install at migration 7", () => {
       const notNull = Object.fromEntries(cols.map((c) => [c.name, c.notnull]));
       expect(notNull).toMatchObject({ account_id: 0, draft_id: 0, connection_id: 0, tool_call: 0, agent_id: 1, kind: 1, payload: 1, created_at: 1, expires_at: 1 });
       expect(cols.find((c) => c.name === "status")).toMatchObject({ notnull: 1, dflt_value: "'pending'" });
+
+      // events: connection_id added and indexed (no rebuild); account_id stays NOT NULL.
+      const eventCols = Object.fromEntries(plain(after.prepare("PRAGMA table_info(events)").all()).map((c) => [c.name, c.notnull]));
+      expect(eventCols).toMatchObject({ account_id: 1, connection_id: 0 });
+      expect(plain(after.prepare("PRAGMA index_info(events_connection_seq)").all()).map((c) => c.name)).toEqual(["connection_id", "seq"]);
     } finally {
       after.close();
     }
@@ -351,8 +359,10 @@ describe("migration 8 on a fresh database", () => {
       "status_reason",
       "expires_at",
       "protocol",
+      "protocol_checked_at",
       "tools_cached_at",
       "instructions_hash",
+      "events_cursor",
       "created_at",
       "updated_at",
     ]);
@@ -370,7 +380,9 @@ describe("migration 8 on a fresh database", () => {
       "discovery_enc",
       "created_at",
       "updated_at",
+      "issued_at", // migration 9
     ]);
+    expect(cols("events")).toContain("connection_id");
     expect(cols("connection_grants")).toEqual(["agent_id", "connection_id", "level", "created_at", "updated_at"]);
     expect(cols("approval_rules")).toEqual(["id", "agent_id", "connection_id", "tool", "target_path", "target_value", "created_at"]);
     insert.connection();
@@ -384,6 +396,10 @@ describe("migration 8 on a fresh database", () => {
     });
     insert.tool();
     expect(db.get("SELECT risky, read, state, held_reason FROM upstream_tools")).toEqual({ risky: 0, read: 1, state: "active", held_reason: null });
+    // A connection event: account_id is '' (still NOT NULL), connection_id carries the connection.
+    db.run("INSERT INTO events (id, type, account_id, connection_id, dedupe_key, created_at) VALUES ('evt_c', 'connection.auth_failed', '', 'con_1', 'con_1:auth', ?)", T);
+    expect(() => db.run("INSERT INTO events (id, type, account_id, connection_id, dedupe_key, created_at) VALUES ('evt_n', 'x', NULL, 'con_1', 'k', ?)", T)).toThrow(/NOT NULL/);
+    expect(db.get("SELECT account_id, connection_id FROM events WHERE connection_id = 'con_1'")).toEqual({ account_id: "", connection_id: "con_1" });
     expect(db.all("PRAGMA foreign_key_check")).toEqual([]);
   });
 
@@ -410,7 +426,7 @@ describe("migration 8 on a fresh database", () => {
     expect(db.all("PRAGMA foreign_key_check")).toEqual([]);
   });
 
-  it("reads an mcp.call approval as McpCallApproval (no account, no draft); it can be rejected but not approved by this version", async () => {
+  it("reads an mcp.call approval as McpCallApproval (no account, no draft); approving goes through the broker", async () => {
     const config = testConfig();
     db.close();
     const ctx = createAppContext(config, { google: () => new FakeGoogle().service(), accounts: (c) => fakeAccounts(c) });
@@ -429,9 +445,8 @@ describe("migration 8 on a fresh database", () => {
         call: { tool: "notion-delete-pages", exposedName: "notion__notion-delete-pages", args: '{"page_id":"p1"}' },
       });
       expect(a.calendar).toBeUndefined();
-      await expect(ctx.mail.approve("apr_1")).rejects.toMatchObject({ status: 409 });
-      expect(ctx.mail.getApproval("apr_1")!.status).toBe("pending");
-      expect(await ctx.mail.reject("apr_1")).toMatchObject({ status: "rejected" });
+      // The broker's runner (M1 PR 7) re-checks first: the agent has no grant on the connection, so it's cancelled, never run.
+      expect(await ctx.mail.approve("apr_1")).toMatchObject({ status: "rejected" });
     } finally {
       await stopServices(ctx);
       rmSync(config.dataDir, { recursive: true, force: true });
@@ -467,20 +482,24 @@ describe("migration 8 constraints", () => {
     for (const kind of ["native_whoop", "stdio", "native_google"]) tryInsert({ kind, url: null });
     expect(() => tryInsert({ kind: "sse" })).toThrow(CHECK);
     expect(() => tryInsert({ kind: "remote_http", url: null })).toThrow(CHECK);
-    tryInsert({ preset: "notion" });
-    tryInsert({ preset: "whoop" });
-    expect(() => tryInsert({ preset: "github" })).toThrow(CHECK);
+    // No CHECK on preset: the code validates it against the preset registry, so new presets need no rebuild.
+    for (const preset of ["notion", "whoop", "github"]) tryInsert({ preset });
     for (const auth_type of ["none", "header", "oauth"]) tryInsert({ auth_type });
     expect(() => tryInsert({ auth_type: "basic" })).toThrow(CHECK);
     for (const level_default of ["full", "ask", "read"]) tryInsert({ level_default });
     expect(() => tryInsert({ level_default: "write" })).toThrow(CHECK);
     for (const status of ["active", "needs_reauth", "error", "disabled"]) tryInsert({ status });
     expect(() => tryInsert({ status: "paused" })).toThrow(CHECK);
-    for (const private_target of ["http://127.0.0.1:8787", "https://[::1]:3000", "http://100.104.249.49:3773", "http://macbook.tailb10092.ts.net:443"]) {
+    for (const private_target of ["http://127.0.0.1:8787", "http://100.104.249.49:3773", "http://macbook.tailb10092.ts.net:443", "https://localhost:3000"]) {
       tryInsert({ private_target });
     }
-    for (const private_target of ["http://127.0.0.1", "http://127.0.0.1:8787/mcp", "ftp://x:1", "http://user@host:1", "http://:80", "127.0.0.1:80", "http://h:80?x", "http://h:8a"]) {
-      expect(() => tryInsert({ private_target }), private_target).toThrow(CHECK);
+    const bad = [
+      ...["http://127.0.0.1", "http://127.0.0.1:8787/mcp", "ftp://x:1", "http://user@host:1", "http://:80", "127.0.0.1:80", "http://h:80?x", "http://h:8a"],
+      // Canonicalised in code; the CHECK refuses the characters that could hide a different host.
+      ...["https://[::1]:3000", "http://h\\x:80", "http://127.0.0.1\\@evil:80", "http://h%2e:80", "http://h\tx:80", "http://h\nx:80", "http://h\u0001:80", "http://h\u007f:80"],
+    ];
+    for (const private_target of bad) {
+      expect(() => tryInsert({ private_target }), JSON.stringify(private_target)).toThrow(CHECK);
     }
   });
 
