@@ -26,6 +26,9 @@ import type {
 } from "@shared/types";
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { apiGet } from "./api";
+import type { AgentConnection, ApprovalRule, BrokerApproval, Connection, HeldTool, PresetView } from "./broker-dto";
+
+export type * from "./broker-dto";
 
 /** Query key roots. The live stream invalidates by root. */
 export const keys = {
@@ -51,6 +54,12 @@ export const keys = {
   /** Paged history on /events and /audit: kept out of per-message invalidation (the pages merge live rows themselves and can be paused), refetched on mount and after a reconnect. */
   eventHistory: ["event-history"] as const,
   auditLog: ["audit-log"] as const,
+  // MCP broker (docs/MCP-BROKER.md).
+  connections: ["connections"] as const,
+  connection: (id: string) => ["connections", id] as const,
+  presets: ["connection-presets"] as const,
+  agentConnections: (agentId: string) => ["agent-connections", agentId] as const,
+  approvalRules: ["approval-rules"] as const,
 };
 
 export interface EventFilters {
@@ -146,6 +155,28 @@ export const queries = {
       getNextPageParam: (last) => last.nextCursor,
       staleTime: Infinity,
       refetchOnMount: "always",
+    }),
+  /** Upstream connections (broker). */
+  connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => apiGet<Connection[]>("/api/connections"), refetchInterval: 60_000 }),
+  connection: (id: string) =>
+    queryOptions({ queryKey: keys.connection(id), queryFn: () => apiGet<Connection>(`/api/connections/${encodeURIComponent(id)}`) }),
+  /** Tools on hold on one connection, with their pinned and live definitions. */
+  heldTools: (id: string) =>
+    queryOptions({ queryKey: [...keys.connection(id), "held"], queryFn: () => apiGet<HeldTool[]>(`/api/connections/${encodeURIComponent(id)}/held`) }),
+  presets: () => queryOptions({ queryKey: keys.presets, queryFn: () => apiGet<PresetView[]>("/api/connections/presets"), staleTime: 10 * 60_000 }),
+  agentConnections: (agentId: string) =>
+    queryOptions({
+      queryKey: keys.agentConnections(agentId),
+      queryFn: () => apiGet<AgentConnection[]>(`/api/agents/${encodeURIComponent(agentId)}/connections`),
+    }),
+  approvalRules: (agentId: string) =>
+    queryOptions({ queryKey: [...keys.approvalRules, agentId], queryFn: () => apiGet<ApprovalRule[]>("/api/approval-rules", { agentId }) }),
+  /** One approval, for the one-tap /approve/$id page. */
+  approval: (id: string) =>
+    queryOptions({
+      queryKey: [...keys.approvals, "one", id],
+      queryFn: () => apiGet<BrokerApproval>(`/api/approvals/${encodeURIComponent(id)}`),
+      retry: false,
     }),
   /** First audit page only, for an agent's detail page. */
   recentAudit: (agentId: string) =>

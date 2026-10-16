@@ -44,7 +44,8 @@ const toForm = (s: Settings): FormValues => ({
   pairingEnabled: s.pairingEnabled,
 });
 
-const fromForm = (v: FormValues): Settings => ({
+// brokerUpstreams isn't on this form (the patch only carries changed fields).
+const fromForm = (v: FormValues): Omit<Settings, "brokerUpstreams"> => ({
   publicUrl: v.publicUrl.trim().replace(/\/+$/, ""),
   ingestMode: v.ingestMode,
   pollIntervalSeconds: Number(v.pollIntervalSeconds),

@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { AlertTriangleIcon, ArrowRightIcon, KeyRoundIcon, StampIcon, UnplugIcon } from "lucide-react";
 import { AccountStatusBadge } from "@/components/accounts/account-status";
 import { connectAccount } from "@/components/accounts/connect-host";
+import { asMcpApproval } from "@/components/approvals/mcp-call";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -47,6 +48,9 @@ export function AccountsAttention({ accounts }: { accounts: Account[] }) {
 export function ApprovalsCallout({ approvals }: { approvals: Approval[] }) {
   if (!approvals.length) return null;
   const first = approvals[0]!;
+  const firstCall = asMcpApproval(first);
+  // Broker tool calls wait here too: then it's "requests", not "messages".
+  const what = approvals.some((a) => asMcpApproval(a)) ? ["request", "requests"] : ["message", "messages"];
   return (
     <Card className="border-warning/40 bg-warning/[0.06]">
       <CardContent className="flex flex-wrap items-center gap-3">
@@ -55,10 +59,11 @@ export function ApprovalsCallout({ approvals }: { approvals: Approval[] }) {
         </span>
         <div className="min-w-48 flex-1">
           <div className="font-medium">
-            {approvals.length === 1 ? "1 message is waiting for your approval" : `${approvals.length} messages are waiting for your approval`}
+            {approvals.length === 1 ? `1 ${what[0]} is waiting for your approval` : `${approvals.length} ${what[1]} are waiting for your approval`}
           </div>
           <p className="truncate text-sm text-muted-foreground">
-            {first.agentName}: “{first.subject || "(no subject)"}”{approvals.length > 1 && " and more"}
+            {first.agentName}: {firstCall ? `${firstCall.mcp.tool} on ${firstCall.mcp.connectionName}` : `“${first.subject || "(no subject)"}”`}
+            {approvals.length > 1 && " and more"}
           </p>
         </div>
         <Button asChild>

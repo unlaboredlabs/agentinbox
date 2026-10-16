@@ -269,6 +269,11 @@ export interface Settings {
   webhookAllowlist: string[];
   /** Accept device-flow pairing requests from `npx agentinbox-cli connect` (each still needs approval). */
   pairingEnabled: boolean;
+  /**
+   * The MCP broker's upstream connections (docs/MCP-BROKER.md): the Connections page, connection access on agents,
+   * `mcp.call` approvals and first run with Google optional. On by default since the console shipped (M1 PR 8).
+   */
+  brokerUpstreams: boolean;
 }
 
 export interface GoogleClientConfig {
