@@ -28,6 +28,7 @@ import {
   draftControl,
   draftProblems,
   draftUrl,
+  duplicateOf,
   emptyDraft,
   grantedScopesView,
   presetServerSlug,
@@ -199,6 +200,31 @@ describe("T3 Code in the console: a user-named server, expiry and granted scopes
     // The create body carries the preset, the address (path added) and a typed name.
     expect(createInput(ready)).toEqual({ preset: "t3code", url: "http://100.104.249.49:3773/mcp", slug: "t3-100-104-249-49", levelDefault: "ask" });
     expect(createInput({ ...ready, name: "forge" }).name).toBe("forge");
+  });
+
+  it("a second T3 server on the same IP (another port) or first DNS label: its own slug, no false 'you already have'", () => {
+    const first = conn({ id: "con_a", preset: "t3code", slug: "t3-127-0-0-1", name: "127.0.0.1:41063", url: "http://127.0.0.1:41063/mcp" });
+    const list = [first, conn({ id: "con_n", preset: "notion", slug: "notion" })];
+    const taken = list.map((c) => c.slug);
+    const second = { ...emptyDraft(t3), url: "http://127.0.0.1:41987" };
+    // Not a duplicate: another port is another server, so no "Reconnect 127.0.0.1:41063" offer.
+    expect(duplicateOf(second, list)).toBeNull();
+    // The suggested slug skips the taken one, like the server's freeSlug; a third gets -3.
+    const slug = suggestDraftSlug(second, taken);
+    expect(slug).toBe("t3-127-0-0-1-2");
+    expect(suggestDraftSlug(second, [...taken, slug])).toBe("t3-127-0-0-1-3");
+    expect(suggestDraftSlug({ ...emptyDraft(t3), url: "http://forge.local:3773" }, ["t3-forge"])).toBe("t3-forge-2");
+    // With it, the create body (the early create for the allow) doesn't collide, and nothing blocks Connect.
+    const ready = { ...second, slug, probe: probe({ auth: "oauth", issuer: "http://127.0.0.1:41987", registration: "dcr", refresh: false }) };
+    expect(createInput(ready)).toMatchObject({ preset: "t3code", url: "http://127.0.0.1:41987/mcp", slug: "t3-127-0-0-1-2" });
+    expect(draftProblems(ready, taken)).toEqual([]);
+    expect(defaultName(ready)).toBe("127.0.0.1:41987");
+    // The same server again (same origin, with or without /mcp) is a duplicate, and offers that one.
+    expect(duplicateOf({ ...emptyDraft(t3), url: "http://127.0.0.1:41063/" }, list)?.id).toBe("con_a");
+    // …but never the connection this dialog created itself for the allow.
+    expect(duplicateOf({ ...emptyDraft(t3), url: "http://127.0.0.1:41063", createdId: "con_a" }, list)).toBeNull();
+    // Other presets still match on preset and slug.
+    expect(duplicateOf({ ...emptyDraft(notion), slug: "notion" }, list)?.id).toBe("con_n");
   });
 
   it("an expired connection says so and offers Reconnect", () => {

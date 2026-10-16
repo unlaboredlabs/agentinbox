@@ -38,6 +38,7 @@ import {
   probeSummary,
   slugProblem,
   suggestDraftSlug,
+  duplicateOf,
 } from "./connection-flow";
 
 interface Request {
@@ -206,7 +207,7 @@ export function AddConnectionHost() {
               draft={draft}
               set={set}
               taken={taken}
-              existing={draft.preset ? (connections.data ?? []).find((c) => c.preset === draft.preset!.id && c.slug === draft.slug) ?? null : null}
+              existing={duplicateOf(draft, connections.data ?? [])}
               onReuse={(c) => {
                 onOpenChange(false);
                 startConnect(c);
@@ -309,7 +310,7 @@ function SetupPage({
   const stepIssues = draft.preset ? inputProblems(draft.preset.setupSteps, draft.inputs) : {};
   const probed = needsProbe(draft);
   const ready = !probed || (!!draft.probe && control?.kind !== "private");
-  const probeForm = <ProbeForm draft={draft} set={set} created={created} onCreated={onCreated} onDropCreated={onDropCreated} />;
+  const probeForm = <ProbeForm draft={draft} set={set} taken={taken} created={created} onCreated={onCreated} onDropCreated={onDropCreated} />;
   // A user-named server (T3 Code): the address field sits in the step that explains it.
   const inStep = !!draft.preset?.userServer && !!draft.preset.setupSteps.some((s) => s.id === "server");
   return (
@@ -319,7 +320,11 @@ function SetupPage({
           <PlugIcon />
           <AlertTitle>You already have {existing.name}</AlertTitle>
           <AlertDescription className="space-y-3">
-            <p>Use it again: reconnecting signs in anew and keeps its access settings. To add a second one, give it another short name below.</p>
+            <p>
+              {draft.preset?.userServer
+                ? `${existing.name} is this same server (${hostPort(existing.url ?? "")}). Reconnecting signs in anew and keeps its access settings. For another server, enter its address instead.`
+                : "Use it again: reconnecting signs in anew and keeps its access settings. To add a second one, give it another short name below."}
+            </p>
             <Button size="sm" onClick={() => onReuse(existing)}>
               Reconnect {existing.name}
             </Button>
@@ -401,25 +406,28 @@ function SetupPage({
 function ProbeForm({
   draft,
   set,
+  taken,
   created,
   onCreated,
   onDropCreated,
 }: {
   draft: ConnectionDraft;
   set: (p: Partial<ConnectionDraft>) => void;
+  /** Slugs in use: the suggestion skips them (a second server on the same IP gets -2). */
+  taken: readonly string[];
   created: ConnectionView | null;
   onCreated: (c: ConnectionView) => void;
   onDropCreated: () => void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
-  const probe = async (connectionId?: string) => {
+  const probe = async (connectionId?: string, slug?: string) => {
     setPending(true);
     setError(undefined);
     try {
       const url = draftUrl(draft);
       const r = await api<ConnectionProbe>("/api/connections/probe", { body: { url, ...(connectionId ? { connectionId } : {}) } });
-      set({ probe: r, slug: draft.slug || suggestDraftSlug(draft) });
+      set({ probe: r, slug: slug ?? (draft.slug || suggestDraftSlug(draft, taken)) });
     } catch (err) {
       setError(err);
       set({ probe: null });
@@ -432,13 +440,13 @@ function ProbeForm({
     setPending(true);
     setError(undefined);
     try {
-      const slug = draft.slug || suggestDraftSlug(draft) || "local";
+      const slug = draft.slug || suggestDraftSlug(draft, taken) || "local";
       // No grants until the user picks access (Connect sets them): nothing can reach an allowed private host before.
       const c = created ?? (await api<ConnectionView>("/api/connections", { body: { ...createInput({ ...draft, slug }), agentIds: [] } }));
       onCreated(await api<ConnectionView>(`/api/connections/${enc(c.id)}/private-target`, { method: "PUT", body: { allow: true } }));
       set({ createdId: c.id, privateAllowed: true, slug });
       setPending(false);
-      await probe(c.id);
+      await probe(c.id, slug);
     } catch (err) {
       setError(err);
       setPending(false);
@@ -464,7 +472,8 @@ function ProbeForm({
               placeholder={draft.preset?.userServer ? "http://100.101.102.103:3773" : "https://mcp.example.com/mcp"}
               value={draft.url}
               disabled={!!created}
-              onChange={(e) => set({ url: e.target.value, probe: null })}
+              // A user-named server's suggested slug follows its address (until typed by hand).
+              onChange={(e) => set({ url: e.target.value, probe: null, ...(draft.preset?.userServer && !draft.slugEdited ? { slug: "" } : {}) })}
             />
             <Button type="submit" variant="outline" disabled={!draft.url.trim() || pending}>
               {pending ? <Spinner /> : <SearchIcon />} Check

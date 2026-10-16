@@ -248,9 +248,32 @@ export function defaultName(d: Pick<ConnectionDraft, "preset" | "url">): string 
 }
 
 /** The slug suggested once the address is checked: `<preset>-<host>` for a user-named server, else from the host. */
-export function suggestDraftSlug(d: Pick<ConnectionDraft, "preset" | "url">): string {
+export function suggestDraftSlug(d: Pick<ConnectionDraft, "preset" | "url">, taken: readonly string[] = []): string {
   const url = draftUrl(d);
-  return d.preset?.userServer ? presetServerSlug(d.preset.slug, url) : suggestSlug(url);
+  const base = d.preset?.userServer ? presetServerSlug(d.preset.slug, url) : suggestSlug(url);
+  if (!base || !taken.includes(base)) return base;
+  // Free like the server's freeSlug: a second server on the same IP or first DNS label gets -2, -3…
+  const root = base.slice(0, 20).replace(/-+$/, "");
+  for (let n = 2; ; n++) if (!taken.includes(`${root}-${n}`)) return `${root}-${n}`;
+}
+
+/**
+ * The connection this draft would duplicate, offered as "Reconnect it instead": for a user-named server (T3 Code) the
+ * one of that preset at the same `scheme://host:port`, for other presets the one with that preset and slug. Never the
+ * connection this dialog created itself (for the private-network allow).
+ */
+export function duplicateOf<C extends Pick<ConnectionView, "id" | "preset" | "slug" | "url">>(
+  d: Pick<ConnectionDraft, "preset" | "url" | "slug" | "createdId">,
+  connections: readonly C[],
+): C | null {
+  const p = d.preset;
+  if (!p) return null;
+  const others = connections.filter((c) => c.preset === p.id && c.id !== d.createdId);
+  if (p.userServer) {
+    const origin = d.url.trim() ? exactOrigin(draftUrl(d)) : null;
+    return origin ? (others.find((c) => c.url && exactOrigin(c.url) === origin) ?? null) : null;
+  }
+  return others.find((c) => c.slug === d.slug) ?? null;
 }
 
 /** The draft's MCP URL: a preset's fixed one, a user-named server's (path added), or the custom URL as typed. */
