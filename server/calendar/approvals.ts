@@ -4,7 +4,7 @@
 // a failed attempt the same way.
 
 import { randomUUID } from "node:crypto";
-import type { Approval, CalendarApprovalDetail, CalendarEventInput, CalendarResponseStatus, Grant } from "../../shared/types.ts";
+import type { Approval, CalendarApprovalDetail, CalendarEventInput, CalendarResponseStatus, GoogleApproval, Grant } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import type { CalendarAttendeeRaw, CalendarClient, CalendarDateTimeRaw, CalendarEventRaw } from "../google/calendar.ts";
 import { classifyCalendarError } from "../google/calendar.ts";
@@ -249,7 +249,7 @@ export function addedAttendees(change: CalendarEventInput, before: string[], sel
 }
 
 /** The stored change, when it has everything its kind needs (else applying fails for good). */
-function wellFormed(a: Approval): { kind: CalendarWriteKind; d: CalendarApprovalDetail & { eventId: string } } | null {
+function wellFormed(a: GoogleApproval): { kind: CalendarWriteKind; d: CalendarApprovalDetail & { eventId: string } } | null {
   const kind = writeKindOf(a.kind);
   const d = a.calendar;
   if (!kind || !d || typeof d.calendarId !== "string" || !d.calendarId || !d.change || typeof d.eventId !== "string" || !d.eventId) return null;
@@ -260,11 +260,11 @@ function wellFormed(a: Approval): { kind: CalendarWriteKind; d: CalendarApproval
 }
 
 export function createCalendarApprovals(ctx: AppContext): CalendarApprovals {
-  const selfEmail = (a: Approval) => ctx.accounts.get(a.accountId)?.email ?? a.accountEmail;
+  const selfEmail = (a: GoogleApproval) => ctx.accounts.get(a.accountId)?.email ?? a.accountEmail;
   const markAttempt = (id: string) => ctx.db.run("UPDATE approvals SET payload = json_set(payload, '$.calendar.attemptedAt', ?) WHERE id = ?", now(), id);
 
   /** Applies the change, or finds that an earlier attempt already did. */
-  async function apply(a: Approval, kind: CalendarWriteKind, d: CalendarApprovalDetail & { eventId: string }): Promise<void> {
+  async function apply(a: GoogleApproval, kind: CalendarWriteKind, d: CalendarApprovalDetail & { eventId: string }): Promise<void> {
     const client = ctx.google.calendar(a.accountId);
     const attemptedBefore = !!d.attemptedAt;
     const grant = ctx.policy.grant(a.agentId, a.accountId);
