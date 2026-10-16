@@ -259,6 +259,11 @@ describe("classification", () => {
     ["create_draft", { description: "x" }, null, { risky: false, read: false, source: "heuristic" }],
     ["schedule_draft_message", { description: "x" }, null, { risky: false, read: false, source: "heuristic" }],
     ["send_draft", { description: "x" }, null, { risky: true, read: false, source: "heuristic" }],
+    // A draft BEFORE the send doesn't cancel it.
+    ["drafts_send", { description: "x" }, null, { risky: true, read: false, source: "heuristic" }],
+    ["gmail_users_drafts_send", { description: "x" }, null, { risky: true, read: false, source: "heuristic" }],
+    ["draft_and_send_email", { description: "x" }, null, { risky: true, read: false, source: "heuristic" }],
+    ["draft_schedule_message", { description: "x" }, null, { risky: true, read: false, source: "heuristic" }],
     // Server prefixes: notion-get-page and slack_list_channels are reads; a verb first isn't a prefix.
     ["notion-get-page", { description: "x" }, null, { risky: false, read: true, source: "heuristic" }],
     ["slack_list_channels", { description: "Lists channels" }, null, { risky: false, read: true, source: "heuristic" }],

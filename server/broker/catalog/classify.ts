@@ -78,14 +78,15 @@ const isDraft = (w: string) => w === "draft" || w === "drafts";
  * Risky by name:
  * - a risky verb token, except the one immediately after a leading read verb (get_post);
  * - `schedule` plus a messaging noun (slack_schedule_message);
- * - a `draft` token cancels `send` and `schedule` risk (slack_send_message_draft, create_draft), except right after
- *   `send` (send_draft sends the draft).
+ * - a `draft` token AFTER a `send` or `schedule` token cancels that token's risk (slack_send_message_draft,
+ *   schedule_draft_message), except directly after `send` (send_draft sends the draft). A draft before it doesn't
+ *   (drafts_send, draft_and_send_email send).
  */
 function riskyName(core: string[]): boolean {
-  const drafted = core.some((w, i) => isDraft(w) && core[i - 1] !== "send");
+  const draftAfter = (i: number, gap: number) => core.some((w, j) => j >= i + gap && isDraft(w));
   const readFirst = READ_PREFIXES.has(core[0] ?? "");
-  const verb = core.some((w, i) => RISKY_VERBS.has(w) && !(readFirst && i === 1) && !(drafted && w === "send"));
-  const scheduled = !drafted && core.includes("schedule") && core.some((w) => SCHEDULE_NOUNS.has(w));
+  const verb = core.some((w, i) => RISKY_VERBS.has(w) && !(readFirst && i === 1) && !(w === "send" && draftAfter(i, 2)));
+  const scheduled = core.some((w, i) => w === "schedule" && !draftAfter(i, 1)) && core.some((w) => SCHEDULE_NOUNS.has(w));
   return verb || scheduled;
 }
 
