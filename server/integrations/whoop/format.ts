@@ -76,7 +76,8 @@ export function sleepText(s: Sleep): string {
   parts.push(`${st.sleep_cycle_count} sleep cycles, ${st.disturbance_count} disturbances`);
   const need = sc.sleep_needed;
   if (need) {
-    const total = need.baseline_milli + need.need_from_sleep_debt_milli + need.need_from_recent_strain_milli - need.need_from_recent_nap_milli;
+    // WHOOP: the need is the sum of the components; need_from_recent_nap_milli is already zero or negative.
+    const total = need.baseline_milli + need.need_from_sleep_debt_milli + need.need_from_recent_strain_milli + need.need_from_recent_nap_milli;
     parts.push(`sleep needed ${duration(Math.max(0, total))}`);
   }
   return parts.join("; ");

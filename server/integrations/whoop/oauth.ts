@@ -3,11 +3,19 @@
 // single-use, so the TokenRefresher's compare-and-swap must save each new one before it's used.
 
 import { type RefreshFn, SourceError, type StoredTokens } from "../../broker/types.ts";
-import { WHOOP_AUTHORIZE_URL, WHOOP_SCOPES, WHOOP_TOKEN_URL, retryAfterMs } from "./api.ts";
+import { PATHS, type Profile, WHOOP_AUTHORIZE_URL, WHOOP_SCOPES, WHOOP_TOKEN_URL, apiGet, retryAfterMs } from "./api.ts";
 
 /** Setup input keys holding the user's app credentials; the client record (CredentialStore.client) uses the same keys. */
 export const CLIENT_ID_INPUT = "client_id";
 export const CLIENT_SECRET_INPUT = "client_secret";
+/** Client-record key for the WHOOP member this connection belongs to (from the profile at connect). */
+export const WHOOP_USER_ID_KEY = "whoop_user_id";
+
+/** The connection's WHOOP user id from the stored client record, as a string; null when it was never stored. */
+export function whoopUserIdFrom(record: Record<string, unknown> | null | undefined): string | null {
+  const v = record?.[WHOOP_USER_ID_KEY];
+  return (typeof v === "number" && Number.isSafeInteger(v)) || (typeof v === "string" && /^\d{1,20}$/.test(v)) ? String(v) : null;
+}
 
 export interface WhoopClient {
   clientId: string;
@@ -52,8 +60,16 @@ export interface WhoopOAuthConnection {
   client: Record<string, unknown> | null;
 }
 
-/** Exchanges the callback's `code` for tokens. The caller saves them (CredentialStore.saveTokens). */
-export async function exchangeCode(code: string, connection: WhoopOAuthConnection, opts: OAuthOptions = {}): Promise<StoredTokens> {
+/**
+ * Exchanges the callback's `code` for tokens and records which WHOOP member connected (the profile's user_id), so
+ * webhooks from other members of the same app are dropped. The caller saves both:
+ * `store.saveTokens(id, tokens)` and `store.setClient(id, client)`.
+ */
+export async function exchangeCode(
+  code: string,
+  connection: WhoopOAuthConnection,
+  opts: OAuthOptions = {},
+): Promise<{ tokens: StoredTokens; client: Record<string, unknown> }> {
   const client = whoopClientFrom(connection.client);
   if (!client) throw new SourceError("needs_reauth", "The WHOOP app's client ID and secret are missing: enter them again");
   const tokens = await tokenRequest(
@@ -63,7 +79,12 @@ export async function exchangeCode(code: string, connection: WhoopOAuthConnectio
   if (!tokens.refreshToken) {
     throw new SourceError("protocol", "WHOOP sent no refresh token: the offline scope wasn't granted. Reconnect and approve every scope.");
   }
-  return tokens;
+  const signal = opts.signal ?? AbortSignal.timeout(30_000);
+  const profile = await apiGet<Profile>({ fetch: opts.fetch ?? fetch, accessToken: async () => tokens.accessToken }, PATHS.profile, {}, signal);
+  if (!profile || !Number.isSafeInteger(profile.user_id)) {
+    throw new SourceError("protocol", "WHOOP didn't return the member's profile: reconnect and approve every scope, including profile.");
+  }
+  return { tokens, client: { ...connection.client, [WHOOP_USER_ID_KEY]: profile.user_id } };
 }
 
 /** The provider exchange for TokenRefresher. Single-use refresh tokens: the response's refresh token replaces the old one. */

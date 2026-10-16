@@ -7,7 +7,7 @@ import { CLIENT_ID_INPUT, CLIENT_SECRET_INPUT } from "./oauth.ts";
 import { whoopSetupSteps } from "./setup.ts";
 import { createWhoopSource } from "./tools.ts";
 
-export { authorizeUrl, checkClient, exchangeCode, whoopClientFrom, whoopRefreshFn } from "./oauth.ts";
+export { WHOOP_USER_ID_KEY, authorizeUrl, checkClient, exchangeCode, whoopClientFrom, whoopRefreshFn, whoopUserIdFrom } from "./oauth.ts";
 export type { WhoopClient, WhoopOAuthConnection } from "./oauth.ts";
 
 export interface WhoopPresetOptions {

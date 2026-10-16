@@ -10,6 +10,9 @@ import type { Logger } from "../util/log.ts";
 export const CONNECTION_HOOKS_PREFIX = "/hooks/connections";
 /** WHOOP's payloads are four small fields. */
 export const CONNECTION_HOOK_BODY_LIMIT = 16 * 1024;
+/** Longer than any preset's signature tolerance (WHOOP: 2 h), so an accepted replay is still remembered. */
+export const HOOK_DEDUPE_TTL_MS = 3 * 3_600_000;
+const HOOK_DEDUPE_MAX = 2_000;
 
 /** The inbound webhook URL for a connection, given the install's public URL. */
 export const connectionHookUrl = (publicUrl: string, connectionId: string) =>
@@ -18,11 +21,17 @@ export const connectionHookUrl = (publicUrl: string, connectionId: string) =>
 /** What the broker provides to the route (implemented where connections and the credential store live). */
 export interface ConnectionHookHost {
   /**
-   * The connection's preset, source deps and client secret; null when the connection doesn't exist, is disabled or
-   * needs re-auth, or has no client secret.
+   * The connection's preset, source deps, client secret and stored client record (CredentialStore.client: WHOOP keeps
+   * the connected member's `whoop_user_id` there); null when the connection doesn't exist, is disabled or needs
+   * re-auth, or has no client secret.
    */
-  webhookTarget(connectionId: string): { preset: IntegrationPreset; deps: NativeSourceDeps; clientSecret: string } | null;
-  /** Into the events outbox (deduped on dedupeKey). */
+  webhookTarget(connectionId: string): {
+    preset: IntegrationPreset;
+    deps: NativeSourceDeps;
+    clientSecret: string;
+    client: Record<string, unknown> | null;
+  } | null;
+  /** Into the events outbox (deduped on dedupeKey). Throwing makes the route answer 500, so the provider retries. */
   emit(events: IntegrationEvent[]): void;
 }
 
@@ -30,10 +39,35 @@ export interface ConnectionHookHost {
 export const brokerUpstreamsOn = (settings: Pick<SettingsStore, "get">): boolean =>
   (settings.get() as { brokerUpstreams?: unknown }).brokerUpstreams === true;
 
+/** Recently emitted dedupe keys per connection (providers deliver an event more than once). */
+class Seen {
+  private readonly byConnection = new Map<string, Map<string, number>>();
+  constructor(private readonly now: () => number) {}
+
+  has(connectionId: string, key: string): boolean {
+    const at = this.byConnection.get(connectionId)?.get(key);
+    return at !== undefined && this.now() - at < HOOK_DEDUPE_TTL_MS;
+  }
+
+  mark(connectionId: string, key: string): void {
+    let seen = this.byConnection.get(connectionId);
+    if (!seen) this.byConnection.set(connectionId, (seen = new Map()));
+    const t = this.now();
+    seen.delete(key);
+    seen.set(key, t);
+    // Oldest first (insertion order): drop expired entries and anything over the cap.
+    for (const [k, v] of seen) {
+      if (seen.size <= HOOK_DEDUPE_MAX && t - v < HOOK_DEDUPE_TTL_MS) break;
+      seen.delete(k);
+    }
+  }
+}
+
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-export function connectionHookRoutes(opts: { enabled: () => boolean; host: () => ConnectionHookHost | null; log: Logger }) {
+export function connectionHookRoutes(opts: { enabled: () => boolean; host: () => ConnectionHookHost | null; log: Logger; now?: () => number }) {
   const app = new Hono();
+  const seen = new Seen(opts.now ?? Date.now);
   app.post(`${CONNECTION_HOOKS_PREFIX}/:id`, async (c) => {
     const id = c.req.param("id");
     const host = opts.enabled() ? opts.host() : null;
@@ -45,9 +79,15 @@ export function connectionHookRoutes(opts: { enabled: () => boolean; host: () =>
     c.req.raw.headers.forEach((v, k) => {
       headers[k] = v;
     });
+    // The contract's deps plus the client record (additive; presets that don't need it ignore it).
+    const deps: NativeSourceDeps & { clientSecret: string; client: Record<string, unknown> | null } = {
+      ...target.deps,
+      clientSecret: target.clientSecret,
+      client: target.client,
+    };
     let events: IntegrationEvent[] | null;
     try {
-      events = await handle({ headers, rawBody }, { ...target.deps, clientSecret: target.clientSecret });
+      events = await handle({ headers, rawBody }, deps);
     } catch (err) {
       opts.log.warn("connection webhook failed", { connectionId: id, error: (err as Error).message });
       return c.body(null, 500);
@@ -56,8 +96,17 @@ export function connectionHookRoutes(opts: { enabled: () => boolean; host: () =>
       opts.log.warn("connection webhook: bad signature", { connectionId: id });
       return c.body(null, 401);
     }
-    const own = events.filter((e) => e.connectionId === id);
-    if (own.length) host.emit(own);
+    const fresh = events.filter((e) => e.connectionId === id && !seen.has(id, e.dedupeKey));
+    if (fresh.length) {
+      try {
+        host.emit(fresh);
+      } catch (err) {
+        // Not marked as seen: the provider's retry gets another chance.
+        opts.log.warn("connection webhook: emit failed", { connectionId: id, error: (err as Error).message });
+        return c.body(null, 500);
+      }
+      for (const e of fresh) seen.mark(id, e.dedupeKey);
+    }
     return c.body(null, 204);
   });
   return app;

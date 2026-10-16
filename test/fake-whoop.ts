@@ -107,7 +107,8 @@ export class FakeWhoop {
             sleep_cycle_count: 4,
             disturbance_count: 3,
           },
-          sleep_needed: { baseline_milli: 8 * HOUR, need_from_sleep_debt_milli: 20 * 60_000, need_from_recent_strain_milli: 10 * 60_000, need_from_recent_nap_milli: 0 },
+          // Yesterday's sleep came after a nap: WHOOP reports the nap credit as a negative need.
+          sleep_needed: { baseline_milli: 8 * HOUR, need_from_sleep_debt_milli: 20 * 60_000, need_from_recent_strain_milli: 10 * 60_000, need_from_recent_nap_milli: i === 1 ? -45 * 60_000 : 0 },
           respiratory_rate: 15.2,
           sleep_performance_percentage: 88,
           sleep_consistency_percentage: 79,
