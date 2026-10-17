@@ -439,3 +439,48 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - The CLI prints "Enter your T3 Code server's address" even after `--url`.
 - A CLI t3code add interrupted during sign-in leaves a "not signed in" connection; re-running gives a 409. Point to `connections reconnect`.
 - T3 default connection name is `host:port`; "T3 Code (host:port)" would read clearer (one line server + console).
+
+## Extensions round (Oct 2026: #79–#82, xaq-extensions #1–#4)
+
+### Store and supply chain (#81)
+- The scrubbed git env drops `SSH_AUTH_SOCK`, `HTTPS_PROXY`, `SSL_CERT_FILE`/`GIT_SSL_CAINFO`: private ssh repos and proxied networks can't install. Consider passing those through.
+- `git fetch` has no disk cap; the timeout kills only `git`, not `git-remote-https`/`ssh` children.
+- A 40-hex ref skips the GitHub API, so a fork-only sha is shown under the typed owner/repo: say "may belong to a fork".
+- Registry index and GitHub API bodies are read in full before the size check.
+- `fetchLocal`: a file swapped for a symlink/FIFO between `lstat` and read; directories aren't counted toward a cap.
+- Refused install attempts (`changed`, `third_party_unconfirmed`, `integrity_mismatch`) aren't audited; an identical reinstall is audited as an install.
+- The CLI admin channel times out at 120 s while a slow git install continues on the daemon.
+- `COMMIT_RE` is 40-hex only (SHA-256 git repos fail unclearly); GitHub ref splitting picks the shortest prefix (tag `x` over branch `x/y`).
+- `connections rename --slug " x"` compares before trimming.
+- Read-only install dirs make a plain `rm -rf ~/.xaq` fail; document it.
+- xaq-extensions CI runs the PR's own `build-index.mjs`: put `scripts/` and `.github/` under CODEOWNERS or run the check from the base. A push-to-main base check only catches a bad pin after merge.
+- `text`/`eol=crlf`/`ident` attributes also change tarball bytes (fails closed); `validate.mjs` could refuse them.
+- `ext update` doesn't print the source/ref it follows; the local-dir update diff shows a meaningless commit row; a third-party GitHub add fetches twice (2 of 60 API calls/hour).
+- The console "Add from URL" placeholder could mention registry names.
+
+### Manifests and migration (#80)
+- Unique names have no unique index (concurrent creates race).
+- `{{` in an https link (`https://{{publicUrl}}`) is accepted and renders oddly.
+- A manifest `input.pattern` compiles in the admin's browser: a catastrophic regex can freeze the tab.
+- `built` preset cache in `integrations/index.ts` isn't pruned on remove/update; `relist` runs twice after a pinned install.
+
+### Code-extension host (#82)
+- Re-check `CODE_EXTENSION_NODE_FLOOR` after Node's Oct 21, 2026 security release (rated High on all lines).
+- With `TRUST_PROXY`, a child connecting over loopback can forge `X-Forwarded-For` (same as any local process): document it.
+- `user_app` token/authorize requests use global `fetch` (no private-address guard); the exchange accepts a grant with no refresh token (fails only at first expiry); `xaq/credentials/get` isn't rate-limited.
+- The in-flight cap of 8 is shared by tool calls and prompts/resources fan-out.
+- `EVENT_TYPE_RE` allows a 24-character prefix while names can be 32.
+- Template expansion decodes `%2F`/`%25` in variable values; worth a test.
+- Code connections marked `error` aren't in `runtime.start()`'s refresh tracking.
+- `void reloadExtension(name)`-style calls should `.catch`.
+- `/connect` right after creating a code connection kills the child mid-listing (heals on callback); a new code connection is `active` and spawns before sign-in.
+- After an integrity failure, `ext add`/`ext update` say "installed"/"up to date" (DB integrity, not files): the only way out is a forced remove + add. The agent is told "may or may not have run" though the child never started.
+- Unreachable WHOOP-era webhook code remains in core (`server/integrations/hooks.ts`, `server/broker/reachability.ts`, `server/app.ts`); the `https_localhost` redirect mode is never wired.
+- Registry-unreachable message only shows from Get started → Notion, not from Connections → Add; it uses the id ("notion"), not the display name.
+
+### WHOOP extension (xaq-extensions #3)
+- Records cached more than ~8 days back are only re-checked by the weekly rebuild or `sync_now` (deletions, re-scores, late edits).
+- An incremental load finishing after a background rebuild can overwrite the newer `builtAt` (extra requests, no data loss).
+- `sync_now` on a cold start can exceed the host's 60 s; a cold load over a year of history is ~50 s.
+- Fixtures lack DST, workouts across midnight, two main sleeps in one cycle, and records edited between warm loads.
+- Tool descriptions and server instructions still mention "the dashboard" (kept verbatim for `tools/list` parity).
