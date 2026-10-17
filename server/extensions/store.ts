@@ -15,6 +15,7 @@ import type { Logger } from "../util/log.ts";
 import { computeIntegrity, integrityDirName, IntegrityError } from "./integrity.ts";
 import { defaultExtensionUrls, EXTENSION_NAME_RE, type ExtensionUrls, fetchIndex, OFFICIAL_NAMES, OFFICIAL_OWNER, OFFICIAL_REPO, type RegistryEntry, type RegistryIndex } from "./registry.ts";
 import { type FetchDeps, fetchGit, fetchGithubTarball, fetchLocal, fetchOfficial, parseSource, resolveGithubTree, SourceError, type SourceSpec } from "./sources.ts";
+import { type Manifest, ManifestError, validateManifest } from "./manifest.ts";
 import { type ExtractLimits, UnsafeArchiveError } from "./tar.ts";
 
 export interface InstalledExtension {
@@ -46,6 +47,8 @@ export interface ExtensionStore {
   resolve(source: string): Promise<{ candidate: InstalledExtension; warnings: string[] }>; // fetch + verify, no install
   install(source: string, opts: { confirmThirdParty: boolean; expectIntegrity?: string }): Promise<InstalledExtension>;
   installPinned(pin: ExtensionPin): Promise<InstalledExtension>; // official repo at that commit
+  /** An installed official extension swapped for its pinned build: fetched and verified first, then swapped (B2: broken installs). */
+  replacePinned(pin: ExtensionPin): Promise<InstalledExtension>;
   /** Without `confirm`, the would-be update ({from, to}) and nothing installed; with it, installed. null: up to date. */
   update(name: string, opts: { confirm: boolean; expectIntegrity?: string }): Promise<{ from: InstalledExtension; to: InstalledExtension } | null>;
   remove(name: string, opts: { force: boolean }): Promise<void>; // async (queued with install and update), per the #81 review
@@ -102,25 +105,22 @@ export interface ManifestFacts {
   remoteUrl: string | null;
 }
 
-// B2: replace the body with `validateManifest(raw)` from server/extensions/manifest.ts (schema 1, unknown keys
-// rejected) and derive the facts from its result. Until then, this minimal check is the only one.
+/** The manifest, checked by validateManifest (server/extensions/manifest.ts: schema 1, unknown keys rejected). */
 export function checkManifest(raw: unknown): ManifestFacts {
-  const m = raw as Record<string, unknown> | null;
-  if (!m || typeof m !== "object" || Array.isArray(m)) throw new ExtensionError("invalid", `${MANIFEST_FILE} isn't a JSON object.`);
-  if (m.schema !== 1) throw new ExtensionError("invalid", `${MANIFEST_FILE} must have "schema": 1.`);
-  if (typeof m.name !== "string" || !EXTENSION_NAME_RE.test(m.name)) throw new ExtensionError("invalid", `${MANIFEST_FILE}'s name must be 1-32 lowercase letters, digits or dashes.`);
-  if (m.kind !== "remote" && m.kind !== "code") throw new ExtensionError("invalid", `${MANIFEST_FILE}'s kind must be "remote" or "code".`);
-  if (typeof m.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(m.version)) throw new ExtensionError("invalid", `${MANIFEST_FILE}'s version must be semver.`);
-  const code = (m.code ?? {}) as { network?: unknown };
-  const network = Array.isArray(code.network) ? code.network.filter((h): h is string => typeof h === "string").slice(0, 50) : [];
-  const remote = (m.remote ?? {}) as { url?: unknown };
+  let m: Manifest;
+  try {
+    m = validateManifest(raw);
+  } catch (err) {
+    if (err instanceof ManifestError) throw new ExtensionError("invalid", err.message);
+    throw err;
+  }
   return {
     name: m.name,
     kind: m.kind,
     version: m.version,
-    displayName: typeof m.displayName === "string" && m.displayName ? m.displayName : m.name,
-    network: m.kind === "code" ? network : [],
-    remoteUrl: m.kind === "remote" && typeof remote.url === "string" ? remote.url : null,
+    displayName: m.displayName,
+    network: m.code?.network ?? [],
+    remoteUrl: m.remote?.url ?? null,
   };
 }
 
@@ -140,8 +140,9 @@ export function thirdPartyWarning(ext: Pick<InstalledExtension, "official" | "so
     lines.push("Kind: code. This code runs on your machine with network access. Node's permission model limits its files, but not the network.");
     lines.push(f.network.length ? `Declared network hosts: ${f.network.join(", ")} (declared by the extension, not enforced).` : "Declared network hosts: none (declared by the extension, not enforced).");
   } else {
-    lines.push(`Kind: remote. No code runs on your machine; xaq connects to ${f.remoteUrl ?? "the MCP server you name"}. Its risk map decides which tools ask you first.`);
+    lines.push(`Kind: remote. No code runs on your machine; xaq connects to ${f.remoteUrl ?? "the MCP server you name"}.`);
   }
+  lines.push("Its risk map can make tools stricter than xaq's own rules (ask before more of them), never looser.");
   return lines;
 }
 
@@ -289,6 +290,34 @@ export class SqliteExtensionStore implements ExtensionStore {
     });
   }
 
+  /**
+   * Replaces an installed official extension with its pinned build (a broken install, server/extensions/bootstrap.ts):
+   * the pinned build is fetched and verified before anything changes, then swapped in like an update. A failed fetch
+   * or a mismatch leaves the installed one as it was. Same name and kind; its connections stay bound.
+   */
+  replacePinned(pin: ExtensionPin): Promise<InstalledExtension> {
+    return this.serial(async () => {
+      const from = this.get(pin.name);
+      if (!from) throw new ExtensionError("not_found", `${pin.name} isn't installed.`);
+      if (!from.official) throw new ExtensionError("official_name", `${pin.name} is a third-party install; only an official one is replaced from a pin.`);
+      if (from.integrity === pin.integrity) return from;
+      const staged = await this.stageWith(pin.name, true, (dest) => fetchOfficial(pin.name, pin.commit, dest, this.deps));
+      try {
+        const to = staged.candidate;
+        if (to.integrity !== pin.integrity) {
+          throw new ExtensionError("integrity_mismatch", `${pin.name} at ${short(pin.commit)} has integrity ${to.integrity}, not the pinned ${pin.integrity}. Refusing to install it.`);
+        }
+        if (to.name !== from.name || to.kind !== from.kind) throw new ExtensionError("invalid", `${pin.name}'s pinned build is a different extension (${to.name}, ${to.kind}).`);
+        const installed = this.commit(staged, from);
+        this.opts.log?.info("Extension replaced by its pinned build", { name: pin.name, from: from.commit ?? from.integrity, to: installed.commit });
+        this.hooks.onChange?.({ from, to: installed });
+        return installed;
+      } finally {
+        this.discard(staged.work);
+      }
+    });
+  }
+
   update(name: string, opts: { confirm: boolean; expectIntegrity?: string }): Promise<{ from: InstalledExtension; to: InstalledExtension } | null> {
     const go = async () => {
       const from = this.get(name);
@@ -298,6 +327,8 @@ export class SqliteExtensionStore implements ExtensionStore {
         const to = staged.candidate;
         if (to.integrity === from.integrity) return null;
         if (to.name !== from.name) throw new ExtensionError("invalid", `${from.source} is now the extension "${to.name}", not "${from.name}".`);
+        // A kind change (remote ↔ code) would turn the same connections into a different thing: a new install instead.
+        if (to.kind !== from.kind) throw new ExtensionError("invalid", `${from.source} is now a ${to.kind} extension, not ${from.kind}. Remove ${name} and add it again.`);
         if (!opts.confirm) return { from, to };
         if (opts.expectIntegrity && opts.expectIntegrity !== to.integrity) {
           throw new ExtensionError("changed", `${name}'s update changed since it was shown (now ${to.version}, ${short(to.commit)}). Review it again.`, { candidate: to });

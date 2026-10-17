@@ -110,32 +110,23 @@ export function connectionStatusView(
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** T3 Code's scopes that only its Full access grants (server/integrations/t3code/tools.ts T3_FULL_ACCESS_SCOPES). */
-const T3_FULL_ACCESS_SCOPES = ["settings:write", "source-control:write"];
-
 /**
- * What the server granted with the current sign-in: the scopes and, for T3 Code, the access level they mean. null
- * when nothing is recorded (not OAuth, or not signed in).
+ * What the server granted with the current sign-in, and a warning when that includes scopes the connection's extension
+ * calls broad (its manifest's `remote.auth.broadScopes`: T3 Code's Full access). null when nothing is recorded (not
+ * OAuth, or not signed in).
  */
-export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "preset">): { scopes: string[]; note: string | null } | null {
+export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "broadScopes" | "scopeNotes" | "name">): { scopes: string[]; note: string | null } | null {
   if (!c.grantedScopes) return null;
   const scopes = c.grantedScopes;
-  if (c.preset !== "t3code") return { scopes, note: null };
-  if (scopes.some((s) => T3_FULL_ACCESS_SCOPES.includes(s))) {
-    return {
-      scopes,
-      note:
-        "Full access in T3: agents can also add and change projects, T3's settings and source control, and T3's browser preview runs in your browser profile with its saved logins. If they don't need that, reconnect and pick a lower level.",
-    };
-  }
-  if (scopes.includes("orchestration:operate")) {
-    return {
-      scopes,
-      note: "Agents can read, start, message and stop T3 threads. T3's browser preview runs in your browser profile on that computer, with its saved logins.",
-    };
-  }
-  if (scopes.includes("orchestration:read")) return { scopes, note: "Read only in T3: agents can read projects and threads, nothing more." };
-  return { scopes, note: null };
+  // The extension's own words first (T3: what its Full access, Supervised and Read only levels mean).
+  const noted = c.scopeNotes?.find((n) => scopes.includes(n.scope));
+  if (noted) return { scopes, note: noted.note };
+  const broad = scopes.filter((s) => c.broadScopes?.includes(s));
+  if (!broad.length) return { scopes, note: null };
+  return {
+    scopes,
+    note: `Broad access: this sign-in granted ${broad.join(", ")} on ${c.name}. If agents don't need that, reconnect and pick a lower level.`,
+  };
 }
 
 // ───────────── Agent access (adapter over per-connection grants) ─────────────
@@ -440,7 +431,10 @@ export function draftProblems(d: ConnectionDraft, taken: readonly string[]): str
   const control = draftControl(d);
   if (control?.kind === "private") out.push("Allow the private-network address, or use another one.");
   if (needsProbe(d) && d.probe && !d.probe.reachable && !d.probe.blocked) out.push("xaq couldn't reach this server.");
-  if (d.preset?.userServer && d.probe?.reachable && d.probe.auth !== "oauth") out.push(`This doesn't look like a ${d.preset.displayName} server: it doesn't ask for a sign-in.`);
+  // A user-named server must ask for what its extension says it does (T3 Code: a sign-in; Brightspace: a key).
+  if (d.preset?.userServer && d.probe?.reachable && d.probe.auth !== d.preset.authType && d.preset.authType !== "none") {
+    out.push(`This doesn't look like a ${d.preset.displayName} server: it doesn't ask for ${d.preset.authType === "oauth" ? "a sign-in" : "an API key or token"}.`);
+  }
   if (d.probe?.blocked === "ssrf") out.push("xaq can't connect to this address.");
   // Created early for the allow: its own slug isn't a clash.
   const slug = slugProblem(d.slug, d.createdId ? taken.filter((s) => s !== d.slug) : taken);

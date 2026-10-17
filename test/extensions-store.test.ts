@@ -180,7 +180,7 @@ describe("the extension store", () => {
   });
 
   it("third-party: a GitHub URL needs confirmation and gets the warning (kind, network hosts, runs on your machine)", async () => {
-    const files = { "xaq-extension.json": manifest("whoopish", { kind: "code", remote: undefined, code: { entry: "dist/server.mjs", network: ["api.example.com", "auth.example.com"] } }), "!dist/server.mjs": "export {}" };
+    const files = { "xaq-extension.json": manifest("whoopish", { kind: "code", remote: undefined, code: { entry: "dist/server.mjs", auth: { type: "none" }, network: ["api.example.com", "auth.example.com"] } }), "!dist/server.mjs": "export {}" };
     const dir = writeTree(join(work, "whoopish"), files);
     const sha = fakeSha("tp");
     gh.commit("someone", "exts", "feat/x", sha, entriesFromDir(dir, "pkg/whoopish"));
@@ -306,6 +306,46 @@ describe("the extension store", () => {
     writeFileSync(join(dir, "new.txt"), "n");
     expect((await store.update("devext", { confirm: false }))?.to.integrity).toBe(computeIntegrity(dir));
     await expect(store.update("missing", { confirm: false })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("replacePinned swaps an official install for its pinned build only after fetching and verifying it", async () => {
+    const v1 = publishOfficial("swapme");
+    const store = newStore();
+    await store.installPinned({ name: "swapme", commit: v1.sha, integrity: v1.integrity });
+    const v2 = publishOfficial("swapme", { "new.txt": "n" }, { version: "1.1.0", seed: "2" });
+    // Offline or a bad pin: nothing changes, the installed build stays (and its files).
+    const offline = await store.replacePinned({ name: "swapme", commit: fakeSha("not-pushed"), integrity: v2.integrity }).catch((e: unknown) => e);
+    expect(offline).toBeInstanceOf(ExtensionError);
+    expect(store.get("swapme")).toMatchObject({ commit: v1.sha, integrity: v1.integrity });
+    expect(readdirSync(join(dataDir, "extensions", "swapme"))).toEqual([integrityDirName(v1.integrity)]);
+    const wrong = await store.replacePinned({ name: "swapme", commit: v2.sha, integrity: v1.integrity.replace(/.$/, "x") }).catch((e: unknown) => e);
+    expect(code(wrong)).toBe("integrity_mismatch");
+    expect(store.get("swapme")).toMatchObject({ commit: v1.sha });
+    // A good pin: swapped in one step, like an update.
+    const changes: string[] = [];
+    store.setHooks({ onChange: (c) => changes.push(`${c.from?.version}->${c.to?.version}`) });
+    expect(await store.replacePinned({ name: "swapme", commit: v2.sha, integrity: v2.integrity })).toMatchObject({ version: "1.1.0", commit: v2.sha });
+    expect(changes).toEqual(["1.0.0->1.1.0"]);
+    expect(readdirSync(join(dataDir, "extensions", "swapme"))).toEqual([integrityDirName(v2.integrity)]);
+    // Only official installs, only installed ones.
+    const { dir } = extDir("tpswap");
+    await store.install(dir, { confirmThirdParty: true });
+    expect(code(await store.replacePinned({ name: "tpswap", commit: v2.sha, integrity: v2.integrity }).catch((e: unknown) => e))).toBe("official_name");
+    expect(code(await store.replacePinned({ name: "absent", commit: v2.sha, integrity: v2.integrity }).catch((e: unknown) => e))).toBe("not_found");
+  });
+
+  it("refuses an update that changes the kind (remote ↔ code): that's a remove and a new install", async () => {
+    const store = newStore();
+    const { dir } = extDir("kindext");
+    await store.install(dir, { confirmThirdParty: true });
+    writeFileSync(join(dir, "xaq-extension.json"), manifest("kindext", { kind: "code", remote: undefined, code: { entry: "s.mjs", auth: { type: "none" } } }));
+    writeFileSync(join(dir, "s.mjs"), "export {}");
+    for (const confirm of [false, true]) {
+      const err = await store.update("kindext", { confirm }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "invalid" });
+      expect((err as Error).message).toMatch(/now a code extension, not remote/);
+    }
+    expect(store.get("kindext")).toMatchObject({ kind: "remote" });
   });
 
   it("refuses an install over a different installed version (that's an update)", async () => {

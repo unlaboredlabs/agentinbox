@@ -42,8 +42,15 @@ key; the broker holds every upstream credential and lists only the tools the age
 [MCP-BROKER.md](MCP-BROKER.md).
 
 - **Add one**: in the console, Connections → Add connection; or `npx xaq-cli connections add notion|whoop|t3code|<url>`
-  on the daemon's machine. Presets: Notion (its hosted MCP, two clicks), WHOOP (your own WHOOP developer app; the
-  console walks you through it) and T3 Code (below). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
+  on the daemon's machine. Pre-made connections are **extensions** from
+  [wynn-dev/xaq-extensions](https://github.com/wynn-dev/xaq-extensions) ([EXTENSIONS.md](EXTENSIONS.md)): Notion
+  (its hosted MCP, two clicks), T3 Code (below) and Brightspace (your own
+  [Brightspace MCP server](https://github.com/wynn-dev/brightspace-mcp-server): its address and its bearer token;
+  every tool reads). WHOOP (your own WHOOP developer app; the console walks you through it) is still built in until
+  its extension ships. Connections made before extensions keep working as they are: xaq binds them to their
+  extension at startup and installs a missing one in the background, with no new sign-in. Until it's installed,
+  Notion and T3 Code connections keep the same rules and can still reconnect (core keeps a copy of those two
+  extensions' manifests for them). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
   WHOOP every 15 minutes for new recoveries, sleeps and workouts (`whoop.*` events).
   - **Optional webhooks:** they bring those events within seconds, and the 15-minute check keeps running as a
     reconciliation poll, so a webhook missed while the machine was asleep or offline still arrives. The setup offers
@@ -57,7 +64,7 @@ key; the broker holds every upstream credential and lists only the tools the age
     one-time pairing code: T3 → Settings → Connections, `t3 auth pairing create` on T3's machine, or the Token line
     `t3 serve` prints. Pick the least T3 access your agents need: Read only, or Supervised (Limited on older T3); Full
     access also lets agents add and change projects, T3's settings and source control. The connection shows the
-    scopes T3 granted. Names default to the server's `host:port` (editable; names are unique), slugs to
+    scopes T3 granted, and warns when they include Full access's `settings:write` or `source-control:write`. Names default to the server's `host:port` (editable; names are unique), slugs to
     `t3-<host>`. T3's sign-in lasts 30 days and can't be refreshed: xaq warns 7 days and 1 day before
     (`connection.expiring`, with a Reconnect link), and once it expires agents get "The T3 Code connection '<name>'
     expired; ask your user to reconnect it in xaq at <link>" instead of a failure. Reconnect takes a new pairing code

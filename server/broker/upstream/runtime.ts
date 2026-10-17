@@ -378,6 +378,7 @@ export class UpstreamRuntime {
     const full: PendingAuth = {
       ...pending,
       ...(o.reconnectPolicy?.maxLifetimeDays ? { capDays: o.reconnectPolicy.maxLifetimeDays } : {}),
+      ...(o.reconnectPolicy?.tokenLifetimeCapDays ? { tokenCapDays: o.reconnectPolicy.tokenLifetimeCapDays } : {}),
       // The server this sign-in is for: a URL edit before the callback makes it void.
       ...(conn.url ? { origin: originKey(conn.url) } : {}),
     };
@@ -475,6 +476,11 @@ export class UpstreamRuntime {
     if (tokens.refreshToken) {
       const cap = pending.capDays ? new Date(this.now() + pending.capDays * 86_400_000).toISOString() : null;
       this.ctx.db.run("UPDATE connections SET expires_at = ? WHERE id = ?", cap, connectionId);
+    } else if (pending.tokenCapDays) {
+      // No refresh: the credential dies with the access token (saveTokens), and never later than the preset's cap.
+      const cap = this.now() + pending.tokenCapDays * 86_400_000;
+      const at = tokens.expiresAt === null ? cap : Math.min(tokens.expiresAt, cap);
+      this.ctx.db.run("UPDATE connections SET expires_at = ? WHERE id = ?", new Date(at).toISOString(), connectionId);
     }
 
     this.store.markActive(connectionId);

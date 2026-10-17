@@ -58,6 +58,8 @@ export interface PendingAuth {
   issParameter: boolean;
   /** A preset reconnect cap in days (Notion: 180), applied when the sign-in completes. */
   capDays?: number;
+  /** A preset cap on a credential without a refresh token (T3 Code: 30 days), applied when the sign-in completes. */
+  tokenCapDays?: number;
   /** The connection URL's origin when the sign-in started: refused at finish if the URL changed since. */
   origin?: string;
 }

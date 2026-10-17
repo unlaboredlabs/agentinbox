@@ -1,27 +1,34 @@
-// T3 Code preset (server/integrations/t3code): the risk table keyed on T3's real tool names, the http-private-only
-// rule at every step of the OAuth flow, DCR/PKCE/iss against a T3-like fake, extra scopes, the 30-day expiry without
-// refresh (warnings, the expired state and the agent's message, Reconnect keeping grants and pins), and several T3
-// servers as separate, uniquely named connections. Offline: fakes on 127.0.0.1, fake DNS.
+// The T3 Code extension (xaq-extensions extensions/t3code, a fixture copy, through presetFromManifest): the risk table
+// keyed on T3's real tool names, the http-private-only rule at every step of the OAuth flow, DCR/PKCE/iss against a
+// T3-like fake, extra scopes, the 30-day expiry without refresh (warnings, the expired state and the agent's message,
+// Reconnect keeping grants and pins), and several T3 servers as separate, uniquely named connections. Offline: fakes
+// on 127.0.0.1, fake DNS.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { classifyTool } from "../server/broker/catalog/classify.ts";
 import { reconnectMessage } from "../server/broker/policy/errors.ts";
 import { agentSearchSettings } from "../server/broker/search/mode.ts";
 import { type IntegrationPreset, SourceError, type ToolDef } from "../server/broker/types.ts";
 import { checkTarget, guardedFetch } from "../server/broker/upstream/fetch.ts";
 import { requireSameOrigin, UpstreamRuntime, upstreams } from "../server/broker/upstream/runtime.ts";
-import { presets } from "../server/integrations/index.ts";
-import { classifyT3Tool, t3codePreset } from "../server/integrations/t3code/index.ts";
-import { T3_NAME_CHECK_EXEMPT, T3_TOOLS } from "../server/integrations/t3code/tools.ts";
+import { presetById, presets } from "../server/integrations/index.ts";
 import { hostSlugPart, presetServerSlug, presetServerUrl } from "../server/integrations/user-server.ts";
 import type { LookupFn } from "../server/webhooks/ssrf.ts";
 import { type FakeMcpUpstream, type FakeTool, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
+import { fixtureManifest, useFixtureExtensions } from "./extension-fixtures.ts";
 import { testContext } from "./helpers.ts";
 import { CSRF, harness, json } from "./platform-helpers.ts";
+
+afterAll(useFixtureExtensions());
+const t3codePreset = presetById("t3code")!;
+const classifyT3Tool = (t: ToolDef) => t3codePreset.classify(t);
+const T3_MANIFEST = fixtureManifest("t3code");
+const T3_TOOLS = Object.fromEntries(Object.entries(T3_MANIFEST.risk!.tools).map(([name, e]) => [name, { cls: e.class }]));
+const T3_NAME_CHECK_EXEMPT = T3_MANIFEST.risk!.nameCheckExempt!;
 
 let cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -131,16 +138,17 @@ const t3Tool = (name: string, properties: Record<string, unknown> = {}): ToolDef
   annotations: READ.includes(name) ? { readOnlyHint: true, destructiveHint: false } : { readOnlyHint: false, destructiveHint: true },
 });
 
-describe("T3 Code preset: shape and risk table", () => {
-  it("is registered, user-named, same-origin OAuth, no fixed URL", () => {
+describe("T3 Code extension: shape and risk table", () => {
+  it("is registered, user-named, same-origin OAuth, no fixed URL, a 30-day cap, Full access scopes named broad", () => {
     expect(presets()).toContain(t3codePreset);
     expect(t3codePreset).toMatchObject({
       id: "t3code",
       displayName: "T3 Code",
       slug: "t3",
       kind: "remote_http",
-      auth: { type: "mcp_oauth" },
       userServer: { defaultPath: "/mcp", sameOriginIssuer: true },
+      auth: { type: "mcp_oauth", broadScopes: ["settings:write", "source-control:write"] },
+      reconnectPolicy: { tokenLifetimeCapDays: 30 },
     });
     expect(t3codePreset.url).toBeUndefined();
   });
