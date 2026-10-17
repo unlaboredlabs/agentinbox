@@ -3,6 +3,7 @@ import { type AdminChannel, openAdminChannel } from "../server/connections-cli/a
 import { ConnectionsApi } from "../server/connections-cli/api.ts";
 import { type ConnectOutcome, createBrokerService, stubParts } from "../server/broker/service.ts";
 import type { IntegrationPreset } from "../server/broker/types.ts";
+import { upstreams as upstreamRuntime, type UpstreamRuntimeOptions } from "../server/broker/upstream/runtime.ts";
 import { harness, type Harness } from "./platform-helpers.ts";
 
 /**
@@ -45,7 +46,11 @@ const NOTION: IntegrationPreset = {
   setupSteps: () => [{ id: "connect", title: "Connect Notion", body: "Approve access and pick a workspace." }],
 };
 
-export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerOff?: boolean } = {}): Promise<Daemon> {
+/**
+ * `upstream`: the real upstream runtime (connector, credential store, remote sources) with these options (a fake DNS
+ * and a `dial` to a fake MCP server on loopback) instead of the fake connector; `upstreams` is then unused.
+ */
+export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerOff?: boolean; upstream?: UpstreamRuntimeOptions } = {}): Promise<Daemon> {
   let giveTools: Daemon["giveTools"] = () => {};
   // What a working connect does to the row (the credential store's markActive).
   let markActive = (_id: string) => {};
@@ -66,9 +71,13 @@ export async function startDaemon(opts: { presets?: IntegrationPreset[]; brokerO
     },
   };
   let lastAuthorize: string | null = null;
+  const real = opts.upstream;
   const h = harness({
     broker: (ctx) =>
-      createBrokerService(ctx, {
+      real
+        ? // Registered first, so the broker's own upstreams(ctx) gets this runtime.
+          (upstreamRuntime(ctx, real), createBrokerService(ctx, { presets: () => opts.presets ?? [NOTION] }))
+        : createBrokerService(ctx, {
         presets: () => opts.presets ?? [NOTION],
         connector: {
           async probe(input) {

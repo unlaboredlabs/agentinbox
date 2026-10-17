@@ -83,6 +83,8 @@ export class RemoteToolSource implements ToolSource {
   private lastToken: string | undefined;
   private insufficientScope: string | null = null;
   private closed = false;
+  /** The auth type the session was opened with: its requests carried that kind of credential (or none). */
+  private openedAs: ConnectionRow["auth_type"] | null = null;
 
   constructor(private readonly deps: RemoteSourceDeps) {
     this.connectionId = deps.connectionId;
@@ -131,6 +133,7 @@ export class RemoteToolSource implements ToolSource {
 
   private async open(signal: AbortSignal): Promise<Live> {
     const conn = this.deps.connection();
+    this.openedAs = conn.auth_type;
     const fetch = this.sdkFetch(conn);
     const authProvider = this.authProvider(conn);
     const url = new URL(conn.url);
@@ -231,6 +234,15 @@ export class RemoteToolSource implements ToolSource {
     }
     const own = findSourceError(err);
     if (own) return own;
+    const authFailed = this.insufficientScope !== null || err instanceof UnauthorizedError || (err instanceof SdkError && err.code === SdkErrorCode.ClientHttpAuthentication);
+    // A refusal of a credential that is no longer the saved one says nothing about the saved one: the session was
+    // dropped (a Connect saves the credential, then invalidates the source) or opened with another auth type (the first
+    // listing of a just-created connection, sent without the key its Connect saves meanwhile). Never needs_reauth: the
+    // listing that follows the Connect uses the new credential.
+    if (authFailed && (this.closed || this.openedAs !== conn.auth_type)) {
+      void this.drop();
+      return new SourceError("unavailable", `${conn.name}'s credential changed while a request was in flight; the next one uses the new one`);
+    }
     if (this.insufficientScope !== null) {
       const reason = `${conn.name} needs more access${this.insufficientScope ? ` (scope ${this.insufficientScope})` : ""}; widening it needs the owner to reconnect`;
       this.recordScope(this.insufficientScope);

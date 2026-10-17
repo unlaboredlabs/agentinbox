@@ -234,7 +234,10 @@ describe("listen", () => {
     expect(plain()).toMatch(/Access\s+me@example.com: read, draft; can't send/);
   });
 
-  const lines = (file: string) => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []);
+  // The seqs the handler ran for, sorted: events run two at a time (default --concurrency 2), each `echo >>` its own
+  // process, so the order they append in is unspecified (Dispatcher: "events can finish out of order").
+  const lines = (file: string) =>
+    (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []).sort((a, b) => Number(a) - Number(b));
 
   it("--backfill replays only the mail from before the listener started, next to the running listener", async () => {
     saveProfile("default", baseProfile());

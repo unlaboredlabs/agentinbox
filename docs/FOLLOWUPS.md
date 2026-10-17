@@ -383,7 +383,6 @@ Known non-blocking issues from the onboarding sweep (fresh-persona walks p9–p1
 - Gmail wording remains for non-Gmail users: the "Gmail for your agents" tagline, "Gmail accounts" in the sidebar, the password page, "the AI tool that will read your mail", an Overview full of mail counts; the agent's tool list includes Gmail tools with no Gmail account connected.
 - The Notion dialog example says `notion__search`; the real name is `notion__notion-search`.
 - The CLI's default name for a loopback server is `127-0-0-1-38081`; the console's rule gives `local-38081`. After naming a connection, the console can still show its host as the name.
-- The CLI header prompt repeats itself and doesn't say whether to type "Bearer ".
 - Aborting `connections add` at the header prompt leaves a keyless connection listed as active with 0 tools.
 - The approve page says "This action can't be undone" for `notion-delete-pages` (moves pages to Trash).
 - "The next step checks that it works" after creating the agent, but Finish setup goes straight to Overview; an abandoned pairing request stays as a banner until it expires.

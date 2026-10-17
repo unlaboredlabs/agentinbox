@@ -91,16 +91,34 @@ abstract class BasePrompter implements Prompter {
   close(): void {}
 }
 
+/** The terminal's streams; tests pass fake TTY ones. */
+export interface TerminalIo {
+  input: NodeJS.ReadableStream & { isTTY?: boolean; isRaw?: boolean; setRawMode?: (mode: boolean) => unknown };
+  output: NodeJS.WritableStream & { isTTY?: boolean };
+}
+
+/** Bracketed-paste markers (ESC [200~ … ESC [201~), in case the terminal still has that mode on. */
+// eslint-disable-next-line no-control-regex
+const PASTE_MARKS = /\x1b\[20[01]~/g;
+
 /** The real terminal. */
 export class TerminalPrompter extends BasePrompter {
-  readonly interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+  readonly interactive: boolean;
+
+  constructor(
+    assumeYes: boolean,
+    private readonly io: TerminalIo = { input: process.stdin, output: process.stdout },
+  ) {
+    super(assumeYes);
+    this.interactive = !!io.input.isTTY && !!io.output.isTTY;
+  }
 
   print(line = ""): void {
-    process.stdout.write(`${line}\n`);
+    this.io.output.write(`${line}\n`);
   }
 
   protected async line(question: string): Promise<string> {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const rl = createInterface({ input: this.io.input, output: this.io.output });
     try {
       return await rl.question(question);
     } finally {
@@ -108,12 +126,16 @@ export class TerminalPrompter extends BasePrompter {
     }
   }
 
+  /**
+   * Not echoed. Ends at the first CR or LF (Enter, or the newline at the end of a paste); the rest of that chunk is
+   * dropped. Backspace edits, Ctrl+C cancels; other control characters and paste markers are ignored.
+   */
   protected hidden(question: string): Promise<string> {
-    const stdin = process.stdin;
-    process.stdout.write(question);
+    const stdin = this.io.input;
+    this.io.output.write(question);
     return new Promise((resolve, reject) => {
       let value = "";
-      const wasRaw = stdin.isRaw;
+      const wasRaw = !!stdin.isRaw;
       stdin.setRawMode?.(true);
       stdin.resume();
       stdin.setEncoding("utf8");
@@ -121,12 +143,12 @@ export class TerminalPrompter extends BasePrompter {
         stdin.removeListener("data", onData);
         stdin.setRawMode?.(wasRaw);
         stdin.pause();
-        process.stdout.write("\n");
+        this.io.output.write("\n");
         if (err) reject(err);
         else resolve(value);
       };
-      const onData = (chunk: string) => {
-        for (const ch of chunk) {
+      const onData = (chunk: string | Buffer) => {
+        for (const ch of String(chunk).replace(PASTE_MARKS, "")) {
           if (ch === "\r" || ch === "\n") return done();
           if (ch === "\u0003") return done(Object.assign(new Error("Cancelled."), { code: "ABORT_ERR" }));
           if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
