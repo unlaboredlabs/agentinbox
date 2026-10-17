@@ -138,8 +138,9 @@ export function thirdPartyWarning(ext: Pick<InstalledExtension, "official" | "so
     lines.push("Kind: code. This code runs on your machine with network access. Node's permission model limits its files, but not the network.");
     lines.push(f.network.length ? `Declared network hosts: ${f.network.join(", ")} (declared by the extension, not enforced).` : "Declared network hosts: none (declared by the extension, not enforced).");
   } else {
-    lines.push(`Kind: remote. No code runs on your machine; xaq connects to ${f.remoteUrl ?? "the MCP server you name"}. Its risk map decides which tools ask you first.`);
+    lines.push(`Kind: remote. No code runs on your machine; xaq connects to ${f.remoteUrl ?? "the MCP server you name"}.`);
   }
+  lines.push("Its risk map can make tools stricter than xaq's own rules (ask before more of them), never looser.");
   return lines;
 }
 
@@ -296,6 +297,8 @@ export class SqliteExtensionStore implements ExtensionStore {
         const to = staged.candidate;
         if (to.integrity === from.integrity) return null;
         if (to.name !== from.name) throw new ExtensionError("invalid", `${from.source} is now the extension "${to.name}", not "${from.name}".`);
+        // A kind change (remote ↔ code) would turn the same connections into a different thing: a new install instead.
+        if (to.kind !== from.kind) throw new ExtensionError("invalid", `${from.source} is now a ${to.kind} extension, not ${from.kind}. Remove ${name} and add it again.`);
         if (!opts.confirm) return { from, to };
         if (opts.expectIntegrity && opts.expectIntegrity !== to.integrity) {
           throw new ExtensionError("changed", `${name}'s update changed since it was shown (now ${to.version}, ${short(to.commit)}). Review it again.`, { candidate: to });

@@ -74,6 +74,10 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 - **`remote`:** exactly one of `url` (https) and `userServer`. `userServer.sameOriginIssuer` defaults to false.
 - **`remote.auth.broadScopes`** (with `mcp_oauth` only, optional): granted scopes that mean broad access. The console
   warns when a sign-in grants any of them. T3 Code: `["settings:write", "source-control:write"]`.
+- **`remote.auth.scopeNotes`** (with `mcp_oauth` only, optional): `{ "<scope>": "<what it means>" }`, in priority
+  order. The connection page shows the note of the first scope the sign-in granted, otherwise the generic broad-access
+  warning. Notes are shown as they are (no `{{ }}`). T3 Code explains its Full access, Supervised and Read only
+  levels this way.
 - **`reconnectPolicy`:** each field is a whole number of days, from 1 to 3650.
   - `maxLifetimeDays`: a cap on a refreshable sign-in, counted from the sign-in (Notion: 180).
   - `idleDays`: shown only (Notion: 30).
@@ -85,7 +89,9 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   - **Variables:** only `{{publicUrl}}`, `{{redirectUri}}` and `{{webhookUrl}}` (validator only). Any other
     `{{…}}` is an error.
   - **`when`:** the only value is `"webhookUrl"`. A step that uses `{{webhookUrl}}` must have it (validator only).
-  - **Links:** a link is https, or starts with one of the variables.
+  - **Links:** a link is https, or one of the variables followed by `/`, `?`, `#` or nothing, so
+    `{{publicUrl}}@evil.example` is refused.
+  - **Shown as they are:** input `label` and `placeholder` and `scopeNotes` can't contain `{{` or `}}`.
   - **Uniqueness:** step ids and input keys are unique (validator only).
 - **`risk.tools[name].class`:**
 
@@ -96,11 +102,16 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   | `"risky"` | `{ read: false, risky: true }` | Asks at the "ask" level. |
 
   Tools not listed return null, which means the generic rules (annotations, then the verb list).
+
+  **Third-party risk maps can make tools stricter, never looser.** For an extension that isn't from the official
+  registry, xaq applies the generic rules on top of its map: `risky = map risky OR generic risky`,
+  `read = map read AND NOT generic risky`, and its `nameCheckExempt` is ignored. The install warning says so, and the
+  Add connection picker marks its preset "third-party" (`PresetView.official`).
 - **`risk.tools[name].target`:** a JSON Pointer, or an array of candidate pointers. The first candidate whose
   top-level argument the tool's live `inputSchema` declares becomes the "always allow … for this target" path. If
   none is declared, there is no target. Notion uses `["/page_ids", "/pages", "/page_id", "/ids", "/id"]`.
 - **`risk.nameCheckExempt`:** each name must be listed in `risk.tools` and not be `risky` (validator only). The
-  table's answer is final for those exact names.
+  table's answer is final for those exact names. Official extensions only (ignored for third-party ones).
 - **`code`:** `entry` is a relative `.mjs` or `.js` path inside the extension. `events` are `<name>.<event>`, which
   limits a name with events to 24 characters. A `user_app` auth's `clientIdInput` and `clientSecretInput` must be
   setup inputs (validator only). Its optional `refreshScope` (OAuth scopes separated by single spaces) passes through
@@ -122,8 +133,9 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   - any other git URL, through the `git` CLI;
   - a local directory, for development and tests.
   Anything that isn't the official registry (wynn-dev/xaq-extensions at the indexed commit) is **third-party**. It
-  gets a clear warning before install: the declared network hosts, kind `code` or not, and "this code runs on your
-  machine with network access". The CLI needs `--yes` or an interactive confirmation.
+  gets a clear warning before install: the declared network hosts, kind `code` or not, "this code runs on your
+  machine with network access", and that its risk map can make tools stricter but never looser. The CLI needs
+  `--yes` or an interactive confirmation.
 - **Integrity:** sha256 over a canonical listing of the extension directory. For each regular file, sorted by POSIX
   path relative to the extension root, the line is `<path>\0<mode 644|755>\0<hex sha256 of content>\n`. Symlinks,
   devices and paths outside the root are refused. It's encoded as `sha256-<base64>`. Core
@@ -132,9 +144,14 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   the version and the manifest. Files land in `<dataDir>/extensions/<name>/<integrity-hex-prefix>/`, made read-only.
   The integrity is checked again before every child start. A mismatch refuses to start and says why.
 - **Updates:** `xaq ext update <name>` shows the old and new version, commit and integrity, and installs only on
-  confirmation. Nothing ever updates on its own: an update never swaps code silently.
+  confirmation. Nothing ever updates on its own: an update never swaps code silently. An update can't change the
+  extension's `name` or its `kind` (remote or code): that's a remove and a new install.
 - **Removal:** `xaq ext remove <name>` is refused while connections use the extension, unless `--force`, which
-  disables those connections. Credentials are deleted only by removing the connections.
+  disables those connections and unbinds them (`connections.preset` is cleared), so a later extension of the same
+  name, a third-party one say, can't take them over. Credentials are deleted only by removing the connections.
+- **Broken installs:** an installed extension whose manifest this xaq can't read is reported (logged, and listed by
+  `brokenExtensions()`) and offers no preset. An official one is reinstalled from its bootstrap pin when the pin is
+  another build; its connections stay bound and enabled through that.
 - **Console:** an Extensions page lists installed extensions with their version, commit, source, official or
   third-party, and the connections using each. It can add from the registry, update with the diff shown, and remove.
   Adding from a URL works with the same warning.
@@ -178,25 +195,32 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 
 - **Core:** the Notion, T3 Code and WHOOP presets leave core. Core keeps the generic machinery: remote MCP OAuth,
   `user_app` OAuth with refresh, private-target allow, expiry, events and outbox.
-- **Pins:** core carries `server/extensions/bootstrap.json`, the pins (name, commit, integrity) of the official notion,
-  t3code, whoop and brightspace extensions at release time. It holds pins only, no code.
+- **Pins, plus a data snapshot:** core carries `server/extensions/bootstrap.json`, the pins (name, commit, integrity)
+  of the official notion, t3code, whoop and brightspace extensions at release time. It also carries a data snapshot of
+  the official remote manifests for already-bound connections, `server/extensions/bootstrap/{notion,t3code}.json`.
+  They are byte-identical to the pinned repo files, a test checks that, and they hold no code.
 - **Upgrade, at startup:**
   - each connection whose `preset` is one of these is bound to that extension;
   - a missing extension is installed in the background from its bootstrap pin;
-  - until it's installed, a remote connection keeps working as a generic MCP connection (generic risk rules, which
-    is the safe direction), and a code one shows "Installing the extension…" with its tools unavailable;
+  - until it's installed, a connection of notion or t3code works under the snapshot: its risk map, setup copy,
+    `userServer`/`sameOriginIssuer` and policies. Nothing gets looser than before the upgrade, and a reconnect still
+    works, so a T3 connection never dies at its 30-day expiry because an install failed;
+  - the snapshot serves only connections already bound to that name. It isn't offered in Add connection, since new
+    connections need the installed extension, and an installed extension always wins over it;
+  - any other bound remote connection runs on the generic rules, and a code one shows "Installing the extension…"
+    with its tools unavailable;
   - tokens, client records, grants, levels and always-allow rules are untouched: nobody re-authorizes.
 - **Binding:** `connections.preset` holds the extension's name. That is the binding, with no extra column.
   `usedBy(name)` is the ids of the connections `WHERE preset = name` (`server/extensions/bootstrap.ts`).
-- **Reconnect before the install:** a bound connection whose extension isn't installed yet can't be reconnected.
-  Its sign-in waits for the extension's own rules (T3 Code's same-origin issuer) instead of running generic ones.
-  Its tools keep working on the stored credential.
+- **Reconnect before the install:** through the snapshot for notion and t3code. A bound connection with neither an
+  install nor a snapshot can't be reconnected: its sign-in waits for the extension's own rules instead of running
+  generic ones. Its tools keep working on the stored credential.
 - **The registry:** `presets()` (`server/integrations/index.ts`) stays synchronous. It lists the installed extensions'
   presets, then what is still in core; an installed extension replaces a core preset of the same name.
 - **Startup wiring** (the broker's `start()`): `useExtensionStore(extensionStore(ctx))`, then `setHooks` with:
   - `usedBy`, as above;
-  - `onRemove`: a forced removal disables the bound connections. Their credentials stay until the connections are
-    removed.
+  - `onRemove`: a forced removal disables and unbinds the bound connections. Their credentials stay until the
+    connections are removed. A reinstall of a broken official extension disables nothing.
   - `onChange`: `reloadPresets()`, then the bound connections are re-listed, which re-classifies their pinned tools
     under the new manifest, or under the generic rules once it's gone.
   A background install from a bootstrap pin re-lists the same way. The broker's `stop()` unregisters the store.
@@ -204,4 +228,5 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 - **Placeholder pins:** an all-zero commit in `bootstrap.json` installs nothing. The release fills in the real pins.
 - **Test:** a DB fixture shaped like Wynn's install: `notion-personal` and `notion-work` (Notion preset), `whoop` (a
   generic MCP connection to the dashboard URL with a bearer key) and `brightspace` (generic, bearer, `127.0.0.1`). After
-  the upgrade, all four list and call tools with the same credentials and exposed names.
+  the upgrade, all four list and call tools with the same credentials and exposed names, with Notion's rules intact
+  (spawning a Custom Agent asks, its reads stay listed at Read only), before and after the install.

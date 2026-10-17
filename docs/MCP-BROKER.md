@@ -386,8 +386,11 @@ The events outbox, webhooks, SSE stream and listener relay are generalised:
   rebuilt on install, update and remove.
 - **Binding:** `connections.preset` holds the extension's name, which binds the connection to the extension.
 - **Upgrading needs no new sign-in:** existing Notion, T3 Code and WHOOP connections are bound at startup, and a
-  missing extension installs in the background from `server/extensions/bootstrap.json`. Until then a remote
-  connection works as a generic one: generic risk rules, and Reconnect waits for the install.
+  missing extension installs in the background from `server/extensions/bootstrap.json`. Until then, Notion and T3
+  Code connections run under core's data snapshot of those two official manifests. The snapshot keeps the same risk
+  rules, setup copy and sign-in rules, so Reconnect works. It serves bound connections only and is never offered for
+  new ones. Any other bound remote connection runs on the generic rules, and Reconnect waits for the install.
+- **Third-party extensions** can make tools stricter than the generic rules, never looser.
 
 The sections below describe each integration's design. Their data (URL, auth, setup copy, risk table) is now the
 extension's manifest.

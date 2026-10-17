@@ -155,6 +155,7 @@ export function connectionsApi(ctx: AppContext) {
       authType: authTypeOf(p.auth),
       setupSteps: steps.map((s) => ({ ...s })),
       reconnectPolicy: p.reconnectPolicy ?? null,
+      official: p.official !== false,
       userServer: p.userServer ? { defaultPath: p.userServer.defaultPath } : null,
     };
   };

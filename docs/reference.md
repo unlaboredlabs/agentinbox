@@ -48,8 +48,9 @@ key; the broker holds every upstream credential and lists only the tools the age
   [Brightspace MCP server](https://github.com/wynn-dev/brightspace-mcp-server): its address and its bearer token;
   every tool reads). WHOOP (your own WHOOP developer app; the console walks you through it) is still built in until
   its extension ships. Connections made before extensions keep working as they are: xaq binds them to their
-  extension at startup and installs a missing one in the background, with no new sign-in. Until it's installed they
-  run as generic connections (generic risk rules) and Reconnect waits for it. WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
+  extension at startup and installs a missing one in the background, with no new sign-in. Until it's installed,
+  Notion and T3 Code connections keep the same rules and can still reconnect (core keeps a copy of those two
+  extensions' manifests for them). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
   WHOOP every 15 minutes for new recoveries, sleeps and workouts (`whoop.*` events).
   - **Optional webhooks:** they bring those events within seconds, and the 15-minute check keeps running as a
     reconciliation poll, so a webhook missed while the machine was asleep or offline still arrives. The setup offers

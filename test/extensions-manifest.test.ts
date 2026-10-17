@@ -3,12 +3,13 @@
 // the presets() registry over the extension store, the bootstrap pins and usedBy.
 
 import { Ajv2020 } from "ajv/dist/2020.js";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { classifyTool } from "../server/broker/catalog/classify.ts";
 import type { SetupContext, ToolDef } from "../server/broker/types.ts";
-import { BOOTSTRAP_PINS, isPlaceholderPin, usedBy } from "../server/extensions/bootstrap.ts";
+import { BOOTSTRAP_PINS, isPlaceholderPin, isReinstalling, upgradeToExtensions, usedBy } from "../server/extensions/bootstrap.ts";
 import { MANIFEST_JSON_SCHEMA, ManifestError, presetFromManifest, renderSetup, validateManifest } from "../server/extensions/manifest.ts";
-import { brokenExtensions, presetById, presets, reloadPresets, useExtensionStore } from "../server/integrations/index.ts";
+import { boundPreset, brokenExtensions, presetById, presets, reloadPresets, snapshotPreset, useExtensionStore } from "../server/integrations/index.ts";
 import { FIXTURE_EXTENSIONS, fixtureExtension, fixtureManifest, stubExtensionStore } from "./extension-fixtures.ts";
 import { testContext } from "./helpers.ts";
 
@@ -375,6 +376,158 @@ describe("migration bookkeeping", () => {
       expect(usedBy(t.ctx.db, "notion")).toEqual(["con_a", "con_b"]);
       expect(usedBy(t.ctx.db, "t3code")).toEqual(["con_d"]);
       expect(usedBy(t.ctx.db, "brightspace")).toEqual([]);
+    } finally {
+      await t.dispose();
+    }
+  });
+});
+
+describe("review rules (tier L)", () => {
+  const third = (manifest: Record<string, unknown>) => presetFromManifest({ ...fixtureExtension("notion"), name: "demo", official: false, source: "/tmp/demo", manifest });
+
+  it("a third-party risk map can make tools stricter, never looser; its nameCheckExempt is ignored", () => {
+    const m = patch(
+      patch(remote(), "risk.tools", {
+        send_note: { class: "write" },
+        list_notes: { class: "read" },
+        wipe_cache: { class: "read" },
+        tidy: { class: "risky", target: "/id" },
+        archive_note: { class: "write" },
+        notes_report: { class: "read" },
+      }),
+      "risk.nameCheckExempt",
+      ["send_note"],
+    );
+    const p = third(m);
+    expect(p.official).toBe(false);
+    expect(p.nameCheckExempt).toBeUndefined();
+    // Looser than the generic rules: overruled. send (a risky verb) stays risky even though the map says write and exempts it.
+    expect(classifyTool(tool("send_note"), p)).toMatchObject({ risky: true, read: false });
+    // A read the annotations call destructive is risky, not a read.
+    expect(classifyTool(tool("notes_report", {}, { destructiveHint: true }), p)).toMatchObject({ risky: true, read: false });
+    expect(classifyTool(tool("wipe_cache"), p)).toMatchObject({ risky: true, read: false });
+    // Stricter: kept. A tool the generic rules call a write can be made risky; a plain read stays a read.
+    expect(classifyTool(tool("tidy", { id: {} }), p)).toEqual({ risky: true, read: false, source: "preset", targetPath: "/id" });
+    expect(classifyTool(tool("list_notes", {}, { readOnlyHint: true }), p)).toEqual({ risky: false, read: true, source: "preset" });
+    expect(classifyTool(tool("archive_note", {}, { destructiveHint: true }), p)).toMatchObject({ risky: true });
+    // The same map from the official registry is trusted as written.
+    const o = presetFromManifest({ ...fixtureExtension("notion"), name: "demo", manifest: m });
+    expect(o.official).toBe(true);
+    expect(classifyTool(tool("send_note"), o)).toMatchObject({ risky: false, read: false });
+    expect(classifyTool(tool("notes_report", {}, { destructiveHint: true }), o)).toEqual({ risky: false, read: true, source: "preset" });
+  });
+
+  it("a template link must go on with /, ?, # or nothing, so the install's address can't become a user name", () => {
+    for (const url of ["{{publicUrl}}", "{{publicUrl}}/settings", "{{redirectUri}}?x=1", "{{webhookUrl}}#top"]) {
+      const m = patch(remote(), "setup.0.link", { label: "Open", url });
+      if (url.includes("webhookUrl")) (m.setup as Record<string, unknown>[])[0]!.when = "webhookUrl";
+      expect(() => validateManifest(m), url).not.toThrow();
+      expect(schemaValid(m), url).toBe(true);
+    }
+    for (const url of ["{{publicUrl}}@evil.example", "{{publicUrl}}.evil.example/x", "{{publicUrl}}:8443", "{{ publicUrl }}evil"]) {
+      const m = patch(remote(), "setup.0.link", { label: "Open", url });
+      expect(() => validateManifest(m), url).toThrow(/followed by \/, \?, # or nothing/);
+      expect(schemaValid(m), url).toBe(false);
+    }
+  });
+
+  it("input labels and placeholders are shown as they are: no {{ }}", () => {
+    for (const input of [
+      { key: "k", label: "Paste {{publicUrl}}" },
+      { key: "k", label: "Key", placeholder: "{{redirectUri}}" },
+      { key: "k", label: "Key }}" },
+    ]) {
+      const m = patch(remote(), "setup.0.input", input);
+      expect(() => validateManifest(m), JSON.stringify(input)).toThrow(/can't use \{\{ \}\}/);
+      expect(schemaValid(m), JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it("scopeNotes: scope-keyed strings, in order, passed to the preset", () => {
+    const m = patch(remote(), "remote.auth", { type: "mcp_oauth", broadScopes: ["admin"], scopeNotes: { admin: "Everything.", "read:all": "Reads." } });
+    expect(schemaValid(m)).toBe(true);
+    expect(presetFromManifest({ ...fixtureExtension("notion"), name: "demo", manifest: m }).auth).toEqual({
+      type: "mcp_oauth",
+      broadScopes: ["admin"],
+      scopeNotes: [
+        { scope: "admin", note: "Everything." },
+        { scope: "read:all", note: "Reads." },
+      ],
+    });
+    for (const notes of [{ admin: 3 }, { "bad scope": "x" }, { admin: "See {{publicUrl}}" }, []]) {
+      const bad = patch(remote(), "remote.auth", { type: "mcp_oauth", scopeNotes: notes });
+      expect(() => validateManifest(bad), JSON.stringify(notes)).toThrow(/scopeNotes/);
+      expect(schemaValid(bad), JSON.stringify(notes)).toBe(false);
+    }
+    expect(() => validateManifest(patch(remote(), "remote.auth", { type: "header", headerName: "X-Key", scopeNotes: {} }))).toThrow(/doesn't take/);
+  });
+});
+
+describe("the bootstrap snapshot", () => {
+  const root = new URL("../", import.meta.url);
+  const read = (path: string) => readFileSync(new URL(path, root));
+
+  it.each(["notion", "t3code"])("core's %s snapshot is byte-identical to the repo's manifest (the fixture copy)", (name) => {
+    expect(read(`server/extensions/bootstrap/${name}.json`).equals(read(`test/fixtures/extensions/${name}/xaq-extension.json`))).toBe(true);
+  });
+
+  it("serves bound connections only: not in presets(), official, and an installed extension wins", () => {
+    expect(presets().map((p) => p.id)).toEqual(["whoop"]);
+    expect(presetById("notion")).toBeNull();
+    expect(snapshotPreset("notion")).toMatchObject({ id: "notion", official: true, url: "https://mcp.notion.com/mcp", reconnectPolicy: { maxLifetimeDays: 180 } });
+    expect(snapshotPreset("t3code")).toMatchObject({ userServer: { sameOriginIssuer: true }, nameCheckExempt: ["t3_thread_send", "t3_thread_send_attachments", "t3_thread_merge_back"] });
+    expect(snapshotPreset("notion")!.classify(tool("notion-spawn-session"))).toMatchObject({ risky: true });
+    expect(snapshotPreset("brightspace")).toBeNull();
+    expect(snapshotPreset("whoop")).toBeNull();
+    expect(boundPreset("notion")).toBe(snapshotPreset("notion"));
+    // Installed: the install, not the snapshot.
+    const newer = { ...fixtureExtension("notion"), manifest: { ...fixtureManifest("notion"), displayName: "Notion (newer)", version: "1.1.0" } };
+    useExtensionStore({ list: () => [newer] });
+    expect(boundPreset("notion")).toMatchObject({ displayName: "Notion (newer)" });
+    expect(boundPreset("notion")).not.toBe(snapshotPreset("notion"));
+  });
+});
+
+describe("broken installed extensions", () => {
+  const log = { info() {}, warn() {}, error() {} };
+  const pin = (name: string, integrity = `sha256-${Buffer.alloc(32, 9).toString("base64")}`) => ({ name, commit: "4".repeat(40), integrity });
+  const brokenExt = (name: "notion" | "t3code", over: Record<string, unknown> = {}) => ({ ...fixtureExtension(name), manifest: { schema: 1, name }, ...over });
+
+  it("are reported; an official one reinstalls from its pin without disabling its connections", async () => {
+    const t = testContext();
+    try {
+      let seen: boolean | null = null;
+      const store = stubExtensionStore({ installable: ["notion"], extra: [brokenExt("notion")], onRemove: (n) => (seen = isReinstalling(n)) });
+      const r = upgradeToExtensions({ db: t.ctx.db, store, log, pins: [pin("notion")] });
+      expect(Object.keys(r.broken)).toEqual(["notion"]);
+      await r.done;
+      expect(store.removals).toEqual(["notion"]);
+      // The removal ran while marked as a reinstall (the broker's onRemove then disables nothing).
+      expect(seen).toBe(true);
+      expect(isReinstalling("notion")).toBe(false);
+      expect(store.installs).toEqual([pin("notion")]);
+      expect(store.get("notion")!.manifest).toEqual(fixtureManifest("notion"));
+    } finally {
+      await t.dispose();
+    }
+  });
+
+  it("are only reported when third-party, unpinned, or already at the pinned build", async () => {
+    const t = testContext();
+    try {
+      const same = pin("t3code");
+      const store = stubExtensionStore({
+        installable: ["notion", "t3code"],
+        extra: [brokenExt("notion", { official: false }), brokenExt("t3code", { integrity: same.integrity })],
+      });
+      const r = upgradeToExtensions({ db: t.ctx.db, store, log, pins: [pin("notion"), same] });
+      expect(Object.keys(r.broken).sort()).toEqual(["notion", "t3code"]);
+      await r.done;
+      expect(store.removals).toEqual([]);
+      expect(store.installs).toEqual([]);
+      const placeholder = stubExtensionStore({ installable: ["notion"], extra: [brokenExt("notion")] });
+      await upgradeToExtensions({ db: t.ctx.db, store: placeholder, log }).done;
+      expect(placeholder.removals).toEqual([]);
     } finally {
       await t.dispose();
     }

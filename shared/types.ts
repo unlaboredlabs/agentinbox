@@ -1291,6 +1291,11 @@ export interface ConnectionView extends Connection {
    * Code's settings:write): the console warns when grantedScopes include any. null when the extension names none.
    */
   broadScopes: string[] | null;
+  /**
+   * What granted scopes mean on this connection's extension (its manifest's `remote.auth.scopeNotes`), in priority
+   * order: the console shows the first granted one's note. null when the extension names none.
+   */
+  scopeNotes: { scope: string; note: string }[] | null;
   /** Agents with a grant on this connection. */
   agents: number;
 }
@@ -1391,6 +1396,8 @@ export interface PresetView {
   authType: ConnectionAuthType;
   setupSteps: SetupStepView[];
   reconnectPolicy: { maxLifetimeDays?: number; idleDays?: number; tokenLifetimeCapDays?: number } | null;
+  /** From the official xaq extensions (or core). false: third-party, shown with a badge; its risk map only adds risk. */
+  official: boolean;
   /**
    * The user names the server (T3 Code, Brightspace): `url` is null, CreateConnectionInput.url is required, and `defaultPath` is
    * appended when only an origin is given. One connection per server, named after its host unless named.

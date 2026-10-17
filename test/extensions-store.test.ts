@@ -308,6 +308,20 @@ describe("the extension store", () => {
     await expect(store.update("missing", { confirm: false })).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("refuses an update that changes the kind (remote ↔ code): that's a remove and a new install", async () => {
+    const store = newStore();
+    const { dir } = extDir("kindext");
+    await store.install(dir, { confirmThirdParty: true });
+    writeFileSync(join(dir, "xaq-extension.json"), manifest("kindext", { kind: "code", remote: undefined, code: { entry: "s.mjs", auth: { type: "none" } } }));
+    writeFileSync(join(dir, "s.mjs"), "export {}");
+    for (const confirm of [false, true]) {
+      const err = await store.update("kindext", { confirm }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "invalid" });
+      expect((err as Error).message).toMatch(/now a code extension, not remote/);
+    }
+    expect(store.get("kindext")).toMatchObject({ kind: "remote" });
+  });
+
   it("refuses an install over a different installed version (that's an update)", async () => {
     const store = newStore();
     await store.install(extDir("devx").dir, { confirmThirdParty: true });

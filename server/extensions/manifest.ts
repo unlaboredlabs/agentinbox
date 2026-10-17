@@ -6,6 +6,7 @@
 // schema alone. Setup strings may use {{publicUrl}}, {{redirectUri}} and {{webhookUrl}} and nothing else; a step
 // that uses {{webhookUrl}} must say `"when": "webhookUrl"`, so it only shows when the internet can reach this install.
 
+import { classifyTool } from "../broker/catalog/classify.ts";
 import type { IntegrationPreset, PresetAuth, SetupContext, SetupStep, ToolClass, ToolDef } from "../broker/types.ts";
 import { createCodeSource } from "./code-host-stub.ts";
 import type { InstalledExtension } from "./store.ts";
@@ -30,8 +31,11 @@ export interface RiskEntry {
 export type RemoteAuth =
   | { type: "none" }
   | { type: "header"; headerName: string; prefix?: string }
-  /** `broadScopes`: granted scopes that mean broad access; the console warns when a sign-in grants any of them. */
-  | { type: "mcp_oauth"; broadScopes?: string[] };
+  /**
+   * `broadScopes`: granted scopes that mean broad access; the console warns when a sign-in grants any of them.
+   * `scopeNotes`: what a granted scope means, in priority order; the console shows the first granted one's note.
+   */
+  | { type: "mcp_oauth"; broadScopes?: string[]; scopeNotes?: Record<string, string> };
 
 export type CodeAuth =
   | { type: "none" }
@@ -103,6 +107,9 @@ const RESERVED_NAMES = new Set(["message", "thread", "label", "account", "sync",
 const TEMPLATE_VARS = ["publicUrl", "redirectUri", "webhookUrl"] as const;
 type TemplateVar = (typeof TEMPLATE_VARS)[number];
 const TEMPLATE_RE = /\{\{\s*([^{}]*?)\s*\}\}/g;
+/** A link built on one of the install's addresses: the variable, then a path, query, fragment or nothing. */
+const TEMPLATE_LINK_RE = /^\{\{\s*(publicUrl|redirectUri|webhookUrl)\s*\}\}([/?#]|$)/;
+const SCOPE_RE = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
 // No control characters except newline in prose (manifests are shown to the admin verbatim).
 // oxlint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u0009\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
@@ -195,6 +202,12 @@ function validatePattern(v: unknown, path: string): string {
   return s;
 }
 
+/** Strings that are shown as they are (no {{variables}} filled in) can't look like a template either. */
+function noTemplate(s: string, path: string): string {
+  if (s.includes("{{") || s.includes("}}")) fail(path, "can't use {{ }}");
+  return s;
+}
+
 function validateStep(v: unknown, path: string): ManifestSetupStep {
   const o = obj(v, path, ["id", "title", "body", "link", "copy", "input", "when"], ["id", "title", "body"]);
   const used = new Set<TemplateVar>();
@@ -207,8 +220,11 @@ function validateStep(v: unknown, path: string): ManifestSetupStep {
     const l = obj(o.link, `${path}.link`, ["label", "url"], ["label", "url"]);
     const label = templated(l.label, `${path}.link.label`, { max: 120 }, used);
     const url = templated(l.url, `${path}.link.url`, { max: 2048 }, used);
-    // A link is either an https URL or one of this install's own addresses.
-    if (!/^\{\{\s*(publicUrl|redirectUri|webhookUrl)\s*\}\}/.test(url)) httpsUrl(url, `${path}.link.url`);
+    // A link is either an https URL or one of this install's own addresses, followed by a path, query, fragment or
+    // nothing (so `{{publicUrl}}@evil.example` can't turn the install's address into a user name).
+    if (/^\{\{/.test(url)) {
+      if (!TEMPLATE_LINK_RE.test(url)) fail(`${path}.link.url`, "must be {{publicUrl}}, {{redirectUri}} or {{webhookUrl}} followed by /, ?, # or nothing");
+    } else httpsUrl(url, `${path}.link.url`);
     step.link = { label, url };
   }
   if (o.copy !== undefined) {
@@ -219,11 +235,11 @@ function validateStep(v: unknown, path: string): ManifestSetupStep {
     const i = obj(o.input, `${path}.input`, ["key", "label", "secret", "pattern", "placeholder"], ["key", "label"]);
     step.input = {
       key: str(i.key, `${path}.input.key`, { max: 64, re: INPUT_KEY_RE, what: "a lowercase identifier (letters, digits, _)" }),
-      label: str(i.label, `${path}.input.label`, { max: 120 }),
+      label: noTemplate(str(i.label, `${path}.input.label`, { max: 120 }), `${path}.input.label`),
     };
     if (i.secret !== undefined) step.input.secret = bool(i.secret, `${path}.input.secret`);
     if (i.pattern !== undefined) step.input.pattern = validatePattern(i.pattern, `${path}.input.pattern`);
-    if (i.placeholder !== undefined) step.input.placeholder = str(i.placeholder, `${path}.input.placeholder`, { max: 200 });
+    if (i.placeholder !== undefined) step.input.placeholder = noTemplate(str(i.placeholder, `${path}.input.placeholder`, { max: 200 }), `${path}.input.placeholder`);
   }
   if (o.when !== undefined) {
     if (o.when !== "webhookUrl") fail(`${path}.when`, 'must be "webhookUrl"');
@@ -279,7 +295,7 @@ function validateRemote(v: unknown): NonNullable<Manifest["remote"]> {
     remote.userServer = { defaultPath: str(u.defaultPath, "remote.userServer.defaultPath", { max: 200, re: /^\/[A-Za-z0-9_.~\-/]*$/, what: 'a path such as "/mcp"' }) };
     if (u.sameOriginIssuer !== undefined) remote.userServer.sameOriginIssuer = bool(u.sameOriginIssuer, "remote.userServer.sameOriginIssuer");
   }
-  const a = obj(o.auth, "remote.auth", ["type", "headerName", "prefix", "broadScopes"], ["type"]);
+  const a = obj(o.auth, "remote.auth", ["type", "headerName", "prefix", "broadScopes", "scopeNotes"], ["type"]);
   const extra = (allowed: string[]) => {
     for (const k of Object.keys(a)) if (k !== "type" && !allowed.includes(k)) fail("remote.auth", `has "${k}", which type ${String(a.type)} doesn't take`);
   };
@@ -296,9 +312,21 @@ function validateRemote(v: unknown): NonNullable<Manifest["remote"]> {
       break;
     }
     case "mcp_oauth": {
-      extra(["broadScopes"]);
+      extra(["broadScopes", "scopeNotes"]);
       const auth: RemoteAuth = { type: "mcp_oauth" };
-      if (a.broadScopes !== undefined) auth.broadScopes = strList(a.broadScopes, "remote.auth.broadScopes", (s, p) => str(s, p, { max: 200, re: /^[\x21\x23-\x5b\x5d-\x7e]+$/, what: "an OAuth scope" }), 50);
+      if (a.broadScopes !== undefined) auth.broadScopes = strList(a.broadScopes, "remote.auth.broadScopes", (s, p) => str(s, p, { max: 200, re: SCOPE_RE, what: "an OAuth scope" }), 50);
+      if (a.scopeNotes !== undefined) {
+        if (!isObj(a.scopeNotes)) fail("remote.auth.scopeNotes", "must be an object");
+        const scopes = Object.keys(a.scopeNotes);
+        if (scopes.length > 50) fail("remote.auth.scopeNotes", "must have at most 50 entries");
+        const notes: Record<string, string> = {};
+        for (const scope of scopes) {
+          const p = `remote.auth.scopeNotes["${scope.slice(0, 64)}"]`;
+          str(scope, p, { max: 200, re: SCOPE_RE, what: "keyed by an OAuth scope" });
+          Object.defineProperty(notes, scope, { value: noTemplate(str(a.scopeNotes[scope], p, { max: 1000 }), p), enumerable: true, writable: true, configurable: true });
+        }
+        auth.scopeNotes = notes;
+      }
       remote.auth = auth;
       break;
     }
@@ -412,6 +440,7 @@ const days$ = { type: "integer", minimum: 1, maximum: MAX_DAYS };
 const scope$ = stringOf(200, { pattern: "^[\\x21\\x23-\\x5b\\x5d-\\x7e]+$" });
 const toolName$ = stringOf(128, { pattern: TOOL_NAME_RE.source });
 const pointer$ = stringOf(512, { pattern: POINTER_RE.source });
+const noTemplate$ = { not: { pattern: "\\{\\{|\\}\\}" } };
 const httpsUrl$ = stringOf(2048, { pattern: "^https://[^\\s@/]+(/\\S*)?$" });
 
 /**
@@ -459,7 +488,11 @@ export const MANIFEST_JSON_SCHEMA = {
               type: "object",
               additionalProperties: false,
               required: ["type"],
-              properties: { type: { const: "mcp_oauth" }, broadScopes: { type: "array", maxItems: 50, uniqueItems: true, items: scope$ } },
+              properties: {
+                type: { const: "mcp_oauth" },
+                broadScopes: { type: "array", maxItems: 50, uniqueItems: true, items: scope$ },
+                scopeNotes: { type: "object", maxProperties: 50, propertyNames: { pattern: SCOPE_RE.source, maxLength: 200 }, additionalProperties: stringOf(1000, noTemplate$) },
+              },
             },
           ],
         },
@@ -512,7 +545,12 @@ export const MANIFEST_JSON_SCHEMA = {
           id: stringOf(32, { pattern: STEP_ID_RE.source }),
           title: stringOf(120),
           body: stringOf(4000),
-          link: { type: "object", additionalProperties: false, required: ["label", "url"], properties: { label: stringOf(120), url: stringOf(2048, { pattern: "^(https://|\\{\\{)" }) } },
+          link: {
+            type: "object",
+            additionalProperties: false,
+            required: ["label", "url"],
+            properties: { label: stringOf(120), url: stringOf(2048, { pattern: "^(https://|\\{\\{\\s*(publicUrl|redirectUri|webhookUrl)\\s*\\}\\}([/?#]|$))" }) },
+          },
           copy: { type: "object", additionalProperties: false, required: ["label", "value"], properties: { label: stringOf(120), value: stringOf(2048) } },
           input: {
             type: "object",
@@ -520,10 +558,10 @@ export const MANIFEST_JSON_SCHEMA = {
             required: ["key", "label"],
             properties: {
               key: stringOf(64, { pattern: INPUT_KEY_RE.source }),
-              label: stringOf(120),
+              label: stringOf(120, noTemplate$),
               secret: { type: "boolean" },
               pattern: stringOf(500),
-              placeholder: stringOf(200),
+              placeholder: stringOf(200, noTemplate$),
             },
           },
           when: { const: "webhookUrl" },
@@ -604,18 +642,34 @@ export function classifierFor(risk: Manifest["risk"]): (tool: ToolDef) => ToolCl
   };
 }
 
+/**
+ * A third-party risk map: it can make a tool stricter than the generic rules (annotations, the verb list), never
+ * looser. risky = map's risky OR generic risky; read = map's read AND NOT generic risky.
+ */
+export function stricterOnly(table: (tool: ToolDef) => ToolClass | null): (tool: ToolDef) => ToolClass | null {
+  return (tool) => {
+    const cls = table(tool);
+    if (!cls) return null;
+    const generic = classifyTool(tool, null);
+    return { ...cls, risky: cls.risky || generic.risky, read: cls.read && !generic.risky };
+  };
+}
+
 // ───────────── Manifest → IntegrationPreset ─────────────
 
 /** The IntegrationPreset for a validated manifest. `ext` is needed for code extensions (the host starts its entry). */
-export function presetFromValidManifest(m: Manifest, ext: InstalledExtension | null): IntegrationPreset {
+export function presetFromValidManifest(m: Manifest, ext: InstalledExtension | null, opts: { official: boolean }): IntegrationPreset {
   const setup = m.setup ?? [];
+  const table = classifierFor(m.risk);
   const base = {
     id: m.name,
     displayName: m.displayName,
     slug: m.slug,
-    classify: classifierFor(m.risk),
+    official: opts.official,
+    // A third-party risk map can only add risk: the generic rules still apply on top, and no name is exempt.
+    classify: opts.official ? table : stricterOnly(table),
     setupSteps: (ctx: SetupContext) => renderSetup(setup, ctx),
-    ...(m.risk?.nameCheckExempt?.length ? { nameCheckExempt: [...m.risk.nameCheckExempt] } : {}),
+    ...(opts.official && m.risk?.nameCheckExempt?.length ? { nameCheckExempt: [...m.risk.nameCheckExempt] } : {}),
     ...(m.reconnectPolicy && Object.keys(m.reconnectPolicy).length ? { reconnectPolicy: { ...m.reconnectPolicy } } : {}),
   };
   if (m.kind === "remote") {
@@ -624,7 +678,11 @@ export function presetFromValidManifest(m: Manifest, ext: InstalledExtension | n
       r.auth.type === "header"
         ? { type: "header", headerName: r.auth.headerName, ...(r.auth.prefix !== undefined ? { prefix: r.auth.prefix } : {}) }
         : r.auth.type === "mcp_oauth"
-          ? { type: "mcp_oauth", ...(r.auth.broadScopes?.length ? { broadScopes: [...r.auth.broadScopes] } : {}) }
+          ? {
+              type: "mcp_oauth",
+              ...(r.auth.broadScopes?.length ? { broadScopes: [...r.auth.broadScopes] } : {}),
+              ...(r.auth.scopeNotes && Object.keys(r.auth.scopeNotes).length ? { scopeNotes: Object.entries(r.auth.scopeNotes).map(([scope, note]) => ({ scope, note })) } : {}),
+            }
           : { type: "none" };
     return {
       ...base,
@@ -650,5 +708,5 @@ export function presetFromManifest(ext: InstalledExtension): IntegrationPreset {
   const m = validateManifest(ext.manifest);
   if (m.name !== ext.name) throw new ManifestError(`${MANIFEST_FILE}: name is "${m.name}", but the extension is installed as "${ext.name}"`);
   if (m.kind !== ext.kind) throw new ManifestError(`${MANIFEST_FILE}: kind is "${m.kind}", but the extension is installed as "${ext.kind}"`);
-  return presetFromValidManifest(m, ext);
+  return presetFromValidManifest(m, ext, { official: ext.official });
 }

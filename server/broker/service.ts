@@ -26,9 +26,9 @@ import {
 import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
-import { type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
+import { isReinstalling, type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
 import { type ExtensionPin, extensionStore, type SqliteExtensionStore } from "../extensions/store.ts";
-import { presetById, presetSource, presets, reloadPresets, useExtensionStore } from "../integrations/index.ts";
+import { boundPreset, presetSource, presets, reloadPresets, snapshotPreset, useExtensionStore } from "../integrations/index.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -208,7 +208,9 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   const sources = new Map<string, ToolSource>();
   const enabled = () => ctx.settings.get().brokerUpstreams;
   const presetList = () => (given.presets ?? presets)();
-  const presetFor = (presetId: string | null) => (presetId ? (presetList().find((p) => p.id === presetId) ?? null) : null);
+  // A connection's preset: the installed extension (or a core preset), else the bootstrap snapshot of an official one
+  // it was bound to before the upgrade (server/integrations/index.ts). New connections pick from presetList() only.
+  const presetFor = (presetId: string | null) => (presetId ? (presetList().find((p) => p.id === presetId) ?? snapshotPreset(presetId)) : null);
 
   // The upstream runtime (W3/W4): credential store, refresher, connect flow, remote sources. Created here, first,
   // so its connection events go to the outbox; native OAuth flows are registered before start() runs.
@@ -452,11 +454,16 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     }
   }
 
-  /** A forced extension removal: its connections are disabled. Credentials stay until the connections are removed. */
+  /**
+   * A forced extension removal: its connections are disabled and unbound (preset cleared), so a later extension of
+   * the same name, say a third-party one, can't take them over. Credentials stay until the connections are removed.
+   */
   function disableBound(connectionIds: string[], reason: string): void {
     for (const id of connectionIds) {
       const c = getConnection(ctx, id);
-      if (!c || c.status === "disabled") continue;
+      if (!c) continue;
+      ctx.db.run("UPDATE connections SET preset = NULL, updated_at = ? WHERE id = ?", now(), id);
+      if (c.status === "disabled") continue;
       ctx.db.run("UPDATE connections SET status = 'disabled', status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), id);
       catalog.detach(id);
       void closeSource(id);
@@ -588,7 +595,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         extensions.setHooks({
           usedBy: (name) => usedBy(ctx.db, name),
           onRemove: (ext, o) => {
-            if (o.force) disableBound(o.usedBy, `its extension ${ext.name} was removed`);
+            // A broken official extension being reinstalled from its pin keeps its connections.
+            if (o.force && !isReinstalling(ext.name)) disableBound(o.usedBy, `its extension ${ext.name} was removed`);
           },
           onChange: (change) => {
             reloadPresets();
@@ -698,7 +706,8 @@ export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = 
   const scope = c.authType === "oauth" ? ctx.db.get<{ scope: string | null }>("SELECT scope FROM connection_credentials WHERE connection_id = ? AND access_token_enc IS NOT NULL", c.id)?.scope : null;
   const grantedScopes = typeof scope === "string" ? scope.split(/\s+/).filter(Boolean) : null;
   const expired = c.status !== "disabled" && isExpired(c, at);
-  const auth = c.preset ? presetById(c.preset)?.auth : undefined;
+  const auth = c.preset ? boundPreset(c.preset)?.auth : undefined;
   const broadScopes = auth?.type === "mcp_oauth" && auth.broadScopes?.length ? [...auth.broadScopes] : null;
-  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, broadScopes, agents };
+  const scopeNotes = auth?.type === "mcp_oauth" && auth.scopeNotes?.length ? auth.scopeNotes.map((n) => ({ ...n })) : null;
+  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, broadScopes, scopeNotes, agents };
 }

@@ -15,8 +15,10 @@
 // upgrade does too after its background installs.
 
 import type { IntegrationPreset } from "../broker/types.ts";
+import notionSnapshot from "../extensions/bootstrap/notion.json" with { type: "json" };
+import t3codeSnapshot from "../extensions/bootstrap/t3code.json" with { type: "json" };
+import { presetFromManifest, presetFromValidManifest, validateManifest } from "../extensions/manifest.ts";
 import type { ExtensionStore, InstalledExtension } from "../extensions/store.ts";
-import { presetFromManifest } from "../extensions/manifest.ts";
 import { whoopPreset } from "./whoop/index.ts";
 
 /** Display order for the official extensions; anything else follows by name. */
@@ -89,3 +91,31 @@ export const brokenExtensions = (): ReadonlyMap<string, string> => {
   presets();
   return broken;
 };
+
+// ───────────── The bootstrap snapshot ─────────────
+//
+// Core carries the official remote manifests of the extensions that used to be core presets, as data (byte-identical
+// to the pinned xaq-extensions files; nothing executable). They serve only connections already bound to that name
+// while the extension isn't installed: classification, setup copy for a reconnect, userServer/sameOriginIssuer and
+// reconnect policies, so an upgrade never loosens a rule and never strands a connection that must reconnect. They
+// are never offered for new connections (presets() doesn't list them), and an installed extension always wins.
+
+const SNAPSHOTS: Readonly<Record<string, unknown>> = { notion: notionSnapshot, t3code: t3codeSnapshot };
+const snapshotBuilt = new Map<string, IntegrationPreset>();
+
+/** The snapshot preset of an official remote extension, or null when core carries none for that name. */
+export function snapshotPreset(id: string): IntegrationPreset | null {
+  if (!Object.hasOwn(SNAPSHOTS, id)) return null;
+  let p = snapshotBuilt.get(id);
+  if (!p) {
+    p = presetFromValidManifest(validateManifest(SNAPSHOTS[id]), null, { official: true });
+    snapshotBuilt.set(id, p);
+  }
+  return p;
+}
+
+/**
+ * The preset of a connection bound to `id` (connections.preset): the installed extension (or a core preset), else
+ * the bootstrap snapshot. For existing connections only: new ones pick from presets().
+ */
+export const boundPreset = (id: string): IntegrationPreset | null => presetById(id) ?? snapshotPreset(id);

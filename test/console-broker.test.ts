@@ -50,6 +50,7 @@ import {
 } from "../src/components/connections/connection-flow.ts";
 import { brokerStatuses, firstRunView, shownWizard } from "../src/components/setup/first-run.ts";
 import { stepStatuses } from "../src/components/setup/steps.ts";
+import { fixtureManifest } from "./extension-fixtures.ts";
 
 const NOW = Date.parse("2026-10-16T12:00:00.000Z");
 const inDays = (d: number) => new Date(NOW + d * 86_400_000).toISOString();
@@ -80,6 +81,7 @@ const conn = (over: Partial<Shared.ConnectionView> = {}): Shared.ConnectionView 
   expired: false,
   grantedScopes: null,
   broadScopes: null,
+  scopeNotes: null,
   agents: 2,
   ...over,
 });
@@ -130,7 +132,7 @@ const view = (over: Partial<Shared.McpCallApprovalView> = {}): Shared.McpCallApp
   ...over,
 });
 
-const notion: Shared.PresetView = { id: "notion", displayName: "Notion", slug: "notion", kind: "remote_http", url: "https://mcp.notion.com/mcp", authType: "oauth", setupSteps: [], reconnectPolicy: { maxLifetimeDays: 180 }, userServer: null };
+const notion: Shared.PresetView = { id: "notion", displayName: "Notion", slug: "notion", kind: "remote_http", url: "https://mcp.notion.com/mcp", authType: "oauth", setupSteps: [], reconnectPolicy: { maxLifetimeDays: 180 }, userServer: null, official: true };
 const whoop: Shared.PresetView = {
   id: "whoop",
   displayName: "WHOOP",
@@ -140,6 +142,7 @@ const whoop: Shared.PresetView = {
   authType: "oauth",
   reconnectPolicy: null,
   userServer: null,
+  official: true,
   setupSteps: [
     { id: "dash", title: "Open the developer dashboard", body: "Sign in with your WHOOP account.", link: { label: "Open dashboard", url: "https://developer.whoop.com" } },
     { id: "redirect", title: "Add the redirect URI", body: "Paste it as `Redirect URL`.", copy: { label: "Redirect URI", value: "http://localhost:8425/oauth/connections/callback" } },
@@ -178,6 +181,7 @@ describe("T3 Code in the console: a user-named server, expiry and granted scopes
     setupSteps: [{ id: "server", title: "Enter your T3 Code server's address", body: "" }],
     reconnectPolicy: null,
     userServer: { defaultPath: "/mcp" },
+    official: true,
   };
 
   it("asks for the address and checks it like a custom server; names and slugs come from the host", () => {
@@ -236,16 +240,24 @@ describe("T3 Code in the console: a user-named server, expiry and granted scopes
     expect(connectionStatusView(conn({ expiresAt: inDays(0.5) }), NOW)).toMatchObject({ label: "Expires in 1 day", tone: "bad" });
   });
 
-  it("shows the granted scopes, and warns when they include the extension's broad ones", () => {
+  it("shows the granted scopes, with the extension's own note for them, or a generic broad-access warning", () => {
     expect(grantedScopesView(conn({ grantedScopes: null }))).toBeNull();
     expect(grantedScopesView(conn({ preset: "notion", grantedScopes: ["read"] }))).toEqual({ scopes: ["read"], note: null });
-    // T3 Code's manifest names its Full access scopes broad (remote.auth.broadScopes).
-    const t3 = { preset: "t3code", name: "forge", broadScopes: ["settings:write", "source-control:write"] };
+    // T3 Code's manifest: Full access scopes are broad, and every level has its note (remote.auth.scopeNotes).
+    const auth = fixtureManifest("t3code").remote!.auth as { broadScopes: string[]; scopeNotes: Record<string, string> };
+    const t3 = { preset: "t3code", name: "forge", broadScopes: auth.broadScopes, scopeNotes: Object.entries(auth.scopeNotes).map(([scope, note]) => ({ scope, note })) };
     const full = grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"] }));
     expect(full?.scopes).toHaveLength(4);
-    expect(full?.note).toBe("Broad access: this sign-in granted settings:write, source-control:write on forge. If agents don't need that, reconnect and pick a lower level.");
-    expect(grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read", "orchestration:operate"] }))?.note).toBeNull();
-    // Without broad scopes named, nothing is called broad, whatever the preset.
+    expect(full?.note).toMatch(/^Full access in T3: .*reconnect and pick a lower level\.$/);
+    expect(grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read", "orchestration:operate"] }))?.note).toMatch(/start, message and stop/);
+    expect(grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read"] }))?.note).toMatch(/^Read only in T3/);
+    // Broad scopes without a note of their own: the generic warning.
+    const bare = { ...t3, scopeNotes: null };
+    expect(grantedScopesView(conn({ ...bare, grantedScopes: ["orchestration:read", "settings:write"] }))?.note).toBe(
+      "Broad access: this sign-in granted settings:write on forge. If agents don't need that, reconnect and pick a lower level.",
+    );
+    expect(grantedScopesView(conn({ ...bare, grantedScopes: ["orchestration:read"] }))?.note).toBeNull();
+    // Without broad scopes or notes named, nothing is said, whatever the preset.
     expect(grantedScopesView(conn({ preset: "t3code", grantedScopes: ["settings:write"] }))?.note).toBeNull();
   });
 });

@@ -11,6 +11,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { classifyTool } from "../server/broker/catalog/classify.ts";
 import { addRule } from "../server/broker/policy/store.ts";
 import { createBrokerService } from "../server/broker/service.ts";
 import type { IntegrationPreset, ToolClass, ToolDef } from "../server/broker/types.ts";
@@ -20,7 +21,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ExtensionPin, extensionStore } from "../server/extensions/store.ts";
-import { presetById, presetSource, presets, useExtensionStore } from "../server/integrations/index.ts";
+import { presetById, presetSource, presets, snapshotPreset, useExtensionStore } from "../server/integrations/index.ts";
 import { fixtureManifest, type StubStore, stubExtensionStore } from "./extension-fixtures.ts";
 import { writeTree } from "./extension-fakes.ts";
 import { type FakeMcpUpstream, type FakeTool, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
@@ -52,6 +53,9 @@ const table =
   (tool: ToolDef): ToolClass | null =>
     Object.hasOwn(t, tool.name) ? cls(t[tool.name]!) : null;
 
+/** Notion reads that the generic rules wouldn't list at Read only (no readOnlyHint, no leading read verb). */
+const HIDDEN_READS = ["notion-memory-search", "notion-ai-search", "notion-download-skill", "notion-download-attachment", "notion-wait-session"];
+
 const CORE_NOTION: IntegrationPreset = {
   id: "notion",
   displayName: "Notion",
@@ -59,7 +63,13 @@ const CORE_NOTION: IntegrationPreset = {
   kind: "remote_http",
   url: "https://mcp.notion.com/mcp",
   auth: { type: "mcp_oauth" },
-  classify: table({ "notion-search": "read", "notion-move-pages": "write", "notion-delete-pages": "risky" }),
+  classify: table({
+    "notion-search": "read",
+    "notion-move-pages": "write",
+    "notion-delete-pages": "risky",
+    "notion-spawn-session": "risky",
+    ...Object.fromEntries(HIDDEN_READS.map((n) => [n, "read" as const])),
+  }),
   setupSteps: () => [],
   reconnectPolicy: { maxLifetimeDays: 180, idleDays: 30 },
 };
@@ -115,6 +125,7 @@ async function fake(opts: Parameters<typeof startFakeMcpUpstream>[0]): Promise<F
   return up;
 }
 
+/** Notion-like tools, with hints like Notion's: only search says readOnlyHint, only deleting says destructiveHint. */
 const notionTools = (label: string): FakeTool[] => [
   {
     name: "notion-search",
@@ -123,12 +134,10 @@ const notionTools = (label: string): FakeTool[] => [
     annotations: { readOnlyHint: true },
     handler: ok(`${label} search`),
   },
-  // Notion marks writes destructive: generic rules ask, the table says it's a normal write.
   {
     name: "notion-move-pages",
     description: "Move pages to a new parent.",
     inputSchema: { type: "object", properties: { page_ids: { type: "array" }, parent: { type: "string" } } },
-    annotations: { destructiveHint: true },
     handler: ok(`${label} moved`),
   },
   {
@@ -138,6 +147,14 @@ const notionTools = (label: string): FakeTool[] => [
     annotations: { destructiveHint: true },
     handler: ok(`${label} deleted`),
   },
+  // A Custom Agent acts on its own (mail, Slack): delegating to one must ask. The generic rules see a plain write.
+  {
+    name: "notion-spawn-session",
+    description: "Start a session with a Custom Agent.",
+    inputSchema: { type: "object", properties: { agent_url: { type: "string" }, message: { type: "string" } } },
+    handler: ok(`${label} spawned`),
+  },
+  ...HIDDEN_READS.map((name) => ({ name, description: "Notion workspace data.", inputSchema: { type: "object", properties: {} }, handler: ok(`${label} ${name}`) })),
 ];
 
 let seq = 0;
@@ -162,7 +179,12 @@ function insertConnection(ctx: AppContext, c: { slug: string; name: string; pres
 const grant = (ctx: AppContext, agentId: string, connectionId: string, level: "full" | "ask" | "read") =>
   ctx.db.run("INSERT INTO connection_grants (agent_id, connection_id, level, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", agentId, connectionId, level, new Date().toISOString(), new Date().toISOString());
 
-/** Wynn's install: two Notion workspaces on the Notion preset, WHOOP's dashboard and Brightspace as generic servers. */
+const approvalId = (s: string) => /apr_[a-z0-9]+/.exec(s)![0];
+
+/**
+ * Wynn's install: two Notion workspaces on the Notion preset (personal at "ask", work at Read only), WHOOP's
+ * dashboard and Brightspace as generic servers; an always-allow rule and a pending approval from before.
+ */
 async function wynnInstall(e: Env) {
   const store = upstreams(e.ctx).store;
   const ups = {
@@ -201,14 +223,19 @@ async function wynnInstall(e: Env) {
   store.setHeader(ids.whoop, "Authorization", "Bearer whoop-dashboard-key");
   store.setHeader(ids.brightspace, "Authorization", "Bearer brightspace-key");
   grant(e.ctx, e.agent.id, ids.personal, "ask");
-  grant(e.ctx, e.agent.id, ids.work, "full");
+  grant(e.ctx, e.agent.id, ids.work, "read");
   grant(e.ctx, e.agent.id, ids.whoop, "read");
   grant(e.ctx, e.agent.id, ids.brightspace, "ask");
   for (const id of Object.values(ids)) await refresh(e, id);
   // An "always allow" rule from before (made after the tool was listed): deleting this one page never asks.
   addRule(e.ctx.db, { agentId: e.agent.id, connectionId: ids.personal, tool: "notion-delete-pages", targetPath: "/page_ids", targetValue: '"p-keep"' });
-  return { ups, ids, tokens };
+  // A call waiting for approval from before the upgrade.
+  const c = await e.client();
+  const pending = approvalId(text(await c.callTool({ name: "notion-personal__notion-delete-pages", arguments: { page_ids: ["p-pending"] } })));
+  return { ups, ids, tokens, pending };
 }
+
+type Wynn = Awaited<ReturnType<typeof wynnInstall>>;
 
 async function refresh(e: Env, id: string) {
   const r = await e.ctx.broker.catalog.refresh(id);
@@ -218,44 +245,47 @@ async function refresh(e: Env, id: string) {
   expect(await e.ctx.broker.catalog.refresh(id)).toMatchObject({ ok: true });
 }
 
-/** Everything the upgrade must leave alone, byte for byte. */
-function snapshot(ctx: AppContext) {
+/** Everything the upgrade must leave alone, byte for byte (`approvals`: the ones that existed before it). */
+function snapshot(ctx: AppContext, approvals: string[] = []) {
   return {
     connections: ctx.db.all("SELECT id, kind, preset, slug, name, url, auth_type, level_default, all_agents, private_target, status, status_reason, expires_at FROM connections ORDER BY id"),
     credentials: ctx.db.all("SELECT * FROM connection_credentials ORDER BY connection_id"),
     grants: ctx.db.all("SELECT agent_id, connection_id, level FROM connection_grants ORDER BY connection_id"),
     rules: ctx.db.all("SELECT id, agent_id, connection_id, tool, target_path, target_value FROM approval_rules ORDER BY id"),
+    approvals: ctx.db.all(`SELECT id, agent_id, connection_id, kind, status, payload, tool_call FROM approvals WHERE id IN (${approvals.map(() => "?").join(", ") || "NULL"}) ORDER BY id`, ...approvals),
     exposed: ctx.db.all("SELECT connection_id, name, exposed_name FROM upstream_tools ORDER BY exposed_name"),
   };
 }
 
+const ALL_NOTION = ["notion-delete-pages", "notion-move-pages", "notion-search", "notion-spawn-session", ...HIDDEN_READS];
 const EXPOSED = [
   "brightspace__check_auth",
   "brightspace__get_my_courses",
-  "notion-personal__notion-delete-pages",
-  "notion-personal__notion-move-pages",
-  "notion-personal__notion-search",
-  "notion-work__notion-delete-pages",
-  "notion-work__notion-move-pages",
-  "notion-work__notion-search",
+  ...ALL_NOTION.map((n) => `notion-personal__${n}`),
+  // Read only: Notion's reads, all of them, and nothing else.
+  ...["notion-search", ...HIDDEN_READS].map((n) => `notion-work__${n}`),
   "whoop__get_status",
-];
+].sort();
 
 const authHeaders = (up: FakeMcpUpstream) => new Set(up.requests.filter((r) => r.rpcMethod === "tools/call").map((r) => r.headers.authorization));
 
-/** All four list their tools under the same names, and calls reach each server with its own unchanged credential. */
-async function allFourWork(e: Env, w: Awaited<ReturnType<typeof wynnInstall>>) {
+/**
+ * All four list their tools under the same names, Notion's rules hold (spawning a Custom Agent asks, its reads are
+ * listed at Read only, moving pages is a write), and calls reach each server with its own unchanged credential.
+ */
+async function allFourWork(e: Env, w: Wynn) {
   const c = await e.client();
   const listed = (await c.listTools()).tools.map((t) => t.name).filter((n) => n.includes("__"));
-  // whoop is granted at "read": only its read tools are listed (the dashboard's get_status is one).
   expect(listed.sort()).toEqual(EXPOSED);
   expect(text(await c.callTool({ name: "notion-personal__notion-search", arguments: { query: "plans" } }))).toContain('personal search {"query":"plans"}');
   expect(text(await c.callTool({ name: "notion-work__notion-search", arguments: { query: "okrs" } }))).toContain('work search {"query":"okrs"}');
+  for (const name of HIDDEN_READS) expect(text(await c.callTool({ name: `notion-work__${name}`, arguments: {} }))).toContain(`work ${name}`);
+  expect(text(await c.callTool({ name: "notion-personal__notion-move-pages", arguments: { page_ids: ["p1"], parent: "p0" } }))).toContain("personal moved");
+  expect(text(await c.callTool({ name: "notion-personal__notion-spawn-session", arguments: { agent_url: "a1", message: "go" } }))).toContain("pending_approval");
   expect(text(await c.callTool({ name: "whoop__get_status", arguments: {} }))).toContain("whoop status");
   expect(text(await c.callTool({ name: "brightspace__get_my_courses", arguments: {} }))).toContain("courses");
-  // The always-allow rule still lets its one target through at "ask"; another target still asks.
+  // The always-allow rule still lets its one target through at "ask".
   expect(text(await c.callTool({ name: "notion-personal__notion-delete-pages", arguments: { page_ids: ["p-keep"] } }))).toContain("personal deleted");
-  expect(text(await c.callTool({ name: "notion-personal__notion-delete-pages", arguments: { page_ids: ["p-other"] } }))).toContain("pending_approval");
   // The same credentials: each server saw only its own token.
   expect(authHeaders(w.ups.personal)).toEqual(new Set([`Bearer ${w.tokens.personal}`]));
   expect(authHeaders(w.ups.work)).toEqual(new Set([`Bearer ${w.tokens.work}`]));
@@ -265,23 +295,36 @@ async function allFourWork(e: Env, w: Awaited<ReturnType<typeof wynnInstall>>) {
 }
 
 /** No re-auth state anywhere: every connection active, no auth failure, no sign-in started, no token request. */
-function noReauth(e: Env, w: Awaited<ReturnType<typeof wynnInstall>>) {
+function noReauth(e: Env, w: Wynn) {
   expect(e.ctx.db.all("SELECT slug, status FROM connections WHERE status <> 'active'")).toEqual([]);
   expect(e.ctx.db.all("SELECT type FROM events WHERE type = 'connection.auth_failed'")).toEqual([]);
   expect(e.ctx.db.all("SELECT state FROM oauth_states WHERE connection_id IS NOT NULL")).toEqual([]);
   for (const up of [w.ups.personal, w.ups.work]) expect(up.requests.filter((r) => r.server === "auth" && r.path.endsWith("/token"))).toEqual([]);
 }
 
-const moveCall = (c: Client) => c.callTool({ name: "notion-personal__notion-move-pages", arguments: { page_ids: ["p1"], parent: "p0" } });
+/** The approval from before the upgrade still runs, once, on the same credential. */
+async function approvePending(e: Env, w: Wynn) {
+  expect(await json(await e.api(`/approvals/${w.pending}/approve`, { method: "POST", json: {} }))).toMatchObject({ status: "sent" });
+  const deletes = w.ups.personal.requests.filter((r) => r.rpcMethod === "tools/call" && r.body.includes("p-pending"));
+  expect(deletes).toHaveLength(1);
+  expect(deletes[0]!.headers.authorization).toBe(`Bearer ${w.tokens.personal}`);
+}
 
 describe("upgrade to extensions: Wynn's install, no re-auth", () => {
-  it("not yet installed: all four keep working as generic MCP connections, then the background install brings the manifest's rules", async () => {
+  it("the fixture exercises the gap: the generic rules alone would loosen spawning and hide five reads", () => {
+    const def = (t: FakeTool): ToolDef => ({ name: t.name, description: t.description ?? "", inputSchema: t.inputSchema ?? {}, ...(t.annotations ? { annotations: t.annotations } : {}) });
+    const tools = notionTools("x");
+    const generic = (name: string) => classifyTool(def(tools.find((t) => t.name === name)!), null);
+    expect(generic("notion-spawn-session")).toMatchObject({ risky: false });
+    for (const name of HIDDEN_READS) expect(generic(name), name).toMatchObject({ read: false });
+    expect(generic("notion-move-pages")).toMatchObject({ risky: false, read: false });
+  });
+
+  it("not yet installed: bound connections keep Notion's rules through the bootstrap snapshot; then the install takes over", async () => {
     const e = await env();
     const w = await wynnInstall(e);
-    const before = snapshot(e.ctx);
-    // Under today's core Notion preset, moving pages is a normal write.
-    const c0 = await allFourWork(e, w);
-    expect(text(await moveCall(c0))).toContain("personal moved");
+    const before = snapshot(e.ctx, [w.pending]);
+    await allFourWork(e, w);
 
     // xaq is updated: the Notion preset left core, and its extension isn't installed yet.
     const store = stubExtensionStore({ installable: ["notion"], hold: true });
@@ -292,57 +335,54 @@ describe("upgrade to extensions: Wynn's install, no re-auth", () => {
     ]);
     expect(up.missing).toEqual(["notion"]);
     expect(store.installs).toEqual([PINS[0]]);
+    // The snapshot serves the bound connections only: Add connection doesn't offer it.
     expect(presets().map((p) => p.id)).not.toContain("notion");
+    expect((await json(await e.api("/connections/presets"))).map((p: { id: string }) => p.id)).not.toContain("notion");
+    expect((await e.api("/connections", { method: "POST", json: { preset: "notion" } })).status).toBe(400);
     for (const id of Object.values(w.ids)) await refresh(e, id);
 
-    // Generic: the same names and credentials; Notion's destructiveHint now asks (the safe direction).
-    const c1 = await allFourWork(e, w);
-    expect(text(await moveCall(c1))).toContain("pending_approval");
-    // Reconnecting waits for the extension (its own sign-in rules), with a clear reason; nothing else changes.
-    const reconnect = await json(await e.api(`/connections/${w.ids.personal}/connect`, { method: "POST", json: {} }));
-    expect(reconnect).toMatchObject({ status: "error" });
-    expect(reconnect.message).toMatch(/notion extension isn't installed yet/);
+    // The same names and credentials, and Notion's rules: nothing got looser.
+    await allFourWork(e, w);
     noReauth(e, w);
-    expect(snapshot(e.ctx)).toEqual(before);
+    expect(snapshot(e.ctx, [w.pending])).toEqual(before);
 
-    // The background install finishes: the connections are re-listed under the manifest's risk map.
+    // The background install finishes: the installed extension takes over (re-listed under its manifest).
     store.release();
     await up.done;
     expect(presets().map((p) => p.id)).toContain("notion");
     for (const id of Object.values(w.ids)) await refresh(e, id);
-    const c2 = await allFourWork(e, w);
-    expect(text(await moveCall(c2))).toContain("personal moved");
+    await allFourWork(e, w);
     noReauth(e, w);
-    expect(snapshot(e.ctx)).toEqual(before);
-    // The view shows the binding (usedBy) and the connection keeps its preset.
+    expect(snapshot(e.ctx, [w.pending])).toEqual(before);
     expect((await json(await e.api(`/connections/${w.ids.personal}`))).preset).toBe("notion");
+    await approvePending(e, w);
   }, 30_000);
 
   it("already installed: nothing to install, the manifest's rules apply at once, nothing else changes", async () => {
     const e = await env();
     const w = await wynnInstall(e);
-    const before = snapshot(e.ctx);
+    const before = snapshot(e.ctx, [w.pending]);
     const store = stubExtensionStore({ installed: ["notion", "t3code", "brightspace"] });
     const up = e.upgrade(store);
     expect(up.missing).toEqual([]);
     await up.done;
     expect(store.installs).toEqual([]);
     for (const id of Object.values(w.ids)) await refresh(e, id);
-    const c = await allFourWork(e, w);
-    expect(text(await moveCall(c))).toContain("personal moved");
+    await allFourWork(e, w);
     // A generic connection stays generic even with a same-named extension installed: whoop and brightspace have no preset.
     expect(e.ctx.db.all("SELECT slug, preset FROM connections WHERE preset IS NULL ORDER BY slug")).toEqual([
       { slug: "brightspace", preset: null },
       { slug: "whoop", preset: null },
     ]);
     noReauth(e, w);
-    expect(snapshot(e.ctx)).toEqual(before);
+    expect(snapshot(e.ctx, [w.pending])).toEqual(before);
+    await approvePending(e, w);
   }, 30_000);
 
-  it("a failed or unpinned install leaves the connections generic and working", async () => {
+  it("a failed or unpinned install leaves the connections on the snapshot, working", async () => {
     const e = await env();
     const w = await wynnInstall(e);
-    const before = snapshot(e.ctx);
+    const before = snapshot(e.ctx, [w.pending]);
     const failing = stubExtensionStore({ installable: [] });
     const up = e.upgrade(failing);
     await up.done;
@@ -354,8 +394,19 @@ describe("upgrade to extensions: Wynn's install, no re-auth", () => {
     await e.ctx.broker.upgradeExtensions(placeholder).done;
     expect(placeholder.installs).toEqual([]);
     noReauth(e, w);
-    expect(snapshot(e.ctx)).toEqual(before);
+    expect(snapshot(e.ctx, [w.pending])).toEqual(before);
+    await approvePending(e, w);
   }, 30_000);
+
+  it("bound to an extension with neither an install nor a snapshot: generic rules, and a reconnect waits for the install", async () => {
+    const e = await env();
+    const bs = await fake({ auth: { kind: "bearer", token: "k" }, tools: [] });
+    const id = insertConnection(e.ctx, { slug: "bs", name: "Brightspace", preset: "brightspace", url: bs.url, authType: "header", privateTarget: bs.origin });
+    e.upgrade(stubExtensionStore({}));
+    const r = await json(await e.api(`/connections/${id}/connect`, { method: "POST", json: {} }));
+    expect(r).toMatchObject({ status: "error" });
+    expect(r.message).toMatch(/brightspace extension isn't installed yet/);
+  });
 });
 
 describe("the extension store's hooks (startup wiring)", () => {
@@ -373,7 +424,7 @@ describe("the extension store's hooks (startup wiring)", () => {
     // through onChange.
     const dir = writeTree(join(work, "bs-dev"), { "xaq-extension.json": JSON.stringify({ ...fixtureManifest("brightspace"), name: "bs-dev", slug: "bs-dev" }) });
     await store.install(dir, { confirmThirdParty: true });
-    expect(presetById("bs-dev")).toMatchObject({ id: "bs-dev", auth: { type: "header" } });
+    expect(presetById("bs-dev")).toMatchObject({ id: "bs-dev", auth: { type: "header" }, official: false });
 
     // A connection bound to it: usedBy names it, and a plain remove is refused.
     const id = insertConnection(e.ctx, { slug: "bs", name: "Brightspace", preset: "bs-dev", url: "http://127.0.0.1:8787/mcp", authType: "header", privateTarget: "http://127.0.0.1:8787" });
@@ -382,7 +433,9 @@ describe("the extension store's hooks (startup wiring)", () => {
     await expect(store.remove("bs-dev", { force: false })).rejects.toMatchObject({ code: "in_use" });
     // Forced: the connection is disabled, its credential stays (until the connection is removed), the preset goes.
     await store.remove("bs-dev", { force: true });
-    expect(e.ctx.db.get("SELECT status, status_reason FROM connections WHERE id = ?", id)).toEqual({ status: "disabled", status_reason: "its extension bs-dev was removed" });
+    // Unbound too (preset cleared): a later extension of that name, say a third-party one, can't take it over.
+    expect(e.ctx.db.get("SELECT status, status_reason, preset FROM connections WHERE id = ?", id)).toEqual({ status: "disabled", status_reason: "its extension bs-dev was removed", preset: null });
+    expect(store.usedBy("bs-dev")).toEqual([]);
     expect(upstreams(e.ctx).store.header(id)).toEqual({ name: "Authorization", value: "Bearer kept" });
     expect(presetById("bs-dev")).toBeNull();
 
@@ -454,12 +507,17 @@ describe("upgrade to extensions: T3 Code", () => {
     expect((await e.h.request(`${cb.pathname}${cb.search}`)).status).toBe(200);
     await refresh(e, con.id);
     const token = (await json(await e.api(`/connections/${con.id}`))) as { expiresAt: string; slug: string };
-    const before = snapshot(e.ctx);
+    // From before the upgrade: an always-allow rule for deleting one project, and a delete waiting for approval.
+    addRule(e.ctx.db, { agentId: e.agent.id, connectionId: con.id, tool: "t3_project_delete", targetPath: "/projectId", targetValue: '"p-keep"' });
     const send = (c: Client) => c.callTool({ name: `${con.slug}__t3_thread_send`, arguments: { threadId: "th1", message: "hi" } });
+    const del = (c: Client, projectId: string) => c.callTool({ name: `${con.slug}__t3_project_delete`, arguments: { projectId } });
     const c0 = await e.client();
     expect(text(await send(c0))).toContain("queued");
+    const pending = approvalId(text(await del(c0, "p-pending")));
+    const before = snapshot(e.ctx, [pending]);
 
-    // Updated xaq, extension not installed yet: generic rules (the send verb asks), same names, same sign-in.
+    // Updated xaq, extension not installed yet: the bootstrap snapshot keeps T3's table and exemptions (the send goes
+    // through, deleting asks unless the rule covers it), with the same names and the same sign-in.
     const store = stubExtensionStore({ installable: ["t3code"], hold: true });
     const up = e.upgrade(store);
     expect(up.bound).toEqual([{ connectionId: con.id, extension: "t3code" }]);
@@ -469,21 +527,53 @@ describe("upgrade to extensions: T3 Code", () => {
       [`${con.slug}__t3_project_delete`, `${con.slug}__t3_project_list`, `${con.slug}__t3_thread_send`].sort(),
     );
     expect(text(await c1.callTool({ name: `${con.slug}__t3_project_list`, arguments: {} }))).toContain("projects");
-    expect(text(await send(c1))).toContain("pending_approval");
+    expect(text(await send(c1))).toContain("queued");
+    expect(text(await del(c1, "p-keep"))).toContain("deleted");
+    expect(text(await del(c1, "p-other"))).toContain("pending_approval");
+    expect(snapshot(e.ctx, [pending])).toEqual(before);
 
-    // Installed: the manifest's table and exemptions apply (send goes through, delete asks), on the same credential.
+    // Installed: the manifest's table and exemptions apply, on the same credential.
     store.release();
     await up.done;
     await refresh(e, con.id);
     const c2 = await e.client();
     expect(text(await send(c2))).toContain("queued");
-    expect(text(await c2.callTool({ name: `${con.slug}__t3_project_delete`, arguments: { projectId: "p1" } }))).toContain("pending_approval");
-    expect(snapshot(e.ctx)).toEqual(before);
+    expect(text(await del(c2, "p-keep"))).toContain("deleted");
+    expect(text(await del(c2, "p1"))).toContain("pending_approval");
+    expect(snapshot(e.ctx, [pending])).toEqual(before);
     expect(new Set(t3.requests.filter((r) => r.rpcMethod === "tools/call").map((r) => r.headers.authorization)).size).toBe(1);
     const after = await json(await e.api(`/connections/${con.id}`));
     expect(after).toMatchObject({ status: "active", expired: false, expiresAt: token.expiresAt, slug: token.slug, preset: "t3code" });
-    // Reconnect now runs the extension's same-origin sign-in (and starts like before).
-    expect(await json(await e.api(`/connections/${con.id}/connect`, { method: "POST", json: {} }))).toMatchObject({ status: "authorize" });
+    // The approval from before runs once.
+    expect(await json(await e.api(`/approvals/${pending}/approve`, { method: "POST", json: {} }))).toMatchObject({ status: "sent" });
+    expect(t3.requests.filter((r) => r.rpcMethod === "tools/call" && r.body.includes("p-pending"))).toHaveLength(1);
+  }, 30_000);
+
+  it("never installed: a T3 connection still reconnects, under the snapshot's same-origin sign-in, before its 30 days run out", async () => {
+    const t3 = await fake({
+      protocol: "streamable-2025",
+      auth: { kind: "oauth", refreshGrant: false, accessTokenTtlSec: 2_592_000, scopesSupported: ["orchestration:read"] },
+      spaFallback: true,
+      tools: [{ name: "t3_project_list", description: "List projects.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true }, handler: ok("projects") }],
+    });
+    const e = await env();
+    const con = await json(await e.api("/connections", { method: "POST", json: { preset: "t3code", url: t3.origin, agentIds: [] } }));
+    await e.api(`/connections/${con.id}/private-target`, { method: "PUT", json: { allow: true } });
+    const first = await json(await e.api(`/connections/${con.id}/connect`, { method: "POST", json: {} }));
+    const cb = await t3.oauth!.followAuthorize(first.authorizeUrl);
+    expect((await e.h.request(`${cb.pathname}${cb.search}`)).status).toBe(200);
+    // The install fails for good; the connection nears its expiry.
+    await e.upgrade(stubExtensionStore({ installable: [] })).done;
+    expect(snapshotPreset("t3code")).toMatchObject({ userServer: { defaultPath: "/mcp", sameOriginIssuer: true }, reconnectPolicy: { tokenLifetimeCapDays: 30 } });
+    e.ctx.db.run("UPDATE connections SET expires_at = ? WHERE id = ?", new Date(Date.now() + 2 * DAY).toISOString(), con.id);
+    // Reconnect works: a new sign-in on T3's own origin, and the connection is good for another 30 days.
+    const again = await json(await e.api(`/connections/${con.id}/connect`, { method: "POST", json: {} }));
+    expect(again).toMatchObject({ status: "authorize" });
+    expect(new URL(again.authorizeUrl).origin).toBe(t3.origin);
+    const cb2 = await t3.oauth!.followAuthorize(again.authorizeUrl);
+    expect((await e.h.request(`${cb2.pathname}${cb2.search}`)).status).toBe(200);
+    const view = await json(await e.api(`/connections/${con.id}`));
+    expect(view).toMatchObject({ status: "active", expiresInDays: 29 });
   }, 30_000);
 
   it("the manifest's 30-day cap: a T3 that hands out longer tokens still expires (and warns) at 30 days", async () => {

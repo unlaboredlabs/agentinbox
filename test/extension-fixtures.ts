@@ -31,9 +31,11 @@ export function fixtureExtension(name: FixtureExtension, over: Partial<Installed
   };
 }
 
-export interface StubStore extends Pick<ExtensionStore, "list" | "get" | "installPinned"> {
+export interface StubStore extends Pick<ExtensionStore, "list" | "get" | "installPinned" | "remove"> {
   /** Pins installPinned was called with, in order. */
   installs: ExtensionPin[];
+  /** Names remove() was called with, in order. */
+  removals: string[];
   /** Resolves the pending installPinned calls (with `installable`, they wait for this). */
   release(): void;
 }
@@ -42,13 +44,18 @@ export interface StubStore extends Pick<ExtensionStore, "list" | "get" | "instal
  * An in-memory store with `installed` extensions. installPinned installs the fixture of that name (when it's
  * `installable`), after `release()` when `hold` is set, and fails otherwise.
  */
-export function stubExtensionStore(opts: { installed?: FixtureExtension[]; installable?: FixtureExtension[]; hold?: boolean } = {}): StubStore {
+export function stubExtensionStore(
+  opts: { installed?: FixtureExtension[]; installable?: FixtureExtension[]; hold?: boolean; extra?: InstalledExtension[]; onRemove?: (name: string) => void } = {},
+): StubStore {
   const have = new Map<string, InstalledExtension>((opts.installed ?? []).map((n) => [n, fixtureExtension(n)]));
+  for (const ext of opts.extra ?? []) have.set(ext.name, ext);
   const installs: ExtensionPin[] = [];
+  const removals: string[] = [];
   let gate: () => void = () => {};
   const held = opts.hold ? new Promise<void>((r) => (gate = r)) : Promise.resolve();
   return {
     installs,
+    removals,
     release: () => gate(),
     list: () => [...have.values()],
     get: (name) => have.get(name) ?? null,
@@ -59,6 +66,11 @@ export function stubExtensionStore(opts: { installed?: FixtureExtension[]; insta
       const ext = fixtureExtension(pin.name as FixtureExtension, { commit: pin.commit, integrity: pin.integrity });
       have.set(pin.name, ext);
       return ext;
+    },
+    async remove(name) {
+      removals.push(name);
+      opts.onRemove?.(name);
+      if (!have.delete(name)) throw new Error(`${name} isn't installed`);
     },
   };
 }

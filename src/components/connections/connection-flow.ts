@@ -115,9 +115,12 @@ const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
  * calls broad (its manifest's `remote.auth.broadScopes`: T3 Code's Full access). null when nothing is recorded (not
  * OAuth, or not signed in).
  */
-export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "broadScopes" | "name">): { scopes: string[]; note: string | null } | null {
+export function grantedScopesView(c: Pick<ConnectionView, "grantedScopes" | "broadScopes" | "scopeNotes" | "name">): { scopes: string[]; note: string | null } | null {
   if (!c.grantedScopes) return null;
   const scopes = c.grantedScopes;
+  // The extension's own words first (T3: what its Full access, Supervised and Read only levels mean).
+  const noted = c.scopeNotes?.find((n) => scopes.includes(n.scope));
+  if (noted) return { scopes, note: noted.note };
   const broad = scopes.filter((s) => c.broadScopes?.includes(s));
   if (!broad.length) return { scopes, note: null };
   return {

@@ -7,6 +7,7 @@ import { ChoiceCards } from "@/components/choice-cards";
 import { CopyField, ErrorAlert, ExternalLink, QueryError } from "@/components/common";
 import { PasswordInput } from "@/components/password-input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -261,7 +262,14 @@ function PresetPicker({ presets, onPick }: { presets: PresetView[]; onPick: (p: 
           <button type="button" className={item} onClick={() => onPick(p)}>
             <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted font-semibold">{p.displayName.slice(0, 1)}</span>
             <span className="min-w-0 flex-1">
-              <span className="block font-medium">{p.displayName}</span>
+              <span className="flex items-center gap-2 font-medium">
+                {p.displayName}
+                {!p.official && (
+                  <Badge variant="outline" title="Not from the official xaq extensions: its risk map can only make tools stricter.">
+                    third-party
+                  </Badge>
+                )}
+              </span>
               {p.url && <span className="block truncate text-xs text-muted-foreground">{p.url}</span>}
               {p.userServer && <span className="block text-xs text-muted-foreground">Your own server, by its address. One connection per server.</span>}
             </span>

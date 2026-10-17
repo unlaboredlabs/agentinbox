@@ -138,11 +138,11 @@ export type PresetAuth =
   | { type: "none" }
   | { type: "header"; headerName: string; prefix?: string }
   /**
-   * Remote MCP OAuth discovered from the server; registration by DCR or a metadata document (Notion). `broadScopes`
-   * (additive, from an extension manifest): granted scopes that mean broad access (T3's Full access); the console
-   * warns when a sign-in grants any of them.
+   * Remote MCP OAuth discovered from the server; registration by DCR or a metadata document (Notion). Additive, from
+   * an extension manifest: `broadScopes`, granted scopes that mean broad access (T3's Full access; the console warns),
+   * and `scopeNotes`, what a granted scope means, in priority order (the console shows the first granted one's note).
    */
-  | { type: "mcp_oauth"; broadScopes?: readonly string[] }
+  | { type: "mcp_oauth"; broadScopes?: readonly string[]; scopeNotes?: readonly { scope: string; note: string }[] }
   /** Provider OAuth with the user's own app (WHOOP): fixed endpoints, client secret, no PKCE. */
   | {
       type: "user_app";
@@ -191,6 +191,11 @@ export interface IntegrationPreset {
    * gets the name check.
    */
   nameCheckExempt?: readonly string[];
+  /**
+   * Additive (extensions): from the official registry (or core). A third-party preset can only make tools stricter
+   * than the generic rules, and the picker marks it. Undefined counts as official (core presets).
+   */
+  official?: boolean;
 }
 
 export interface NativeSourceDeps {
