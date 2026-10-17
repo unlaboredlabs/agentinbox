@@ -57,7 +57,7 @@ anything earlier in that doc.
 - #50: attachments on `create_draft`, `reply` and `send_message` (25 MB per message, at most 10 files, Gmail-blocked
   types refused, filenames cleaned and decoded, shown on approval cards, audited). Published as `nightly.48`.
 
-## Current: xaq (renamed 2026-10-16) — MCP broker M1–M3 + T3 Code shipped
+## Current: xaq (renamed 2026-10-16) — MCP broker + extensions shipped
 
 - **Renamed:** repo `wynn-dev/xaq` (was `wynn-dev/agentinbox`), package `xaq-cli`, bin `xaq`, #60.
   - The first xaq-cli nightly is `0.1.0-nightly.71` (main 54b04b0), published via OIDC with provenance.
@@ -71,18 +71,29 @@ anything earlier in that doc.
   - #76: the T3 Code preset (tier L): MCP OAuth, http only on private/tailnet addresses, same-origin sign-in, 30-day expiry with a warning and Reconnect, several servers, a risk table. Published in `nightly.76`.
   - T3 E2E rule: only a disposable `t3 serve` under `env -i` with a fresh `T3CODE_HOME`. Never the live :3773, `~/.t3` or `~/.hermes/mcp-tokens`.
 
+- **Extensions (Wynn's decision, 2026-10-16):** see [docs/EXTENSIONS.md](EXTENSIONS.md).
+  - The core is lean. Notion, T3 Code, Brightspace (remote manifests) and WHOOP (a code extension) live in
+    [wynn-dev/xaq-extensions](https://github.com/wynn-dev/xaq-extensions), pinned by commit and integrity in its
+    `index.json` and in core's `server/extensions/bootstrap.json` (all at `4130a3a`).
+  - xaq #79 is the contract, #81 the store/CLI/console, #80 the manifests and migration (no re-auth; a data snapshot
+    of the official notion/t3code manifests keeps already-bound connections gated as before), #82 the code host
+    (stdio child under `node --permission`, `--no-experimental-sqlite`, a signal preload; Node floor for code
+    extensions 22.23.2 / 24.18.1 / 26.5.1) and #83 the release pins. xaq-extensions #1–#4. Published in `nightly.82`.
+  - WHOOP: the extension reads the WHOOP API live (no DB, no polling, no events) with a scored-days cache. Parity with
+    the dashboard MCP passed on Wynn's Mac on 2026-10-17 (570 checks, 53 days). The extension now holds the slug
+    `whoop`, and Hermes uses it. Adri and Wynn tear down the dashboard: don't touch it.
+  - Wynn's connections: `notion-personal`, `notion-work`, `whoop` (extension), `brightspace-tud`.
+- **Dropped:** moving forge's T3 servers into xaq (Hermes keeps its own T3 entries). Don't touch any T3 pairing.
+
 Open, in order:
-1. **Wynn's Mac upgrade from step 4:** `npx -y xaq-cli@latest service install`, then `listen service install`,
-   `listen status`, `hermes mcp test agentinbox`, and a test email (the commands are in the lead thread).
+1. **`connections add <url> --yes` with a header key at the hidden prompt** ends `needs_reauth`, while `reconnect`
+   with the same value works (Wynn, twice). Tier S fix in progress; ships in the next nightly.
 2. **Wynn repoints `agentinbox-cli`'s npm trusted publisher** to `wynn-dev/xaq` + `shim.yml`. Then: run `shim.yml`,
    `npm deprecate agentinbox-cli …`, and `npm deprecate xaq-cli@0.0.0-stage …`. Don't run `shim.yml` before that.
-3. **Real-world checks that need Wynn:**
-   - Notion connect (M1 #2);
-   - the Hermes import (M1 #3). Open decision: one entry or two; the rec is two, keeping a mail-only `agentinbox`
-     entry for routes confined with `mcp-agentinbox`;
-   - WHOOP with his own developer app (M2);
-   - Hermes in search mode (M3) after the import: opt-in from the agent's "Tool list" card;
-   - T3 Code: connect forge's T3 servers.
+3. **Re-check the code-extension Node floor** after Node's 2026-10-21 security release (`CODE_EXTENSION_NODE_FLOOR`).
+4. **Open decisions / checks with Wynn:** the Hermes import (one entry or two; the rec is two, keeping a mail-only
+   `agentinbox` entry for routes confined with `mcp-agentinbox`); Hermes in search mode (opt-in from the agent's
+   "Tool list" card).
 
 ## Rules (Wynn / Adri)
 
