@@ -110,9 +110,9 @@ that talks to the child.
       any path, xaq's own DB included. With the flag the module doesn't exist (`import` fails and
       `getBuiltinModule` returns undefined).
     - The signal preload is a `data:` URL, so it needs no file-system allow. It pins `process.kill`, `_kill`,
-      `_debugProcess` and `_debugEnd` to throwers (non-writable, non-configurable; `getBuiltinModule("node:process")`
-      is the same object), so the child can't SIGUSR1 xaq into opening its inspector, nor kill xaq or other
-      processes of the same user. It also ignores SIGUSR1 itself. xaq ignores SIGUSR1 too (`ignoreInspectorSignal`
+      `_debugProcess`, `_debugEnd` and `os.setPriority` to throwers (non-writable, non-configurable, on the objects
+      `getBuiltinModule` and `require` return, with the ESM named exports synced). So the child can't SIGUSR1 xaq
+      into opening its inspector, kill xaq or other processes of the same user, or lower xaq's priority. It also ignores SIGUSR1 itself. xaq ignores SIGUSR1 too (`ignoreInspectorSignal`
       at startup).
     - `--allow-net` is added only on a Node that has it. From 25, `--permission` gates the network too: on 26.12.0,
       fetch fails with ERR_ACCESS_DENIED without it. On 22.x and 24.x the flag doesn't exist and is fatal. The
@@ -130,7 +130,8 @@ that talks to the child.
   child processes, workers and addons. It does **not** restrict the network. It's a guard against accidents and
   sloppy code, not a hostile-code jail, which is why third-party code extensions get the warning.
   - *Clarified (B3):*
-    - **Signals** aren't part of the permission model. They're blocked only by the preload above, from JavaScript.
+    - **Signals and scheduling priority** aren't part of the permission model. They're blocked only by the preload
+      above, from JavaScript.
       Only OS-level isolation (a separate user, a container) closes this fully.
     - **`node:sqlite`** is disabled in the child, because it would bypass the file-system rules.
     - **Node floor for code extensions:** earlier releases have known permission-model bypasses, so code

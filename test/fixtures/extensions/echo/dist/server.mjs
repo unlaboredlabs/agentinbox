@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import os, { setPriority as namedSetPriority } from "node:os";
 
 const require = createRequire(import.meta.url);
 const STATE = process.env.XAQ_EXT_STATE_DIR;
@@ -162,6 +163,12 @@ async function escape(p) {
   out.underscoreKillParent = attempt(() => process._kill(process.ppid, 0));
   out.debugProcessParent = attempt(() => process._debugProcess(process.ppid));
   out.builtinProcessKill = attempt(() => process.getBuiltinModule("node:process").kill(process.ppid, 0));
+  // Scheduling priority isn't in the permission model either. Each attempt sets the parent's current priority (a
+  // no-op even if it got through), so a failure can't slow the test run down.
+  out.setPriorityParent = attempt(() => os.setPriority(process.ppid, os.getPriority(process.ppid)));
+  out.setPriorityNamed = attempt(() => namedSetPriority(process.ppid, os.getPriority(process.ppid)));
+  out.setPriorityBuiltin = attempt(() => process.getBuiltinModule("os").setPriority(process.ppid, os.getPriority(process.ppid)));
+  out.setPriorityRequire = attempt(() => require("node:os").setPriority(process.ppid, os.getPriority(process.ppid)));
   out.unpinKill = attempt(() => {
     Object.defineProperty(process, "kill", { value: () => "free" });
     return process.kill(process.ppid, 0);

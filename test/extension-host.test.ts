@@ -178,7 +178,9 @@ describe("spawn", () => {
     expect(NODE_HAS_ALLOW_NET).toBe(process.allowedNodeEnvironmentFlags.has("--allow-net"));
     // The preload is a data: URL (no file-system allow) that pins every signal route.
     expect(CHILD_PRELOAD).toMatch(/^data:text\/javascript,/);
-    for (const k of ['"kill"', '"_kill"', '"_debugProcess"', '"_debugEnd"', "writable:false", "configurable:false", 'process.on("SIGUSR1"']) expect(CHILD_PRELOAD).toContain(k);
+    for (const k of ['"kill"', '"_kill"', '"_debugProcess"', '"_debugEnd"', '"setPriority"', "syncBuiltinESMExports", "writable:false", "configurable:false", 'process.on("SIGUSR1"']) {
+      expect(CHILD_PRELOAD).toContain(k);
+    }
   });
 
   it.skipIf(!NODE_OK)("the live child got exactly that argv, cwd = its state dir (0700), and only the contract's environment", async () => {
@@ -273,6 +275,10 @@ live("the sandbox (every escape attempt fails)", () => {
         "readOtherState",
         "readOtherStateViaDotDot",
         "readParentEnviron",
+        "setPriorityBuiltin",
+        "setPriorityNamed",
+        "setPriorityParent",
+        "setPriorityRequire",
         "signalParentUsr1",
         "spawnShell",
         "spawnSync",
@@ -302,6 +308,7 @@ live("the sandbox (every escape attempt fails)", () => {
     // Every signal route throws (the preload), and the pins can't be undone.
     for (const k of ["signalParentUsr1", "killParent", "underscoreKillParent", "debugProcessParent", "builtinProcessKill"]) expect(r[k], k).toBe("denied: Signals are disabled for xaq extensions");
     expect(r.unpinKill).toMatch(/^denied: Cannot redefine property: kill/);
+    for (const k of ["setPriorityParent", "setPriorityNamed", "setPriorityBuiltin", "setPriorityRequire"]) expect(r[k], k).toBe("denied: os.setPriority is disabled for xaq extensions");
     expect(existsSync(join(w.dataDir, "planted.txt"))).toBe(false);
     expect(existsSync(join(w.installDir, "dist", "planted.txt"))).toBe(false);
   });

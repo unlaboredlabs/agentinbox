@@ -9,10 +9,13 @@
 // - `--no-experimental-sqlite`: `node:sqlite` ignores the permission model (it opens, ATTACHes and VACUUMs INTO any
 //   path), so a child could open xaq's own database. With the flag, `import("node:sqlite")` fails and
 //   `process.getBuiltinModule("node:sqlite")` is undefined.
-// - `--import <CHILD_PRELOAD>`: signals aren't covered by the permission model. The preload pins `process.kill`,
-//   `_kill`, `_debugProcess` and `_debugEnd` to throwers (non-writable, non-configurable; the same object as
-//   `getBuiltinModule("node:process")`), so the child can't SIGUSR1 xaq into opening its inspector, nor kill xaq or
-//   any other process of the same user. It also ignores SIGUSR1 itself. Only OS-level isolation closes this fully.
+// - `--import <CHILD_PRELOAD>`: signals and scheduling priority aren't covered by the permission model. The preload
+//   pins `process.kill`, `_kill`, `_debugProcess`, `_debugEnd` and `os.setPriority` to throwers (non-writable,
+//   non-configurable, on the module objects `getBuiltinModule("node:process")` / `("os")` and `require` return; then
+//   `syncBuiltinESMExports` so `import { setPriority } from "node:os"` gets the thrower too). So the child can't
+//   SIGUSR1 xaq into opening its inspector, kill xaq or another process of the same user, or lower xaq's priority.
+//   It also ignores SIGUSR1 itself. Only OS-level isolation closes this fully. Verified on 22.13.0, 22.23.3, 24.22.0
+//   and 26.12.0, every route (default, named and dynamic imports, getBuiltinModule).
 // - The Node floor (codeExtensionNodeProblem): releases before the 2026 permission-model fixes have known bypasses.
 
 import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
@@ -23,21 +26,25 @@ export const XAQ_EXT_PROTOCOL = "1";
 
 /** Loaded before the extension's entry (a data: URL needs no file-system allow). See the header. */
 export const CHILD_PRELOAD =
-  'data:text/javascript,for(const k of ["kill","_kill","_debugProcess","_debugEnd"])Object.defineProperty(process,k,{value(){throw new Error("Signals are disabled for xaq extensions")},writable:false,configurable:false});process.on("SIGUSR1",()=>{});';
+  'data:text/javascript,const deny=(o,k,m)=>Object.defineProperty(o,k,{value(){throw new Error(m)},writable:false,configurable:false});for(const k of ["kill","_kill","_debugProcess","_debugEnd"])deny(process,k,"Signals are disabled for xaq extensions");deny(process.getBuiltinModule("node:os"),"setPriority","os.setPriority is disabled for xaq extensions");process.getBuiltinModule("node:module").syncBuiltinESMExports();process.on("SIGUSR1",()=>{});';
 
 /**
  * The oldest release of each Node line that may run code extensions: the latest security release with
- * permission-model fixes, from https://nodejs.org/dist/index.json and the Node security release notes (checked
- * 2026-10-17):
- * - 2026-01-13 (22.22.0, 24.13.0, 25.3.0): CVE-2025-55130 (fs bypass with crafted symlinks), CVE-2025-55132
- *   (`futimes` on read-only paths). 22.13.0 also has CVE-2025-23083 (`module.register` + diagnostics_channel worker;
- *   fixed in 22.13.1), reproduced against this host.
- * - 2026-03-24 (22.22.2, 24.14.1): CVE-2026-21715 (`realpathSync.native` reads), CVE-2026-21716 (`FileHandle.chmod`).
- * - 2026-06-18 (22.23.0, 24.17.0, 26.3.1): CVE-2026-48617 (`process.report` paths), CVE-2026-48935
- *   (`FileHandle.utimes`).
- * - 2026-07-29 (22.23.2, 24.18.1, 26.5.1): CVE-2026-58043 (High: path matching over-grants fs access at prefix
- *   boundaries), CVE-2026-56847 (trace events), CVE-2026-58039 (process reports).
+ * permission-model fixes. Checked on 2026-10-17 against https://nodejs.org/dist/index.json (the `security` releases)
+ * and each post under https://nodejs.org/en/blog/vulnerability/:
+ * - 2025-01-21, january-2025-security-releases (22.13.1): CVE-2025-23083, a worker permission bypass through an
+ *   InternalWorker leaked via diagnostics_channel (reproduced on 22.13.0 against this host).
+ * - 2026-01-13, december-2025-security-releases (the post kept its pre-announcement slug; 22.22.0, 24.13.0, 25.3.0):
+ *   CVE-2025-55130 (fs bypass with crafted symlinks), CVE-2025-55132 (`futimes` on read-only paths).
+ * - 2026-03-24, march-2026-security-releases (22.22.2, 24.14.1): CVE-2026-21715 (`realpathSync.native` reads),
+ *   CVE-2026-21716 (`FileHandle.chmod`).
+ * - 2026-06-18, june-2026-security-releases (22.23.0, 24.17.0, 26.3.1): CVE-2026-48617 (`process.report` paths),
+ *   CVE-2026-48935 (`FileHandle.utimes`).
+ * - 2026-07-29, july-2026-security-releases (22.23.2, 24.18.1, 26.5.1): CVE-2026-58043 (High: path matching
+ *   over-grants fs access at prefix boundaries), CVE-2026-56847 (trace events), CVE-2026-58039 (process reports).
  * Lines not listed (23, 25: end of life) are refused; lines after 26 are allowed.
+ * TODO: re-check this floor after Node's October 21, 2026 security release (pre-announced in
+ * october-2026-security-releases) and raise it if that release fixes permission-model issues.
  */
 export const CODE_EXTENSION_NODE_FLOOR: Record<number, string> = { 22: "22.23.2", 24: "24.18.1", 26: "26.5.1" };
 
