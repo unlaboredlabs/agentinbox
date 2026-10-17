@@ -390,9 +390,10 @@ describe("upgrade to extensions: Wynn's install, no re-auth", () => {
     expect(failing.installs.map((p) => p.name)).toEqual(["notion"]);
     for (const id of Object.values(w.ids)) await refresh(e, id);
     await allFourWork(e, w);
-    // The shipped placeholder pins install nothing (no fetch for an all-zero commit).
+    // Placeholder pins install nothing (no fetch for an all-zero commit).
     const placeholder = stubExtensionStore({ installable: ["notion"] });
-    await e.ctx.broker.upgradeExtensions(placeholder).done;
+    const zero = (name: string): ExtensionPin => ({ name, commit: "0".repeat(40), integrity: `sha256-${"A".repeat(43)}=` });
+    await e.ctx.broker.upgradeExtensions(placeholder, ["notion", "t3code", "whoop", "brightspace"].map(zero)).done;
     expect(placeholder.installs).toEqual([]);
     noReauth(e, w);
     expect(snapshot(e.ctx, [w.pending])).toEqual(before);
