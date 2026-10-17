@@ -1,8 +1,7 @@
 // The preset registry (docs/MCP-BROKER.md "Pre-made integrations", docs/EXTENSIONS.md). Pre-made connections are
-// extensions: each installed extension's manifest becomes an IntegrationPreset (server/extensions/manifest.ts). The
-// presets still in core (WHOOP, until its code extension lands) follow; an installed extension of the same name
-// replaces one. The broker service, the connections API (presets list, create from a preset) and the classifier
-// read them from here.
+// extensions: each installed extension's manifest becomes an IntegrationPreset (server/extensions/manifest.ts). No
+// preset is left in core (WHOOP is a code extension, run by server/extensions/host). The broker service, the
+// connections API (presets list, create from a preset) and the classifier read them from here.
 //
 // Rules for entries:
 // - `id` is the extension's name. It's stored in connections.preset (which binds the connection to the extension)
@@ -19,7 +18,6 @@ import notionSnapshot from "../extensions/bootstrap/notion.json" with { type: "j
 import t3codeSnapshot from "../extensions/bootstrap/t3code.json" with { type: "json" };
 import { presetFromManifest, presetFromValidManifest, validateManifest } from "../extensions/manifest.ts";
 import type { ExtensionStore, InstalledExtension } from "../extensions/store.ts";
-import { whoopPreset } from "./whoop/index.ts";
 
 /** Display order for the official extensions; anything else follows by name. */
 const ORDER = ["notion", "whoop", "t3code", "brightspace"];
@@ -35,8 +33,11 @@ const built = new Map<string, IntegrationPreset>();
 /** Installed extensions whose manifest didn't load (name → why), for diagnostics. */
 const broken = new Map<string, string>();
 
-/** Presets still in core. Built once: native presets keep per-process state (WHOOP's event dedupe). */
-const corePresets = (): IntegrationPreset[] => (core ??= [whoopPreset()]);
+/**
+ * Presets still in core: none. WHOOP left core for its code extension (server/extensions/host); its connections show
+ * "Needs the whoop extension" until it's installed.
+ */
+const corePresets = (): IntegrationPreset[] => (core ??= []);
 
 function extensionPreset(ext: InstalledExtension): IntegrationPreset | null {
   const key = `${ext.name}\0${ext.integrity}`;

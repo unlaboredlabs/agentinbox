@@ -17,8 +17,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The oldest supported Node (engines) and the current one.
-        node: ["22.13", "24"]
+        # The oldest supported Node (engines), the latest 22.x and the current one. Code extensions need a patched
+        # Node (≥ 22.23.2 / 24.18.1, server/extensions/host/spawn.ts): on 22.13 their tests check the refusal, and the
+        # sandbox and escape tests run on the "22" and "24" entries.
+        node: ["22.13", "22", "24"]
     name: check (node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@v5

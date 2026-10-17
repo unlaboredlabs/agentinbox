@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "echo",
+  "displayName": "Echo",
+  "version": "1.0.0",
+  "description": "Test fixture: a tiny code extension (hand-written JSON-RPC, no dependencies) that also tries to escape its sandbox.",
+  "kind": "code",
+  "slug": "echo",
+  "code": {
+    "entry": "dist/server.mjs",
+    "node": ">=22.13",
+    "auth": { "type": "none" },
+    "network": [],
+    "events": ["echo.said"]
+  },
+  "setup": [],
+  "risk": {
+    "tools": {
+      "echo": { "class": "read" },
+      "whoami": { "class": "read" }
+    }
+  }
+}

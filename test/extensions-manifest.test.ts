@@ -247,13 +247,15 @@ describe("presetFromManifest", () => {
     expect(p.setupSteps(CTX).some((s) => s.id === "server")).toBe(true);
   });
 
-  it("code: a native preset whose source is the host's (stubbed until the host lands), with its OAuth and events", async () => {
+  it("code: a native preset whose source is the code host's, with its OAuth and events", async () => {
     const ext = { ...fixtureExtension("notion"), name: "whoopish", kind: "code" as const, manifest: code() };
     const p = presetFromManifest(ext);
     expect(p).toMatchObject({ id: "whoopish", kind: "native", auth: { type: "user_app", clientIdInput: "client_id", scopes: ["read:all", "offline"] }, events: { types: ["whoopish.recovery_updated"] } });
     const source = p.createSource!({ connectionId: "con_1", accessToken: async () => "t", fetch: globalThis.fetch, log: { info() {}, warn() {} } });
     expect(source.connectionId).toBe("con_1");
-    await expect(source.listTools(AbortSignal.timeout(1000))).rejects.toThrow(/can't run in this build/);
+    // Without the broker's deps (a data dir and the outbox) the host refuses, without spawning; the full chain is
+    // test/extension-chain.test.ts.
+    await expect(source.listTools(AbortSignal.timeout(1000))).rejects.toThrow(/can't run code extensions/);
   });
 
   it("code.auth.refreshScope: optional, checked by both, passed through to the preset's auth", () => {
@@ -325,16 +327,16 @@ describe("the Brightspace extension's risk map", () => {
 });
 
 describe("presets(): installed extensions plus what's left in core", () => {
-  it("core only without a store; installed extensions in display order; reload picks up changes", async () => {
-    expect(presets().map((p) => p.id)).toEqual(["whoop"]);
+  it("nothing without a store (no preset is left in core); installed extensions in display order; reload picks up changes", async () => {
+    expect(presets().map((p) => p.id)).toEqual([]);
     const store = stubExtensionStore({ installed: ["brightspace", "t3code"], installable: ["notion"] });
     useExtensionStore(store);
-    expect(presets().map((p) => p.id)).toEqual(["whoop", "t3code", "brightspace"]);
+    expect(presets().map((p) => p.id)).toEqual(["t3code", "brightspace"]);
     const t3 = presetById("t3code");
     await store.installPinned({ name: "notion", commit: "3".repeat(40), integrity: "sha256-x" });
     expect(presetById("notion")).toBeNull(); // cached until a reload
     reloadPresets();
-    expect(presets().map((p) => p.id)).toEqual(["notion", "whoop", "t3code", "brightspace"]);
+    expect(presets().map((p) => p.id)).toEqual(["notion", "t3code", "brightspace"]);
     // The same install keeps the same preset object across reloads.
     expect(presetById("t3code")).toBe(t3);
   });
@@ -480,7 +482,7 @@ describe("the bootstrap snapshot", () => {
   });
 
   it("serves bound connections only: not in presets(), official, and an installed extension wins", () => {
-    expect(presets().map((p) => p.id)).toEqual(["whoop"]);
+    expect(presets().map((p) => p.id)).toEqual([]);
     expect(presetById("notion")).toBeNull();
     expect(snapshotPreset("notion")).toMatchObject({ id: "notion", official: true, url: "https://mcp.notion.com/mcp", reconnectPolicy: { maxLifetimeDays: 180 } });
     expect(snapshotPreset("t3code")).toMatchObject({ userServer: { sameOriginIssuer: true }, nameCheckExempt: ["t3_thread_send", "t3_thread_send_attachments", "t3_thread_merge_back"] });

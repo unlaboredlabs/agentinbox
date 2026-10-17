@@ -41,7 +41,7 @@ function ConnectionsPage() {
                 <PlugIcon />
               </EmptyMedia>
               <EmptyTitle>No connections yet</EmptyTitle>
-              <EmptyDescription>Add Notion, WHOOP, T3 Code or any MCP server. Every agent then reaches it through its one xaq connection.</EmptyDescription>
+              <EmptyDescription>Install an extension (Notion, T3 Code, WHOOP, Brightspace) and connect it, or add any MCP server. Every agent then reaches it through its one xaq connection.</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
               <AddButton variant="outline" />

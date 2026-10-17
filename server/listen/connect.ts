@@ -441,7 +441,7 @@ export function printNextSteps(profileName: string, profile: Profile, tool: Agen
     // No mailbox: its connections' events (an approval waiting, a connection that needs reconnecting).
     out(`  ${n++}. Wake ${label} when one of its connections needs it. First try it in the foreground (Ctrl-C stops it; --save keeps the command in the profile):`);
     out(`       ${pc.cyan(`${NPX} listen${p} --save ${target} --types approval.requested,connection.auth_failed,connection.expiring`)}`);
-    out(pc.gray(`     Add an integration's own events too, e.g. whoop.recovery_updated.`));
+    out(pc.gray(`     Add an integration's own events too (<extension>.<event>, if it emits any).`));
   }
   out(pc.gray(`     What the woken agent can use: ${r.confinement}.`));
   out(pc.gray(`     Where its output goes: ${r.output}`));

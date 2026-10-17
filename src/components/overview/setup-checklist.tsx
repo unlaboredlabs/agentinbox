@@ -18,7 +18,7 @@ export function SetupChecklist() {
         <CardHeader>
           <CardTitle>Finish setting up xaq</CardTitle>
           <CardDescription>
-            {view === "choose" ? "Choose what to connect first: Notion, WHOOP, any MCP server, or Gmail & Calendar." : `${finished} of ${total} steps done.`}
+            {view === "choose" ? "Choose what to connect first: Notion, any MCP server, or Gmail & Calendar." : `${finished} of ${total} steps done.`}
           </CardDescription>
           <CardAction>
             <Button asChild>

@@ -6,3 +6,6 @@ dist
 .data
 coverage
 !/shim/agentinbox-cli/dist/
+
+# Test extensions ship their built entry (docs/EXTENSIONS.md: one bundled ESM file).
+!test/fixtures/extensions/*/dist/

@@ -8,7 +8,8 @@
 
 import { classifyTool } from "../broker/catalog/classify.ts";
 import type { IntegrationPreset, PresetAuth, SetupContext, SetupStep, ToolClass, ToolDef } from "../broker/types.ts";
-import { createCodeSource } from "./code-host-stub.ts";
+import { codeExtensionSource } from "./host/index.ts";
+import { computeIntegrity } from "./integrity.ts";
 import type { InstalledExtension } from "./store.ts";
 
 export const MANIFEST_FILE = "xaq-extension.json";
@@ -707,9 +708,20 @@ export function presetFromValidManifest(m: Manifest, ext: InstalledExtension | n
     ...base,
     kind: "native",
     auth,
-    ...(ext ? { createSource: (deps) => createCodeSource(ext, deps) } : {}),
+    // The code host (server/extensions/host): one sandboxed child per connection. Before every start it re-checks
+    // the integrity of exactly this install (what ExtensionStore.verify does for the recorded one).
+    ...(ext ? { createSource: (deps) => codeExtensionSource(ext, deps, { verify: () => verifyInstall(ext) }) } : {}),
     ...(c.events?.length ? { events: { types: [...c.events] } } : {}),
   };
+}
+
+/** The install's files still hash to the integrity recorded at install (false on any read error). */
+function verifyInstall(ext: InstalledExtension): boolean {
+  try {
+    return computeIntegrity(ext.installDir) === ext.integrity;
+  } catch {
+    return false;
+  }
 }
 
 /** The IntegrationPreset of an installed extension. Throws ManifestError when its manifest is invalid or not its own. */

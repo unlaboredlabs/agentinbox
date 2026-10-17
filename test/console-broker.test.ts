@@ -458,7 +458,7 @@ describe("First run with Google optional", () => {
 
   it("Gmail & Calendar enters the Google steps; the others take the short path", () => {
     expect(firstRunView(true, fresh, { firstConnect: "google" })).toBe("google");
-    for (const c of ["notion", "whoop", "custom"] as const) expect(firstRunView(true, fresh, { firstConnect: c })).toBe("broker");
+    for (const c of ["notion", "custom"] as const) expect(firstRunView(true, fresh, { firstConnect: c })).toBe("broker");
   });
 
   it("doesn't ask an install already into the Google steps", () => {

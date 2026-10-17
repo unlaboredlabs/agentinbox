@@ -28,13 +28,15 @@ import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
 import { type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
 import { OFFICIAL_NAMES } from "../extensions/registry.ts";
-import { type ExtensionPin, extensionStore, type SqliteExtensionStore } from "../extensions/store.ts";
+import { type ExtensionPin, extensionStore, LISTENER_ORDER, type SqliteExtensionStore } from "../extensions/store.ts";
 import { boundPreset, presetSource, presets, reloadPresets, snapshotPreset, useExtensionStore } from "../integrations/index.ts";
+import { removeConnectionState } from "../extensions/host/spawn.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
 import { brokerConnections, Catalog, CatalogRegistry, connectionGrants, SqliteCatalogStore } from "./catalog/index.ts";
 import { nativeDepsFor, registerNativeFlows, upstreamConnector } from "./connector.ts";
+import { type BrokerPassthrough, createPassthrough } from "./passthrough.ts";
 import { upstreams } from "./upstream/runtime.ts";
 import { type BrokerPolicyRuntime, brokerPolicyOf, createBrokerPolicyRuntime } from "./policy/index.ts";
 import { isExpired } from "./policy/store.ts";
@@ -170,6 +172,8 @@ export interface BrokerService extends Lifecycle {
    * of events emitted.
    */
   pollEvents(at?: number): Promise<number>;
+  /** Upstream prompts and resources for /mcp (server/broker/passthrough.ts), every connection kind. */
+  passthrough: BrokerPassthrough;
   /**
    * The startup upgrade to extensions (server/extensions/bootstrap.ts): connections of the Notion, T3 Code and WHOOP
    * presets are bound to those extensions, and missing ones install in the background; once one is installed its
@@ -193,13 +197,13 @@ export function stubParts(): Pick<BrokerParts, "registry" | "connector"> {
   };
 }
 
-function unavailableSource(connectionId: string): ToolSource {
+function unavailableSource(connectionId: string, message = UNAVAILABLE): ToolSource {
   return {
     connectionId,
     listTools: async () => {
-      throw new SourceError("unavailable", UNAVAILABLE);
+      throw new SourceError("unavailable", message);
     },
-    callTool: async () => unavailable(),
+    callTool: async () => ({ isError: true, content: [{ type: "text", text: message }] }),
     close: async () => {},
   };
 }
@@ -224,7 +228,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       }
     },
   });
-  registerNativeFlows(up);
+  registerNativeFlows(up, presetFor);
   const credentials = given.credentials ?? up.store;
 
   // The catalog (W5): stored definitions and the per-agent registry over upstream_tools. A changed upstream tool is
@@ -306,11 +310,36 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   function createSource(c: Connection): ToolSource {
     if (c.kind === "remote_http") return parts.connector.createSource(c);
     const preset = presetOf(c);
-    if (!preset?.createSource) return unavailableSource(c.id);
+    if (!preset) return unavailableSource(c.id, c.preset ? missingExtensionMessage(c.preset) : UNAVAILABLE);
+    if (!preset.createSource) return unavailableSource(c.id);
     return preset.createSource(parts.nativeDeps?.(c) ?? defaultNativeDeps(c));
   }
 
-  const defaultNativeDeps = (c: Connection): NativeSourceDeps => nativeDepsFor(ctx, up, c);
+  /**
+   * The runtime's deps plus what code extensions use (server/extensions/host): the outbox (the preset's own `<id>.*`
+   * types for this connection only), the data directory, and the connection's `error` status.
+   */
+  const defaultNativeDeps = (c: Connection): NativeSourceDeps => ({
+    ...nativeDepsFor(ctx, up, c),
+    dataDir: ctx.config.dataDir,
+    emit: (e) => {
+      const conn = getConnection(ctx, c.id);
+      // A disabled (killed) connection emits nothing, even from a child that hasn't stopped yet.
+      if (!conn || conn.status === "disabled" || !enabled()) {
+        log.warn("Dropped an event from a disabled connection", { connection: c.id, type: e.type.slice(0, 80) });
+        return;
+      }
+      const preset = presetOf(conn);
+      if (preset) emitIntegrationEvents(conn, preset, [e]);
+    },
+    setError: (reason) => {
+      if (reason === null) {
+        ctx.db.run("UPDATE connections SET status = 'active', status_reason = NULL, updated_at = ? WHERE id = ? AND status = 'error'", now(), c.id);
+        return;
+      }
+      ctx.db.run("UPDATE connections SET status = 'error', status_reason = ?, updated_at = ? WHERE id = ? AND status IN ('active', 'error')", reason.slice(0, 1000), now(), c.id);
+    },
+  });
 
   /**
    * Catalog listing per connection. The catalog gets a proxy that resolves the live source on every listing, so a
@@ -442,6 +471,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     return emitted;
   }
   let pollTimer: NodeJS.Timeout | null = null;
+  let unwatchExtensions: (() => void) | null = null;
   let extensions: SqliteExtensionStore | null = null;
 
   /** Re-lists connections after their extension changed: cached views drop, native sources are rebuilt, and listing
@@ -452,6 +482,29 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       const c = getConnection(ctx, id);
       if (!c || c.status === "disabled") continue;
       void (c.kind === "remote_http" ? Promise.resolve() : closeSource(id)).then(() => catalog.refresh(id)).catch(() => {});
+    }
+  }
+
+  /**
+   * The extension of the connections a forced removal disabled is back (installed again): each one returns to `active`
+   * when its credentials are still there (nothing was cleared: no sign-in needed), else to `needs_reauth` (Reconnect).
+   * Only connections disabled by that removal, still bound to the name; a kill or a manual disable stays.
+   */
+  function reenableAfterReinstall(name: string): void {
+    const reason = extensionRemovedReason(name);
+    for (const id of usedBy(ctx.db, name)) {
+      const c = getConnection(ctx, id);
+      if (!c || c.status !== "disabled" || c.statusReason !== reason) continue;
+      const signedIn = c.authType === "none" || (c.authType === "header" ? !!credentials.header(id) : !!credentials.tokens(id));
+      ctx.db.run(
+        "UPDATE connections SET status = ?, status_reason = ?, updated_at = ? WHERE id = ?",
+        signedIn ? "active" : "needs_reauth",
+        signedIn ? null : `Reconnect ${c.name}: its sign-in is gone`,
+        now(),
+        id,
+      );
+      ctx.audit.record({ actorType: "system", action: "connection.enable", target: id, outcome: "ok", reason: `its extension ${name} was installed again`, detail: { slug: c.slug, signedIn } });
+      if (enabled()) attach(id);
     }
   }
 
@@ -544,6 +597,12 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       const agents = ctx.db.all<{ agent_id: string }>("SELECT agent_id FROM connection_grants WHERE connection_id = ?", connectionId);
       await this.kill(connectionId, "deleted");
       ctx.db.run("DELETE FROM connections WHERE id = ?", connectionId);
+      // A code extension's per-connection state goes with the connection (its source is closed by now).
+      try {
+        removeConnectionState(ctx.config.dataDir, connectionId);
+      } catch (err) {
+        log.warn("Deleting a connection's extension state failed", { connection: connectionId, error: errorMessage(err) });
+      }
       invalidate("all");
       ctx.audit.record({ actorType: "admin", actorId: null, action: "connection.delete", target: connectionId, outcome: "ok", detail: { slug: c.slug } });
       for (const { agent_id } of agents) notifyAgent(ctx, agent_id);
@@ -561,6 +620,13 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     webhookUrl,
     webhookReachability: () => reach.check(),
     pollEvents,
+    passthrough: createPassthrough({
+      db: ctx.db,
+      source: (id) => service.source(id),
+      credentials,
+      audit: (input) => ctx.audit.record(input),
+      log: ctx.log.child("mcp"),
+    }),
 
     upgradeExtensions(store, pins) {
       return upgradeToExtensions({
@@ -598,14 +664,23 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
           onRemove: (ext, o) => {
             // Official names stay bound (no third party can install under them, and re-adding the extension must bring
             // its rules back, say Notion's gate on spawning agents); any other name is unbound too.
-            if (o.force) disableBound(o.usedBy, `its extension ${ext.name} was removed`, { unbind: !ext.official && !OFFICIAL_NAMES.includes(ext.name) });
+            if (o.force) disableBound(o.usedBy, extensionRemovedReason(ext.name), { unbind: !ext.official && !OFFICIAL_NAMES.includes(ext.name) });
           },
-          onChange: (change) => {
-            reloadPresets();
+          // setHooks registers at LISTENER_ORDER.presets: presets() is rebuilt first...
+          onChange: () => reloadPresets(),
+        });
+        // ...then, at LISTENER_ORDER.restart, the extension's connections are re-listed under the new preset: native
+        // (code) sources close, so the next use starts the new code after its integrity check.
+        unwatchExtensions?.();
+        unwatchExtensions = extensions.onChange(
+          (change) => {
             const name = change.to?.name ?? change.from?.name;
+            // Reinstalled after a forced removal: its connections (still bound: official names stay bound) come back.
+            if (change.to && !change.from) reenableAfterReinstall(change.to.name);
             relist(name ? usedBy(ctx.db, name) : []);
           },
-        });
+          { order: LISTENER_ORDER.restart },
+        );
         service.upgradeExtensions(extensions);
       } catch (err) {
         log.error("Couldn't load extensions", { error: errorMessage(err) });
@@ -619,6 +694,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     },
 
     async stop() {
+      unwatchExtensions?.();
+      unwatchExtensions = null;
       // This context's store goes with it (tests run several contexts in one process).
       if (extensions && presetSource() === extensions) useExtensionStore(null);
       catalog.close();
@@ -699,8 +776,21 @@ export function listConnections(ctx: Pick<AppContext, "db">): Connection[] {
 
 const DAY_MS = 86_400_000;
 
-/** The list/get shape: tool count, agents and days to expiry. */
-export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = Date.now()): ConnectionView {
+/** The status reason of a connection a forced extension removal disabled (reenableAfterReinstall matches it). */
+export const extensionRemovedReason = (name: string) => `its extension ${name} was removed`;
+
+/** What a connection says when its preset's extension isn't installed (a code connection can't run without it). */
+export const missingExtensionMessage = (name: string) => `Needs the ${name} extension. Install it with \`xaq ext add ${name}\`, or from Extensions in the console.`;
+
+/**
+ * The list/get shape: tool count, agents and days to expiry. With `presets`, a non-remote connection whose preset
+ * (extension) isn't installed reads as `error` with missingExtensionMessage, not `active` with failing calls. A
+ * remote one keeps working as a generic MCP connection meanwhile (docs/EXTENSIONS.md "Migration").
+ */
+export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = Date.now(), presets?: readonly IntegrationPreset[]): ConnectionView {
+  if (presets && c.kind !== "remote_http" && c.preset && c.status !== "disabled" && !presets.some((p) => p.id === c.preset)) {
+    c = { ...c, status: "error", statusReason: missingExtensionMessage(c.preset) };
+  }
   const total = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM upstream_tools WHERE connection_id = ?", c.id)!.n;
   const agents = ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM connection_grants WHERE connection_id = ?", c.id)!.n;
   const expiresInDays = c.expiresAt ? Math.max(0, Math.floor((Date.parse(c.expiresAt) - at) / DAY_MS)) : null;

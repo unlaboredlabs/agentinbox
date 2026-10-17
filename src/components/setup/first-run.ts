@@ -1,16 +1,15 @@
 // First run with Google optional (docs/MCP-BROKER.md, "Setup UX"): the wizard first asks what to connect. Gmail &
-// Calendar enters today's Google steps unchanged; Notion, WHOOP or a custom MCP server go to Add connection, then
-// the agent step. Pure functions of the server's SetupState and this browser's draft. Relative imports only.
+// Calendar enters today's Google steps unchanged; Notion or a custom MCP server go to Add connection, then the agent
+// step. WHOOP is an extension now (docs/EXTENSIONS.md), so it isn't a first-run card. Pure functions of the server's SetupState and this browser's draft. Relative imports only.
 
 import type { SetupState } from "../../../shared/types.ts";
 import type { SetupDraft } from "./steps.ts";
 
-export const FIRST_CHOICES = ["notion", "whoop", "custom", "google"] as const;
+export const FIRST_CHOICES = ["notion", "custom", "google"] as const;
 export type FirstChoice = (typeof FIRST_CHOICES)[number];
 
 export const FIRST_CHOICE_INFO: Record<FirstChoice, { title: string; description: string; presetId: string | null }> = {
   notion: { title: "Notion", description: "Pages and databases in your workspace. About 2 minutes.", presetId: "notion" },
-  whoop: { title: "WHOOP", description: "Recovery, sleep and workouts. About 5 minutes, with your own WHOOP app.", presetId: "whoop" },
   custom: { title: "Another MCP server", description: "Paste its address. xaq finds out how it signs in.", presetId: null },
   google: { title: "Gmail & Calendar", description: "Mail and calendars of your Google accounts. About 10 minutes in Google Cloud.", presetId: null },
 };

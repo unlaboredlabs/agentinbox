@@ -17,6 +17,7 @@ import type { AgentPrincipal } from "../policy/types.ts";
 import { errorMessage, HttpError, PolicyDenied } from "../util/errors.ts";
 import { brokerInstructions, installedHandler, registerBrokerTools } from "./broker.ts";
 import { registerCalendarTools } from "./calendar.ts";
+import { registerBrokerPassthrough } from "./passthrough.ts";
 import {
   formatAccounts,
   formatApprovalStatus,
@@ -824,7 +825,10 @@ function exposeTools(
   if (mode === "direct") {
     for (const [name, tool] of natives) expose(name, tool);
     // MCP broker: upstream tools and get_call_status.
-    if (broker) registerBrokerTools(ctx, server, principal, broker, { handled, shapes, dynamic, signal: opts.signal });
+    if (broker) {
+      registerBrokerTools(ctx, server, principal, broker, { handled, shapes, dynamic, signal: opts.signal });
+      registerBrokerPassthrough(ctx, server, principal, broker, { signal: opts.signal });
+    }
     return server;
   }
 
@@ -858,7 +862,10 @@ function exposeTools(
   // Every tool the agent can use is registered, as in direct mode: a call by name (an agent's script calling
   // search_threads) goes through the same handler, policy, approvals and audit. Only the listing is trimmed.
   for (const [name, tool] of natives) expose(name, tool);
-  if (broker) registerBrokerTools(ctx, server, principal, broker, { handled, shapes, dynamic, signal: opts.signal });
+  if (broker) {
+    registerBrokerTools(ctx, server, principal, broker, { handled, shapes, dynamic, signal: opts.signal });
+    registerBrokerPassthrough(ctx, server, principal, broker, { signal: opts.signal });
+  }
   // Listed: the meta-tools, get_call_status (with connections) and the hot tools.
   const listed = new Set<string>([...META_TOOL_NAMES, CALL_STATUS_TOOL, ...hotToolNames(brokerTools.length, prefs!.hot)]);
   const list = installedHandler(server, "tools/list");

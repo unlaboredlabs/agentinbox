@@ -68,7 +68,7 @@ export function useSetupProgress() {
   }, [configured]);
   const statuses = stepStatuses(query.data, draft);
   const firstTodo = STEP_IDS.find((id) => statuses[id] === "todo");
-  // First run with Google optional: Notion, WHOOP or a custom server take the short path (first-run.ts).
+  // First run with Google optional: Notion or a custom server take the short path (first-run.ts).
   const view = firstRunView(useBrokerEnabled(), query.data, draft);
   const connections = useQuery({ ...queries.connections(), enabled: view === "broker" });
   const broker = brokerStatuses(connections.data?.length ?? 0, query.data?.agentsCreated ?? 0);

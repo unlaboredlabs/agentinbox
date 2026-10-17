@@ -87,6 +87,59 @@ export interface ToolSource {
   callTool(name: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolResult>;
   /** Releases sessions/processes. Idempotent. */
   close(): Promise<void>;
+  /**
+   * Additive (extensions, docs/EXTENSIONS.md "Prompts and resources"): the upstream's prompts and resources, passed
+   * through /mcp. Optional: a source without them (or whose server doesn't declare the capability) has none. Errors as
+   * for listTools (SourceError).
+   */
+  prompts?: PromptSource;
+}
+
+/** A prompt as the upstream lists it (MCP Prompt, SDK-agnostic). */
+export interface PromptDef {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: { name: string; description?: string; required?: boolean }[];
+}
+
+/** A resource as the upstream lists it (MCP Resource, SDK-agnostic). */
+export interface ResourceDef {
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/** A resource template as the upstream lists it (MCP ResourceTemplate, SDK-agnostic). */
+export interface ResourceTemplateDef {
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** prompts/get's result (MCP GetPromptResult): messages whose content blocks pass through. */
+export interface PromptResult {
+  description?: string;
+  messages: { role: "user" | "assistant"; content: ContentBlock }[];
+}
+
+/** resources/read's result (MCP ReadResourceResult). */
+export interface ResourceReadResult {
+  contents: ({ uri: string; mimeType?: string } & ({ text: string } | { blob: string }))[];
+}
+
+/** Prompts and resources of one source (all "read" class; docs/EXTENSIONS.md). */
+export interface PromptSource {
+  listPrompts(signal: AbortSignal): Promise<PromptDef[]>;
+  getPrompt(name: string, args: Record<string, string>, signal: AbortSignal): Promise<PromptResult>;
+  listResources(signal: AbortSignal): Promise<ResourceDef[]>;
+  listResourceTemplates(signal: AbortSignal): Promise<ResourceTemplateDef[]>;
+  readResource(uri: string, signal: AbortSignal): Promise<ResourceReadResult>;
 }
 
 /** Why a source couldn't serve a call. `needs_reauth` also flips the connection's status (CredentialStore). FROZEN. */
@@ -152,7 +205,10 @@ export type PresetAuth =
       /** Setup inputs that hold the client id / secret. */
       clientIdInput: string;
       clientSecretInput: string;
-      /** Additive (extension manifests): sent as `scope` on a refresh (WHOOP: "offline"); omitted when absent. */
+      /**
+       * Additive (extensions): sent as `scope` on every refresh request when set (WHOOP: "offline", which its docs
+       * require to renew the refresh token). Unset: no `scope`, the originally granted scope (RFC 6749 §6).
+       */
       refreshScope?: string;
     };
 
@@ -203,11 +259,25 @@ export interface NativeSourceDeps {
   accessToken(signal: AbortSignal): Promise<string>;
   fetch: typeof fetch;
   log: { info(msg: string, meta?: Record<string, unknown>): void; warn(msg: string, meta?: Record<string, unknown>): void };
+  /**
+   * Additive (code extensions, server/extensions/host): the broker's wiring supplies these; a preset that doesn't
+   * need them ignores them.
+   * - `tokenExpiresAt`: epoch ms of the current access token's expiry (after `accessToken`), null when unknown.
+   * - `emit`: an IntegrationEvent into the events outbox (only the preset's own `<id>.*` types for this connection
+   *   get through, as for native events).
+   * - `dataDir`: the install's data directory (code extensions keep per-connection state under it).
+   * - `setError`: marks the connection `error` with a reason shown in the console (null clears an error this source
+   *   set, back to `active`).
+   */
+  tokenExpiresAt?(): number | null;
+  emit?(e: IntegrationEvent): void;
+  dataDir?: string;
+  setError?(reason: string | null): void;
 }
 
-/** An event a native integration emits (e.g. `whoop.recovery_updated`), delivered through the events outbox. */
+/** An event a native integration emits (e.g. `example.item_updated`), delivered through the events outbox. */
 export interface IntegrationEvent {
-  /** `<preset>.<name>`, e.g. `whoop.recovery_updated`. */
+  /** `<preset>.<name>`, e.g. `example.item_updated`. */
   type: string;
   connectionId: string;
   /** Dedupe key unique per occurrence (e.g. WHOOP trace_id). */

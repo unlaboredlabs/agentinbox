@@ -1,6 +1,7 @@
+import type { ExtensionRegistryEntryView, ExtensionView } from "@shared/extensions";
 import type { AccessLevel, Agent, ConnectionGrant, ConnectionProbe, ConnectionView, PresetView, SetupStepView, StartConnectInput, StartConnectResult } from "@shared/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeftIcon, ArrowRightIcon, GlobeIcon, NetworkIcon, PlugIcon, SearchIcon, ShieldCheckIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, DownloadIcon, GlobeIcon, NetworkIcon, PlugIcon, SearchIcon, ShieldCheckIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { connectAccount } from "@/components/accounts/connect-host";
 import { ChoiceCards } from "@/components/choice-cards";
@@ -17,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { keys, queries } from "@/lib/queries";
+import { installableExtensions } from "@/components/extensions/extension-logic";
 import { connectConnection } from "./connection-auth";
 import { startConnect } from "./connection-row";
 import {
@@ -70,6 +72,12 @@ export function AddConnectionHost() {
   const [created, setCreated] = useState<ConnectionView | null>(null);
   const onDone = useRef<Request["onDone"]>(undefined);
   const presets = useQuery({ ...queries.presets(), enabled: open });
+  // The official extensions not installed yet: the picker offers to install them (pre-made connections are extensions).
+  const registry = useQuery({ ...queries.extensionRegistry(), enabled: open });
+  /** Opened on a preset that isn't installed (first run's "Notion"): the picker leads with installing it. */
+  const [offer, setOffer] = useState<string | null>(null);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<unknown>();
   const connections = useQuery({ ...queries.connections(), enabled: open });
   const taken = (connections.data ?? []).map((c) => c.slug);
 
@@ -77,6 +85,8 @@ export function AddConnectionHost() {
   useEffect(() => {
     openerRef.current = (r) => {
       onDone.current = r.onDone;
+      setOffer(null);
+      setInstallError(undefined);
       setDraft(emptyDraft());
       setCreated(null);
       setPage(r.start ? "setup" : "pick");
@@ -89,7 +99,10 @@ export function AddConnectionHost() {
         .then((list) => {
           const p = list.find((x) => x.id === r.start);
           setDraft(emptyDraft(p ?? null));
-          if (!p) setPage("pick");
+          if (!p) {
+            setOffer(r.start ?? null);
+            setPage("pick");
+          }
         })
         .catch(() => setPage("pick"))
         .finally(() => setStartWith(undefined));
@@ -131,6 +144,26 @@ export function AddConnectionHost() {
     }
     setDraft(emptyDraft(p));
     setPage("setup");
+  };
+
+  /** Installs an official extension from the registry, then continues to its setup as if it had been there. */
+  const installAndContinue = async (e: ExtensionRegistryEntryView) => {
+    setInstalling(e.name);
+    setInstallError(undefined);
+    try {
+      await api<ExtensionView>("/api/extensions", { body: { source: e.name, expectIntegrity: e.integrity } });
+      void qc.invalidateQueries({ queryKey: keys.extensions });
+      void qc.invalidateQueries({ queryKey: keys.extensionRegistry });
+      const list = await qc.fetchQuery({ ...queries.presets(), staleTime: 0 });
+      const p = list.find((x) => x.id === e.name);
+      if (!p) throw new Error(`${e.displayName} was installed, but it doesn't offer a connection. Check it on the Extensions page.`);
+      setOffer(null);
+      choose(p);
+    } catch (err) {
+      setInstallError(err);
+    } finally {
+      setInstalling(null);
+    }
   };
 
   const set = (patch: Partial<ConnectionDraft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -197,7 +230,16 @@ export function AddConnectionHost() {
           ) : presets.isError ? (
             <QueryError error={presets.error} onRetry={() => void presets.refetch()} />
           ) : (
-            <PresetPicker presets={presets.data} onPick={choose} />
+            <PresetPicker
+              presets={presets.data}
+              onPick={choose}
+              installable={installableExtensions(registry.data, presets.data.map((p) => p.id))}
+              registryDown={registry.isError}
+              offer={offer}
+              installing={installing}
+              installError={installError}
+              onInstall={(e) => void installAndContinue(e)}
+            />
           ))}
 
         {page === "setup" &&
@@ -253,10 +295,65 @@ export function AddConnectionHost() {
   );
 }
 
-function PresetPicker({ presets, onPick }: { presets: PresetView[]; onPick: (p: PresetView | null) => void }) {
+function PresetPicker({
+  presets,
+  onPick,
+  installable,
+  registryDown,
+  offer,
+  installing,
+  installError,
+  onInstall,
+}: {
+  presets: PresetView[];
+  onPick: (p: PresetView | null) => void;
+  /** Official extensions not installed yet (installableExtensions). */
+  installable: ExtensionRegistryEntryView[];
+  /** The registry couldn't be fetched (offline): installing waits for the Extensions page. */
+  registryDown: boolean;
+  /** The preset asked for (first run) that isn't installed. */
+  offer: string | null;
+  installing: string | null;
+  installError: unknown;
+  onInstall: (e: ExtensionRegistryEntryView) => void;
+}) {
   const item = "flex w-full items-start gap-3 rounded-lg border bg-card p-3 text-left text-sm outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring";
+  const offered = offer ? installable.find((e) => e.name === offer) : undefined;
+  const rest = installable.filter((e) => e !== offered);
   return (
     <ul className="space-y-2">
+      {installError !== undefined && (
+        <li>
+          <ErrorAlert error={installError} />
+        </li>
+      )}
+      {offer && !offered && !presets.some((p) => p.id === offer) && (
+        <li>
+          <Alert variant="info">
+            <DownloadIcon />
+            <AlertTitle>The {offer} extension isn't installed</AlertTitle>
+            <AlertDescription>
+              {registryDown
+                ? "xaq couldn't reach the official extensions list. Install it from the Extensions page once it can."
+                : "Install it from the Extensions page, then add the connection."}
+            </AlertDescription>
+          </Alert>
+        </li>
+      )}
+      {offered && (
+        <li>
+          <Alert variant="info">
+            <DownloadIcon />
+            <AlertTitle>{offered.displayName} is an extension</AlertTitle>
+            <AlertDescription className="space-y-3">
+              <p>{offered.description} It comes from the official xaq extensions and is installed once; then you connect it.</p>
+              <Button size="sm" disabled={installing !== null} onClick={() => onInstall(offered)}>
+                {installing === offered.name ? <Spinner /> : <DownloadIcon />} Install the {offered.displayName} extension
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </li>
+      )}
       {presets.map((p) => (
         <li key={p.id}>
           <button type="button" className={item} onClick={() => onPick(p)}>
@@ -275,6 +372,21 @@ function PresetPicker({ presets, onPick }: { presets: PresetView[]; onPick: (p: 
             </span>
             <ArrowRightIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />
           </button>
+        </li>
+      ))}
+      {rest.map((e) => (
+        <li key={`install-${e.name}`} className="flex w-full items-start gap-3 rounded-lg border border-dashed p-3 text-sm">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted font-semibold">{e.displayName.slice(0, 1)}</span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-2 font-medium">
+              {e.displayName}
+              <Badge variant="outline">not installed</Badge>
+            </span>
+            <span className="block text-xs text-muted-foreground">{e.description}</span>
+          </span>
+          <Button size="sm" variant="outline" disabled={installing !== null} onClick={() => onInstall(e)}>
+            {installing === e.name ? <Spinner /> : <DownloadIcon />} Install
+          </Button>
         </li>
       ))}
       <li>

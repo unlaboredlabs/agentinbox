@@ -49,15 +49,15 @@ async function selfOrigins(dataDir: string): Promise<string[]> {
 export function registerConnectionsCommands(program: Command): void {
   const connections = program
     .command("connections", { hidden: !CONNECTIONS_VISIBLE })
-    .description("the MCP servers xaq connects agents to (Notion, WHOOP, any MCP URL); run on xaq's machine")
+    .description("the MCP servers xaq connects agents to (Notion, T3 Code, any MCP URL, installed extensions); run on xaq's machine")
     .summary("add, list, reconnect or remove connected MCP servers")
     .helpGroup(GROUP);
 
   dataOption(
     connections
       .command("add")
-      .description("connect an integration (notion, whoop, t3code) or any MCP server URL, interactively")
-      .argument("<integration-or-url>", "notion, whoop, t3code, or an MCP server URL such as https://mcp.example.com/mcp"),
+      .description("connect an installed extension (install it first: `ext add notion`) or any MCP server URL, interactively")
+      .argument("<integration-or-url>", "an installed extension (`ext add notion|t3code|whoop|brightspace` first), or an MCP server URL such as https://mcp.example.com/mcp"),
   )
     .option("--url <address>", "t3code: your T3 Code server's address, e.g. http://100.101.102.103:3773 (asked when omitted)")
     .option("--slug <name>", "its short name: agents see its tools as <name>__<tool>")

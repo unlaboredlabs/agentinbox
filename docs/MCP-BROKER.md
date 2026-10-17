@@ -10,7 +10,8 @@ agentinbox grows from a Gmail/Calendar broker into an **MCP broker**:
 
 - **One endpoint per agent.** It unifies all of that agent's MCP servers.
 - **Pre-made integrations**, starting with **Notion** and **WHOOP**. Gmail and Calendar stay as the built-in native
-  integration.
+  integration. *(2026-10: pre-made integrations are now extensions, [EXTENSIONS.md](EXTENSIONS.md). WHOOP is a code
+  extension, so the native WHOOP described below has left core.)*
 - **The broker holds every upstream credential.** Agents never see them.
 - **Each agent gets only the tools it's allowed.**
 - **Existing machinery is reused:** approvals, the audit log, signed webhooks and the listener relay.
@@ -367,7 +368,7 @@ upstream: the spec forbids token passthrough.
 ### Events from integrations
 
 The events outbox, webhooks, SSE stream and listener relay are generalised:
-- Event types become open-ended under a prefix: `whoop.recovery_updated` and `connection.auth_failed`, next to today's
+- Event types become open-ended under a prefix: `<integration>.<event>` and `connection.auth_failed`, next to today's
   closed mail and calendar enum.
 - Events carry `connection_id` where they used to carry `account_id`.
 - `canSeeEvent` gains a branch for connection grants.
@@ -427,6 +428,10 @@ REST tool set on an internal token. It goes later, and only if asked for.
 
 ### WHOOP: native, each user's own app
 
+*Superseded (2026-10): WHOOP is now a code extension ([EXTENSIONS.md](EXTENSIONS.md)) that reads the API live, with no
+events, polling or webhooks. Core keeps only the generic `user_app` OAuth (`server/broker/upstream/user-app.ts`). This
+section records the M2 design.*
+
 The official v2 API ([WHOOP API](https://developer.whoop.com/api/), [OAuth](https://developer.whoop.com/docs/developing/oauth)):
 - **Scopes:** `read:recovery|cycles|workout|sleep|profile|body_measurement`, plus `offline` for a refresh token.
 - **Tokens:** 1 h access tokens. Refresh tokens rotate and are single-use. Refreshing needs the client secret, and
@@ -483,7 +488,7 @@ from WHOOP.
 
 All take date ranges and handle pagination, and output is compact text plus `structuredContent`.
 
-**Events:** `whoop.recovery_updated` (and sleep and workout) go through the existing outbox, webhooks and listener.
+**Events (as designed for M2; the WHOOP extension emits none):** recovery, sleep and workout updates would go through the existing outbox, webhooks and listener.
 They come from a poll every 15 minutes, which needs nothing but the OAuth connection.
 - **Cost:** about 290 requests a day, under 3% of WHOOP's 10,000.
 - **Timeliness:** WHOOP scores a sleep or workout minutes after it ends.
@@ -819,13 +824,16 @@ until PR 8, so existing users see nothing half-built:
 
 ### M2: WHOOP native
 
+*Superseded (2026-10): see the WHOOP section above; the native integration was removed when WHOOP became a code
+extension.*
+
 **Scope:** the guided per-user app setup, the WHOOP tools, the refresh worker, webhooks or polling, and the
 `whoop.*` events.
 
 **Done when:**
 - an E2E test against a fake WHOOP covers OAuth, refresh rotation, the webhook signature, polling and the events;
 - a real WHOOP account connects and `whoop__get_today` returns data;
-- a listener receives `whoop.recovery_updated`;
+- a listener receives the integration's events;
 - one persona walk of WHOOP setup passes;
 - Hermes's old `whoop` entry is removed.
 

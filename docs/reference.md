@@ -41,22 +41,22 @@ Besides Gmail and Calendar, xaq brokers other MCP servers. Each agent still has 
 key; the broker holds every upstream credential and lists only the tools the agent is allowed. Design and decisions:
 [MCP-BROKER.md](MCP-BROKER.md).
 
-- **Add one**: in the console, Connections → Add connection; or `npx xaq-cli connections add notion|whoop|t3code|<url>`
-  on the daemon's machine. Pre-made connections are **extensions** from
+- **Add one**: in the console, Connections → Add connection (it offers the official extensions that aren't installed
+  yet, with an Install button); or on the daemon's machine, `npx xaq-cli ext add notion` first, then
+  `npx xaq-cli connections add notion` (or `connections add <url>` for any MCP server). Pre-made connections are
+  **extensions** from
   [wynn-dev/xaq-extensions](https://github.com/wynn-dev/xaq-extensions) ([EXTENSIONS.md](EXTENSIONS.md)): Notion
-  (its hosted MCP, two clicks), T3 Code (below) and Brightspace (your own
+  (its hosted MCP, two clicks), T3 Code (below), Brightspace (your own
   [Brightspace MCP server](https://github.com/wynn-dev/brightspace-mcp-server): its address and its bearer token;
-  every tool reads). WHOOP (your own WHOOP developer app; the console walks you through it) is still built in until
-  its extension ships. Connections made before extensions keep working as they are: xaq binds them to their
-  extension at startup and installs a missing one in the background, with no new sign-in. Until it's installed,
-  Notion and T3 Code connections keep the same rules and can still reconnect (core keeps a copy of those two
-  extensions' manifests for them). WHOOP needs no public URL: agents read live from the WHOOP API, and xaq checks
-  WHOOP every 15 minutes for new recoveries, sleeps and workouts (`whoop.*` events).
-  - **Optional webhooks:** they bring those events within seconds, and the 15-minute check keeps running as a
-    reconciliation poll, so a webhook missed while the machine was asleep or offline still arrives. The setup offers
-    webhooks only when the internet can reach this install.
-  - **Tailnet-only installs** (Tailscale `serve` on a `*.ts.net` name): the setup offers an optional Tailscale Funnel
-    command that exposes only the webhook path, on its own port.
+  every tool reads) and WHOOP (a code extension: install it with `npx xaq-cli ext add whoop` or from Extensions in
+  the console, then add it the same way; the console walks you through your own WHOOP developer app, no public URL
+  is needed, and agents read live from the WHOOP API). Connections made before extensions keep working as they are:
+  xaq binds them to their extension at startup and installs a missing one in the background, with no new sign-in.
+  Until it's installed, Notion and T3 Code connections keep the same rules and can still reconnect (core keeps a
+  copy of those two extensions' manifests for them); a WHOOP connection reads "Needs the whoop extension".
+  - **Optional webhooks:** a preset whose provider sends webhooks offers them only when the internet can reach this
+    install; on a tailnet-only install (Tailscale `serve` on a `*.ts.net` name) it offers an optional Tailscale Funnel
+    command that exposes only the webhook path, on its own port. No built-in preset uses webhooks today.
 
   - **T3 Code**: one connection per T3 server. Give the address you open T3 at (`http://100.x.y.z:3773` on
     Tailscale, `http://127.0.0.1:3773` locally; xaq adds `/mcp`), allow that exact address (plain http is accepted
@@ -95,6 +95,21 @@ key; the broker holds every upstream credential and lists only the tools the age
   connection's page → Change short name, or `npx xaq-cli connections rename <name> --slug <new> [--name <display
   name>]`. The exposed tool names follow at once and approval rules carry over, but anything that calls the old
   `<old>__<tool>` names stops working until it uses the new ones.
+- **Prompts and resources**: `/mcp` also passes each connection's prompts and resources through, in both tool-list
+  modes. Prompts are `<connection>__<prompt>`. Resources are `xaq://<connection>/<the original URI, percent-encoded>`,
+  named `<connection>__<name>`; resource templates work the same way. They count as reads: an agent sees them with
+  any access level on the connection. Each `prompts/get` and `resources/read` is in the audit log (actions
+  `prompts/get` and `resources/read`), and the connection's secrets are scrubbed from what comes back.
+- **Extensions**: pre-built connections are extensions ([EXTENSIONS.md](EXTENSIONS.md)). A *remote* extension is a
+  proxied MCP server. A *code* extension (WHOOP) is a Node file that xaq runs as a child process, one per connection,
+  under Node's permission model: it can read only its own install and its own state directory, can write only that
+  state directory, can't start processes, workers or native addons, and gets an empty environment except four
+  `XAQ_EXT_*` values (and `TZ`, `LANG`). It never sees xaq's database, `master.key`, other connections, the client
+  secret or the refresh token: it asks xaq for this connection's access token. The network is **not** restricted,
+  which is why extensions from outside the official registry come with a warning. A crash restarts it with backoff;
+  five crashes in a row mark the connection Error with its last output (secrets redacted). Code extensions need Node
+  ≥ 22.23.2, ≥ 24.18.1 or ≥ 26.5.1 (older releases have permission-model bypasses); on an older Node the connection
+  says so and nothing runs, while xaq itself and remote extensions work from 22.13.
 - **Search mode**: the tool list shows only `search_tools`, `call_read_tool`, `call_write_tool` and `get_call_status`;
   the agent finds the rest by searching. Calling a tool by its name still works, with the same access, approvals and
   audit. A new agent gets search mode if it has more than about 30 tools the first time it connects. After that its
@@ -418,6 +433,15 @@ Security Policy that allows only the console's own scripts, and a 15-minute lock
 attempts) from one address. When failures pile up across many addresses, every sign-in attempt is slowed down instead.
 It never allows being framed. The data directory and database are readable only by their owner.
 
+**Code extensions run outside xaq's process** (see Extensions under Connections above): Node's permission model confines
+their files and forbids child processes, workers and addons; `node:sqlite` (which would ignore those rules) is
+switched off; a preload stops them sending signals (so they can't open xaq's debugger or kill processes), and xaq
+ignores SIGUSR1 itself; the environment is built from scratch; credentials are handed out as short-lived access
+tokens for that one connection. It's a guard against accidents and sloppy code, not a jail for hostile code: the
+network isn't restricted, and only OS-level isolation (a separate user or container) closes the signal route fully.
+They need a patched Node (≥ 22.23.2, 24.18.1 or 26.5.1). Install third-party code extensions only from people you
+trust.
+
 Recommendations: split agents that read untrusted mail from agents that can send; prefer `draft_only` or `approval`;
 use allowlists for anything that sends directly.
 
@@ -459,6 +483,8 @@ Everything lives in the data directory (`~/.xaq` by default):
 | `service.env` | Environment the service was installed with, possibly including `XAQ_MASTER_KEY` (mode 0600; `service install` only) |
 | `xaq.log` | Service output on macOS (launchd); on Linux use `journalctl --user -u xaq` (or without `--user` for a system service) |
 | `app/` | The service's own install (`service install` only) |
+| `extensions/` | Installed extensions, one read-only directory per pinned version |
+| `extension-state/<extension>/<connection>/` | A code extension's own files for one connection (mode 0700), deleted with the connection |
 
 <!-- rename-xaq: keep-start -->
 A data directory created before the rename keeps its file names: `agentinbox.db`, `agentinbox.lock` and

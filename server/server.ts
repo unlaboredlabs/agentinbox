@@ -35,6 +35,21 @@ export interface RunningServer {
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
+let inspectorSignalIgnored = false;
+
+/**
+ * SIGUSR1 makes Node open its inspector on 127.0.0.1:9229, and anything that can signal this process (a code
+ * extension's child is the same user; the permission model doesn't cover signals) could then run code in xaq and read
+ * master.key. With a listener installed, Node doesn't start the inspector. `--disable-sigusr1` would do it too, but
+ * xaq can't choose its own Node flags (it starts as `node dist/cli.js` or through npx) and 22.13 lacks it. The
+ * children are also stopped from sending signals at all (server/extensions/host/spawn.ts, CHILD_PRELOAD).
+ */
+export function ignoreInspectorSignal(): void {
+  if (inspectorSignalIgnored) return;
+  inspectorSignalIgnored = true;
+  process.on("SIGUSR1", () => {});
+}
+
 /**
  * Binds the port first (so a busy port leaves nothing behind), then takes the data directory's
  * instance lock, checks the master key against stored secrets, builds the context and the app,
@@ -42,6 +57,7 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
  * Use `port: 0` in tests; `config.port` is updated to the bound port.
  */
 export async function startServer(opts: StartOptions): Promise<RunningServer> {
+  ignoreInspectorSignal();
   const { config } = opts;
   type Fetch = Parameters<typeof serve>[0]["fetch"];
   // Distinguishable from a real HealthResponse, so `service install` keeps waiting.

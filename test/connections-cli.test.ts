@@ -312,8 +312,10 @@ describe("connections add", () => {
     }
   });
 
-  it("an unknown integration names the presets", async () => {
-    await expect(addConnection("whop", {}, deps(new ScriptedPrompter([])))).rejects.toThrow(/Use whoop, <an MCP server URL>/);
+  it("an unknown integration names what's installed; an official extension that isn't installed says to install it", async () => {
+    await expect(addConnection("whop", {}, deps(new ScriptedPrompter([])))).rejects.toThrow(/Unknown integration "whop"\. Installed integrations: whoop\. Install one with `npx xaq-cli ext add <name>`.*or pass an MCP server URL/);
+    await expect(addConnection("notion", {}, deps(new ScriptedPrompter([])))).rejects.toThrow("The notion extension isn't installed. Install it first: `npx xaq-cli ext add notion`, then run `npx xaq-cli connections add notion` again.");
+    await expect(addConnection("Brightspace", {}, deps(new ScriptedPrompter([])))).rejects.toThrow(/ext add brightspace/);
   });
 
   it("list, reconnect (header), disable and remove", async () => {

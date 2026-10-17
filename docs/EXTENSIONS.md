@@ -38,15 +38,15 @@ It lives at the root of the extension's directory. Unknown keys are rejected (sc
   // kind "code":
   "code": {
     "entry": "dist/server.mjs",     // one self-contained ESM file: no node_modules, no install scripts, ever
-    "node": ">=22.13",
+    "node": ">=22.23.2",            // shown; the host enforces its own floor for code extensions (Sandbox limits)
     "auth": {                       // OAuth is done by xaq core; the extension only ever gets access tokens
       "type": "user_app",           // or "none"
       "authorizeUrl": "…", "tokenUrl": "…", "scopes": ["…"],
       "clientIdInput": "client_id", "clientSecretInput": "client_secret",
-      "refreshScope": "offline"     // optional: sent as `scope` on a refresh
+      "refreshScope": "offline"     // optional: sent as `scope` on refresh (WHOOP needs "offline"); omit to send none
     },
-    "network": ["api.prod.whoop.com"],   // declared hosts: shown at install and in the warning (not enforced, see Sandbox)
-    "events": ["whoop.recovery_updated"] // the event types it may emit; anything else is dropped and logged
+    "network": ["api.example.com"],      // declared hosts: shown at install and in the warning (not enforced, see Sandbox)
+    "events": ["example.item_updated"]   // the event types it may emit (`<name>.<event>`); anything else is dropped and logged
   },
 
   "reconnectPolicy": { "maxLifetimeDays": 180, "idleDays": 30, "tokenLifetimeCapDays": 30 },
@@ -162,9 +162,27 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 
 ## The code-extension host
 
-- **One child per connection:** `process.execPath --permission --allow-fs-read=<installDir>,<stateDir> --allow-fs-write=<stateDir> <installDir>/<entry>`.
-  - No `--allow-child-process`, `--allow-worker`, `--allow-addons` or `--allow-wasi`.
-  - `cwd` is `<stateDir>`, stdio is pipes only, and no other fds are passed.
+- **One child per connection:** `process.execPath --permission --no-experimental-sqlite --import <signal preload> --allow-fs-read=<installDir> --allow-fs-read=<stateDir> --allow-fs-write=<stateDir> [--allow-net] <installDir>/<entry>`.
+  - *Clarified (B3):* one flag per path. Node 22.13.0 and 24.22 both read the comma form
+    (`--allow-fs-read=a,b`) as one literal path: on 22.13 the child can't even load its entry. A test pins the argv.
+  - No `--allow-child-process`, `--allow-worker`, `--allow-addons` or `--allow-wasi`. Without them, Node refuses
+    `child_process`, `worker_threads`, WASI, `process.dlopen`, `process.binding` and the inspector, and symlinks,
+    hard links and `..` out of the allowed paths.
+  - *Clarified (B3, from the security review):*
+    - `--no-experimental-sqlite`: `node:sqlite` ignores the permission model. It opens, ATTACHes and `VACUUM INTO`s
+      any path, xaq's own DB included. With the flag the module doesn't exist (`import` fails and
+      `getBuiltinModule` returns undefined).
+    - The signal preload is a `data:` URL, so it needs no file-system allow. It pins `process.kill`, `_kill`,
+      `_debugProcess`, `_debugEnd` and `os.setPriority` to throwers (non-writable, non-configurable, on the objects
+      `getBuiltinModule` and `require` return, with the ESM named exports synced). So the child can't SIGUSR1 xaq
+      into opening its inspector, kill xaq or other processes of the same user, or lower xaq's priority. It also ignores SIGUSR1 itself. xaq ignores SIGUSR1 too (`ignoreInspectorSignal`
+      at startup).
+    - `--allow-net` is added only on a Node that has it. From 25, `--permission` gates the network too: on 26.12.0,
+      fetch fails with ERR_ACCESS_DENIED without it. On 22.x and 24.x the flag doesn't exist and is fatal. The
+      contract leaves the network open, so the child's network is the same on every version.
+    - Verified on Node 22.13.0, 22.23.3, 24.22.0 and 26.12.0.
+  - `cwd` is `<stateDir>`, stdio is pipes only, `detached: false`, and no other fds are passed (a test checks that
+    no regular file xaq holds open, such as the DB, reaches the child).
 - **Environment, minimal:** only `XAQ_EXT_NAME`, `XAQ_EXT_CONNECTION_ID`, `XAQ_EXT_STATE_DIR`, `XAQ_EXT_PROTOCOL=1`,
   `TZ`, `LANG`, and `NODE_OPTIONS` unset. Nothing else is inherited, so no `XAQ_*`/`AGENTINBOX_*` secrets, no HOME,
   and no T3 or other variables.
@@ -174,18 +192,54 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 - **Sandbox limits** (documented in the README and the warning): Node's permission model restricts the file system,
   child processes, workers and addons. It does **not** restrict the network. It's a guard against accidents and
   sloppy code, not a hostile-code jail, which is why third-party code extensions get the warning.
+  - *Clarified (B3):*
+    - **Signals and scheduling priority** aren't part of the permission model. They're blocked only by the preload
+      above, from JavaScript.
+      Only OS-level isolation (a separate user, a container) closes this fully.
+    - **`node:sqlite`** is disabled in the child, because it would bypass the file-system rules.
+    - **Node floor for code extensions:** earlier releases have known permission-model bypasses, so code
+      extensions run only on Node ≥ 22.23.2, ≥ 24.18.1 or ≥ 26.5.1, the July 29, 2026 security releases. Those fix
+      CVE-2026-58043, where path matching over-granted file-system access. Earlier fixes include CVE-2025-55130
+      (symlinks), CVE-2025-55132 (`futimes`), CVE-2026-21715 and -21716, and CVE-2026-48617 and -48935. 22.13.0 also
+      has CVE-2025-23083 (`module.register` plus a diagnostics_channel worker). Lines 23 and 25 are end of life and
+      refused. Below the floor, the connection says "Code extensions need Node ≥ X (xaq is running on Y). Update Node
+      and restart xaq." and nothing is spawned.
+    - xaq itself still runs on ≥ 22.13: remote extensions and everything else work there.
 - **Protocol:** standard MCP over stdio, with xaq as the client. Extension-to-host custom JSON-RPC:
   - request `xaq/credentials/get`, params `{}`, returns `{ accessToken, expiresAt }` for **this connection only**. xaq
     refreshes it with its single-flight refresher. An error means needs-reauth.
   - notification `xaq/events/emit`: `{ type, dedupeKey, data }`. The type must be in the manifest's `events`. Events
     go through the outbox like native events today.
   - notification `xaq/log`: `{ level, msg, meta }`, rate-limited and redacted.
+  - *Clarified (B3), as built in `server/extensions/host`:*
+    - Framing is newline-delimited JSON-RPC 2.0 on stdin/stdout (the MCP stdio transport). stdout carries only
+      JSON-RPC; anything else is dropped and logged. Use stderr or `xaq/log` for logs.
+    - xaq opens with the 2025-era `initialize` handshake (no `server/discover` probe), offering the SDK's latest
+      2025 version, with no client capabilities: no sampling, elicitation or roots. The server should declare
+      `tools`, and `prompts` and `resources` if it has them; xaq asks only for what's declared.
+    - `xaq/credentials/get`: params must be `{}` (or carry only `_meta`). Anything else, such as a connection id, is
+      refused with -32602. `expiresAt` is epoch milliseconds, or null when unknown. A refusal is error -32010 with
+      `data.reason: "needs_reauth"`. The client secret and the refresh token are never sent.
+    - `xaq/events/emit`: `type` matches `<name>.<event>` and is listed in `code.events`; `dedupeKey` is 1 to 200
+      printable ASCII characters (unique per occurrence); `data` is a JSON object of at most 8 KB. It's rate-limited
+      to a burst of 30, then 1 per second. Anything else is dropped with a log line.
+    - `xaq/log`: `level` is `debug`, `info`, `warn` or `error`. `msg` is capped at 500 characters and `meta` at
+      1 KB of JSON. Both are redacted, including the access token xaq handed out. It's rate-limited to a burst of 20,
+      then 1 per second.
+    - Limits per connection: 8 requests in flight (more are refused at once as `rate_limited`), one stdout message
+      up to 8 MB (a larger one kills the child, counted as a crash), 15 s to start and finish `initialize`, 30 s per
+      list and 60 s per call.
+    - The extension must exit when stdin closes (xaq may be gone), and should exit on SIGTERM.
 - **Lifecycle:**
   - The child starts when its connection is active and stops (SIGTERM, then SIGKILL after 5 s) on disable, remove,
     update or shutdown.
   - A crash restarts it with backoff; repeated crashes mark the connection `error` with the last stderr lines,
     redacted.
-  - Scheduled work, such as WHOOP's polling sync, is the extension's own timer while it runs.
+  - *Clarified (B3):* the backoff is 1 s, doubling, up to 60 s. Five crashes in a row (a child that ran for 60 s
+    resets the count) mark the connection `error`, and it isn't restarted until the connection is reloaded or xaq
+    restarts. A failed integrity check also marks it `error`, with the reason, and never spawns. A good start clears
+    an `error` the host set.
+  - Scheduled work, such as a polling sync, is the extension's own timer while it runs.
 
 ## Prompts and resources
 
@@ -194,11 +248,32 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 - **Resources** are `xaq://<slug>/<encodeURIComponent(original uri)>`, with names prefixed `<slug>__`.
 - **Templates:** resource templates are passed through the same way.
 - **Access:** both are "read" class. An agent sees them when it has any grant on the connection.
+- *Clarified (B3):*
+  - In a resource template, the literal parts are `encodeURIComponent`-encoded and the `{…}` expressions are kept, so
+    a client expands it as usual and the URI decodes back to the upstream's own URI. A variable's value reaches the
+    upstream percent-decoded.
+  - `prompts/get` and `resources/read` are routed by slug and audited like a read tool call (actions `prompts/get` and
+    `resources/read`, target the connection). The lists aren't audited, like `tools/list`.
+  - Results are cleaned like tool output: ANSI and control characters and invisible characters are removed, the
+    connection's secrets scrubbed, and xaq's delimiters escaped. `uri`s inside them, such as an embedded resource,
+    are rewritten to the `xaq://` form, and binaries over 5 MB are left out.
+  - Resource text, from `resources/read` or a resource embedded in a prompt, is wrapped as tool output is, in
+    `<tool_output source="<slug>/…" nonce="…" untrusted>`. Prompt messages aren't wrapped: a prompt is instructions
+    the user chose to send, and wrapping would defeat it.
+  - The `/mcp` server declares `prompts` and `resources` only for an agent with at least one connection grant. Each
+    list asks every granted connection in parallel; one that fails or takes longer than 10 s is left out of that
+    answer.
 
 ## Migration from core presets (no re-auth)
 
 - **Core:** the Notion, T3 Code and WHOOP presets leave core. Core keeps the generic machinery: remote MCP OAuth,
   `user_app` OAuth with refresh, private-target allow, expiry, events and outbox.
+  - *Clarified (B3):* `user_app` OAuth is `server/broker/upstream/user-app.ts`, driven by the preset's auth (a code
+    manifest's `code.auth`): authorization code with the client secret in the body, no PKCE, https endpoints only.
+    The refresh request sends `scope=<code.auth.refreshScope>` when the manifest sets it, and no `scope` otherwise
+    (the originally granted scope applies, RFC 6749 §6). WHOOP's manifest sets `"refreshScope": "offline"`: WHOOP's
+    documented refresh request includes it, as the native code did. There's no user-id lookup: it only routed webhooks.
+    The generic `/hooks/connections/:id` route stays mounted but answers 404, because no preset in core handles webhooks.
 - **Pins, plus a data snapshot:** core carries `server/extensions/bootstrap.json`, the pins (name, commit, integrity)
   of the official notion, t3code, whoop and brightspace extensions at release time. It also carries a data snapshot of
   the official remote manifests for already-bound connections, `server/extensions/bootstrap/{notion,t3code}.json`.
@@ -211,8 +286,12 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
     works, so a T3 connection never dies at its 30-day expiry because an install failed;
   - the snapshot serves only connections already bound to that name. It isn't offered in Add connection, since new
     connections need the installed extension, and an installed extension always wins over it;
-  - any other bound remote connection runs on the generic rules, and a code one shows "Installing the extension…"
-    with its tools unavailable;
+  - any other bound remote connection runs on the generic rules, and a code one reads "Needs the <name> extension.
+    Install it with `xaq ext add <name>`, or from Extensions in the console." (shown as status `error`, not
+    stored), with its tools unavailable;
+  - *Clarified (B3):* a forced removal disables the connections. When an official extension is installed again,
+    its connections (still bound) return to `active` if their credentials are still there, or to `needs_reauth`;
+    no new sign-in is needed. A third-party one's connections were unbound, so they stay disabled;
   - tokens, client records, grants, levels and always-allow rules are untouched: nobody re-authorizes.
 - **Binding:** `connections.preset` holds the extension's name. That is the binding, with no extra column.
   `usedBy(name)` is the ids of the connections `WHERE preset = name` (`server/extensions/bootstrap.ts`).

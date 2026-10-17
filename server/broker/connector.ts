@@ -1,17 +1,18 @@
 // The broker service's Connector over the upstream runtime (server/broker/upstream, M1 PR 3/4): probe, connect
 // (static header, MCP OAuth, a native preset's own OAuth), the remote ToolSource and paste-mode finish.
-// Also registers native presets' OAuth flows (WHOOP) with the runtime: done at construction, before start().
+// Also gives the runtime native presets' OAuth flows (generic `user_app`, from the preset's auth): done at
+// construction, before start().
 
 import type { Connection, ConnectionProbe } from "../../shared/types.ts";
 import type { AppContext } from "../context.ts";
 import { now } from "../db/index.ts";
-import { authorizeUrl as whoopAuthorizeUrl, exchangeCode as whoopExchangeCode, whoopClientFrom, whoopRefreshFn } from "../integrations/whoop/index.ts";
 import { errorMessage, HttpError } from "../util/errors.ts";
 import { scrubText } from "./credentials/scrub.ts";
 import type { ConnectOutcome, Connector } from "./service.ts";
 import { type IntegrationPreset, type NativeSourceDeps, SourceError } from "./types.ts";
 import { getConnection as upstreamConnection } from "./upstream/connection.ts";
 import type { ProbeResult, UpstreamRuntime } from "./upstream/runtime.ts";
+import { userAppFlow } from "./upstream/user-app.ts";
 
 /** The runtime's probe in the console's words. */
 export function toProbe(p: ProbeResult): ConnectionProbe {
@@ -44,20 +45,14 @@ const hostOf = (u: string) => {
   }
 };
 
-/** WHOOP's own OAuth (the user's app): registered with the runtime so connect, callback and refresh use it. */
-export function registerNativeFlows(up: UpstreamRuntime): void {
-  up.registerNativeFlow({
-    preset: "whoop",
-    authorizeUrl: ({ client, redirectUri, state }) => {
-      const app = whoopClientFrom(client);
-      if (!app) throw new HttpError(400, "whoop_client", "Enter the WHOOP app's client ID and secret first", "They're on your app's page in the WHOOP developer dashboard.");
-      return whoopAuthorizeUrl({ clientId: app.clientId, redirectUri, state });
-    },
-    exchange: (code, p) => whoopExchangeCode(code, { id: p.connectionId, redirectUri: p.redirectUri, client: p.client }, { signal: p.signal }),
-    refreshFn: (client) => {
-      const app = whoopClientFrom(client);
-      return app ? whoopRefreshFn(app) : null;
-    },
+/**
+ * Native presets' own OAuth: every `user_app` preset (a code extension's manifest `code.auth`, e.g. WHOOP) gets the
+ * generic flow (server/broker/upstream/user-app.ts), resolved by preset id when a connection needs it.
+ */
+export function registerNativeFlows(up: UpstreamRuntime, presetFor: (id: string | null) => IntegrationPreset | null): void {
+  up.setNativeFlowResolver((id) => {
+    const p = presetFor(id);
+    return p && p.kind === "native" && p.auth.type === "user_app" ? userAppFlow({ id: p.id, displayName: p.displayName, auth: p.auth }) : null;
   });
 }
 
@@ -72,6 +67,7 @@ export function nativeDepsFor(ctx: AppContext, up: UpstreamRuntime, c: Connectio
       if (!refresh) throw new SourceError("needs_reauth", `The owner must reconnect ${c.name} in xaq (Connections → Reconnect).`);
       return up.refresher.accessToken(c.id, refresh, signal);
     },
+    tokenExpiresAt: () => up.store.tokens(c.id)?.expiresAt ?? null,
     fetch: globalThis.fetch,
     log: { info: (msg, meta) => log.info(msg, meta), warn: (msg, meta) => log.warn(msg, meta) },
   };
