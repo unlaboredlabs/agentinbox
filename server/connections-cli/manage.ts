@@ -250,24 +250,46 @@ async function addPreset(preset: PresetView, flags: AddFlags, deps: ManageDeps, 
   for (const step of preset.setupSteps) if (step.input) inputs[step.input.key] = await askInput(p, step.input);
   let header: StartConnectInput["header"];
   if (preset.authType === "header") {
-    const name = flags.header ?? "Authorization";
-    header = { name, value: await askInput(p, { key: "header", label: `${name} value (not shown)`, secret: true }) };
+    header = await askHeader(p, flags.header ?? "Authorization");
   }
   const slug = await askSlug(p, flags.slug, preset.slug, taken);
   const input: StartConnectInput = { ...(header ? { header } : {}), ...(Object.keys(inputs).length ? { inputs } : {}) };
   return createThen({ slug, ...(flags.name ? { name: flags.name } : {}), preset: preset.id }, flags, deps, (c) => connectNow(c, input, deps, flags));
 }
 
+const isAuthorization = (name: string) => /^authorization$/i.test(name.trim());
+
+/**
+ * The header value to store for what was typed or pasted, the same in `add` and `reconnect`: no CR/LF and no
+ * surrounding whitespace; for Authorization, a bare token gets "Bearer " and a pasted "Bearer <token>" (any case,
+ * any spacing) is stored as "Bearer <token>". Another scheme ("Basic …") is kept as typed.
+ */
+export function headerValue(name: string, typed: string): string {
+  const v = typed.replace(/[\r\n]+/g, "").trim();
+  if (!isAuthorization(name)) return v;
+  const bearer = /^bearer\s+(\S.*)$/i.exec(v);
+  if (bearer) return `Bearer ${bearer[1]!.trim()}`;
+  return /\s/.test(v) ? v : `Bearer ${v}`;
+}
+
+async function askHeader(p: Prompter, name: string): Promise<NonNullable<StartConnectInput["header"]>> {
+  const label = isAuthorization(name) ? `API key or token (not shown; "Bearer " is added if you leave it out)` : `${name} value (not shown)`;
+  for (;;) {
+    const value = headerValue(name, await askInput(p, { key: "header", label, secret: true }));
+    // "Bearer" alone, or only whitespace once CR/LF are gone.
+    if (value && !/^bearer(\s+bearer)?$/i.test(value)) return { name: name.trim(), value };
+    p.print(pc.yellow("  This is needed to continue."));
+  }
+}
+
 async function headerFor(p: Prompter, flags: { header?: string }): Promise<NonNullable<StartConnectInput["header"]>> {
-  const name = flags.header ?? (await p.ask("Header name", "Authorization"));
-  const value = await askInput(p, { key: "header", label: `${name} value (not shown)`, secret: true });
-  return { name, value: /^authorization$/i.test(name) && !/\s/.test(value) ? `Bearer ${value}` : value };
+  return askHeader(p, flags.header ?? (await p.ask("Header name", "Authorization")));
 }
 
 function describeProbe(p: Prompter, probe: ConnectionProbe): void {
   if (probe.auth === "oauth") {
     p.print(`It signs in with OAuth${probe.issuer ? ` via ${safeText(probe.issuer, 120)}` : ""}${probe.registration ? `, and ${registrationWords[probe.registration] ?? probe.registration}` : ""}.`);
-  } else if (probe.auth === "header") p.print(`It needs an API key or token. ${safeText(probe.message, 200)}`);
+  } else if (probe.auth === "header") p.print("It needs an API key or token.");
   else if (probe.auth === "none") p.print("It doesn't need a sign-in.");
   else p.print(safeText(probe.message, 200));
 }

@@ -128,9 +128,10 @@ export interface GuardedFetchOptions {
   maxBytes?: number;
   /**
    * Tests only: where to actually connect for a checked target (e.g. a fake tailnet host listening on loopback).
-   * The guard still checks the real resolved address first.
+   * The guard still checks the real resolved address first. `plain`: speak plain HTTP even to an https URL (a fake
+   * public https server, listening without TLS on loopback).
    */
-  dial?: (target: ResolvedTarget, url: URL) => { address: string; port: number };
+  dial?: (target: ResolvedTarget, url: URL) => { address: string; port: number; plain?: boolean };
 }
 
 export type GuardedFetch = ((input: string | URL, init?: RequestInit) => Promise<Response>) & {
@@ -208,7 +209,7 @@ export function guardedFetch(opts: GuardedFetchOptions = {}): GuardedFetch {
         agent = new Agent({
           connect: (o, cb) => {
             const d = dial(target, url);
-            connector({ ...o, hostname: d.address, port: String(d.port) }, cb);
+            connector({ ...o, ...(d.plain ? { protocol: "http:" } : {}), hostname: d.address, port: String(d.port) }, cb);
           },
           keepAliveTimeout: 30_000,
         });

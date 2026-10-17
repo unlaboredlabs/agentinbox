@@ -69,7 +69,14 @@ const probeSchema = z.object({ url: httpUrl, connectionId: z.string().optional()
 const finishSchema = z.object({ url: z.string().trim().min(1).max(8192) }).strict();
 const connectSchema = z
   .object({
-    header: z.object({ name: z.string().trim().regex(/^[A-Za-z0-9-]{1,100}$/, "Header name must be letters, digits or dashes"), value: z.string().min(1).max(8192) }).strict().optional(),
+    // Surrounding whitespace is never part of a header value (HTTP strips it); a line break would split the header.
+    header: z
+      .object({
+        name: z.string().trim().regex(/^[A-Za-z0-9-]{1,100}$/, "Header name must be letters, digits or dashes"),
+        value: z.string().trim().min(1).max(8192).regex(/^[^\r\n\0]*$/, "The header value can't contain a line break"),
+      })
+      .strict()
+      .optional(),
     inputs: z.record(z.string().max(100), z.string().max(8192)).optional(),
   })
   .strict();
