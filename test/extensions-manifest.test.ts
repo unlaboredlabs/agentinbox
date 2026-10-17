@@ -13,6 +13,9 @@ import { boundPreset, brokenExtensions, presetById, presets, reloadPresets, snap
 import { FIXTURE_EXTENSIONS, fixtureExtension, fixtureManifest, stubExtensionStore } from "./extension-fixtures.ts";
 import { testContext } from "./helpers.ts";
 
+/** An all-zero pin, as shipped before a release fills the real ones in: nothing installs from it. */
+const PLACEHOLDER = (name: string) => ({ name, commit: "0".repeat(40), integrity: `sha256-${"A".repeat(43)}=` });
+
 afterEach(() => useExtensionStore(null));
 
 const ajv = new Ajv2020({ allErrors: true });
@@ -362,8 +365,8 @@ describe("migration bookkeeping", () => {
       expect(pin.integrity).toMatch(/^sha256-[A-Za-z0-9+/]{43}=$/);
       expect(Buffer.from(pin.integrity.slice(7), "base64")).toHaveLength(32);
     }
-    // Placeholders until the release fills the real pins in: nothing installs from them.
-    expect(BOOTSTRAP_PINS.every(isPlaceholderPin)).toBe(true);
+    // The release pins: real commits, never the all-zero placeholder.
+    expect(BOOTSTRAP_PINS.some(isPlaceholderPin)).toBe(false);
   });
 
   it("usedBy: the connections bound to an extension (connections.preset), oldest first", async () => {
@@ -539,7 +542,7 @@ describe("broken installed extensions", () => {
       expect(store.removals).toEqual([]);
       expect(store.installs).toEqual([]);
       const placeholder = stubExtensionStore({ installable: ["notion"], extra: [brokenExt("notion")] });
-      await upgradeToExtensions({ db: t.ctx.db, store: placeholder, log }).done;
+      await upgradeToExtensions({ db: t.ctx.db, store: placeholder, log, pins: [PLACEHOLDER("notion")] }).done;
       expect(placeholder.replacements).toEqual([]);
     } finally {
       await t.dispose();
