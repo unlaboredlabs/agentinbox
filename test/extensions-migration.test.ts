@@ -17,13 +17,14 @@ import { createBrokerService } from "../server/broker/service.ts";
 import type { IntegrationPreset, ToolClass, ToolDef } from "../server/broker/types.ts";
 import { upstreams } from "../server/broker/upstream/runtime.ts";
 import type { AppContext } from "../server/context.ts";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { computeIntegrity } from "../server/extensions/integrity.ts";
 import { type ExtensionPin, extensionStore } from "../server/extensions/store.ts";
-import { presetById, presetSource, presets, snapshotPreset, useExtensionStore } from "../server/integrations/index.ts";
+import { boundPreset, presetById, presetSource, presets, snapshotPreset, useExtensionStore } from "../server/integrations/index.ts";
 import { fixtureManifest, type StubStore, stubExtensionStore } from "./extension-fixtures.ts";
-import { writeTree } from "./extension-fakes.ts";
+import { entriesFromDir, fakeSha, startFakeGithub, writeTree } from "./extension-fakes.ts";
 import { type FakeMcpUpstream, type FakeTool, startFakeMcpUpstream } from "./fake-mcp-upstream.ts";
 import { CSRF, harness, json } from "./platform-helpers.ts";
 
@@ -442,6 +443,37 @@ describe("the extension store's hooks (startup wiring)", () => {
     // Stopping the broker unregisters its store.
     await e.ctx.broker.stop?.();
     expect(presetSource()).toBeNull();
+  }, 30_000);
+
+  it("a forced remove of an official extension keeps its connections bound: re-adding it brings the same gating back", async () => {
+    const e = await env();
+    const gh = await startFakeGithub();
+    cleanup.push(() => gh.close());
+    const work = mkdtempSync(join(tmpdir(), "xaq-b2-official-"));
+    cleanup.push(async () => rmSync(work, { recursive: true, force: true }));
+    // The official notion extension, published in the (fake) xaq-extensions repo.
+    const dir = writeTree(join(work, "notion"), { "xaq-extension.json": readFileSync(new URL("./fixtures/extensions/notion/xaq-extension.json", import.meta.url), "utf8") });
+    const sha = fakeSha("notion-official");
+    gh.commit("wynn-dev", "xaq-extensions", "main", sha, entriesFromDir(dir, "extensions/notion"));
+    const pin = { name: "notion", commit: sha, integrity: computeIntegrity(dir) };
+    const store = extensionStore(e.ctx, { urls: gh.urls });
+    void e.ctx.broker.start?.();
+    await store.installPinned(pin);
+    const id = insertConnection(e.ctx, { slug: "notion-personal", name: "Notion", preset: "notion", url: "https://mcp.notion.com/mcp", authType: "oauth", privateTarget: "http://127.0.0.1:1" });
+    const spawn: ToolDef = { name: "notion-spawn-session", description: "Start a session with a Custom Agent.", inputSchema: { type: "object", properties: {} } };
+    expect(presetById("notion")!.classify(spawn)).toMatchObject({ risky: true });
+
+    // Forced: disabled, but still bound (an official name can't be taken by a third party).
+    await store.remove("notion", { force: true });
+    expect(e.ctx.db.get("SELECT status, preset FROM connections WHERE id = ?", id)).toEqual({ status: "disabled", preset: "notion" });
+    expect(presetById("notion")).toBeNull();
+
+    // Re-added: the connection is the extension's again, with spawning gated as before.
+    await store.installPinned(pin);
+    expect(store.usedBy("notion")).toEqual([id]);
+    expect(presetById("notion")!.classify(spawn)).toMatchObject({ risky: true, source: "preset" });
+    expect(classifyTool(spawn, boundPreset("notion"))).toMatchObject({ risky: true });
+    await e.ctx.broker.stop?.();
   }, 30_000);
 });
 

@@ -47,6 +47,8 @@ export interface ExtensionStore {
   resolve(source: string): Promise<{ candidate: InstalledExtension; warnings: string[] }>; // fetch + verify, no install
   install(source: string, opts: { confirmThirdParty: boolean; expectIntegrity?: string }): Promise<InstalledExtension>;
   installPinned(pin: ExtensionPin): Promise<InstalledExtension>; // official repo at that commit
+  /** An installed official extension swapped for its pinned build: fetched and verified first, then swapped (B2: broken installs). */
+  replacePinned(pin: ExtensionPin): Promise<InstalledExtension>;
   /** Without `confirm`, the would-be update ({from, to}) and nothing installed; with it, installed. null: up to date. */
   update(name: string, opts: { confirm: boolean; expectIntegrity?: string }): Promise<{ from: InstalledExtension; to: InstalledExtension } | null>;
   remove(name: string, opts: { force: boolean }): Promise<void>; // async (queued with install and update), per the #81 review
@@ -281,6 +283,34 @@ export class SqliteExtensionStore implements ExtensionStore {
         const installed = this.commit(staged, null);
         this.opts.log?.info("Extension installed from its pin", { name: installed.name, commit: installed.commit });
         this.hooks.onChange?.({ from: null, to: installed });
+        return installed;
+      } finally {
+        this.discard(staged.work);
+      }
+    });
+  }
+
+  /**
+   * Replaces an installed official extension with its pinned build (a broken install, server/extensions/bootstrap.ts):
+   * the pinned build is fetched and verified before anything changes, then swapped in like an update. A failed fetch
+   * or a mismatch leaves the installed one as it was. Same name and kind; its connections stay bound.
+   */
+  replacePinned(pin: ExtensionPin): Promise<InstalledExtension> {
+    return this.serial(async () => {
+      const from = this.get(pin.name);
+      if (!from) throw new ExtensionError("not_found", `${pin.name} isn't installed.`);
+      if (!from.official) throw new ExtensionError("official_name", `${pin.name} is a third-party install; only an official one is replaced from a pin.`);
+      if (from.integrity === pin.integrity) return from;
+      const staged = await this.stageWith(pin.name, true, (dest) => fetchOfficial(pin.name, pin.commit, dest, this.deps));
+      try {
+        const to = staged.candidate;
+        if (to.integrity !== pin.integrity) {
+          throw new ExtensionError("integrity_mismatch", `${pin.name} at ${short(pin.commit)} has integrity ${to.integrity}, not the pinned ${pin.integrity}. Refusing to install it.`);
+        }
+        if (to.name !== from.name || to.kind !== from.kind) throw new ExtensionError("invalid", `${pin.name}'s pinned build is a different extension (${to.name}, ${to.kind}).`);
+        const installed = this.commit(staged, from);
+        this.opts.log?.info("Extension replaced by its pinned build", { name: pin.name, from: from.commit ?? from.integrity, to: installed.commit });
+        this.hooks.onChange?.({ from, to: installed });
         return installed;
       } finally {
         this.discard(staged.work);

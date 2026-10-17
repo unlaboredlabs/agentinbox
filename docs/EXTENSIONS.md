@@ -74,8 +74,9 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 - **`remote`:** exactly one of `url` (https) and `userServer`. `userServer.sameOriginIssuer` defaults to false.
 - **`remote.auth.broadScopes`** (with `mcp_oauth` only, optional): granted scopes that mean broad access. The console
   warns when a sign-in grants any of them. T3 Code: `["settings:write", "source-control:write"]`.
-- **`remote.auth.scopeNotes`** (with `mcp_oauth` only, optional): `{ "<scope>": "<what it means>" }`, in priority
-  order. The connection page shows the note of the first scope the sign-in granted, otherwise the generic broad-access
+- **`remote.auth.scopeNotes`** (with `mcp_oauth` only, optional): `[{ "scope": "…", "note": "…" }]`, in priority
+  order. It's an array rather than an object so the order is reliable: JavaScript reorders integer-like object keys.
+  Scopes are unique. The connection page shows the note of the first scope the sign-in granted, otherwise the generic broad-access
   warning. Notes are shown as they are (no `{{ }}`). T3 Code explains its Full access, Supervised and Read only
   levels this way.
 - **`reconnectPolicy`:** each field is a whole number of days, from 1 to 3650.
@@ -105,7 +106,8 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
 
   **Third-party risk maps can make tools stricter, never looser.** For an extension that isn't from the official
   registry, xaq applies the generic rules on top of its map: `risky = map risky OR generic risky`,
-  `read = map read AND NOT generic risky`, and its `nameCheckExempt` is ignored. The install warning says so, and the
+  `read = map read AND generic read` (a tool the generic rules call a write stays a write, so Read only never gains
+  one), and its `nameCheckExempt` is ignored. The install warning says so, and the
   Add connection picker marks its preset "third-party" (`PresetView.official`).
 - **`risk.tools[name].target`:** a JSON Pointer, or an array of candidate pointers. The first candidate whose
   top-level argument the tool's live `inputSchema` declares becomes the "always allow … for this target" path. If
@@ -147,11 +149,13 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   confirmation. Nothing ever updates on its own: an update never swaps code silently. An update can't change the
   extension's `name` or its `kind` (remote or code): that's a remove and a new install.
 - **Removal:** `xaq ext remove <name>` is refused while connections use the extension, unless `--force`, which
-  disables those connections and unbinds them (`connections.preset` is cleared), so a later extension of the same
-  name, a third-party one say, can't take them over. Credentials are deleted only by removing the connections.
+  disables those connections. A third-party name also unbinds them (`connections.preset` is cleared), so a later
+  extension of that name can't take them over. An official name keeps them bound: no third party can install under
+  it, and re-adding the extension brings its rules back. Credentials are deleted only by removing the connections.
 - **Broken installs:** an installed extension whose manifest this xaq can't read is reported (logged, and listed by
-  `brokenExtensions()`) and offers no preset. An official one is reinstalled from its bootstrap pin when the pin is
-  another build; its connections stay bound and enabled through that.
+  `brokenExtensions()`) and offers no preset. An official one is replaced by its pinned build when the pin is
+  another build (`store.replacePinned`): the pinned build is fetched and verified first, then swapped in. Offline or
+  on a bad pin, the installed one stays as it was. Nothing is removed, and its connections stay bound and enabled.
 - **Console:** an Extensions page lists installed extensions with their version, commit, source, official or
   third-party, and the connections using each. It can add from the registry, update with the diff shown, and remove.
   Adding from a URL works with the same warning.
@@ -219,8 +223,8 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
   presets, then what is still in core; an installed extension replaces a core preset of the same name.
 - **Startup wiring** (the broker's `start()`): `useExtensionStore(extensionStore(ctx))`, then `setHooks` with:
   - `usedBy`, as above;
-  - `onRemove`: a forced removal disables and unbinds the bound connections. Their credentials stay until the
-    connections are removed. A reinstall of a broken official extension disables nothing.
+  - `onRemove`: a forced removal disables the bound connections and, for a third-party name, unbinds them. Their
+    credentials stay until the connections are removed.
   - `onChange`: `reloadPresets()`, then the bound connections are re-listed, which re-classifies their pinned tools
     under the new manifest, or under the generic rules once it's gone.
   A background install from a bootstrap pin re-lists the same way. The broker's `stop()` unregisters the store.

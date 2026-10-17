@@ -35,7 +35,7 @@ export type RemoteAuth =
    * `broadScopes`: granted scopes that mean broad access; the console warns when a sign-in grants any of them.
    * `scopeNotes`: what a granted scope means, in priority order; the console shows the first granted one's note.
    */
-  | { type: "mcp_oauth"; broadScopes?: string[]; scopeNotes?: Record<string, string> };
+  | { type: "mcp_oauth"; broadScopes?: string[]; scopeNotes?: { scope: string; note: string }[] };
 
 export type CodeAuth =
   | { type: "none" }
@@ -316,16 +316,16 @@ function validateRemote(v: unknown): NonNullable<Manifest["remote"]> {
       const auth: RemoteAuth = { type: "mcp_oauth" };
       if (a.broadScopes !== undefined) auth.broadScopes = strList(a.broadScopes, "remote.auth.broadScopes", (s, p) => str(s, p, { max: 200, re: SCOPE_RE, what: "an OAuth scope" }), 50);
       if (a.scopeNotes !== undefined) {
-        if (!isObj(a.scopeNotes)) fail("remote.auth.scopeNotes", "must be an object");
-        const scopes = Object.keys(a.scopeNotes);
-        if (scopes.length > 50) fail("remote.auth.scopeNotes", "must have at most 50 entries");
-        const notes: Record<string, string> = {};
-        for (const scope of scopes) {
-          const p = `remote.auth.scopeNotes["${scope.slice(0, 64)}"]`;
-          str(scope, p, { max: 200, re: SCOPE_RE, what: "keyed by an OAuth scope" });
-          Object.defineProperty(notes, scope, { value: noTemplate(str(a.scopeNotes[scope], p, { max: 1000 }), p), enumerable: true, writable: true, configurable: true });
-        }
-        auth.scopeNotes = notes;
+        // An array, not an object: the order is the priority, and JS reorders integer-like object keys.
+        if (!Array.isArray(a.scopeNotes)) fail("remote.auth.scopeNotes", "must be an array of { scope, note }");
+        if (a.scopeNotes.length > 50) fail("remote.auth.scopeNotes", "must have at most 50 entries");
+        auth.scopeNotes = a.scopeNotes.map((n: unknown, i: number) => {
+          const p = `remote.auth.scopeNotes[${i}]`;
+          const e = obj(n, p, ["scope", "note"], ["scope", "note"]);
+          return { scope: str(e.scope, `${p}.scope`, { max: 200, re: SCOPE_RE, what: "an OAuth scope" }), note: noTemplate(str(e.note, `${p}.note`, { max: 1000 }), `${p}.note`) };
+        });
+        const scopes = auth.scopeNotes.map((n) => n.scope);
+        if (new Set(scopes).size !== scopes.length) fail("remote.auth.scopeNotes", "names a scope twice");
       }
       remote.auth = auth;
       break;
@@ -491,7 +491,16 @@ export const MANIFEST_JSON_SCHEMA = {
               properties: {
                 type: { const: "mcp_oauth" },
                 broadScopes: { type: "array", maxItems: 50, uniqueItems: true, items: scope$ },
-                scopeNotes: { type: "object", maxProperties: 50, propertyNames: { pattern: SCOPE_RE.source, maxLength: 200 }, additionalProperties: stringOf(1000, noTemplate$) },
+                scopeNotes: {
+                  type: "array",
+                  maxItems: 50,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["scope", "note"],
+                    properties: { scope: stringOf(200, { pattern: SCOPE_RE.source }), note: stringOf(1000, noTemplate$) },
+                  },
+                },
               },
             },
           ],
@@ -644,14 +653,14 @@ export function classifierFor(risk: Manifest["risk"]): (tool: ToolDef) => ToolCl
 
 /**
  * A third-party risk map: it can make a tool stricter than the generic rules (annotations, the verb list), never
- * looser. risky = map's risky OR generic risky; read = map's read AND NOT generic risky.
+ * looser. risky = map's risky OR generic risky; read = map's read AND generic read (a write stays a write).
  */
 export function stricterOnly(table: (tool: ToolDef) => ToolClass | null): (tool: ToolDef) => ToolClass | null {
   return (tool) => {
     const cls = table(tool);
     if (!cls) return null;
     const generic = classifyTool(tool, null);
-    return { ...cls, risky: cls.risky || generic.risky, read: cls.read && !generic.risky };
+    return { ...cls, risky: cls.risky || generic.risky, read: cls.read && generic.read && !generic.risky };
   };
 }
 
@@ -681,7 +690,7 @@ export function presetFromValidManifest(m: Manifest, ext: InstalledExtension | n
           ? {
               type: "mcp_oauth",
               ...(r.auth.broadScopes?.length ? { broadScopes: [...r.auth.broadScopes] } : {}),
-              ...(r.auth.scopeNotes && Object.keys(r.auth.scopeNotes).length ? { scopeNotes: Object.entries(r.auth.scopeNotes).map(([scope, note]) => ({ scope, note })) } : {}),
+              ...(r.auth.scopeNotes?.length ? { scopeNotes: r.auth.scopeNotes.map((n) => ({ ...n })) } : {}),
             }
           : { type: "none" };
     return {

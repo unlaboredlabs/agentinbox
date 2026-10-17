@@ -26,7 +26,8 @@ import {
 import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
-import { isReinstalling, type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
+import { type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
+import { OFFICIAL_NAMES } from "../extensions/registry.ts";
 import { type ExtensionPin, extensionStore, type SqliteExtensionStore } from "../extensions/store.ts";
 import { boundPreset, presetSource, presets, reloadPresets, snapshotPreset, useExtensionStore } from "../integrations/index.ts";
 import { loopbackUrl } from "../urls.ts";
@@ -455,14 +456,14 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   }
 
   /**
-   * A forced extension removal: its connections are disabled and unbound (preset cleared), so a later extension of
-   * the same name, say a third-party one, can't take them over. Credentials stay until the connections are removed.
+   * A forced extension removal: its connections are disabled; for a third-party name also unbound (preset cleared),
+   * so a later extension of that name can't take them over. Credentials stay until the connections are removed.
    */
-  function disableBound(connectionIds: string[], reason: string): void {
+  function disableBound(connectionIds: string[], reason: string, opts: { unbind: boolean }): void {
     for (const id of connectionIds) {
       const c = getConnection(ctx, id);
       if (!c) continue;
-      ctx.db.run("UPDATE connections SET preset = NULL, updated_at = ? WHERE id = ?", now(), id);
+      if (opts.unbind) ctx.db.run("UPDATE connections SET preset = NULL, updated_at = ? WHERE id = ?", now(), id);
       if (c.status === "disabled") continue;
       ctx.db.run("UPDATE connections SET status = 'disabled', status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), id);
       catalog.detach(id);
@@ -595,8 +596,9 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         extensions.setHooks({
           usedBy: (name) => usedBy(ctx.db, name),
           onRemove: (ext, o) => {
-            // A broken official extension being reinstalled from its pin keeps its connections.
-            if (o.force && !isReinstalling(ext.name)) disableBound(o.usedBy, `its extension ${ext.name} was removed`);
+            // Official names stay bound (no third party can install under them, and re-adding the extension must bring
+            // its rules back, say Notion's gate on spawning agents); any other name is unbound too.
+            if (o.force) disableBound(o.usedBy, `its extension ${ext.name} was removed`, { unbind: !ext.official && !OFFICIAL_NAMES.includes(ext.name) });
           },
           onChange: (change) => {
             reloadPresets();

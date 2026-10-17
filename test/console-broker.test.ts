@@ -244,8 +244,8 @@ describe("T3 Code in the console: a user-named server, expiry and granted scopes
     expect(grantedScopesView(conn({ grantedScopes: null }))).toBeNull();
     expect(grantedScopesView(conn({ preset: "notion", grantedScopes: ["read"] }))).toEqual({ scopes: ["read"], note: null });
     // T3 Code's manifest: Full access scopes are broad, and every level has its note (remote.auth.scopeNotes).
-    const auth = fixtureManifest("t3code").remote!.auth as { broadScopes: string[]; scopeNotes: Record<string, string> };
-    const t3 = { preset: "t3code", name: "forge", broadScopes: auth.broadScopes, scopeNotes: Object.entries(auth.scopeNotes).map(([scope, note]) => ({ scope, note })) };
+    const auth = fixtureManifest("t3code").remote!.auth as { broadScopes: string[]; scopeNotes: { scope: string; note: string }[] };
+    const t3 = { preset: "t3code", name: "forge", broadScopes: auth.broadScopes, scopeNotes: auth.scopeNotes };
     const full = grantedScopesView(conn({ ...t3, grantedScopes: ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"] }));
     expect(full?.scopes).toHaveLength(4);
     expect(full?.note).toMatch(/^Full access in T3: .*reconnect and pick a lower level\.$/);

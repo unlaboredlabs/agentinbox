@@ -31,11 +31,13 @@ export function fixtureExtension(name: FixtureExtension, over: Partial<Installed
   };
 }
 
-export interface StubStore extends Pick<ExtensionStore, "list" | "get" | "installPinned" | "remove"> {
+export interface StubStore extends Pick<ExtensionStore, "list" | "get" | "installPinned" | "replacePinned" | "remove"> {
   /** Pins installPinned was called with, in order. */
   installs: ExtensionPin[];
   /** Names remove() was called with, in order. */
   removals: string[];
+  /** Pins replacePinned() was called with, in order. */
+  replacements: ExtensionPin[];
   /** Resolves the pending installPinned calls (with `installable`, they wait for this). */
   release(): void;
 }
@@ -51,11 +53,13 @@ export function stubExtensionStore(
   for (const ext of opts.extra ?? []) have.set(ext.name, ext);
   const installs: ExtensionPin[] = [];
   const removals: string[] = [];
+  const replacements: ExtensionPin[] = [];
   let gate: () => void = () => {};
   const held = opts.hold ? new Promise<void>((r) => (gate = r)) : Promise.resolve();
   return {
     installs,
     removals,
+    replacements,
     release: () => gate(),
     list: () => [...have.values()],
     get: (name) => have.get(name) ?? null,
@@ -63,6 +67,17 @@ export function stubExtensionStore(
       installs.push(pin);
       await held;
       if (!(opts.installable as readonly string[] | undefined)?.includes(pin.name)) throw new Error(`no such extension: ${pin.name}`);
+      const ext = fixtureExtension(pin.name as FixtureExtension, { commit: pin.commit, integrity: pin.integrity });
+      have.set(pin.name, ext);
+      return ext;
+    },
+    // The pinned build of an `installable` fixture replaces the installed one; anything else fails like an offline
+    // fetch, before anything changes.
+    async replacePinned(pin) {
+      replacements.push(pin);
+      await held;
+      if (!have.has(pin.name)) throw new Error(`${pin.name} isn't installed`);
+      if (!(opts.installable as readonly string[] | undefined)?.includes(pin.name)) throw new Error(`fetch failed: ${pin.name}`);
       const ext = fixtureExtension(pin.name as FixtureExtension, { commit: pin.commit, integrity: pin.integrity });
       have.set(pin.name, ext);
       return ext;

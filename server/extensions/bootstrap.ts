@@ -33,11 +33,7 @@ export function usedBy(db: Pick<Db, "all">, name: string): string[] {
 }
 
 /** What the upgrade needs from the extension store. */
-export type UpgradeStore = Pick<ExtensionStore, "list" | "get" | "installPinned" | "remove">;
-
-/** Official extensions being reinstalled from their pin (a broken manifest): their removal disables nothing. */
-const reinstalling = new Set<string>();
-export const isReinstalling = (name: string): boolean => reinstalling.has(name);
+export type UpgradeStore = Pick<ExtensionStore, "list" | "get" | "installPinned" | "replacePinned">;
 
 export interface UpgradeDeps {
   db: Pick<Db, "all">;
@@ -110,17 +106,17 @@ export function upgradeToExtensions(deps: UpgradeDeps): UpgradeResult {
       deps.log.warn("Couldn't install an extension for existing connections: they use the bootstrap snapshot or the generic rules", { extension: name, error: errorMessage(err) });
     }
   };
+  // The pinned build is fetched and verified first, then swapped in (store.replacePinned): offline, or on a bad pin,
+  // the installed one stays as it was. Its connections stay bound throughout.
   const reinstall = async (pin: ExtensionPin) => {
-    reinstalling.add(pin.name);
     try {
-      await deps.store.remove(pin.name, { force: true });
+      const ext = await deps.store.replacePinned(pin);
+      reloadPresets();
+      deps.log.info("Replaced a broken extension with its pinned build", { extension: pin.name, version: ext.version, commit: ext.commit });
+      deps.onInstalled?.(ext, usedBy(deps.db, pin.name));
     } catch (err) {
-      deps.log.warn("Couldn't remove a broken extension to reinstall it", { extension: pin.name, error: errorMessage(err) });
-      return;
-    } finally {
-      reinstalling.delete(pin.name);
+      deps.log.warn("Couldn't replace a broken extension with its pinned build: it stays as it is", { extension: pin.name, error: errorMessage(err) });
     }
-    await install(pin.name);
   };
   const job = (name: string, run: () => Promise<void>) => {
     let j = running.get(name);

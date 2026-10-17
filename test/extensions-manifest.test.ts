@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { classifyTool } from "../server/broker/catalog/classify.ts";
 import type { SetupContext, ToolDef } from "../server/broker/types.ts";
-import { BOOTSTRAP_PINS, isPlaceholderPin, isReinstalling, upgradeToExtensions, usedBy } from "../server/extensions/bootstrap.ts";
+import { BOOTSTRAP_PINS, isPlaceholderPin, upgradeToExtensions, usedBy } from "../server/extensions/bootstrap.ts";
 import { MANIFEST_JSON_SCHEMA, ManifestError, presetFromManifest, renderSetup, validateManifest } from "../server/extensions/manifest.ts";
 import { boundPreset, brokenExtensions, presetById, presets, reloadPresets, snapshotPreset, useExtensionStore } from "../server/integrations/index.ts";
 import { FIXTURE_EXTENSIONS, fixtureExtension, fixtureManifest, stubExtensionStore } from "./extension-fixtures.ts";
@@ -410,6 +410,12 @@ describe("review rules (tier L)", () => {
     expect(classifyTool(tool("tidy", { id: {} }), p)).toEqual({ risky: true, read: false, source: "preset", targetPath: "/id" });
     expect(classifyTool(tool("list_notes", {}, { readOnlyHint: true }), p)).toEqual({ risky: false, read: true, source: "preset" });
     expect(classifyTool(tool("archive_note", {}, { destructiveHint: true }), p)).toMatchObject({ risky: true });
+    // A generic write the map calls a read stays a write: not listed at Read only (update_page, run_query, create_issue).
+    const reads = third(patch(remote(), "risk.tools", { update_page: { class: "read" }, run_query: { class: "read" }, create_issue: { class: "read" } }));
+    for (const name of ["update_page", "run_query", "create_issue"]) {
+      expect(classifyTool(tool(name, {}, { readOnlyHint: false }), reads), name).toMatchObject({ read: false });
+      expect(classifyTool(tool(name), reads), name).toMatchObject({ read: false });
+    }
     // The same map from the official registry is trusted as written.
     const o = presetFromManifest({ ...fixtureExtension("notion"), name: "demo", manifest: m });
     expect(o.official).toBe(true);
@@ -443,8 +449,10 @@ describe("review rules (tier L)", () => {
     }
   });
 
-  it("scopeNotes: scope-keyed strings, in order, passed to the preset", () => {
-    const m = patch(remote(), "remote.auth", { type: "mcp_oauth", broadScopes: ["admin"], scopeNotes: { admin: "Everything.", "read:all": "Reads." } });
+  it("scopeNotes: an array of { scope, note }, in order (integer-like scopes too), passed to the preset", () => {
+    const ordered = patch(remote(), "remote.auth", { type: "mcp_oauth", scopeNotes: [{ scope: "b", note: "B." }, { scope: "10", note: "Ten." }, { scope: "2", note: "Two." }] });
+    expect((presetFromManifest({ ...fixtureExtension("notion"), name: "demo", manifest: ordered }).auth as unknown as { scopeNotes: { scope: string }[] }).scopeNotes.map((n) => n.scope)).toEqual(["b", "10", "2"]);
+    const m = patch(remote(), "remote.auth", { type: "mcp_oauth", broadScopes: ["admin"], scopeNotes: [{ scope: "admin", note: "Everything." }, { scope: "read:all", note: "Reads." }] });
     expect(schemaValid(m)).toBe(true);
     expect(presetFromManifest({ ...fixtureExtension("notion"), name: "demo", manifest: m }).auth).toEqual({
       type: "mcp_oauth",
@@ -454,7 +462,7 @@ describe("review rules (tier L)", () => {
         { scope: "read:all", note: "Reads." },
       ],
     });
-    for (const notes of [{ admin: 3 }, { "bad scope": "x" }, { admin: "See {{publicUrl}}" }, []]) {
+    for (const notes of [{ admin: "x" }, [{ scope: "admin", note: 3 }], [{ scope: "bad scope", note: "x" }], [{ scope: "admin", note: "See {{publicUrl}}" }], [{ scope: "a", note: "x", extra: 1 }], [{ scope: "a" }]]) {
       const bad = patch(remote(), "remote.auth", { type: "mcp_oauth", scopeNotes: notes });
       expect(() => validateManifest(bad), JSON.stringify(notes)).toThrow(/scopeNotes/);
       expect(schemaValid(bad), JSON.stringify(notes)).toBe(false);
@@ -493,20 +501,22 @@ describe("broken installed extensions", () => {
   const pin = (name: string, integrity = `sha256-${Buffer.alloc(32, 9).toString("base64")}`) => ({ name, commit: "4".repeat(40), integrity });
   const brokenExt = (name: "notion" | "t3code", over: Record<string, unknown> = {}) => ({ ...fixtureExtension(name), manifest: { schema: 1, name }, ...over });
 
-  it("are reported; an official one reinstalls from its pin without disabling its connections", async () => {
+  it("are reported; an official one is replaced by its pinned build (fetched first, then swapped), never removed", async () => {
     const t = testContext();
     try {
-      let seen: boolean | null = null;
-      const store = stubExtensionStore({ installable: ["notion"], extra: [brokenExt("notion")], onRemove: (n) => (seen = isReinstalling(n)) });
+      const store = stubExtensionStore({ installable: ["notion"], extra: [brokenExt("notion")] });
       const r = upgradeToExtensions({ db: t.ctx.db, store, log, pins: [pin("notion")] });
       expect(Object.keys(r.broken)).toEqual(["notion"]);
       await r.done;
-      expect(store.removals).toEqual(["notion"]);
-      // The removal ran while marked as a reinstall (the broker's onRemove then disables nothing).
-      expect(seen).toBe(true);
-      expect(isReinstalling("notion")).toBe(false);
-      expect(store.installs).toEqual([pin("notion")]);
+      expect(store.replacements).toEqual([pin("notion")]);
+      expect(store.removals).toEqual([]);
       expect(store.get("notion")!.manifest).toEqual(fixtureManifest("notion"));
+      // Offline (the fetch fails): the installed one stays as it was; nothing was removed.
+      const offline = stubExtensionStore({ installable: [], extra: [brokenExt("notion")] });
+      await upgradeToExtensions({ db: t.ctx.db, store: offline, log, pins: [pin("notion")] }).done;
+      expect(offline.replacements).toEqual([pin("notion")]);
+      expect(offline.removals).toEqual([]);
+      expect(offline.get("notion")).toMatchObject({ manifest: { schema: 1, name: "notion" } });
     } finally {
       await t.dispose();
     }
@@ -523,11 +533,12 @@ describe("broken installed extensions", () => {
       const r = upgradeToExtensions({ db: t.ctx.db, store, log, pins: [pin("notion"), same] });
       expect(Object.keys(r.broken).sort()).toEqual(["notion", "t3code"]);
       await r.done;
+      expect(store.replacements).toEqual([]);
       expect(store.removals).toEqual([]);
       expect(store.installs).toEqual([]);
       const placeholder = stubExtensionStore({ installable: ["notion"], extra: [brokenExt("notion")] });
       await upgradeToExtensions({ db: t.ctx.db, store: placeholder, log }).done;
-      expect(placeholder.removals).toEqual([]);
+      expect(placeholder.replacements).toEqual([]);
     } finally {
       await t.dispose();
     }
