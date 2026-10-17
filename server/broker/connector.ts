@@ -94,6 +94,14 @@ export function upstreamConnector(ctx: AppContext, up: UpstreamRuntime, presetFo
     async startConnect(conn, input, signal) {
       try {
         const preset = presetFor(conn.preset);
+        // Bound to an extension that isn't installed (yet): its tools keep working on the stored credential, but a new
+        // sign-in waits for the extension's own rules (T3 Code's same-origin sign-in) instead of running generic ones.
+        if (conn.preset && !preset) {
+          return {
+            status: "error",
+            message: `The ${conn.preset} extension isn't installed yet, so ${conn.name} can't be reconnected. xaq installs it in the background; try again shortly, or run \`xaq ext add ${conn.preset}\`.`,
+          };
+        }
         // Static header (bearer or API key): stored encrypted, injected per request.
         if (input.header) {
           if (conn.kind !== "remote_http") throw new HttpError(400, "connection_auth", `${conn.name} doesn't take a header`);

@@ -26,9 +26,11 @@ import {
 import type { AppContext, Lifecycle } from "../context.ts";
 import { now } from "../db/index.ts";
 import { type ConnectionHookHost, connectionHookUrl } from "../integrations/hooks.ts";
-import { presets } from "../integrations/index.ts";
+import { type UpgradeResult, type UpgradeStore, upgradeToExtensions, usedBy } from "../extensions/bootstrap.ts";
+import { OFFICIAL_NAMES } from "../extensions/registry.ts";
+import { type ExtensionPin, extensionStore, LISTENER_ORDER, type SqliteExtensionStore } from "../extensions/store.ts";
+import { boundPreset, presetSource, presets, reloadPresets, snapshotPreset, useExtensionStore } from "../integrations/index.ts";
 import { removeConnectionState } from "../extensions/host/spawn.ts";
-import { extensionStore, LISTENER_ORDER } from "../extensions/store.ts";
 import { loopbackUrl } from "../urls.ts";
 import { conflict, errorMessage, notFound } from "../util/errors.ts";
 import { type ConnectionGrantRef, connectionGrantsOf } from "./access.ts";
@@ -172,6 +174,12 @@ export interface BrokerService extends Lifecycle {
   pollEvents(at?: number): Promise<number>;
   /** Upstream prompts and resources for /mcp (server/broker/passthrough.ts), every connection kind. */
   passthrough: BrokerPassthrough;
+  /**
+   * The startup upgrade to extensions (server/extensions/bootstrap.ts): connections of the Notion, T3 Code and WHOOP
+   * presets are bound to those extensions, and missing ones install in the background; once one is installed its
+   * connections are re-listed under its risk map. start() runs it with the registered extension store.
+   */
+  upgradeExtensions(store: UpgradeStore, pins?: readonly ExtensionPin[]): UpgradeResult;
 }
 
 const UNAVAILABLE = "Integrations aren't available in this build of xaq yet.";
@@ -205,7 +213,9 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   const sources = new Map<string, ToolSource>();
   const enabled = () => ctx.settings.get().brokerUpstreams;
   const presetList = () => (given.presets ?? presets)();
-  const presetFor = (presetId: string | null) => (presetId ? (presetList().find((p) => p.id === presetId) ?? null) : null);
+  // A connection's preset: the installed extension (or a core preset), else the bootstrap snapshot of an official one
+  // it was bound to before the upgrade (server/integrations/index.ts). New connections pick from presetList() only.
+  const presetFor = (presetId: string | null) => (presetId ? (presetList().find((p) => p.id === presetId) ?? snapshotPreset(presetId)) : null);
 
   // The upstream runtime (W3/W4): credential store, refresher, connect flow, remote sources. Created here, first,
   // so its connection events go to the outbox; native OAuth flows are registered before start() runs.
@@ -364,16 +374,6 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
 
   const presetOf = (c: Connection): IntegrationPreset | null => presetFor(c.preset);
 
-  /** Every connection bound to the extension (preset id = extension name): closed, then listed again. */
-  async function reloadExtension(name: string): Promise<void> {
-    for (const c of listConnections(ctx)) {
-      if (c.preset !== name) continue;
-      await closeSource(c.id);
-      invalidate({ connectionId: c.id });
-      if (c.status !== "disabled") attach(c.id);
-    }
-  }
-
   /** The client registration (e.g. WHOOP's pasted client id and secret). */
   const clientRecord = (connectionId: string): Record<string, unknown> | null => credentials.client(connectionId);
 
@@ -472,6 +472,36 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   }
   let pollTimer: NodeJS.Timeout | null = null;
   let unwatchExtensions: (() => void) | null = null;
+  let extensions: SqliteExtensionStore | null = null;
+
+  /** Re-lists connections after their extension changed: cached views drop, native sources are rebuilt, and listing
+   * re-classifies the pinned tools under the extension's risk map (or the generic rules, once it's gone). */
+  function relist(connectionIds: string[]): void {
+    invalidate("all");
+    for (const id of connectionIds) {
+      const c = getConnection(ctx, id);
+      if (!c || c.status === "disabled") continue;
+      void (c.kind === "remote_http" ? Promise.resolve() : closeSource(id)).then(() => catalog.refresh(id)).catch(() => {});
+    }
+  }
+
+  /**
+   * A forced extension removal: its connections are disabled; for a third-party name also unbound (preset cleared),
+   * so a later extension of that name can't take them over. Credentials stay until the connections are removed.
+   */
+  function disableBound(connectionIds: string[], reason: string, opts: { unbind: boolean }): void {
+    for (const id of connectionIds) {
+      const c = getConnection(ctx, id);
+      if (!c) continue;
+      if (opts.unbind) ctx.db.run("UPDATE connections SET preset = NULL, updated_at = ? WHERE id = ?", now(), id);
+      if (c.status === "disabled") continue;
+      ctx.db.run("UPDATE connections SET status = 'disabled', status_reason = ?, updated_at = ? WHERE id = ?", reason, now(), id);
+      catalog.detach(id);
+      void closeSource(id);
+      ctx.audit.record({ actorType: "system", action: "connection.disable", target: id, outcome: "ok", reason, detail: { slug: c.slug } });
+    }
+    if (connectionIds.length) invalidate("all");
+  }
 
   const service: BrokerService = {
     enabled,
@@ -575,22 +605,17 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       log: ctx.log.child("mcp"),
     }),
 
+    upgradeExtensions(store, pins) {
+      return upgradeToExtensions({
+        db: ctx.db,
+        store,
+        ...(pins ? { pins } : {}),
+        log,
+        onInstalled: (_ext, connectionIds) => relist(connectionIds),
+      });
+    },
+
     start() {
-      // Extension installs, updates and removals (server/extensions/store.ts) restart the connections that use the
-      // extension: the old child stops, and the next use starts the new code (after its integrity check).
-      try {
-        // After the preset reload (B2, LISTENER_ORDER.presets), so a restart sees the new preset.
-        unwatchExtensions?.();
-        unwatchExtensions = extensionStore(ctx).onChange(
-          ({ from, to }) => {
-            const name = (to ?? from)?.name;
-            if (name) void reloadExtension(name);
-          },
-          { order: LISTENER_ORDER.restart },
-        );
-      } catch (err) {
-        log.error("Couldn't watch extension changes", { error: errorMessage(err) });
-      }
       // Agents from before search mode keep their full tool list (once per install; docs/MCP-BROKER.md).
       try {
         const pinned = pinExistingAgentsDirect(ctx.db, ctx.settings);
@@ -605,6 +630,36 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
       } catch (err) {
         log.error("Couldn't release tools held by an older version", { error: errorMessage(err) });
       }
+      // Extensions (docs/EXTENSIONS.md): presets() reads the installed ones; the store asks us which connections use
+      // one, disables them on a forced removal, and reloads presets() after every change. Then the startup upgrade:
+      // connections of the former core presets are bound, and missing extensions install in the background.
+      try {
+        extensions = extensionStore(ctx);
+        useExtensionStore(extensions);
+        extensions.setHooks({
+          usedBy: (name) => usedBy(ctx.db, name),
+          onRemove: (ext, o) => {
+            // Official names stay bound (no third party can install under them, and re-adding the extension must bring
+            // its rules back, say Notion's gate on spawning agents); any other name is unbound too.
+            if (o.force) disableBound(o.usedBy, `its extension ${ext.name} was removed`, { unbind: !ext.official && !OFFICIAL_NAMES.includes(ext.name) });
+          },
+          // setHooks registers at LISTENER_ORDER.presets: presets() is rebuilt first...
+          onChange: () => reloadPresets(),
+        });
+        // ...then, at LISTENER_ORDER.restart, the extension's connections are re-listed under the new preset: native
+        // (code) sources close, so the next use starts the new code after its integrity check.
+        unwatchExtensions?.();
+        unwatchExtensions = extensions.onChange(
+          (change) => {
+            const name = change.to?.name ?? change.from?.name;
+            relist(name ? usedBy(ctx.db, name) : []);
+          },
+          { order: LISTENER_ORDER.restart },
+        );
+        service.upgradeExtensions(extensions);
+      } catch (err) {
+        log.error("Couldn't load extensions", { error: errorMessage(err) });
+      }
       policy.start();
       ctx.bus.on("settings", onSettings);
       wasOn = enabled();
@@ -616,6 +671,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
     async stop() {
       unwatchExtensions?.();
       unwatchExtensions = null;
+      // This context's store goes with it (tests run several contexts in one process).
+      if (extensions && presetSource() === extensions) useExtensionStore(null);
       catalog.close();
       ctx.bus.off("settings", onSettings);
       if (pollTimer) clearInterval(pollTimer);
@@ -713,5 +770,8 @@ export function connectionView(ctx: Pick<AppContext, "db">, c: Connection, at = 
   const scope = c.authType === "oauth" ? ctx.db.get<{ scope: string | null }>("SELECT scope FROM connection_credentials WHERE connection_id = ? AND access_token_enc IS NOT NULL", c.id)?.scope : null;
   const grantedScopes = typeof scope === "string" ? scope.split(/\s+/).filter(Boolean) : null;
   const expired = c.status !== "disabled" && isExpired(c, at);
-  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, agents };
+  const auth = c.preset ? boundPreset(c.preset)?.auth : undefined;
+  const broadScopes = auth?.type === "mcp_oauth" && auth.broadScopes?.length ? [...auth.broadScopes] : null;
+  const scopeNotes = auth?.type === "mcp_oauth" && auth.scopeNotes?.length ? auth.scopeNotes.map((n) => ({ ...n })) : null;
+  return { ...c, tools: { total }, expiresInDays, expired, grantedScopes, broadScopes, scopeNotes, agents };
 }

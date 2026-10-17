@@ -100,7 +100,7 @@ function freeName(ctx: AppContext, base: string, ownerId: string | null): string
 
 /** A free slug from a host or preset slug: lowercase, dashes, at most 24, suffixed -2, -3… on collision. */
 function freeSlug(ctx: AppContext, base: string): string {
-  const root = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "mcp";
+  const root = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20).replace(/-+$/, "") || "mcp";
   const taken = (s: string) => !!ctx.db.get("SELECT 1 FROM connections WHERE slug = ?", s);
   if (!taken(root)) return root;
   for (let i = 2; ; i++) if (!taken(`${root}-${i}`)) return `${root}-${i}`;
@@ -158,6 +158,7 @@ export function connectionsApi(ctx: AppContext) {
       authType: authTypeOf(p.auth),
       setupSteps: steps.map((s) => ({ ...s })),
       reconnectPolicy: p.reconnectPolicy ?? null,
+      official: p.official !== false,
       userServer: p.userServer ? { defaultPath: p.userServer.defaultPath } : null,
     };
   };
@@ -191,7 +192,9 @@ export function connectionsApi(ctx: AppContext) {
     if (userServer && !body.url) throw badRequest(`Enter the address of your ${preset!.displayName} server`, "For example http://100.101.102.103:3773 on Tailscale.");
     const url = userServer ? presetServerUrl(body.url!, userServer.defaultPath) : (preset?.url ?? body.url ?? null);
     if (!preset && !url) throw badRequest("Pass a url, or a preset");
-    const kind: ConnectionKind = preset?.kind === "native" ? (`native_${preset.id}` as ConnectionKind) : "remote_http";
+    // A code extension's connection runs a stdio child (server/extensions/host). Connections from before extensions
+    // keep their `native_whoop` kind; the broker treats every non-remote kind alike.
+    const kind: ConnectionKind = preset?.kind === "native" ? "stdio" : "remote_http";
     if (!(CONNECTION_KINDS as readonly string[]).includes(kind)) throw badRequest(`The ${preset!.id} integration isn't available in this version`);
     if (kind === "remote_http" && !url) throw badRequest("This integration has no URL");
     const slugBase = userServer ? presetServerSlug(preset!.slug, url!) : (preset?.slug ?? new URL(url!).hostname.split(".").find((p) => p !== "mcp" && p !== "www") ?? "mcp");

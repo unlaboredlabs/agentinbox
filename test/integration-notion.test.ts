@@ -1,8 +1,16 @@
-import { describe, expect, it } from "vitest";
+// The Notion extension (xaq-extensions extensions/notion, a fixture copy): its manifest, through presetFromManifest,
+// keeps the core preset's shape, setup copy and risk table exactly.
+
+import { afterAll, describe, expect, it } from "vitest";
 import type { ToolDef } from "../server/broker/types.ts";
-import { presets } from "../server/integrations/index.ts";
-import { classifyNotionTool, notionPreset } from "../server/integrations/notion/index.ts";
-import { NOTION_TOOLS } from "../server/integrations/notion/tools.ts";
+import { presetById, presets } from "../server/integrations/index.ts";
+import { fixtureManifest, useFixtureExtensions } from "./extension-fixtures.ts";
+
+afterAll(useFixtureExtensions());
+const notionPreset = presetById("notion")!;
+const classifyNotionTool = (t: ToolDef) => notionPreset.classify(t);
+const ALIASES = ["fetch", "search", "ai-search"];
+const NOTION_TOOLS = Object.fromEntries(Object.entries(fixtureManifest("notion").risk!.tools).filter(([name]) => !ALIASES.includes(name)));
 
 const tool = (name: string, properties: Record<string, unknown> = {}): ToolDef => ({
   name,
@@ -75,9 +83,11 @@ const RISKY = [
   "notion-send-message-to-session",
 ];
 
-describe("Notion preset", () => {
-  it("has the documented shape", () => {
+describe("Notion extension", () => {
+  it("has the core preset's shape", () => {
     expect(notionPreset).toMatchObject({
+      id: "notion",
+      displayName: "Notion",
       slug: "notion",
       kind: "remote_http",
       url: "https://mcp.notion.com/mcp",

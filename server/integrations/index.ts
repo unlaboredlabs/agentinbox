@@ -1,22 +1,122 @@
-// Pre-made integrations (docs/MCP-BROKER.md "Pre-made integrations"). Each preset lives in
-// server/integrations/<id>/ and adds one entry to the list below; the broker service, the connections API
-// (presets list, create from a preset) and the classifier read them from here.
+// The preset registry (docs/MCP-BROKER.md "Pre-made integrations", docs/EXTENSIONS.md). Pre-made connections are
+// extensions: each installed extension's manifest becomes an IntegrationPreset (server/extensions/manifest.ts). No
+// preset is left in core (WHOOP is a code extension, run by server/extensions/host). The broker service, the
+// connections API (presets list, create from a preset) and the classifier read them from here.
 //
 // Rules for entries:
-// - `id` is stored in connections.preset (checked here, not by the schema) and names its events `<id>.<name>`;
-//   it can't be one of xaq's own event prefixes (message, calendar, connection, approval, …).
-// - Remote presets (Notion) give `url` and `auth`; native ones give `createSource` (and `events`).
-// - Remote presets whose server the user names (T3 Code) give `userServer` instead of `url`.
-// WHOOP left core: it's a code extension now (docs/EXTENSIONS.md), run by server/extensions/host. Core keeps the
-// generic `user_app` OAuth it used (server/broker/upstream/user-app.ts).
+// - `id` is the extension's name. It's stored in connections.preset (which binds the connection to the extension)
+//   and names its events `<id>.<name>`; it can't be one of xaq's own event prefixes (message, calendar, connection, …).
+// - Remote presets give `url` and `auth`, or `userServer` when the user names the server (T3 Code, Brightspace);
+//   native ones give `createSource` (and `events`).
+//
+// presets() is synchronous for its callers and cached. The broker's start() registers the store
+// (useExtensionStore) and its onChange hook calls reloadPresets() after an install, update or remove; the startup
+// upgrade does too after its background installs.
 
 import type { IntegrationPreset } from "../broker/types.ts";
-import { notionPreset } from "./notion/index.ts";
-import { t3codePreset } from "./t3code/index.ts";
+import notionSnapshot from "../extensions/bootstrap/notion.json" with { type: "json" };
+import t3codeSnapshot from "../extensions/bootstrap/t3code.json" with { type: "json" };
+import { presetFromManifest, presetFromValidManifest, validateManifest } from "../extensions/manifest.ts";
+import type { ExtensionStore, InstalledExtension } from "../extensions/store.ts";
 
+/** Display order for the official extensions; anything else follows by name. */
+const ORDER = ["notion", "whoop", "t3code", "brightspace"];
+
+/** What presets() needs from the extension store. */
+export type PresetSource = Pick<ExtensionStore, "list">;
+
+let store: PresetSource | null = null;
+let core: IntegrationPreset[] | null = null;
 let cached: IntegrationPreset[] | null = null;
+/** Presets of installed extensions, by name and integrity: the same install keeps the same object across reloads. */
+const built = new Map<string, IntegrationPreset>();
+/** Installed extensions whose manifest didn't load (name → why), for diagnostics. */
+const broken = new Map<string, string>();
 
-/** Every pre-made integration, in display order. Built once: native presets keep per-process state. */
-export const presets = (): IntegrationPreset[] => (cached ??= [notionPreset, t3codePreset]);
+/**
+ * Presets still in core: none. WHOOP left core for its code extension (server/extensions/host); its connections show
+ * "Needs the whoop extension" until it's installed.
+ */
+const corePresets = (): IntegrationPreset[] => (core ??= []);
+
+function extensionPreset(ext: InstalledExtension): IntegrationPreset | null {
+  const key = `${ext.name}\0${ext.integrity}`;
+  const hit = built.get(key);
+  if (hit) return hit;
+  try {
+    const p = presetFromManifest(ext);
+    built.set(key, p);
+    broken.delete(ext.name);
+    return p;
+  } catch (err) {
+    broken.set(ext.name, (err as Error).message);
+    return null;
+  }
+}
+
+const rank = (id: string) => {
+  const i = ORDER.indexOf(id);
+  return i === -1 ? ORDER.length : i;
+};
+
+function build(): IntegrationPreset[] {
+  const installed = (store?.list() ?? []).flatMap((ext) => extensionPreset(ext) ?? []);
+  const names = new Set(installed.map((p) => p.id));
+  const all = [...installed, ...corePresets().filter((p) => !names.has(p.id))];
+  return all.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+}
+
+/** Every pre-made integration, in display order: installed extensions, then presets still in core. */
+export const presets = (): IntegrationPreset[] => (cached ??= build());
 
 export const presetById = (id: string): IntegrationPreset | null => presets().find((p) => p.id === id) ?? null;
+
+/** Rebuilds presets() on next use: after an extension was installed, updated or removed. */
+export function reloadPresets(): void {
+  cached = null;
+}
+
+/** The extension store presets() reads (set once at startup; tests set a stub and reset it with null). */
+export function useExtensionStore(s: PresetSource | null): void {
+  store = s;
+  built.clear();
+  broken.clear();
+  reloadPresets();
+}
+
+/** The store presets() reads (null: core presets only). */
+export const presetSource = (): PresetSource | null => store;
+
+/** Installed extensions whose manifest didn't load, with the reason (they offer no preset). */
+export const brokenExtensions = (): ReadonlyMap<string, string> => {
+  presets();
+  return broken;
+};
+
+// ───────────── The bootstrap snapshot ─────────────
+//
+// Core carries the official remote manifests of the extensions that used to be core presets, as data (byte-identical
+// to the pinned xaq-extensions files; nothing executable). They serve only connections already bound to that name
+// while the extension isn't installed: classification, setup copy for a reconnect, userServer/sameOriginIssuer and
+// reconnect policies, so an upgrade never loosens a rule and never strands a connection that must reconnect. They
+// are never offered for new connections (presets() doesn't list them), and an installed extension always wins.
+
+const SNAPSHOTS: Readonly<Record<string, unknown>> = { notion: notionSnapshot, t3code: t3codeSnapshot };
+const snapshotBuilt = new Map<string, IntegrationPreset>();
+
+/** The snapshot preset of an official remote extension, or null when core carries none for that name. */
+export function snapshotPreset(id: string): IntegrationPreset | null {
+  if (!Object.hasOwn(SNAPSHOTS, id)) return null;
+  let p = snapshotBuilt.get(id);
+  if (!p) {
+    p = presetFromValidManifest(validateManifest(SNAPSHOTS[id]), null, { official: true });
+    snapshotBuilt.set(id, p);
+  }
+  return p;
+}
+
+/**
+ * The preset of a connection bound to `id` (connections.preset): the installed extension (or a core preset), else
+ * the bootstrap snapshot. For existing connections only: new ones pick from presets().
+ */
+export const boundPreset = (id: string): IntegrationPreset | null => presetById(id) ?? snapshotPreset(id);

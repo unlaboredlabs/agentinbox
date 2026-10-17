@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "name": "brightspace",
+  "displayName": "Brightspace",
+  "version": "1.0.0",
+  "description": "Your own Brightspace (D2L) MCP server: agents read your courses, assignments, grades, announcements, discussions and course content. It only reads; nothing is submitted or posted.",
+  "kind": "remote",
+  "slug": "brightspace",
+  "remote": {
+    "userServer": { "defaultPath": "/mcp" },
+    "auth": { "type": "header", "headerName": "Authorization", "prefix": "Bearer " }
+  },
+  "setup": [
+    {
+      "id": "install",
+      "title": "Set up the Brightspace MCP server",
+      "body": "It runs on your own computer and signs in to Brightspace as you. Follow its Install steps: Node.js 22 or newer, git and pnpm, then `pnpm install` and `pnpm run setup`, which asks for your school and signs in once.",
+      "link": { "label": "Open the Install steps", "url": "https://github.com/wynn-dev/brightspace-mcp-server#install" }
+    },
+    {
+      "id": "token",
+      "title": "Start it over HTTP with a token",
+      "body": "Make a token with `openssl rand -hex 32`. Then start the server with `MCP_AUTH_TOKEN=<your token> pnpm run start:http`, or put `MCP_AUTH_TOKEN` in its `.env` and run `pnpm run start:http`. It listens on `http://127.0.0.1:8787` unless you set `MCP_HTTP_HOST` and `MCP_HTTP_PORT`. Keep the token: you paste it here next.",
+      "link": { "label": "Open the remote access steps", "url": "https://github.com/wynn-dev/brightspace-mcp-server#remote-access" }
+    },
+    {
+      "id": "server",
+      "title": "Enter the server's address",
+      "body": "Usually `http://127.0.0.1:8787` when it runs on this computer; xaq adds `/mcp`. Plain http is accepted only on this computer and your private network (Tailscale's 100.x addresses, 10.x, 172.16 to 172.31, 192.168.x), after you allow that address. On another computer, start the server with `MCP_HTTP_HOST` set, and keep it on your private network."
+    },
+    {
+      "id": "key",
+      "title": "Paste the token",
+      "body": "Paste the same token as the API key. xaq stores it encrypted and sends it as `Authorization: Bearer <token>` on every request."
+    },
+    {
+      "id": "access",
+      "title": "What agents can do",
+      "body": "Every Brightspace tool reads: courses, assignments, quizzes, grades, announcements, discussions, calendars and course files. None submits, posts or sends anything. `check_auth` can start a new Brightspace sign-in on the server's computer, which may send you an MFA prompt, so it isn't offered at Read only."
+    }
+  ],
+  "risk": {
+    "tools": {
+      "get_briefing": { "class": "read" },
+      "get_calendar": { "class": "read" },
+      "get_submission_history": { "class": "read" },
+      "get_my_work": { "class": "read" },
+      "get_course_updates": { "class": "read" },
+      "get_my_groups": { "class": "read" },
+      "get_checklists": { "class": "read" },
+      "get_grade_summary": { "class": "read" },
+      "search_course": { "class": "read" },
+      "get_my_courses": { "class": "read" },
+      "get_my_grades": { "class": "read" },
+      "get_announcements": { "class": "read" },
+      "get_assignments": { "class": "read" },
+      "get_course_content": { "class": "read" },
+      "read_course_content": { "class": "read" },
+      "get_roster": { "class": "read" },
+      "get_discussions": { "class": "read" },
+      "get_syllabus": { "class": "read" },
+      "check_auth": { "class": "write" },
+      "download_file": { "class": "write" }
+    }
+  }
+}

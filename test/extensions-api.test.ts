@@ -48,7 +48,7 @@ function publish(name: string, seed = "1", version = "1.0.0") {
 }
 
 function thirdParty(name: string) {
-  const dir = writeTree(join(work, `tp-${name}`), { "xaq-extension.json": manifest(name, { kind: "code", remote: undefined, code: { entry: "s.mjs", network: ["api.tp.example"] } }), "s.mjs": "" });
+  const dir = writeTree(join(work, `tp-${name}`), { "xaq-extension.json": manifest(name, { kind: "code", remote: undefined, code: { entry: "s.mjs", auth: { type: "none" }, network: ["api.tp.example"] } }), "s.mjs": "" });
   gh.commit("someone", "tp", "main", fakeSha(`tp-${name}`), entriesFromDir(dir, name));
   return `https://github.com/someone/tp/tree/main/${name}`;
 }

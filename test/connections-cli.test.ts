@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exactOrigin as serverExactOrigin } from "../server/api/connections.ts";
 import type { IntegrationPreset } from "../server/broker/types.ts";
-import { t3codePreset } from "../server/integrations/t3code/index.ts";
 import { SessionStore } from "../server/auth/sessions.ts";
 import { sha256 } from "../server/crypto.ts";
 import { AdminApiError, CLI_SESSION_TTL_MS, createCliSession, daemonOrigin, openAdminChannel } from "../server/connections-cli/admin.ts";
@@ -11,7 +10,9 @@ import { checkTarget, exactOrigin } from "../server/connections-cli/private.ts";
 import { ScriptedPrompter } from "../server/connections-cli/prompt.ts";
 import { readTomlMcpServers, UNREADABLE as TOML_UNREADABLE } from "../server/connections-cli/toml.ts";
 import { readMcpServers, removeYamlServers, UNREADABLE } from "../server/connections-cli/yaml.ts";
+import { presetFromManifest } from "../server/extensions/manifest.ts";
 import { type Daemon, publicLookup, startDaemon } from "./connections-cli-fake.ts";
+import { fixtureExtension } from "./extension-fixtures.ts";
 import { harness } from "./platform-helpers.ts";
 
 const WHOOP_LIKE: IntegrationPreset = {
@@ -282,7 +283,7 @@ describe("connections add", () => {
   });
 
   it("t3code: the server's address (path added), the private allow, the steps, and a host-named connection", async () => {
-    const t3 = await startDaemon({ presets: [t3codePreset] });
+    const t3 = await startDaemon({ presets: [presetFromManifest(fixtureExtension("t3code"))] });
     try {
       t3.upstreams.probe = (_u, allow) =>
         allow ? { reachable: true, auth: "oauth", message: "OAuth", issuer: "http://100.104.249.49:3773", registration: "dcr", refresh: false } : { reachable: false, auth: "unknown", blocked: "private_target", message: "blocked" };
