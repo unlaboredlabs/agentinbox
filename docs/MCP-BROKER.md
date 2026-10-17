@@ -368,7 +368,7 @@ upstream: the spec forbids token passthrough.
 ### Events from integrations
 
 The events outbox, webhooks, SSE stream and listener relay are generalised:
-- Event types become open-ended under a prefix: `whoop.recovery_updated` and `connection.auth_failed`, next to today's
+- Event types become open-ended under a prefix: `<integration>.<event>` and `connection.auth_failed`, next to today's
   closed mail and calendar enum.
 - Events carry `connection_id` where they used to carry `account_id`.
 - `canSeeEvent` gains a branch for connection grants.
@@ -488,7 +488,7 @@ from WHOOP.
 
 All take date ranges and handle pagination, and output is compact text plus `structuredContent`.
 
-**Events:** `whoop.recovery_updated` (and sleep and workout) go through the existing outbox, webhooks and listener.
+**Events (as designed for M2; the WHOOP extension emits none):** recovery, sleep and workout updates would go through the existing outbox, webhooks and listener.
 They come from a poll every 15 minutes, which needs nothing but the OAuth connection.
 - **Cost:** about 290 requests a day, under 3% of WHOOP's 10,000.
 - **Timeliness:** WHOOP scores a sleep or workout minutes after it ends.
@@ -833,7 +833,7 @@ extension.*
 **Done when:**
 - an E2E test against a fake WHOOP covers OAuth, refresh rotation, the webhook signature, polling and the events;
 - a real WHOOP account connects and `whoop__get_today` returns data;
-- a listener receives `whoop.recovery_updated`;
+- a listener receives the integration's events;
 - one persona walk of WHOOP setup passes;
 - Hermes's old `whoop` entry is removed.
 

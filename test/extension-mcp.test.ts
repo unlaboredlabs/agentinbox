@@ -288,7 +288,11 @@ describe("passthrough names and URIs", () => {
             { role: "user", content: { type: "image", data: "A".repeat(8 * 1024 * 1024), mimeType: "image/png" } },
           ],
         }),
-        listResources: async () => [],
+        listResources: async () => [
+          { uri: "doc://a", name: "Meeting notes 2026" },
+          { uri: "doc://b", name: "  tabs\tand\u200b spaces " },
+          { uri: "doc://c", name: " \u0007 " },
+        ],
         listResourceTemplates: async () => [],
         readResource: async (uri) => ({ contents: [{ uri, text: `secret ${secret}` }, { uri, blob: "A".repeat(8 * 1024 * 1024) }] }),
       },
@@ -306,6 +310,11 @@ describe("passthrough names and URIs", () => {
     });
     const signal = AbortSignal.timeout(5000);
     expect((await pass.listPrompts("agt", signal)).map((p) => p.name)).toEqual(["acme__ok"]);
+    // A resource name with spaces isn't dropped: it's a label (the URI routes), made safe.
+    expect((await pass.listResources("agt", signal)).map((r) => [r.name, r.uri])).toEqual([
+      ["acme__Meeting_notes_2026", "xaq://acme/doc%3A%2F%2Fa"],
+      ["acme__tabs_and_spaces", "xaq://acme/doc%3A%2F%2Fb"],
+    ]);
     const r = await pass.getPrompt("agt", "acme__ok", {}, signal);
     expect(JSON.stringify(r)).not.toContain(secret);
     expect(r.messages).toHaveLength(2);

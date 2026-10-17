@@ -12,13 +12,15 @@ server, Gmail and Google Calendar) and gives each agent a single MCP endpoint wi
 npx xaq-cli
 ```
 
-Open the link it prints and pick what to connect first: Notion, T3 Code, another MCP server, or Gmail and
-Calendar. WHOOP is an extension: `npx xaq-cli ext add whoop`, then add it like any other connection.
-Only Gmail and Calendar need a Google Cloud project; everything else is a few clicks. The console then connects your
-first agent. Requires Node.js 22.13 or newer (code extensions such as WHOOP need 22.23.2, 24.18.1 or newer).
+Open the link it prints and pick what to connect first: Notion, another MCP server, or Gmail and Calendar.
+Pre-made connections (Notion, T3 Code, WHOOP, Brightspace) are extensions: the console installs the one you pick
+from the official registry, then connects it. Only Gmail and Calendar need a Google Cloud project; everything else
+is a few clicks. The console then connects your first agent. Requires Node.js 22.13 or newer (code extensions such
+as WHOOP need 22.23.2, 24.18.1 or 26.5.1 or newer on those lines).
 
-From the terminal on the same machine: `npx xaq-cli connections add notion` (or an installed extension such as `whoop`, `t3code --url
-http://<your T3 server>:3773`, or an MCP server URL),
+From the terminal on the same machine: install an extension first, `npx xaq-cli ext add notion` (or `t3code`,
+`whoop`, `brightspace`), then `npx xaq-cli connections add notion` (`t3code --url http://<your T3 server>:3773`, or
+any MCP server URL),
 and `npx xaq-cli import --from hermes` (also `claude-code`, `cursor`, `codex`) to move an agent's existing MCP
 servers behind the broker. Details: [Connections](docs/reference.md#connections-mcp-broker).
 

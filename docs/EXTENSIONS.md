@@ -286,8 +286,12 @@ repo's `scripts/validate.mjs`) checks the shape; a few rules below are only the 
     works, so a T3 connection never dies at its 30-day expiry because an install failed;
   - the snapshot serves only connections already bound to that name. It isn't offered in Add connection, since new
     connections need the installed extension, and an installed extension always wins over it;
-  - any other bound remote connection runs on the generic rules, and a code one shows "Installing the extension…"
-    with its tools unavailable;
+  - any other bound remote connection runs on the generic rules, and a code one reads "Needs the <name> extension.
+    Install it with `xaq ext add <name>`, or from Extensions in the console." (shown as status `error`, not
+    stored), with its tools unavailable;
+  - *Clarified (B3):* a forced removal disables the connections. When an official extension is installed again,
+    its connections (still bound) return to `active` if their credentials are still there, or to `needs_reauth`;
+    no new sign-in is needed. A third-party one's connections were unbound, so they stay disabled;
   - tokens, client records, grants, levels and always-allow rules are untouched: nobody re-authorizes.
 - **Binding:** `connections.preset` holds the extension's name. That is the binding, with no extra column.
   `usedBy(name)` is the ids of the connections `WHERE preset = name` (`server/extensions/bootstrap.ts`).

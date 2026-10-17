@@ -2,6 +2,7 @@ import pc from "picocolors";
 import { renameWarning, slugProblem } from "../../shared/connection-rename.ts";
 import type { SetupStepView, StartConnectInput } from "../../shared/types.ts";
 import { safeText } from "../listen/ui.ts";
+import { OFFICIAL_NAMES } from "../extensions/registry.ts";
 import { NPX } from "../listen/version.ts";
 import { accessLabel, agentsLabel, chooseAccess, chooseAgents, parseAccess } from "./access.ts";
 import type { ConnectionProbe, ConnectionsApi, ConnectionView, PresetView } from "./api.ts";
@@ -329,6 +330,19 @@ async function addUrl(raw: string, flags: AddFlags, deps: ManageDeps, taken: Set
   });
 }
 
+/**
+ * Pre-made connections are extensions: an official one that isn't installed says how to install it; anything else
+ * names what is installed.
+ */
+export function unknownIntegration(target: string, installed: readonly string[]): string {
+  const name = target.trim().toLowerCase();
+  if (OFFICIAL_NAMES.includes(name)) {
+    return `The ${name} extension isn't installed. Install it first: \`${NPX} ext add ${name}\`, then run \`${NPX} connections add ${name}\` again.`;
+  }
+  const have = installed.length ? `Installed integrations: ${installed.join(", ")}. ` : "No integrations are installed yet. ";
+  return `Unknown integration "${safeText(target, 64)}". ${have}Install one with \`${NPX} ext add <name>\` (official: ${OFFICIAL_NAMES.join(", ")}), or pass an MCP server URL.`;
+}
+
 export async function addConnection(target: string, flags: AddFlags, deps: ManageDeps): Promise<number> {
   const existing = await deps.api.list();
   const taken = new Set(existing.map((c) => c.slug));
@@ -343,7 +357,7 @@ export async function addConnection(target: string, flags: AddFlags, deps: Manag
   if (isUrl(target)) return addUrl(target, flags, deps, taken);
   const presets = await deps.api.presets();
   const preset = presets.find((x) => x.id === target.trim().toLowerCase());
-  if (!preset) throw new Error(`Unknown integration "${target}". Use ${[...presets.map((x) => x.id), "<an MCP server URL>"].join(", ")}.`);
+  if (!preset) throw new Error(unknownIntegration(target, presets.map((x) => x.id)));
   if (preset.userServer) {
     const raw = flags.url ?? (await deps.prompter.ask(`Address of your ${preset.displayName} server (e.g. http://100.101.102.103:3773)`));
     return addUrl(raw, flags, deps, taken, preset);
@@ -355,7 +369,7 @@ export async function listConnections(deps: ManageDeps): Promise<number> {
   const { api, prompter: p } = deps;
   const all = await api.list();
   if (!all.length) {
-    p.print(`No connections yet. Add one: ${NPX} connections add notion|t3code|<url>`);
+    p.print(`No connections yet. Install an extension (${NPX} ext add notion), then ${NPX} connections add notion; or ${NPX} connections add <an MCP server URL>.`);
     return 0;
   }
   const w = Math.max(4, ...all.map((c) => c.slug.length));

@@ -486,6 +486,29 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
   }
 
   /**
+   * The extension of the connections a forced removal disabled is back (installed again): each one returns to `active`
+   * when its credentials are still there (nothing was cleared: no sign-in needed), else to `needs_reauth` (Reconnect).
+   * Only connections disabled by that removal, still bound to the name; a kill or a manual disable stays.
+   */
+  function reenableAfterReinstall(name: string): void {
+    const reason = extensionRemovedReason(name);
+    for (const id of usedBy(ctx.db, name)) {
+      const c = getConnection(ctx, id);
+      if (!c || c.status !== "disabled" || c.statusReason !== reason) continue;
+      const signedIn = c.authType === "none" || (c.authType === "header" ? !!credentials.header(id) : !!credentials.tokens(id));
+      ctx.db.run(
+        "UPDATE connections SET status = ?, status_reason = ?, updated_at = ? WHERE id = ?",
+        signedIn ? "active" : "needs_reauth",
+        signedIn ? null : `Reconnect ${c.name}: its sign-in is gone`,
+        now(),
+        id,
+      );
+      ctx.audit.record({ actorType: "system", action: "connection.enable", target: id, outcome: "ok", reason: `its extension ${name} was installed again`, detail: { slug: c.slug, signedIn } });
+      if (enabled()) attach(id);
+    }
+  }
+
+  /**
    * A forced extension removal: its connections are disabled; for a third-party name also unbound (preset cleared),
    * so a later extension of that name can't take them over. Credentials stay until the connections are removed.
    */
@@ -641,7 +664,7 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
           onRemove: (ext, o) => {
             // Official names stay bound (no third party can install under them, and re-adding the extension must bring
             // its rules back, say Notion's gate on spawning agents); any other name is unbound too.
-            if (o.force) disableBound(o.usedBy, `its extension ${ext.name} was removed`, { unbind: !ext.official && !OFFICIAL_NAMES.includes(ext.name) });
+            if (o.force) disableBound(o.usedBy, extensionRemovedReason(ext.name), { unbind: !ext.official && !OFFICIAL_NAMES.includes(ext.name) });
           },
           // setHooks registers at LISTENER_ORDER.presets: presets() is rebuilt first...
           onChange: () => reloadPresets(),
@@ -652,6 +675,8 @@ export function createBrokerService(ctx: AppContext, given: Partial<BrokerParts>
         unwatchExtensions = extensions.onChange(
           (change) => {
             const name = change.to?.name ?? change.from?.name;
+            // Reinstalled after a forced removal: its connections (still bound: official names stay bound) come back.
+            if (change.to && !change.from) reenableAfterReinstall(change.to.name);
             relist(name ? usedBy(ctx.db, name) : []);
           },
           { order: LISTENER_ORDER.restart },
@@ -750,6 +775,9 @@ export function listConnections(ctx: Pick<AppContext, "db">): Connection[] {
 }
 
 const DAY_MS = 86_400_000;
+
+/** The status reason of a connection a forced extension removal disabled (reenableAfterReinstall matches it). */
+export const extensionRemovedReason = (name: string) => `its extension ${name} was removed`;
 
 /** What a connection says when its preset's extension isn't installed (a code connection can't run without it). */
 export const missingExtensionMessage = (name: string) => `Needs the ${name} extension. Install it with \`xaq ext add ${name}\`, or from Extensions in the console.`;

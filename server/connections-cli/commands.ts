@@ -56,8 +56,8 @@ export function registerConnectionsCommands(program: Command): void {
   dataOption(
     connections
       .command("add")
-      .description("connect an integration (notion, t3code, or an installed extension such as whoop) or any MCP server URL, interactively")
-      .argument("<integration-or-url>", "notion, t3code, an installed extension (whoop: `xaq ext add whoop` first), or an MCP server URL such as https://mcp.example.com/mcp"),
+      .description("connect an installed extension (install it first: `ext add notion`) or any MCP server URL, interactively")
+      .argument("<integration-or-url>", "an installed extension (`ext add notion|t3code|whoop|brightspace` first), or an MCP server URL such as https://mcp.example.com/mcp"),
   )
     .option("--url <address>", "t3code: your T3 Code server's address, e.g. http://100.101.102.103:3773 (asked when omitted)")
     .option("--slug <name>", "its short name: agents see its tools as <name>__<tool>")

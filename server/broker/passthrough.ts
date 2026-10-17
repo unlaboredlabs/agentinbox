@@ -60,6 +60,18 @@ export interface PassthroughDeps {
 
 // oxlint-disable-next-line no-control-regex -- refusing control characters is the point
 const UPSTREAM_NAME_RE = /^[^\s\u0000-\u001f\u007f]{1,128}$/u;
+
+/**
+ * A resource's or template's display name, made safe: invisible and control characters go, whitespace runs become
+ * "_", at most 128 characters; null when nothing is left. (Prompts keep the strict check: their name is how
+ * prompts/get routes. A resource routes by its URI, so its name is only a label.)
+ */
+export function safeResourceName(name: unknown): string | null {
+  if (typeof name !== "string") return null;
+  // oxlint-disable-next-line no-control-regex -- dropping control characters is the point
+  const out = stripInvisible(name).text.replace(/[\u0000-\u001f\u007f]/g, " ").trim().replace(/\s+/g, "_").slice(0, 128);
+  return out || null;
+}
 const SLUG_RE = /^[a-z0-9-]{1,24}$/;
 
 export const exposedPromptName = (slug: string, name: string) => `${slug}__${name}`;
@@ -127,12 +139,13 @@ function cleanPrompt(slug: string, p: PromptDef): PromptDef | null {
 }
 
 function cleanResource(slug: string, r: ResourceDef): ResourceDef | null {
-  if (typeof r?.uri !== "string" || !r.uri || r.uri.length > 2048 || typeof r.name !== "string" || !UPSTREAM_NAME_RE.test(r.name)) return null;
+  const name = safeResourceName(r?.name);
+  if (typeof r?.uri !== "string" || !r.uri || r.uri.length > 2048 || !name) return null;
   const title = text(r.title, 200);
   const description = text(r.description, 2000);
   return {
     uri: exposedResourceUri(slug, r.uri),
-    name: `${slug}__${r.name}`,
+    name: `${slug}__${name}`,
     ...(title ? { title } : {}),
     ...(description ? { description } : {}),
     ...(typeof r.mimeType === "string" && MIME_RE.test(r.mimeType) ? { mimeType: r.mimeType } : {}),
@@ -141,12 +154,13 @@ function cleanResource(slug: string, r: ResourceDef): ResourceDef | null {
 }
 
 function cleanTemplate(slug: string, t: ResourceTemplateDef): ResourceTemplateDef | null {
-  if (typeof t?.uriTemplate !== "string" || !t.uriTemplate || t.uriTemplate.length > 2048 || typeof t.name !== "string" || !UPSTREAM_NAME_RE.test(t.name)) return null;
+  const name = safeResourceName(t?.name);
+  if (typeof t?.uriTemplate !== "string" || !t.uriTemplate || t.uriTemplate.length > 2048 || !name) return null;
   const title = text(t.title, 200);
   const description = text(t.description, 2000);
   return {
     uriTemplate: exposedResourceTemplate(slug, t.uriTemplate),
-    name: `${slug}__${t.name}`,
+    name: `${slug}__${name}`,
     ...(title ? { title } : {}),
     ...(description ? { description } : {}),
     ...(typeof t.mimeType === "string" && MIME_RE.test(t.mimeType) ? { mimeType: t.mimeType } : {}),

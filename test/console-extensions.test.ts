@@ -1,7 +1,7 @@
 // The console's Extensions page decisions (src/components/extensions/extension-logic.ts) on the /api/extensions DTOs.
 import { describe, expect, it } from "vitest";
 import type { ExtensionRegistryEntryView, ExtensionView } from "../shared/extensions.ts";
-import { originView, registryAction, shortCommit, updateRows, usedByLabel } from "../src/components/extensions/extension-logic.ts";
+import { installableExtensions, originView, registryAction, shortCommit, updateRows, usedByLabel } from "../src/components/extensions/extension-logic.ts";
 
 const ext = (patch: Partial<ExtensionView> = {}): ExtensionView => ({
   name: "whoop",
@@ -29,6 +29,22 @@ const entry = (patch: Partial<ExtensionRegistryEntryView> = {}): ExtensionRegist
   integrity: `sha256-${"A".repeat(43)}=`,
   installed: null,
   ...patch,
+});
+
+describe("Add connection: official extensions to install", () => {
+  it("lists registry entries that aren't installed and aren't already a preset", () => {
+    const registry = [
+      entry({ name: "notion", displayName: "Notion" }),
+      entry({ name: "t3code", displayName: "T3 Code", installed: { version: "1.0.0", integrity: "x", official: true } }),
+      entry({ name: "whoop" }),
+    ];
+    expect(installableExtensions(registry, []).map((e) => e.name)).toEqual(["notion", "whoop"]);
+    expect(installableExtensions(registry, ["whoop"]).map((e) => e.name)).toEqual(["notion"]);
+    // A same-named third-party install isn't offered over (registryAction says "conflict" on the Extensions page).
+    expect(installableExtensions([entry({ name: "notion", installed: { version: "9", integrity: "y", official: false } })], []).map((e) => e.name)).toEqual([]);
+    // Registry unreachable: nothing to offer.
+    expect(installableExtensions(undefined, [])).toEqual([]);
+  });
 });
 
 describe("Extensions page", () => {

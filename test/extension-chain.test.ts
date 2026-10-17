@@ -70,7 +70,19 @@ describe.skipIf(codeExtensionNodeProblem() !== null)("a code extension, store â†
     expect(argv).toContain(installed.installDir);
     expect(argv).toContain(extensionStateDir(ctx.config.dataDir, "echo", con.id));
 
-    // Removing the extension (forced: the connection uses it) disables the connection and stops its child.
+    // An official extension removed by force and installed again: its connections (official names stay bound) come
+    // back on their own, with no sign-in, because nothing cleared their credentials. (The fixture is a directory
+    // install; the store's row is marked official to take that path.)
+    ctx.db.run("UPDATE extensions SET official = 1 WHERE name = 'echo'");
+    await extensionStore(ctx).remove("echo", { force: true });
+    expect(await json(await api(`/connections/${con.id}`))).toMatchObject({ status: "disabled", preset: "echo", statusReason: "its extension echo was removed" });
+    await extensionStore(ctx).install(FIXTURE, { confirmThirdParty: true });
+    expect(await json(await api(`/connections/${con.id}`))).toMatchObject({ status: "active", statusReason: null });
+    await ctx.broker.catalog.refresh(con.id);
+    expect(textOf(await client.callTool({ name: "echo__echo", arguments: { text: "back after reinstall" } }))).toContain("back after reinstall");
+
+    // Removing a third-party extension (forced: the connection uses it) disables and unbinds the connection, and
+    // stops its child; installing it again doesn't bring the connection back.
     const pid = (ctx.broker.source(con.id) as unknown as { pid: number | null }).pid!;
     expect(pid).toBeTypeOf("number");
     await extensionStore(ctx).remove("echo", { force: true });
@@ -85,6 +97,8 @@ describe.skipIf(codeExtensionNodeProblem() !== null)("a code extension, store â†
     };
     while (alive() && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
     expect(alive()).toBe(false);
+    expect(await json(await api(`/connections/${con.id}`))).toMatchObject({ status: "disabled", preset: null });
+    await extensionStore(ctx).install(FIXTURE, { confirmThirdParty: true });
     expect(await json(await api(`/connections/${con.id}`))).toMatchObject({ status: "disabled" });
 
     // Deleting the connection deletes its state directory.

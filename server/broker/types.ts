@@ -275,9 +275,9 @@ export interface NativeSourceDeps {
   setError?(reason: string | null): void;
 }
 
-/** An event a native integration emits (e.g. `whoop.recovery_updated`), delivered through the events outbox. */
+/** An event a native integration emits (e.g. `example.item_updated`), delivered through the events outbox. */
 export interface IntegrationEvent {
-  /** `<preset>.<name>`, e.g. `whoop.recovery_updated`. */
+  /** `<preset>.<name>`, e.g. `example.item_updated`. */
   type: string;
   connectionId: string;
   /** Dedupe key unique per occurrence (e.g. WHOOP trace_id). */

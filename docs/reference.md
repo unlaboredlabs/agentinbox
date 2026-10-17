@@ -41,8 +41,10 @@ Besides Gmail and Calendar, xaq brokers other MCP servers. Each agent still has 
 key; the broker holds every upstream credential and lists only the tools the agent is allowed. Design and decisions:
 [MCP-BROKER.md](MCP-BROKER.md).
 
-- **Add one**: in the console, Connections → Add connection; or `npx xaq-cli connections add notion|t3code|<url>`
-  on the daemon's machine. Pre-made connections are **extensions** from
+- **Add one**: in the console, Connections → Add connection (it offers the official extensions that aren't installed
+  yet, with an Install button); or on the daemon's machine, `npx xaq-cli ext add notion` first, then
+  `npx xaq-cli connections add notion` (or `connections add <url>` for any MCP server). Pre-made connections are
+  **extensions** from
   [wynn-dev/xaq-extensions](https://github.com/wynn-dev/xaq-extensions) ([EXTENSIONS.md](EXTENSIONS.md)): Notion
   (its hosted MCP, two clicks), T3 Code (below), Brightspace (your own
   [Brightspace MCP server](https://github.com/wynn-dev/brightspace-mcp-server): its address and its bearer token;

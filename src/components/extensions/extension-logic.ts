@@ -37,5 +37,13 @@ export function updateRows(from: ExtensionView, to: ExtensionView): DiffRow[] {
   return rows;
 }
 
+/**
+ * Official registry extensions the "Add connection" picker offers to install: not installed under that name, and not
+ * already a preset (an installed one is).
+ */
+export function installableExtensions(registry: readonly ExtensionRegistryEntryView[] | undefined, presetIds: readonly string[]): ExtensionRegistryEntryView[] {
+  return (registry ?? []).filter((e) => !e.installed && !presetIds.includes(e.name));
+}
+
 /** "Used by" in words. */
 export const usedByLabel = (usedBy: string[]) => (usedBy.length ? usedBy.join(", ") : "No connections");
